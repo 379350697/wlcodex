@@ -128,6 +128,25 @@ def test_composition_builds_telegram_app(tmp_path: Path) -> None:
     assert "claude_mode" in registered
 
 
+def test_telegram_app_processes_callbacks_while_long_runs_are_active(tmp_path: Path) -> None:
+    config_path = tmp_path / "test.toml"
+    sqlite_path = tmp_path / "wlcodex.sqlite3"
+    _write_test_config_with_path(config_path, sqlite_path, tmp_path / "tasks")
+
+    config = load_config(config_path)
+    ledger = Ledger.open(config.storage.sqlite_path)
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    task_service = TaskService(ledger, config.workspaces)
+    inspector = TaskInspector(ledger, config.storage.task_log_dir)
+    approval_svc = ApprovalService()
+    controller = CommandController(task_service, backend, inspector)
+
+    app, _ = build_application(config, "dummy-token", controller, ledger, approval_svc)
+
+    assert app.update_processor.max_concurrent_updates > 1
+
+
 def test_missing_token_exits(tmp_path: Path) -> None:
     config_path = tmp_path / "test.toml"
     _write_test_config(config_path)

@@ -846,7 +846,7 @@ def build_application(
     ledger: Ledger | None = None,
     approval_service: object = None,
 ) -> tuple[Application, WlCodexHandlers | None]:
-    application = Application.builder().token(token).build()
+    application = Application.builder().token(token).concurrent_updates(8).build()
 
     if controller is not None and ledger is not None:
         handlers = WlCodexHandlers(
