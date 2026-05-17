@@ -277,3 +277,199 @@ async def test_verify_with_conversation_calls_codex(ctrl: CommandController) -> 
     # /verify should find the latest run and attempt Codex verification
     response = await ctrl.handle("/verify 确认修复", {"chat_id": 100, "user_id": 200})
     assert "验收" in response.text
+
+
+# ---------------------------------------------------------------------------
+# Real-closure tests: prove backend interfaces (not echo) are used
+# ---------------------------------------------------------------------------
+
+
+class FakeClaudeBackendForController:
+    """Fake Claude backend that implements real AgentBackend.send interface."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self._responses: list[str] = ["Fake Claude implementation result."]
+        self.enabled = True
+
+    async def send(self, request):
+        from wlcodex.agent_backend import AgentResult
+        self.calls.append(request.prompt)
+        text = self._responses[len(self.calls) - 1]
+        return AgentResult(
+            text=text,
+            exit_code=0,
+            token_input=len(request.prompt) // 4,
+            token_output=len(text) // 4,
+        )
+
+    def interrupt(self, session_id=None):
+        pass
+
+    def health(self):
+        return type("h", (), {"is_healthy": True})()
+
+
+@pytest.fixture
+def ctrl_with_claude(tmp_path: Path) -> CommandController:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    backend._codex_responses = [
+        "decision: pass\nsummary: Analysis complete.",
+    ]
+    service = TaskService(ledger, (
+        WorkspaceConfig("demo", Path("/tmp/demo"), True),
+        WorkspaceConfig("wlcodex", Path("/tmp/wlcodex"), True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    claude = FakeClaudeBackendForController()
+    return CommandController(service, backend, inspector, ledger=ledger, claude_backend=claude)
+
+
+@pytest.mark.asyncio
+async def test_claude_direct_uses_real_send_interface(ctrl_with_claude: CommandController) -> None:
+    """Claude direct mode must call backend.send(), not echo/fake_response."""
+    response = await ctrl_with_claude.handle(
+        "/claude 修改 auth.py 添加空值检查",
+        {"chat_id": 100, "user_id": 200},
+    )
+    claude = ctrl_with_claude._claude
+    assert hasattr(claude, "calls")
+    assert len(claude.calls) == 1
+    # The prompt must be a rendered packet, not raw command text
+    assert "mode:" in claude.calls[0] or "user_goal:" in claude.calls[0]
+    assert "Claude Code 已完成" in response.text
+
+
+@pytest.mark.asyncio
+async def test_claude_direct_sets_active_claude_run_id(ctrl_with_claude: CommandController) -> None:
+    """Claude direct must write agent_run.id to active_claude_run_id, NOT active_codex_task_id."""
+    await ctrl_with_claude.handle(
+        "/claude 修改 README",
+        {"chat_id": 100, "user_id": 200},
+    )
+    active = ctrl_with_claude._ledger.get_active_conversation(100)
+    assert active is not None
+    # active_claude_run_id must be set
+    assert active.active_claude_run_id is not None
+    assert active.active_claude_run_id > 0
+    # active_codex_task_id must NOT be polluted by Claude
+    assert active.active_codex_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_conversation_text_uses_packet_render(ctrl_with_claude: CommandController) -> None:
+    """Plain text must send packet.render() to Codex, not raw text."""
+    await ctrl_with_claude.handle_conversation_text(
+        "帮我分析这个模块",
+        {"chat_id": 100, "user_id": 200},
+    )
+    # Check that start_turn was called with rendered packet, not raw text
+    turns = ctrl_with_claude._backend.turns
+    assert len(turns) > 0
+    _, prompt_sent = turns[-1]
+    assert "mode:" in prompt_sent
+    assert "user_goal:" in prompt_sent
+    # The original raw user text should be inside the packet
+    assert "帮我分析这个模块" in prompt_sent
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_uses_send_codex_prompt(ctrl_with_claude: CommandController) -> None:
+    """ChiefEngineerOrchestrator must use send_codex_prompt, not echo."""
+    from wlcodex.orchestrator import ChiefEngineerOrchestrator
+    from wlcodex.context_packets import ContextBudget
+
+    orch = ChiefEngineerOrchestrator(
+        ctrl_with_claude._backend,
+        ctrl_with_claude._claude,
+        max_verify_rounds=1,
+    )
+    result = await orch.run("修复登录 bug")
+    assert result.status == "passed"
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_runs_real_orchestration(ctrl_with_claude: CommandController) -> None:
+    """Handle /auto must invoke ChiefEngineerOrchestrator with real backends."""
+    response = await ctrl_with_claude.handle(
+        "/auto 修复登录 bug",
+        {"chat_id": 100, "user_id": 200},
+    )
+    assert "总工程师编排完成" in response.text
+
+
+@pytest.mark.asyncio
+async def test_claude_completion_buttons_use_conv_protocol(ctrl_with_claude: CommandController) -> None:
+    """Claude completion buttons must use conv: protocol, not waiting:."""
+    response = await ctrl_with_claude.handle(
+        "/claude 修改 auth.py",
+        {"chat_id": 100, "user_id": 200},
+    )
+    assert len(response.buttons) > 0
+    for row in response.buttons:
+        for btn in row:
+            assert btn["callback_data"].startswith("conv:")
+            assert "waiting:" not in btn["callback_data"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_callback_diff_action(ctrl_with_claude: CommandController) -> None:
+    """conv: diff callback returns diff for the conversation."""
+    from wlcodex.conversation_callback import ConversationCallback, DIFF
+
+    # Setup a conversation first via /claude
+    await ctrl_with_claude.handle("/claude 修改 auth.py", {"chat_id": 100, "user_id": 200})
+    active = ctrl_with_claude._ledger.get_active_conversation(100)
+    assert active is not None
+
+    cb = ConversationCallback(conversation_id=active.id, action=DIFF)
+    response = await ctrl_with_claude.handle_conversation_callback(cb)
+    assert response.text  # Should not error
+
+
+@pytest.mark.asyncio
+async def test_conversation_callback_verify_action(ctrl_with_claude: CommandController) -> None:
+    """conv: verify callback triggers Codex verification."""
+    from wlcodex.conversation_callback import ConversationCallback, VERIFY
+
+    await ctrl_with_claude.handle("/claude 修改 auth.py", {"chat_id": 100, "user_id": 200})
+    active = ctrl_with_claude._ledger.get_active_conversation(100)
+
+    cb = ConversationCallback(conversation_id=active.id, action=VERIFY)
+    response = await ctrl_with_claude.handle_conversation_callback(cb)
+    assert response.text
+    assert "验收" in response.text or "Codex" in response.text
+
+
+def test_encode_decode_conversation_callback_roundtrip() -> None:
+    """Encode and decode a conversation callback should round-trip."""
+    from wlcodex.conversation_callback import (
+        encode_conversation_callback,
+        decode_conversation_callback,
+        DIFF,
+    )
+    encoded = encode_conversation_callback(42, DIFF)
+    assert encoded.startswith("conv:")
+    decoded = decode_conversation_callback(encoded)
+    assert decoded is not None
+    assert decoded.conversation_id == 42
+    assert decoded.action == DIFF
+
+
+def test_decode_conversation_callback_rejects_waiting() -> None:
+    """decode_conversation_callback must reject waiting: protocol."""
+    from wlcodex.conversation_callback import decode_conversation_callback
+    assert decode_conversation_callback("waiting:1:diff") is None
+    assert decode_conversation_callback("approval:xxx") is None
+    assert decode_conversation_callback("not-conv:1:diff") is None
+
+
+@pytest.mark.asyncio
+async def test_stop_with_claude_run_interrupts_claude(ctrl_with_claude: CommandController) -> None:
+    """Handle /stop must interrupt Claude when active_claude_run_id is set."""
+    await ctrl_with_claude.handle("/claude 修改 auth.py", {"chat_id": 100, "user_id": 200})
+    response = await ctrl_with_claude.handle("/stop", {"chat_id": 100, "user_id": 200})
+    assert "对话" in response.text
+    assert "已停止" in response.text

@@ -8,12 +8,14 @@ from pathlib import Path
 
 from wlcodex.app_server_process import AppServerProcess, AppServerProcessConfig
 from wlcodex.approval import ApprovalService
+from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
 from wlcodex.codex_backend import AppServerCodexBackend, FakeCodexBackend
 from wlcodex.config import load_config
 from wlcodex.controller import CommandController
 from wlcodex.db import Ledger
 from wlcodex.event_bridge import EventBridge
 from wlcodex.inspection import TaskInspector
+from wlcodex.menu import build_bot_commands
 from wlcodex.recovery_notifications import notify_recovery_paused_tasks
 from wlcodex.task_service import TaskService
 from wlcodex.telegram_app import build_application
@@ -121,8 +123,24 @@ def main() -> None:
         workspaces={ws.alias: ws for ws in config.workspaces},
     )
 
+    # Claude backend (adapter for Claude Code subprocess)
+    claude_backend = None
+    if config.claude.enabled:
+        claude_backend = ClaudeBackend(ClaudeConfig(
+            enabled=config.claude.enabled,
+            binary=config.claude.binary,
+            startup_timeout_seconds=config.claude.startup_timeout_seconds,
+            request_timeout_seconds=config.claude.request_timeout_seconds,
+        ))
+        logger.info("Claude backend enabled (binary: %s)", config.claude.binary)
+    else:
+        logger.info("Claude backend disabled (set claude.enabled = true to enable)")
+
     # Controller
-    controller = CommandController(task_service, backend, inspector, ledger=ledger)
+    controller = CommandController(
+        task_service, backend, inspector,
+        ledger=ledger, claude_backend=claude_backend,
+    )
 
     # Telegram app
     app, handlers = build_application(config, token, controller, ledger, approval_service)
@@ -163,6 +181,14 @@ def main() -> None:
         try:
             await app.initialize()
             app_initialized = True
+            # Register Telegram BotCommands menu
+            if getattr(config, "menu", None) and getattr(config.menu, "register_bot_commands", False):
+                from telegram import BotCommand
+                commands = [
+                    BotCommand(cmd, desc) for cmd, desc in build_bot_commands()
+                ]
+                await app.bot.set_my_commands(commands)
+                logger.info("Registered %d bot commands in Telegram menu", len(commands))
             await app.start()
             app_started = True
             await app.updater.start_polling()

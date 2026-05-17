@@ -145,6 +145,9 @@ class FakeCodexBackend:
         self._force_health_error: str | None = None
         # Held server requests for approval flow testing
         self._held_approval_requests: dict[str, dict] = {}
+        # Programmable responses for send_codex_prompt
+        self._codex_responses: list[str] = []
+        self._codex_call_count: int = 0
 
     async def create_thread(self, workspace_path: str) -> str:
         tid = f"fake-{uuid.uuid4()}"
@@ -201,6 +204,24 @@ class FakeCodexBackend:
         for event in self._injected_events:
             yield event
         self._injected_events.clear()
+
+    async def send_codex_prompt(self, workspace_path: str, prompt: str) -> str:
+        """Send a prompt to Codex and return the response text synchronously.
+
+        For the fake backend, returns programmed responses from
+        `_codex_responses` or a default analysis result.
+        """
+        self._codex_call_count += 1
+        # Record turn like real backend does
+        await self.create_thread(workspace_path)
+        await self.start_turn("fake-thread", prompt)
+        if self._codex_call_count <= len(self._codex_responses):
+            return self._codex_responses[self._codex_call_count - 1]
+        return (
+            "decision: pass\n"
+            "summary: Codex determined the implementation meets requirements.\n"
+            "confidence: high"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +492,39 @@ class AppServerCodexBackend:
             "threadId": thread_id,
             "turnId": turn_id,
         })
+
+    async def send_codex_prompt(self, workspace_path: str, prompt: str) -> str:
+        """Send prompt to Codex and block until turn completes. Returns response text."""
+        import asyncio as _asyncio
+        thread_id = await self.create_thread(workspace_path)
+        turn_id = await self.start_turn(thread_id, prompt)
+
+        deltas: list[str] = []
+        deadline = _asyncio.get_event_loop().time() + self._request_timeout_seconds
+
+        event_iter = self.events()
+        while True:
+            remaining = deadline - _asyncio.get_event_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                event = await _asyncio.wait_for(event_iter.__anext__(), timeout=min(remaining, 5.0))
+            except _asyncio.TimeoutError:
+                continue
+            if event.event_type == "agent_message_delta":
+                delta = event.payload.get("delta", "")
+                if isinstance(delta, str):
+                    deltas.append(delta)
+            elif event.event_type == "turn_completed":
+                break
+            elif event.event_type == "turn_failed":
+                error = event.payload.get("error", "unknown error")
+                deltas.append(f"\n[Turn failed: {error}]")
+                break
+
+        if not deltas:
+            return "(no Codex response)"
+        return "".join(deltas)
 
     async def fork_thread(self, thread_id: str, workspace_path: str) -> str:
         client = await self._ensure_client()

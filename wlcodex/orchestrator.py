@@ -176,7 +176,7 @@ class ChiefEngineerOrchestrator:
             workspace=workspace,
             budget=self._budget,
         )
-        return await self._call_codex(packet.render())
+        return await self._call_codex(packet.render(), workspace)
 
     async def _implement_with_claude(
         self, goal: str, analysis: str, workspace: str
@@ -187,7 +187,7 @@ class ChiefEngineerOrchestrator:
             workspace=workspace,
             budget=self._budget,
         )
-        return await self._call_claude(packet.render())
+        return await self._call_claude(packet.render(), workspace)
 
     async def _verify_with_codex(
         self, goal: str, analysis: str, impl: str, workspace: str
@@ -199,20 +199,37 @@ class ChiefEngineerOrchestrator:
             workspace=workspace,
             budget=self._budget,
         )
-        return await self._call_codex(packet.render())
+        return await self._call_codex(packet.render(), workspace)
 
-    async def _call_codex(self, prompt: str) -> str:
+    async def _call_codex(self, prompt: str, workspace: str) -> str:
         backend = self._codex
+        # Prefer real send_codex_prompt interface
+        if hasattr(backend, "send_codex_prompt"):
+            return await backend.send_codex_prompt(workspace, prompt)
+        # Legacy test compatibility (echo/fake_response ignore workspace)
         if hasattr(backend, "echo"):
             return backend.echo(prompt)
         if hasattr(backend, "fake_response"):
             return backend.fake_response(prompt)
-        raise NotImplementedError("Codex backend must have 'echo' or 'fake_response'")
+        raise NotImplementedError(
+            "Codex backend must implement send_codex_prompt(workspace, prompt) -> str"
+        )
 
-    async def _call_claude(self, prompt: str) -> str:
+    async def _call_claude(self, prompt: str, workspace: str) -> str:
         backend = self._claude
+        # Prefer real AgentBackend.send interface
+        if hasattr(backend, "send"):
+            from wlcodex.agent_backend import AgentRequest
+            result = await backend.send(AgentRequest(
+                prompt=prompt,
+                workspace_path=workspace,
+            ))
+            return result.text
+        # Legacy test compatibility (echo/fake_response ignore workspace)
         if hasattr(backend, "echo"):
             return backend.echo(prompt)
         if hasattr(backend, "fake_response"):
             return backend.fake_response(prompt)
-        raise NotImplementedError("Claude backend must have 'echo' or 'fake_response'")
+        raise NotImplementedError(
+            "Claude backend must implement send(AgentRequest) -> AgentResult"
+        )

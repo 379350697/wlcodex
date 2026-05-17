@@ -889,6 +889,15 @@ class Ledger:
         )
         self._conn.commit()
 
+    def set_conversation_active_claude_run(
+        self, conversation_id: int, agent_run_id: int
+    ) -> None:
+        self._conn.execute(
+            "UPDATE conversation_sessions SET active_claude_run_id = ?, updated_at = ? WHERE id = ?",
+            (agent_run_id, _now(), conversation_id),
+        )
+        self._conn.commit()
+
     # --- Agent runs ---
 
     def create_agent_run(

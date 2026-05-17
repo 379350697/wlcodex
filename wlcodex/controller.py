@@ -11,6 +11,16 @@ from wlcodex.health_snapshot import build_health_snapshot
 from wlcodex.inspection import TaskInspector
 from wlcodex.models import TaskStatus
 from wlcodex.conversation import default_title, mode_from_command
+from wlcodex.conversation_callback import (
+    CONTINUE,
+    DIFF,
+    NEW_CONVO,
+    RETRY,
+    VERIFY,
+    ConversationCallback,
+    decode_conversation_callback,
+    encode_conversation_callback,
+)
 from wlcodex.context_packets import (
     build_codex_analysis_packet,
     build_codex_verification_packet as make_verification_packet,
@@ -200,6 +210,15 @@ class CommandController:
                     )
                     if active and active.active_codex_task_id:
                         task_id = active.active_codex_task_id
+                    elif active and active.active_claude_run_id:
+                        # Claude run: use workspace git diff directly
+                        ws = str(self._service.get_workspace(active.workspace_alias).path)
+                        result = self._inspector.diff(
+                            active.active_claude_run_id, ws
+                        )
+                        return ControllerResponse(
+                            f"{result.title}\n\n{result.body}"
+                        )
                 if task_id is None:
                     return ControllerResponse("请指定任务 ID 或在活跃对话中使用 /diff。")
                 task = self._service.get_task(task_id)
@@ -216,6 +235,9 @@ class CommandController:
                     )
                     if active and active.active_codex_task_id:
                         task_id = active.active_codex_task_id
+                    elif active and active.active_claude_run_id:
+                        # Claude run: use agent run for files lookup
+                        task_id = active.active_claude_run_id
                 if task_id is None:
                     return ControllerResponse("请指定任务 ID 或在活跃对话中使用 /files。")
                 result = self._inspector.files(task_id)
@@ -523,7 +545,7 @@ class CommandController:
         try:
             thread_id = await self._backend.create_thread(workspace_path)
             self._service.set_task_thread(task.id, thread_id)
-            await self._backend.start_turn(thread_id, text)
+            await self._backend.start_turn(thread_id, packet.render())
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
             return ControllerResponse(
@@ -610,10 +632,16 @@ class CommandController:
             )
 
         from wlcodex.agent_backend import AgentRequest
+        from wlcodex.context_packets import build_claude_handoff_packet
 
+        packet = build_claude_handoff_packet(
+            user_goal=command.prompt,
+            codex_analysis="",  # Direct mode, no Codex analysis
+            workspace=active.workspace_alias,
+        )
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
         result = await self._claude.send(AgentRequest(
-            prompt=command.prompt,
+            prompt=packet.render(),
             workspace_path=workspace_path,
         ))
 
@@ -629,11 +657,11 @@ class CommandController:
             token_input=result.token_input,
             token_output=result.token_output,
         )
-        self._ledger.set_conversation_active_task(active.id, agent_run.id)
+        self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
 
         buttons: list[list[dict[str, str]]] = [[
-            {"text": "查看 diff", "callback_data": f"waiting:{active.id}:diff"},
-            {"text": "Codex 验收", "callback_data": f"waiting:{active.id}:verify"},
+            {"text": "查看 diff", "callback_data": encode_conversation_callback(active.id, DIFF)},
+            {"text": "Codex 验收", "callback_data": encode_conversation_callback(active.id, VERIFY)},
         ]]
 
         return ControllerResponse(
@@ -673,8 +701,12 @@ class CommandController:
                 workspace_alias="wlcodex",
             )
 
+        workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
         orch = ChiefEngineerOrchestrator(self._backend, self._claude)
-        result = await orch.run(command.prompt)
+        result = await orch.run(
+            command.prompt,
+            conversation_context={"workspace": workspace_path},
+        )
 
         orch_run = self._ledger.create_orchestration_run(
             conversation_id=active.id,
@@ -697,11 +729,11 @@ class CommandController:
         label = status_labels.get(result.status, result.status)
 
         buttons: list[list[dict[str, str]]] = [[
-            {"text": "查看 diff", "callback_data": f"waiting:{active.id}:diff"},
+            {"text": "查看 diff", "callback_data": encode_conversation_callback(active.id, DIFF)},
         ]]
         if result.status == "failed":
             buttons[0].append(
-                {"text": "继续修改", "callback_data": f"waiting:{active.id}:retry"}
+                {"text": "继续修改", "callback_data": encode_conversation_callback(active.id, RETRY)}
             )
 
         return ControllerResponse(
@@ -791,7 +823,9 @@ class CommandController:
         if active is None:
             return ControllerResponse("当前没有活跃对话。")
 
-        # Abort the active task if any
+        stopped_items: list[str] = []
+
+        # Abort the active Codex task if any
         if active.active_codex_task_id:
             try:
                 task = self._service.get_task(active.active_codex_task_id)
@@ -803,12 +837,25 @@ class CommandController:
                     except Exception as exc:
                         logger.warning("interrupt_turn failed: %s", exc)
                 self._service.abort_task(active.active_codex_task_id)
+                stopped_items.append(f"Codex 任务 #{active.active_codex_task_id}")
             except KeyError:
                 pass
 
+        # Interrupt the active Claude run if any
+        if active.active_claude_run_id:
+            if self._claude is not None:
+                try:
+                    self._claude.interrupt()
+                except Exception as exc:
+                    logger.warning("Claude interrupt failed: %s", exc)
+            self._ledger.update_agent_run_status(
+                active.active_claude_run_id, "aborted"
+            )
+            stopped_items.append(f"Claude 运行 #{active.active_claude_run_id}")
+
+        detail = "；".join(stopped_items) if stopped_items else "无活跃任务"
         return ControllerResponse(
-            f"对话「{active.title}」已停止。"
-            f"\n后台任务 #{active.active_codex_task_id} 已中止（如果仍在运行）。"
+            f"对话「{active.title}」已停止。\n{detail}"
         )
 
     async def handle_switch_workspace(
@@ -884,6 +931,52 @@ class CommandController:
             return await self._handle_worktree_keep(callback.task_id)
         else:
             return ControllerResponse(f"未知 worktree 操作：{callback.action}")
+
+    # --- Conversation callback handler ---
+
+    async def handle_conversation_callback(
+        self, callback: ConversationCallback
+    ) -> ControllerResponse:
+        """Route conversation inline button callbacks (conv:* protocol)."""
+        try:
+            convo = self._ledger.get_conversation(callback.conversation_id)
+        except KeyError:
+            return ControllerResponse("对话不存在或已被删除。")
+
+        if callback.action == DIFF:
+            return await self.handle(
+                "/diff",
+                {"chat_id": convo.chat_id, "user_id": convo.user_id},
+            )
+        elif callback.action == VERIFY:
+            return await self.handle(
+                "/verify",
+                {"chat_id": convo.chat_id, "user_id": convo.user_id},
+            )
+        elif callback.action == RETRY:
+            # Re-run the orchestrator with the conversation's last goal
+            orch_runs = self._ledger.list_orchestration_runs(
+                callback.conversation_id, limit=1
+            )
+            if orch_runs:
+                goal = orch_runs[0].goal
+                return await self.handle(
+                    f"/auto {goal}",
+                    {"chat_id": convo.chat_id, "user_id": convo.user_id},
+                )
+            return ControllerResponse("没有找到可重试的编排运行。")
+        elif callback.action == CONTINUE:
+            return await self.handle(
+                "/new",
+                {"chat_id": convo.chat_id, "user_id": convo.user_id},
+            )
+        elif callback.action == NEW_CONVO:
+            return await self.handle(
+                "/new",
+                {"chat_id": convo.chat_id, "user_id": convo.user_id},
+            )
+        else:
+            return ControllerResponse(f"未知的对话操作：{callback.action}")
 
     # --- Individual waiting action handlers ---
 

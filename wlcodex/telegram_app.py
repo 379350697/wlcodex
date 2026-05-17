@@ -16,6 +16,7 @@ from telegram.ext import (
 from wlcodex.config import AppConfig
 from wlcodex.controller import CommandController
 from wlcodex.db import Ledger
+from wlcodex.streaming import StreamingRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,36 @@ class WlCodexHandlers:
             )
         return await update.effective_message.reply_text(text)
 
+    # --- Typing and streaming ---
+
+    async def _start_typing(self, chat_id: int) -> object:
+        """Start a typing indicator task for the given chat."""
+        import asyncio
+        from telegram.constants import ChatAction
+
+        async def _keep_typing() -> None:
+            try:
+                while True:
+                    await self._bot.send_chat_action(
+                        chat_id=chat_id, action=ChatAction.TYPING
+                    )
+                    await asyncio.sleep(4.0)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        task = asyncio.create_task(_keep_typing())
+        return task
+
+    def create_streaming_renderer(self, chat_id: int) -> StreamingRenderer:
+        """Create a StreamingRenderer bound to this handler's send/edit callbacks."""
+        return StreamingRenderer(
+            send_fn=self.send_telegram,
+            edit_fn=self.edit_telegram,
+            min_interval_seconds=1.0,
+        )
+
     # --- Telegram send/edit callbacks for event bridge ---
 
     async def send_telegram(
@@ -152,7 +183,16 @@ class WlCodexHandlers:
             )
         except Exception as exc:
             if _is_message_not_modified_error(exc):
-                logger.debug("Telegram message %d already has the requested text", message_id)
+                # Text unchanged but buttons may need applying.
+                # Append zero-width space to force the edit through.
+                try:
+                    await self._bot.edit_message_text(
+                        chat_id=chat_id, message_id=message_id,
+                        text=text + "​",
+                        reply_markup=reply_markup,
+                    )
+                except Exception:
+                    pass
                 return
             logger.debug("Failed to edit message %d, sending new one", message_id)
             new_msg = await self._bot.send_message(
@@ -327,26 +367,66 @@ class WlCodexHandlers:
     async def codex_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
-        response = await self._controller.handle(
-            update.effective_message.text, _ctx(update)
-        )
+        chat_id = update.effective_chat.id
+        typing_task = await self._start_typing(chat_id)
+        try:
+            response = await self._controller.handle(
+                update.effective_message.text, _ctx(update)
+            )
+        finally:
+            typing_task.cancel()
         sent = await self._reply_with_buttons(update, response.text, response.buttons)
-        await self._track_status_from_response(response.text, update.effective_chat.id, sent.message_id)
+        await self._track_status_from_response(response.text, chat_id, sent.message_id)
 
     async def claude_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
-        response = await self._controller.handle(
-            update.effective_message.text, _ctx(update)
-        )
-        await update.effective_message.reply_text(response.text)
+        chat_id = update.effective_chat.id
+        typing_task = await self._start_typing(chat_id)
+        try:
+            response = await self._controller.handle(
+                update.effective_message.text, _ctx(update)
+            )
+        finally:
+            typing_task.cancel()
+
+        # Use streaming renderer when buttons are present (Claude completed)
+        if response.buttons:
+            renderer = self.create_streaming_renderer(chat_id)
+            await renderer.start(chat_id, response.text)
+            await renderer.finish(buttons=response.buttons)
+        else:
+            await update.effective_message.reply_text(response.text)
 
     async def auto_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
-        response = await self._controller.handle(
-            update.effective_message.text, _ctx(update)
-        )
+        chat_id = update.effective_chat.id
+        typing_task = await self._start_typing(chat_id)
+        try:
+            response = await self._controller.handle(
+                update.effective_message.text, _ctx(update)
+            )
+        finally:
+            typing_task.cancel()
+        if response.buttons:
+            renderer = self.create_streaming_renderer(chat_id)
+            await renderer.start(chat_id, response.text)
+            await renderer.finish(buttons=response.buttons)
+        else:
+            await update.effective_message.reply_text(response.text)
+
+    async def verify_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        chat_id = update.effective_chat.id
+        typing_task = await self._start_typing(chat_id)
+        try:
+            response = await self._controller.handle(
+                update.effective_message.text, _ctx(update)
+            )
+        finally:
+            typing_task.cancel()
         await update.effective_message.reply_text(response.text)
 
     async def stop_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -371,22 +451,22 @@ class WlCodexHandlers:
         )
         await update.effective_message.reply_text(response.text)
 
-    async def verify_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._guard(update):
-            return
-        response = await self._controller.handle(
-            update.effective_message.text, _ctx(update)
-        )
-        await update.effective_message.reply_text(response.text)
-
     async def conversation_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle non-command text as a conversation message."""
         if not self._guard(update):
             return
         text = update.effective_message.text
-        response = await self._controller.handle_conversation_text(text, _ctx(update))
+        chat_id = update.effective_chat.id
+
+        # Start typing indicator while processing
+        typing_task = await self._start_typing(chat_id)
+        try:
+            response = await self._controller.handle_conversation_text(text, _ctx(update))
+        finally:
+            typing_task.cancel()
+
         sent = await self._reply_with_buttons(update, response.text, response.buttons)
-        await self._track_status_from_response(response.text, update.effective_chat.id, sent.message_id)
+        await self._track_status_from_response(response.text, chat_id, sent.message_id)
 
     # --- Callback routing ---
 
@@ -408,8 +488,40 @@ class WlCodexHandlers:
             await self._waiting_callback_impl(update, query, data)
         elif data.startswith("worktree_done:"):
             await self._worktree_done_callback_impl(update, query, data)
+        elif data.startswith("conv:"):
+            await self._conversation_callback_impl(update, query, data)
         else:
             await query.answer("未知回调类型。")
+
+    async def _conversation_callback_impl(
+        self, update: Update, query: object, data: str
+    ) -> None:
+        from wlcodex.conversation_callback import decode_conversation_callback
+
+        callback = decode_conversation_callback(data)
+        if callback is None:
+            await query.answer("无效的对话回调数据。")
+            return
+
+        try:
+            response = await self._controller.handle_conversation_callback(callback)
+            await query.answer("完成")
+            if response.buttons:
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                keyboard = [
+                    [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
+                     for b in row]
+                    for row in response.buttons
+                ]
+                await query.edit_message_text(
+                    response.text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            else:
+                await query.edit_message_text(response.text)
+        except Exception as exc:
+            logger.exception("Conversation callback error")
+            await query.answer(f"错误：{exc}")
 
     async def _approval_callback_impl(
         self, update: Update, query: object, data: str
