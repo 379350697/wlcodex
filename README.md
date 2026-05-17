@@ -1,6 +1,27 @@
 # WLCodex
 
-WLCodex is a personal Telegram cockpit for controlling local Linux Codex CLI tasks via `codex app-server`.
+WLCodex is a conversation-first chief-engineer Telegram cockpit. The user talks
+naturally. WLCodex routes intent to Codex (analysis, architecture, verification),
+Claude Code (implementation), or a Codex-led orchestration loop.
+
+## V2 — Conversation-First
+
+**Default UX**: Send a plain text message. WLCodex starts a conversation and
+routes it to Codex for analysis, not task-ID operations.
+
+**Direct channels**:
+- `/codex <prompt>` — talk directly to Codex
+- `/claude <prompt>` — talk directly to Claude Code (when enabled)
+- `/auto <prompt>` — full Codex → Claude → Codex orchestration loop
+
+**Compact context**: Model prompts use compact context packets, never raw
+Telegram transcripts. Token budget is a hard architectural constraint.
+
+**Legacy commands** (advanced/diagnostic): `/task`, `/continue`, `/steer`,
+`/tail`, `/events`, `/diff`, `/files`, `/pause`, `/abort`, `/archive`, `/fork`
+
+**Menu commands**: `/new`, `/stop`, `/status`, `/sessions`, `/switch`, `/model`,
+`/verify`, `/health`, `/help`
 
 ## V1 safety rules
 

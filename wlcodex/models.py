@@ -129,3 +129,92 @@ class TaskSnapshot:
     events: list[TaskEvent] = field(default_factory=list)
     approvals: list[ApprovalRequest] = field(default_factory=list)
     touched_files: list[TouchedFile] = field(default_factory=list)
+
+
+# --- Conversation models ---
+
+
+class ConversationMode(StrEnum):
+    CHIEF_ENGINEER = "chief_engineer"
+    CODEX_DIRECT = "codex_direct"
+    CLAUDE_DIRECT = "claude_direct"
+
+
+class AgentKind(StrEnum):
+    CODEX = "codex"
+    CLAUDE = "claude"
+
+
+class AgentRunStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    ABORTED = "aborted"
+
+
+class OrchestrationStatus(StrEnum):
+    RUNNING = "running"
+    PASSED = "passed"
+    FAILED = "failed"
+    NEEDS_USER = "needs_user"
+    ABORTED = "aborted"
+
+
+@dataclass(frozen=True)
+class ConversationSession:
+    id: int
+    chat_id: int
+    user_id: int
+    title: str
+    mode: str
+    workspace_alias: str
+    active_codex_task_id: int | None
+    active_claude_run_id: int | None
+    conversation_summary: str
+    current_model: str
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None
+
+
+@dataclass(frozen=True)
+class AgentRun:
+    id: int
+    conversation_id: int
+    agent: str
+    role: str
+    status: str
+    hidden_task_id: int | None
+    external_session_id: str | None
+    prompt_packet_summary: str
+    token_input: int
+    token_output: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class OrchestrationRun:
+    id: int
+    conversation_id: int
+    goal: str
+    status: str
+    current_step: str
+    verify_round: int
+    max_verify_rounds: int
+    last_codex_analysis: str
+    last_claude_summary: str
+    last_verification_result: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class OrchestrationDecision:
+    id: int
+    run_id: int
+    decision: str
+    reason: str
+    next_agent: str
+    created_at: datetime

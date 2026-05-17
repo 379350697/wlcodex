@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import logging
 from typing import Any
 
 from wlcodex.health_snapshot import build_health_snapshot
 from wlcodex.inspection import TaskInspector
 from wlcodex.models import TaskStatus
+from wlcodex.conversation import default_title, mode_from_command
+from wlcodex.context_packets import (
+    build_codex_analysis_packet,
+    build_codex_verification_packet as make_verification_packet,
+)
 from wlcodex.router import (
     AbortCommand,
     ArchiveCommand,
+    AutoModeCommand,
+    ClaudeDirectCommand,
+    CodexDirectCommand,
     CodexSessionsCommand,
     ContinueCommand,
     DiffCommand,
@@ -21,14 +30,25 @@ from wlcodex.router import (
     HealthCommand,
     HelpCommand,
     ListTasksCommand,
+    ModelCommand,
+    NewConversationCommand,
     ParseError,
     PauseCommand,
     ShowTaskCommand,
     StartTaskCommand,
     SteerCommand,
+    StopCurrentCommand,
+    SwitchWorkspaceCommand,
     TailCommand,
+    VerifyCommand,
     parse_command,
 )
+from wlcodex.status import (
+    render_conversation_help,
+    render_conversation_status,
+    render_session_list,
+)
+from wlcodex.models import ConversationMode
 from wlcodex.status import (
     render_task_card,
     render_task_list,
@@ -57,7 +77,7 @@ from wlcodex.waiting_callback import (
 
 logger = logging.getLogger(__name__)
 
-HELP_TEXT = render_help()
+HELP_TEXT = render_conversation_help()
 
 
 @dataclass
@@ -73,11 +93,13 @@ class CommandController:
         backend: object,
         inspector: TaskInspector,
         ledger: object | None = None,
+        claude_backend: object | None = None,
     ) -> None:
         self._service = task_service
         self._backend = backend
         self._inspector = inspector
         self._ledger = ledger
+        self._claude = claude_backend
 
     async def handle(
         self, text: str, telegram_context: dict[str, Any] | None = None
@@ -103,6 +125,20 @@ class CommandController:
                 ))
 
             elif isinstance(command, ListTasksCommand):
+                # Conversation-first: show conversation status when available
+                if self._ledger is not None and telegram_context:
+                    chat_id = telegram_context.get("chat_id", 0)
+                    active = self._ledger.get_active_conversation(chat_id)
+                    if active is not None:
+                        runs = self._ledger.list_agent_runs(active.id, limit=1)
+                        latest_run = runs[0] if runs else None
+                        orch_runs = self._ledger.list_orchestration_runs(active.id, limit=1)
+                        orch_run = orch_runs[0] if orch_runs else None
+                        return ControllerResponse(
+                            render_conversation_status(active, latest_run=latest_run, orch_run=orch_run)
+                        )
+
+                # Fall back to task list
                 tasks = self._service.list_tasks()
                 wmeta: dict[int, tuple[int, str, int]] = {}
                 for t in tasks:
@@ -157,14 +193,32 @@ class CommandController:
                 )
 
             elif isinstance(command, DiffCommand):
-                task = self._service.get_task(command.task_id)
-                result = self._inspector.diff(command.task_id, task.workspace_path)
+                task_id = command.task_id
+                if task_id is None and self._ledger is not None:
+                    active = self._ledger.get_active_conversation(
+                        telegram_context.get("chat_id", 0) if telegram_context else 0
+                    )
+                    if active and active.active_codex_task_id:
+                        task_id = active.active_codex_task_id
+                if task_id is None:
+                    return ControllerResponse("请指定任务 ID 或在活跃对话中使用 /diff。")
+                task = self._service.get_task(task_id)
+                result = self._inspector.diff(task_id, task.workspace_path)
                 return ControllerResponse(
                     f"{result.title}\n\n{result.body}"
                 )
 
             elif isinstance(command, FilesCommand):
-                result = self._inspector.files(command.task_id)
+                task_id = command.task_id
+                if task_id is None and self._ledger is not None:
+                    active = self._ledger.get_active_conversation(
+                        telegram_context.get("chat_id", 0) if telegram_context else 0
+                    )
+                    if active and active.active_codex_task_id:
+                        task_id = active.active_codex_task_id
+                if task_id is None:
+                    return ControllerResponse("请指定任务 ID 或在活跃对话中使用 /files。")
+                result = self._inspector.files(task_id)
                 return ControllerResponse(
                     f"{result.title}\n\n{result.body}"
                 )
@@ -209,6 +263,12 @@ class CommandController:
                 return await self._handle_fork(command, telegram_context)
 
             elif isinstance(command, CodexSessionsCommand):
+                if self._ledger is not None and telegram_context:
+                    chat_id = telegram_context.get("chat_id", 0)
+                    convos = self._ledger.list_conversations_by_chat(chat_id)
+                    if convos:
+                        return ControllerResponse(render_session_list(convos))
+                # Fall back to task-based sessions
                 tasks = self._service.list_tasks(include_archived=True)
                 lines = ["Codex 会话：", f"{'ID':>4}  {'状态':<10}  {'Thread ID':<38}  标题"]
                 for task in tasks:
@@ -218,6 +278,32 @@ class CommandController:
                             f"{task.codex_thread_id:<38}  {task.title[:60]}"
                         )
                 return ControllerResponse("\n".join(lines))
+
+            # --- New conversation commands ---
+
+            elif isinstance(command, NewConversationCommand):
+                return await self.handle_new_conversation(command, telegram_context)
+
+            elif isinstance(command, CodexDirectCommand):
+                return await self.handle_codex_direct(command, telegram_context)
+
+            elif isinstance(command, ClaudeDirectCommand):
+                return await self.handle_claude_direct(command, telegram_context)
+
+            elif isinstance(command, AutoModeCommand):
+                return await self.handle_auto_mode(command, telegram_context)
+
+            elif isinstance(command, StopCurrentCommand):
+                return await self.handle_stop_current(telegram_context)
+
+            elif isinstance(command, SwitchWorkspaceCommand):
+                return await self.handle_switch_workspace(command, telegram_context)
+
+            elif isinstance(command, ModelCommand):
+                return await self.handle_model(command, telegram_context)
+
+            elif isinstance(command, VerifyCommand):
+                return await self.handle_verify(command, telegram_context)
 
             else:
                 return ControllerResponse("未处理的命令类型。")
@@ -392,6 +478,389 @@ class CommandController:
             return await self._handle_worktree_isolated(callback.task_id)
         else:
             return ControllerResponse(f"未知等待操作：{callback.action}")
+
+    # --- Conversation handlers ---
+
+    async def handle_conversation_text(
+        self, text: str, telegram_context: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        """Handle plain text as conversation message. Never injects status/log
+        into model prompts."""
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        chat_id = telegram_context.get("chat_id", 0) if telegram_context else 0
+        user_id = telegram_context.get("user_id", 0) if telegram_context else 0
+
+        active = self._ledger.get_active_conversation(chat_id)
+        if active is None:
+            title = default_title(text)
+            active = self._ledger.create_conversation(
+                chat_id=chat_id,
+                user_id=user_id,
+                title=title,
+                mode=ConversationMode.CODEX_DIRECT.value,
+                workspace_alias="wlcodex",
+            )
+
+        # Build compact context packet — never include raw Telegram transcript
+        packet = build_codex_analysis_packet(
+            user_goal=text,
+            conversation_summary=active.conversation_summary,
+            constraints=[],
+            workspace=active.workspace_alias,
+        )
+
+        # Reserve a hidden task through TaskService
+        task = self._service.reserve_task(
+            active.workspace_alias,
+            text,
+            telegram_chat_id=chat_id,
+        )
+        self._ledger.set_conversation_active_task(active.id, task.id)
+
+        workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+        try:
+            thread_id = await self._backend.create_thread(workspace_path)
+            self._service.set_task_thread(task.id, thread_id)
+            await self._backend.start_turn(thread_id, text)
+        except Exception as exc:
+            task = self._service.fail_task(task.id, str(exc))
+            return ControllerResponse(
+                f"Codex 启动失败：{exc}\n\n任务 #{task.id} 已失败。"
+            )
+
+        self._ledger.update_conversation_summary(
+            active.id,
+            f"用户请求：{text[:120]}",
+        )
+        self._ledger.create_agent_run(
+            conversation_id=active.id,
+            agent="codex",
+            role="analysis",
+            hidden_task_id=task.id,
+            prompt_packet_summary=packet.summary(),
+        )
+
+        return ControllerResponse(
+            f"对话「{active.title}」\n\n"
+            f"正在用 Codex 分析你的需求。\n"
+            f"工作区：{active.workspace_alias}\n"
+            f"后台任务 #{task.id}\n\n"
+            f"提示：当 Codex 完成分析后会通知你。"
+        )
+
+    async def handle_new_conversation(
+        self, command: NewConversationCommand, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        user_id = ctx.get("user_id", 0) if ctx else 0
+
+        # Archive any active conversation
+        old = self._ledger.get_active_conversation(chat_id)
+        if old is not None:
+            self._ledger.archive_conversation(old.id)
+
+        title = command.title if command.title else "新对话"
+        convo = self._ledger.create_conversation(
+            chat_id=chat_id,
+            user_id=user_id,
+            title=title,
+            mode=ConversationMode.CODEX_DIRECT.value,
+            workspace_alias="wlcodex",
+        )
+        return ControllerResponse(
+            f"新对话已创建：「{convo.title}」\n"
+            f"模式：Codex 直聊\n"
+            f"工作区：{convo.workspace_alias}\n\n"
+            f"直接发消息开始对话，或用 /codex /claude /auto 切换模式。"
+        )
+
+    async def handle_codex_direct(
+        self, command: CodexDirectCommand, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        return await self.handle_conversation_text(command.prompt, ctx)
+
+    async def handle_claude_direct(
+        self, command: ClaudeDirectCommand, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        if self._claude is None or not getattr(self._claude, "enabled", False):
+            return ControllerResponse(
+                "Claude Code 未启用。请在配置中设置 claude.enabled = true 后重试。"
+            )
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        user_id = ctx.get("user_id", 0) if ctx else 0
+
+        active = self._ledger.get_active_conversation(chat_id)
+        if active is None:
+            title = default_title(command.prompt)
+            active = self._ledger.create_conversation(
+                chat_id=chat_id,
+                user_id=user_id,
+                title=title,
+                mode=ConversationMode.CLAUDE_DIRECT.value,
+                workspace_alias="wlcodex",
+            )
+
+        from wlcodex.agent_backend import AgentRequest
+
+        workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+        result = await self._claude.send(AgentRequest(
+            prompt=command.prompt,
+            workspace_path=workspace_path,
+        ))
+
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=active.id,
+            agent="claude",
+            role="implementation",
+            prompt_packet_summary=command.prompt[:120],
+        )
+        self._ledger.update_agent_run_status(
+            agent_run.id,
+            "done",
+            token_input=result.token_input,
+            token_output=result.token_output,
+        )
+        self._ledger.set_conversation_active_task(active.id, agent_run.id)
+
+        buttons: list[list[dict[str, str]]] = [[
+            {"text": "查看 diff", "callback_data": f"waiting:{active.id}:diff"},
+            {"text": "Codex 验收", "callback_data": f"waiting:{active.id}:verify"},
+        ]]
+
+        return ControllerResponse(
+            f"Claude Code 已完成。\n\n"
+            f"对话：{active.title}\n"
+            f"工作区：{active.workspace_alias}\n"
+            f"Token：{result.token_input} 输入 / {result.token_output} 输出\n\n"
+            f"{_trim_result_text(result.text, 2000)}",
+            buttons=buttons,
+        )
+
+    async def handle_auto_mode(
+        self, command: AutoModeCommand, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        if self._claude is None or not getattr(self._claude, "enabled", False):
+            return ControllerResponse(
+                "总工程师编排需要 Claude Code 后端。\n"
+                "请在配置中设置 claude.enabled = true，或使用 /codex 直接对话。"
+            )
+
+        from wlcodex.orchestrator import ChiefEngineerOrchestrator
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        user_id = ctx.get("user_id", 0) if ctx else 0
+
+        active = self._ledger.get_active_conversation(chat_id)
+        if active is None:
+            title = default_title(command.prompt)
+            active = self._ledger.create_conversation(
+                chat_id=chat_id,
+                user_id=user_id,
+                title=title,
+                mode=ConversationMode.CHIEF_ENGINEER.value,
+                workspace_alias="wlcodex",
+            )
+
+        orch = ChiefEngineerOrchestrator(self._backend, self._claude)
+        result = await orch.run(command.prompt)
+
+        orch_run = self._ledger.create_orchestration_run(
+            conversation_id=active.id,
+            goal=command.prompt,
+        )
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status=result.status,
+            verify_round=result.verify_round,
+            last_codex_analysis=result.codex_analysis[:500] if result.codex_analysis else "",
+            last_claude_summary=result.claude_implementation[:500] if result.claude_implementation else "",
+            last_verification_result=result.verification_summary[:500],
+        )
+
+        status_labels = {
+            "passed": "验收通过",
+            "failed": "验证失败",
+            "needs_user": "需要用户输入",
+        }
+        label = status_labels.get(result.status, result.status)
+
+        buttons: list[list[dict[str, str]]] = [[
+            {"text": "查看 diff", "callback_data": f"waiting:{active.id}:diff"},
+        ]]
+        if result.status == "failed":
+            buttons[0].append(
+                {"text": "继续修改", "callback_data": f"waiting:{active.id}:retry"}
+            )
+
+        return ControllerResponse(
+            f"总工程师编排完成 — {label}\n\n"
+            f"对话：{active.title}\n"
+            f"轮次：第 {result.verify_round} 轮\n"
+            f"Codex 分析：{_trim_result_text(result.codex_analysis, 300)}\n"
+            f"Claude 实施：{_trim_result_text(result.claude_implementation, 300)}\n"
+            f"验证结果：{_trim_result_text(result.verification_summary, 300)}",
+            buttons=buttons,
+        )
+
+    async def handle_verify(
+        self, command: VerifyCommand, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        active = self._ledger.get_active_conversation(chat_id)
+
+        if active is None:
+            return ControllerResponse("当前没有活跃对话。请先开始对话。")
+
+        runs = self._ledger.list_agent_runs(active.id, limit=5)
+        if not runs:
+            return ControllerResponse("当前对话没有已完成的运行。")
+
+        latest_run = runs[-1]
+
+        # Build verification packet and call Codex
+        verify_payload = command.prompt if command.prompt else active.title
+        packet = make_verification_packet(
+            user_goal=verify_payload,
+            claude_completion_summary=latest_run.prompt_packet_summary,
+            workspace=active.workspace_alias,
+        )
+
+        # Call Codex backend for verification
+        try:
+            if active.active_codex_task_id:
+                task = self._service.get_task(active.active_codex_task_id)
+                if task.codex_thread_id:
+                    await self._backend.start_turn(task.codex_thread_id, packet.render())
+                    verification_text = f"已向 Codex 发送验收请求。\n" \
+                                        f"对话：{active.title}\n" \
+                                        f"线程：{task.codex_thread_id}\n" \
+                                        f"验收标准：{packet.acceptance_criteria or '由 Codex 分析'}"
+                else:
+                    verification_text = "Codex 线程未就绪，无法发送验收。"
+            else:
+                # No existing Codex task — create one for verification
+                workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+                thread_id = await self._backend.create_thread(workspace_path)
+                task = self._service.reserve_task(
+                    active.workspace_alias,
+                    f"验证：{verify_payload}",
+                    telegram_chat_id=chat_id,
+                )
+                self._service.set_task_thread(task.id, thread_id)
+                self._ledger.set_conversation_active_task(active.id, task.id)
+                await self._backend.start_turn(thread_id, packet.render())
+                verification_text = f"已创建 Codex 验证任务 #{task.id}。\n" \
+                                    f"对话：{active.title}\n" \
+                                    f"验收内容：{verify_payload}"
+        except Exception as exc:
+            logger.warning("verify: Codex call failed: %s", exc)
+            verification_text = f"Codex 验收请求失败：{exc}"
+
+        return ControllerResponse(
+            f"Codex 验收 — 对话「{active.title}」\n\n"
+            f"最近运行：#{latest_run.id}（{latest_run.agent}/{latest_run.status}）\n"
+            f"摘要：{latest_run.prompt_packet_summary}\n"
+            f"Token：{latest_run.token_input} 输入 / {latest_run.token_output} 输出\n\n"
+            f"{verification_text}"
+        )
+
+    async def handle_stop_current(
+        self, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        active = self._ledger.get_active_conversation(chat_id)
+
+        if active is None:
+            return ControllerResponse("当前没有活跃对话。")
+
+        # Abort the active task if any
+        if active.active_codex_task_id:
+            try:
+                task = self._service.get_task(active.active_codex_task_id)
+                if task.active_turn_id and task.codex_thread_id:
+                    try:
+                        await self._backend.interrupt_turn(
+                            task.codex_thread_id, task.active_turn_id
+                        )
+                    except Exception as exc:
+                        logger.warning("interrupt_turn failed: %s", exc)
+                self._service.abort_task(active.active_codex_task_id)
+            except KeyError:
+                pass
+
+        return ControllerResponse(
+            f"对话「{active.title}」已停止。"
+            f"\n后台任务 #{active.active_codex_task_id} 已中止（如果仍在运行）。"
+        )
+
+    async def handle_switch_workspace(
+        self, command: SwitchWorkspaceCommand, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        active = self._ledger.get_active_conversation(chat_id)
+
+        if active is None:
+            return ControllerResponse("当前没有活跃对话。请先创建对话。")
+
+        try:
+            self._service.get_workspace(command.workspace_alias)
+        except Exception:
+            return ControllerResponse(f"工作区 '{command.workspace_alias}' 不存在。")
+
+        updated = self._ledger.set_conversation_workspace(
+            active.id, command.workspace_alias
+        )
+        return ControllerResponse(
+            f"对话「{updated.title}」工作区已切换至 {command.workspace_alias}。"
+        )
+
+    async def handle_model(
+        self, command: ModelCommand, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        active = self._ledger.get_active_conversation(chat_id)
+
+        if command.model_name:
+            if active is None:
+                return ControllerResponse("当前没有活跃对话。请先创建对话。")
+            self._ledger._conn.execute(
+                "UPDATE conversation_sessions SET current_model = ?, updated_at = ? WHERE id = ?",
+                (command.model_name, datetime.now(timezone.utc).isoformat(), active.id),
+            )
+            self._ledger._conn.commit()
+            return ControllerResponse(
+                f"对话「{active.title}」模型偏好已保存为 {command.model_name}。"
+                f"\n注意：模型切换需要后端支持，当前仅为偏好保存。"
+            )
+        else:
+            current = active.current_model if active else ""
+            if current:
+                return ControllerResponse(f"当前偏好模型：{current}\n使用 /model <name> 切换。")
+            return ControllerResponse("当前未设置偏好模型。使用 /model <name> 切换。")
 
     async def handle_worktree_done_callback(
         self, callback: WaitingCallback
@@ -734,6 +1203,12 @@ def _build_waiting_buttons(task_id: int) -> list[list[dict[str, str]]]:
             {"text": "隔离 worktree 并行", "callback_data": encode_waiting_callback(task_id, WORKTREE_ISOLATED)},
         ],
     ]
+
+
+def _trim_result_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars - 1].rstrip() + "…"
 
 
 def _build_worktree_done_buttons(task_id: int) -> list[list[dict[str, str]]]:

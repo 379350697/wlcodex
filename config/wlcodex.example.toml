@@ -51,6 +51,36 @@ backend_dead_grace_seconds = 120
 #   WLCODEX_LIVE_SMOKE_TASK_ID=...
 #   WLCODEX_LIVE_APPROVAL_REQUIRED=1  (after running approval smoke)
 
+[conversation]
+enabled = true
+default_mode = "chief_engineer"
+default_workspace = "wlcodex"
+summary_max_tokens = 800
+
+[orchestration]
+enabled = true
+max_verify_rounds = 3
+auto_delegate_simple_edits = false
+
+[claude]
+enabled = false
+binary = "claude"
+startup_timeout_seconds = 15.0
+request_timeout_seconds = 600.0
+
+[context_budget]
+codex_analysis_tokens = 2500
+codex_to_claude_tokens = 1500
+claude_to_codex_tokens = 2500
+conversation_summary_tokens = 800
+
+[streaming]
+enabled = true
+edit_min_interval_seconds = 1.0
+
+[menu]
+register_bot_commands = true
+
 [[workspaces]]
 alias = "wlcodex"
 path = "/media/wl/新加卷/codex/wlcodex"

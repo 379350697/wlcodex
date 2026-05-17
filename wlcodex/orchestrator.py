@@ -1,0 +1,218 @@
+"""Chief Engineer orchestration: Codex-Claude-Codex loop with verification retry.
+
+Codex owns analysis, architecture, prompt shaping, verification, and closure.
+Claude Code is the implementation engineer.
+The orchestrator enforces compact context packets for every model call.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import logging
+from typing import Any
+
+from wlcodex.context_packets import (
+    ContextBudget,
+    build_claude_handoff_packet,
+    build_codex_analysis_packet,
+    build_codex_verification_packet,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class OrchestrationResult:
+    status: str
+    verify_round: int = 0
+    codex_analysis: str = ""
+    claude_implementation: str = ""
+    verification_summary: str = ""
+    steps: list[OrchestrationStepResult] = field(default_factory=list)
+
+
+@dataclass
+class OrchestrationStepResult:
+    step: str
+    agent: str
+    summary: str
+
+
+@dataclass
+class VerificationDecision:
+    decision: str  # pass, retry, stop, need_user
+    summary: str = ""
+    required_fix: str = ""
+    confidence: str = ""
+
+    @classmethod
+    def parse(cls, text: str) -> "VerificationDecision":
+        decision = "need_user"
+        summary = text
+        required_fix = ""
+
+        text_lower = text.lower()
+        if "decision: pass" in text_lower or "验收通过" in text:
+            decision = "pass"
+        elif "decision: retry" in text_lower or "需要修改" in text:
+            decision = "retry"
+            # Extract the required fix
+            if "required_fix:" in text_lower:
+                fix_idx = text_lower.find("required_fix:")
+                required_fix = text[fix_idx:].split("\n")[0]
+            elif "需要" in text:
+                required_fix = text
+        elif "decision: stop" in text_lower or "无法完成" in text:
+            decision = "stop"
+        elif "decision: need_user" in text_lower or "需要用户" in text:
+            decision = "need_user"
+
+        return cls(decision=decision, summary=summary, required_fix=required_fix)
+
+
+class ChiefEngineerOrchestrator:
+    """Orchestrates the Codex-Claude-Codex verification loop."""
+
+    def __init__(
+        self,
+        codex_backend: object,
+        claude_backend: object,
+        max_verify_rounds: int = 3,
+        budget: ContextBudget | None = None,
+    ) -> None:
+        self._codex = codex_backend
+        self._claude = claude_backend
+        self._max_verify_rounds = max_verify_rounds
+        self._budget = budget or ContextBudget()
+
+    async def run(
+        self,
+        user_goal: str,
+        conversation_context: dict[str, Any] | None = None,
+    ) -> OrchestrationResult:
+        ctx = conversation_context or {}
+        workspace = ctx.get("workspace", "wlcodex")
+        result = OrchestrationResult(status="running")
+
+        # Step 1: Codex analysis
+        try:
+            analysis = await self._analyze_with_codex(user_goal, workspace)
+            result.codex_analysis = analysis
+            result.steps.append(OrchestrationStepResult(
+                step="analyze", agent="codex", summary=analysis[:200],
+            ))
+        except Exception as exc:
+            result.status = "failed"
+            result.verification_summary = f"Codex analysis failed: {exc}"
+            return result
+
+        # Check if Codex says no implementation needed
+        if "不需要修改" in analysis or "no code changes" in analysis.lower():
+            result.status = "passed"
+            result.verification_summary = "Codex determined no implementation needed."
+            return result
+
+        # Step 2-3: Implementation + verification loop
+        for round_num in range(1, self._max_verify_rounds + 1):
+            result.verify_round = round_num
+
+            # Claude implementation
+            try:
+                impl = await self._implement_with_claude(
+                    user_goal, analysis, workspace
+                )
+                result.claude_implementation = impl
+                result.steps.append(OrchestrationStepResult(
+                    step=f"implement_round_{round_num}", agent="claude", summary=impl[:200],
+                ))
+            except Exception as exc:
+                result.status = "failed"
+                result.verification_summary = f"Claude implementation failed: {exc}"
+                return result
+
+            # Codex verification
+            try:
+                verify_result = await self._verify_with_codex(
+                    user_goal, analysis, impl, workspace
+                )
+                result.verification_summary = verify_result
+                result.steps.append(OrchestrationStepResult(
+                    step=f"verify_round_{round_num}", agent="codex",
+                    summary=verify_result[:200],
+                ))
+            except Exception as exc:
+                result.status = "failed"
+                result.verification_summary = f"Codex verification failed: {exc}"
+                return result
+
+            decision = VerificationDecision.parse(verify_result)
+
+            if decision.decision == "pass":
+                result.status = "passed"
+                return result
+            elif decision.decision == "stop":
+                result.status = "failed"
+                result.verification_summary = decision.summary
+                return result
+            elif decision.decision == "need_user":
+                result.status = "needs_user"
+                result.verification_summary = decision.summary
+                return result
+            elif decision.decision == "retry":
+                # Update analysis with the feedback for next iteration
+                analysis = f"Previous verification failed: {decision.required_fix}\n\nOriginal analysis: {analysis}"
+                continue
+
+        result.status = "needs_user"
+        result.verification_summary = (
+            f"Max verification rounds ({self._max_verify_rounds}) reached. "
+            "Please review the changes and provide guidance."
+        )
+        return result
+
+    async def _analyze_with_codex(self, goal: str, workspace: str) -> str:
+        packet = build_codex_analysis_packet(
+            user_goal=goal,
+            workspace=workspace,
+            budget=self._budget,
+        )
+        return await self._call_codex(packet.render())
+
+    async def _implement_with_claude(
+        self, goal: str, analysis: str, workspace: str
+    ) -> str:
+        packet = build_claude_handoff_packet(
+            user_goal=goal,
+            codex_analysis=analysis,
+            workspace=workspace,
+            budget=self._budget,
+        )
+        return await self._call_claude(packet.render())
+
+    async def _verify_with_codex(
+        self, goal: str, analysis: str, impl: str, workspace: str
+    ) -> str:
+        packet = build_codex_verification_packet(
+            user_goal=goal,
+            codex_plan_summary=analysis,
+            claude_completion_summary=impl,
+            workspace=workspace,
+            budget=self._budget,
+        )
+        return await self._call_codex(packet.render())
+
+    async def _call_codex(self, prompt: str) -> str:
+        backend = self._codex
+        if hasattr(backend, "echo"):
+            return backend.echo(prompt)
+        if hasattr(backend, "fake_response"):
+            return backend.fake_response(prompt)
+        raise NotImplementedError("Codex backend must have 'echo' or 'fake_response'")
+
+    async def _call_claude(self, prompt: str) -> str:
+        backend = self._claude
+        if hasattr(backend, "echo"):
+            return backend.echo(prompt)
+        if hasattr(backend, "fake_response"):
+            return backend.fake_response(prompt)
+        raise NotImplementedError("Claude backend must have 'echo' or 'fake_response'")

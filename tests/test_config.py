@@ -5,6 +5,44 @@ import pytest
 from wlcodex.config import ConfigError, load_config
 
 
+def test_conversation_config_defaults(tmp_path: Path) -> None:
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+
+[codex]
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "wlcodex"
+path = "/tmp/wlcodex"
+        """.strip(),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+
+    assert config.conversation.enabled is True
+    assert config.conversation.default_mode == "chief_engineer"
+    assert config.claude.enabled is False
+    assert config.context_budget.codex_to_claude_tokens == 1500
+    assert config.orchestration.max_verify_rounds == 3
+    assert config.streaming.edit_min_interval_seconds == 1.0
+    assert config.menu.register_bot_commands is True
+
+
 def test_load_config_reads_workspace_and_token_env(tmp_path: Path) -> None:
     config_path = tmp_path / "wlcodex.toml"
     config_path.write_text(

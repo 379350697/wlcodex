@@ -7,11 +7,17 @@ import sqlite3
 from typing import Any
 
 from wlcodex.models import (
+    AgentRun,
+    AgentRunStatus,
     ApprovalKind,
     ApprovalRequest,
     ApprovalStatus,
     BackendRequest,
     BackendRequestStatus,
+    ConversationSession,
+    OrchestrationDecision,
+    OrchestrationRun,
+    OrchestrationStatus,
     Task,
     TaskEvent,
     TaskStatus,
@@ -139,6 +145,76 @@ class Ledger:
 
             CREATE INDEX IF NOT EXISTS idx_telegram_updates_update_id
                 ON telegram_updates(telegram_update_id);
+
+            CREATE TABLE IF NOT EXISTS conversation_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'chief_engineer',
+                workspace_alias TEXT NOT NULL,
+                active_codex_task_id INTEGER,
+                active_claude_run_id INTEGER,
+                conversation_summary TEXT NOT NULL DEFAULT '',
+                current_model TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                archived_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_conversation_sessions_chat_id
+                ON conversation_sessions(chat_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS agent_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                agent TEXT NOT NULL,
+                role TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                hidden_task_id INTEGER,
+                external_session_id TEXT,
+                prompt_packet_summary TEXT NOT NULL DEFAULT '',
+                token_input INTEGER NOT NULL DEFAULT 0,
+                token_output INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversation_sessions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_runs_conversation_id
+                ON agent_runs(conversation_id, id);
+
+            CREATE TABLE IF NOT EXISTS orchestration_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                goal TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                current_step TEXT NOT NULL DEFAULT '',
+                verify_round INTEGER NOT NULL DEFAULT 0,
+                max_verify_rounds INTEGER NOT NULL DEFAULT 3,
+                last_codex_analysis TEXT NOT NULL DEFAULT '',
+                last_claude_summary TEXT NOT NULL DEFAULT '',
+                last_verification_result TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversation_sessions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_orchestration_runs_conversation_id
+                ON orchestration_runs(conversation_id, id);
+
+            CREATE TABLE IF NOT EXISTS orchestration_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                decision TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                next_agent TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES orchestration_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_orchestration_decisions_run_id
+                ON orchestration_decisions(run_id, id);
 
             CREATE TABLE IF NOT EXISTS schema_meta (
                 key TEXT PRIMARY KEY,
@@ -701,6 +777,308 @@ class Ledger:
         return self.get_task(task_id)
 
 
+    # --- Conversations ---
+
+    def create_conversation(
+        self,
+        chat_id: int,
+        user_id: int,
+        title: str,
+        mode: str,
+        workspace_alias: str,
+    ) -> ConversationSession:
+        now = _now()
+        cur = self._conn.execute(
+            """
+            INSERT INTO conversation_sessions (
+                chat_id, user_id, title, mode, workspace_alias, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (chat_id, user_id, title, mode, workspace_alias, now, now),
+        )
+        self._conn.commit()
+        return self.get_conversation(int(cur.lastrowid))
+
+    def get_conversation(self, conversation_id: int) -> ConversationSession:
+        row = self._conn.execute(
+            "SELECT * FROM conversation_sessions WHERE id = ?", (conversation_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown conversation id: {conversation_id}")
+        return _conversation(row)
+
+    def get_active_conversation(self, chat_id: int) -> ConversationSession | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM conversation_sessions
+            WHERE chat_id = ? AND archived_at IS NULL
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (chat_id,),
+        ).fetchone()
+        return _conversation(row) if row else None
+
+    def set_active_conversation_mode(
+        self, conversation_id: int, mode: str
+    ) -> ConversationSession:
+        self._conn.execute(
+            "UPDATE conversation_sessions SET mode = ?, updated_at = ? WHERE id = ?",
+            (mode, _now(), conversation_id),
+        )
+        self._conn.commit()
+        return self.get_conversation(conversation_id)
+
+    def set_conversation_workspace(
+        self, conversation_id: int, workspace_alias: str
+    ) -> ConversationSession:
+        self._conn.execute(
+            "UPDATE conversation_sessions SET workspace_alias = ?, updated_at = ? WHERE id = ?",
+            (workspace_alias, _now(), conversation_id),
+        )
+        self._conn.commit()
+        return self.get_conversation(conversation_id)
+
+    def update_conversation_summary(
+        self, conversation_id: int, summary: str
+    ) -> ConversationSession:
+        self._conn.execute(
+            "UPDATE conversation_sessions SET conversation_summary = ?, updated_at = ? WHERE id = ?",
+            (summary, _now(), conversation_id),
+        )
+        self._conn.commit()
+        return self.get_conversation(conversation_id)
+
+    def archive_conversation(self, conversation_id: int) -> ConversationSession:
+        now = _now()
+        self._conn.execute(
+            "UPDATE conversation_sessions SET archived_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, conversation_id),
+        )
+        self._conn.commit()
+        return self.get_conversation(conversation_id)
+
+    def list_conversations(self, limit: int = 20) -> list[ConversationSession]:
+        rows = self._conn.execute(
+            "SELECT * FROM conversation_sessions ORDER BY updated_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_conversation(row) for row in rows]
+
+    def list_conversations_by_chat(
+        self, chat_id: int, limit: int = 20
+    ) -> list[ConversationSession]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM conversation_sessions
+            WHERE chat_id = ? AND archived_at IS NULL
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (chat_id, limit),
+        ).fetchall()
+        return [_conversation(row) for row in rows]
+
+    def set_conversation_active_task(
+        self, conversation_id: int, task_id: int
+    ) -> None:
+        self._conn.execute(
+            "UPDATE conversation_sessions SET active_codex_task_id = ?, updated_at = ? WHERE id = ?",
+            (task_id, _now(), conversation_id),
+        )
+        self._conn.commit()
+
+    # --- Agent runs ---
+
+    def create_agent_run(
+        self,
+        conversation_id: int,
+        agent: str,
+        role: str,
+        hidden_task_id: int | None = None,
+        external_session_id: str | None = None,
+        prompt_packet_summary: str = "",
+    ) -> AgentRun:
+        now = _now()
+        cur = self._conn.execute(
+            """
+            INSERT INTO agent_runs (
+                conversation_id, agent, role, status, hidden_task_id,
+                external_session_id, prompt_packet_summary, created_at, updated_at
+            )
+            VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+            """,
+            (
+                conversation_id, agent, role, hidden_task_id,
+                external_session_id, prompt_packet_summary, now, now,
+            ),
+        )
+        self._conn.commit()
+        return self.get_agent_run(int(cur.lastrowid))
+
+    def get_agent_run(self, run_id: int) -> AgentRun:
+        row = self._conn.execute(
+            "SELECT * FROM agent_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown agent run id: {run_id}")
+        return _agent_run(row)
+
+    def update_agent_run_status(
+        self,
+        run_id: int,
+        status: str,
+        token_input: int = 0,
+        token_output: int = 0,
+        external_session_id: str | None = None,
+    ) -> AgentRun:
+        params: list[object] = [status, token_input, token_output, _now(), run_id]
+        if external_session_id is not None:
+            params.insert(3, external_session_id)
+            self._conn.execute(
+                """UPDATE agent_runs
+                   SET status = ?, token_input = ?, token_output = ?,
+                       external_session_id = ?, updated_at = ?
+                   WHERE id = ?""",
+                params,
+            )
+        else:
+            self._conn.execute(
+                """UPDATE agent_runs
+                   SET status = ?, token_input = ?, token_output = ?, updated_at = ?
+                   WHERE id = ?""",
+                params,
+            )
+        self._conn.commit()
+        return self.get_agent_run(run_id)
+
+    def list_agent_runs(
+        self, conversation_id: int, limit: int = 50
+    ) -> list[AgentRun]:
+        rows = self._conn.execute(
+            "SELECT * FROM agent_runs WHERE conversation_id = ? ORDER BY id ASC LIMIT ?",
+            (conversation_id, limit),
+        ).fetchall()
+        return [_agent_run(row) for row in rows]
+
+    # --- Orchestration runs ---
+
+    def create_orchestration_run(
+        self,
+        conversation_id: int,
+        goal: str,
+        max_verify_rounds: int = 3,
+    ) -> OrchestrationRun:
+        now = _now()
+        cur = self._conn.execute(
+            """
+            INSERT INTO orchestration_runs (
+                conversation_id, goal, status, current_step, max_verify_rounds, created_at, updated_at
+            )
+            VALUES (?, ?, 'running', '', ?, ?, ?)
+            """,
+            (conversation_id, goal, max_verify_rounds, now, now),
+        )
+        self._conn.commit()
+        return self.get_orchestration_run(int(cur.lastrowid))
+
+    def get_orchestration_run(self, run_id: int) -> OrchestrationRun:
+        row = self._conn.execute(
+            "SELECT * FROM orchestration_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown orchestration run id: {run_id}")
+        return _orchestration_run(row)
+
+    def update_orchestration_run(
+        self,
+        run_id: int,
+        status: str | None = None,
+        current_step: str | None = None,
+        verify_round: int | None = None,
+        last_codex_analysis: str | None = None,
+        last_claude_summary: str | None = None,
+        last_verification_result: str | None = None,
+    ) -> OrchestrationRun:
+        now = _now()
+        sets: list[str] = ["updated_at = ?"]
+        params: list[object] = [now]
+
+        if status is not None:
+            sets.append("status = ?")
+            params.append(status)
+        if current_step is not None:
+            sets.append("current_step = ?")
+            params.append(current_step)
+        if verify_round is not None:
+            sets.append("verify_round = ?")
+            params.append(verify_round)
+        if last_codex_analysis is not None:
+            sets.append("last_codex_analysis = ?")
+            params.append(last_codex_analysis)
+        if last_claude_summary is not None:
+            sets.append("last_claude_summary = ?")
+            params.append(last_claude_summary)
+        if last_verification_result is not None:
+            sets.append("last_verification_result = ?")
+            params.append(last_verification_result)
+
+        params.append(run_id)
+        self._conn.execute(
+            f"UPDATE orchestration_runs SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+        self._conn.commit()
+        return self.get_orchestration_run(run_id)
+
+    def list_orchestration_runs(
+        self, conversation_id: int, limit: int = 20
+    ) -> list[OrchestrationRun]:
+        rows = self._conn.execute(
+            "SELECT * FROM orchestration_runs WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
+            (conversation_id, limit),
+        ).fetchall()
+        return [_orchestration_run(row) for row in rows]
+
+    # --- Orchestration decisions ---
+
+    def record_orchestration_decision(
+        self,
+        run_id: int,
+        decision: str,
+        reason: str = "",
+        next_agent: str = "",
+    ) -> OrchestrationDecision:
+        now = _now()
+        cur = self._conn.execute(
+            """
+            INSERT INTO orchestration_decisions (run_id, decision, reason, next_agent, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (run_id, decision, reason, next_agent, now),
+        )
+        self._conn.commit()
+        return self.get_orchestration_decision(int(cur.lastrowid))
+
+    def get_orchestration_decision(self, decision_id: int) -> OrchestrationDecision:
+        row = self._conn.execute(
+            "SELECT * FROM orchestration_decisions WHERE id = ?", (decision_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown orchestration decision id: {decision_id}")
+        return _orchestration_decision(row)
+
+    def list_orchestration_decisions(
+        self, run_id: int, limit: int = 50
+    ) -> list[OrchestrationDecision]:
+        rows = self._conn.execute(
+            "SELECT * FROM orchestration_decisions WHERE run_id = ? ORDER BY id ASC LIMIT ?",
+            (run_id, limit),
+        ).fetchall()
+        return [_orchestration_decision(row) for row in rows]
+
+
 # --- Row mappers ---
 
 def _task(row: sqlite3.Row) -> Task:
@@ -778,4 +1156,67 @@ def _backend_request(row: sqlite3.Row) -> BackendRequest:
         created_at=_dt(str(row["created_at"])),
         completed_at=_dt(str(row["completed_at"])) if row["completed_at"] else None,
         error=str(row["error"]) if row["error"] else None,
+    )
+
+
+def _conversation(row: sqlite3.Row) -> ConversationSession:
+    return ConversationSession(
+        id=int(row["id"]),
+        chat_id=int(row["chat_id"]),
+        user_id=int(row["user_id"]),
+        title=str(row["title"]),
+        mode=str(row["mode"]),
+        workspace_alias=str(row["workspace_alias"]),
+        active_codex_task_id=row["active_codex_task_id"],
+        active_claude_run_id=row["active_claude_run_id"],
+        conversation_summary=str(row["conversation_summary"] or ""),
+        current_model=str(row["current_model"] or ""),
+        created_at=_dt(str(row["created_at"])),
+        updated_at=_dt(str(row["updated_at"])),
+        archived_at=_dt(str(row["archived_at"])) if row["archived_at"] else None,
+    )
+
+
+def _agent_run(row: sqlite3.Row) -> AgentRun:
+    return AgentRun(
+        id=int(row["id"]),
+        conversation_id=int(row["conversation_id"]),
+        agent=str(row["agent"]),
+        role=str(row["role"]),
+        status=str(row["status"]),
+        hidden_task_id=row["hidden_task_id"],
+        external_session_id=row["external_session_id"],
+        prompt_packet_summary=str(row["prompt_packet_summary"] or ""),
+        token_input=int(row["token_input"] or 0),
+        token_output=int(row["token_output"] or 0),
+        created_at=_dt(str(row["created_at"])),
+        updated_at=_dt(str(row["updated_at"])),
+    )
+
+
+def _orchestration_run(row: sqlite3.Row) -> OrchestrationRun:
+    return OrchestrationRun(
+        id=int(row["id"]),
+        conversation_id=int(row["conversation_id"]),
+        goal=str(row["goal"]),
+        status=str(row["status"]),
+        current_step=str(row["current_step"] or ""),
+        verify_round=int(row["verify_round"] or 0),
+        max_verify_rounds=int(row["max_verify_rounds"] or 3),
+        last_codex_analysis=str(row["last_codex_analysis"] or ""),
+        last_claude_summary=str(row["last_claude_summary"] or ""),
+        last_verification_result=str(row["last_verification_result"] or ""),
+        created_at=_dt(str(row["created_at"])),
+        updated_at=_dt(str(row["updated_at"])),
+    )
+
+
+def _orchestration_decision(row: sqlite3.Row) -> OrchestrationDecision:
+    return OrchestrationDecision(
+        id=int(row["id"]),
+        run_id=int(row["run_id"]),
+        decision=str(row["decision"]),
+        reason=str(row["reason"] or ""),
+        next_agent=str(row["next_agent"] or ""),
+        created_at=_dt(str(row["created_at"])),
     )

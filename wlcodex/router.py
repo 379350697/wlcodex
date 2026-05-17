@@ -65,12 +65,12 @@ class EventsCommand:
 
 @dataclass(frozen=True)
 class DiffCommand:
-    task_id: int
+    task_id: int | None = None
 
 
 @dataclass(frozen=True)
 class FilesCommand:
-    task_id: int
+    task_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +94,46 @@ class ForkCommand:
     prompt: str
 
 
+@dataclass(frozen=True)
+class NewConversationCommand:
+    title: str = ""
+
+
+@dataclass(frozen=True)
+class CodexDirectCommand:
+    prompt: str
+
+
+@dataclass(frozen=True)
+class ClaudeDirectCommand:
+    prompt: str
+
+
+@dataclass(frozen=True)
+class AutoModeCommand:
+    prompt: str
+
+
+@dataclass(frozen=True)
+class StopCurrentCommand:
+    pass
+
+
+@dataclass(frozen=True)
+class SwitchWorkspaceCommand:
+    workspace_alias: str
+
+
+@dataclass(frozen=True)
+class ModelCommand:
+    model_name: str = ""
+
+
+@dataclass(frozen=True)
+class VerifyCommand:
+    prompt: str = ""
+
+
 ParsedCommand = (
     HelpCommand
     | HealthCommand
@@ -111,6 +151,14 @@ ParsedCommand = (
     | AbortCommand
     | ArchiveCommand
     | ForkCommand
+    | NewConversationCommand
+    | CodexDirectCommand
+    | ClaudeDirectCommand
+    | AutoModeCommand
+    | StopCurrentCommand
+    | SwitchWorkspaceCommand
+    | ModelCommand
+    | VerifyCommand
 )
 
 
@@ -129,6 +177,56 @@ def parse_command(text: str) -> ParsedCommand:
     if stripped == "/codex-sessions" or stripped == "/sessions":
         return CodexSessionsCommand()
 
+    # New conversation commands
+    if stripped == "/new":
+        return NewConversationCommand()
+    if stripped.startswith("/new "):
+        title = stripped.split(maxsplit=1)[1].strip()
+        return NewConversationCommand(title=title)
+
+    if stripped.startswith("/codex "):
+        prompt = stripped.split(maxsplit=1)[1].strip()
+        if not prompt:
+            raise ParseError("用法：/codex <prompt>")
+        return CodexDirectCommand(prompt=prompt)
+
+    if stripped.startswith("/claude "):
+        prompt = stripped.split(maxsplit=1)[1].strip()
+        if not prompt:
+            raise ParseError("用法：/claude <prompt>")
+        return ClaudeDirectCommand(prompt=prompt)
+
+    if stripped.startswith("/auto "):
+        prompt = stripped.split(maxsplit=1)[1].strip()
+        if not prompt:
+            raise ParseError("用法：/auto <prompt>")
+        return AutoModeCommand(prompt=prompt)
+
+    if stripped == "/stop":
+        return StopCurrentCommand()
+    if stripped.startswith("/stop "):
+        return StopCurrentCommand()
+
+    if stripped == "/switch":
+        raise ParseError("用法：/switch <workspace>")
+    if stripped.startswith("/switch "):
+        alias = stripped.split(maxsplit=1)[1].strip()
+        if not alias:
+            raise ParseError("用法：/switch <workspace>")
+        return SwitchWorkspaceCommand(workspace_alias=alias)
+
+    if stripped == "/model":
+        return ModelCommand()
+    if stripped.startswith("/model "):
+        model_name = stripped.split(maxsplit=1)[1].strip()
+        return ModelCommand(model_name=model_name)
+
+    if stripped == "/verify":
+        return VerifyCommand()
+    if stripped.startswith("/verify "):
+        prompt = stripped.split(maxsplit=1)[1].strip()
+        return VerifyCommand(prompt=prompt)
+
     if stripped.startswith("/task "):
         return _parse_task(stripped)
     if stripped.startswith("/continue "):
@@ -137,6 +235,12 @@ def parse_command(text: str) -> ParsedCommand:
         return _parse_task_id_prompt(stripped, "/steer", SteerCommand)
     if stripped.startswith("/fork "):
         return _parse_task_id_prompt(stripped, "/fork", ForkCommand)
+
+    # Diff and files can be used without task ID (conversation context)
+    if stripped == "/diff":
+        return DiffCommand(task_id=None)
+    if stripped == "/files":
+        return FilesCommand(task_id=None)
 
     # Single-argument commands
     for verb, cls in _SINGLE_ARG.items():

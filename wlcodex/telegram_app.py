@@ -9,6 +9,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from wlcodex.config import AppConfig
@@ -312,6 +314,80 @@ class WlCodexHandlers:
         response = await self._controller.handle("/health", _ctx(update))
         await update.effective_message.reply_text(response.text)
 
+    # --- New conversation handlers ---
+
+    async def new_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        await update.effective_message.reply_text(response.text)
+
+    async def codex_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        sent = await self._reply_with_buttons(update, response.text, response.buttons)
+        await self._track_status_from_response(response.text, update.effective_chat.id, sent.message_id)
+
+    async def claude_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        await update.effective_message.reply_text(response.text)
+
+    async def auto_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        await update.effective_message.reply_text(response.text)
+
+    async def stop_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle("/stop", _ctx(update))
+        await update.effective_message.reply_text(response.text)
+
+    async def switch_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        await update.effective_message.reply_text(response.text)
+
+    async def model_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        await update.effective_message.reply_text(response.text)
+
+    async def verify_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        await update.effective_message.reply_text(response.text)
+
+    async def conversation_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle non-command text as a conversation message."""
+        if not self._guard(update):
+            return
+        text = update.effective_message.text
+        response = await self._controller.handle_conversation_text(text, _ctx(update))
+        sent = await self._reply_with_buttons(update, response.text, response.buttons)
+        await self._track_status_from_response(response.text, update.effective_chat.id, sent.message_id)
+
     # --- Callback routing ---
 
     async def callback_router(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -470,6 +546,21 @@ def build_application(
     application.add_handler(CommandHandler("codex_sessions", handlers.codex_sessions))
     application.add_handler(CommandHandler("sessions", handlers.codex_sessions))
     application.add_handler(CommandHandler("health", handlers.health))
+
+    # New conversation commands
+    application.add_handler(CommandHandler("new", handlers.new_cmd))
+    application.add_handler(CommandHandler("codex", handlers.codex_cmd))
+    application.add_handler(CommandHandler("claude", handlers.claude_cmd))
+    application.add_handler(CommandHandler("auto", handlers.auto_cmd))
+    application.add_handler(CommandHandler("stop", handlers.stop_cmd))
+    application.add_handler(CommandHandler("switch", handlers.switch_cmd))
+    application.add_handler(CommandHandler("model", handlers.model_cmd))
+    application.add_handler(CommandHandler("verify", handlers.verify_cmd))
+
+    # Non-command text → conversation
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.conversation_text)
+    )
 
     application.add_handler(CallbackQueryHandler(handlers.callback_router))
 

@@ -77,7 +77,9 @@ def test_composition_migrates(tmp_path: Path) -> None:
     ).fetchall()
     table_names = {r[0] for r in tables}
     for expected in ("tasks", "task_events", "approval_requests", "touched_files",
-                     "backend_requests", "telegram_updates"):
+                     "backend_requests", "telegram_updates",
+                     "conversation_sessions", "agent_runs",
+                     "orchestration_runs", "orchestration_decisions"):
         assert expected in table_names, f"Missing table: {expected}"
 
 

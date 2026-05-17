@@ -70,6 +70,48 @@ class WorkspaceConfig:
 
 
 @dataclass(frozen=True)
+class ConversationConfig:
+    enabled: bool = True
+    default_mode: str = "chief_engineer"
+    default_workspace: str = "wlcodex"
+    summary_max_tokens: int = 800
+
+
+@dataclass(frozen=True)
+class OrchestrationConfig:
+    enabled: bool = True
+    max_verify_rounds: int = 3
+    auto_delegate_simple_edits: bool = False
+
+
+@dataclass(frozen=True)
+class ClaudeConfig:
+    enabled: bool = False
+    binary: str = "claude"
+    startup_timeout_seconds: float = 15.0
+    request_timeout_seconds: float = 600.0
+
+
+@dataclass(frozen=True)
+class ContextBudgetConfig:
+    codex_analysis_tokens: int = 2500
+    codex_to_claude_tokens: int = 1500
+    claude_to_codex_tokens: int = 2500
+    conversation_summary_tokens: int = 800
+
+
+@dataclass(frozen=True)
+class StreamingConfig:
+    enabled: bool = True
+    edit_min_interval_seconds: float = 1.0
+
+
+@dataclass(frozen=True)
+class MenuConfig:
+    register_bot_commands: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     telegram: TelegramConfig
     codex: CodexConfig
@@ -79,6 +121,12 @@ class AppConfig:
     approval: ApprovalConfig
     task: TaskConfig
     workspaces: tuple[WorkspaceConfig, ...]
+    conversation: ConversationConfig = ConversationConfig()
+    orchestration: OrchestrationConfig = OrchestrationConfig()
+    claude: ClaudeConfig = ClaudeConfig()
+    context_budget: ContextBudgetConfig = ContextBudgetConfig()
+    streaming: StreamingConfig = StreamingConfig()
+    menu: MenuConfig = MenuConfig()
 
     def workspace_by_alias(self, alias: str) -> WorkspaceConfig:
         for workspace in self.workspaces:
@@ -103,6 +151,12 @@ def load_config(path: Path) -> AppConfig:
     backend_raw = data.get("backend", {})
     approval_raw = data.get("approval", {})
     task_raw = data.get("task", {})
+    conv_raw = data.get("conversation", {})
+    orch_raw = data.get("orchestration", {})
+    claude_raw = data.get("claude", {})
+    budget_raw = data.get("context_budget", {})
+    streaming_raw = data.get("streaming", {})
+    menu_raw = data.get("menu", {})
 
     return AppConfig(
         telegram=TelegramConfig(
@@ -163,6 +217,36 @@ def load_config(path: Path) -> AppConfig:
             backend_dead_grace_seconds=int(task_raw.get("backend_dead_grace_seconds", 120)),
         ),
         workspaces=workspaces,
+        conversation=ConversationConfig(
+            enabled=bool(conv_raw.get("enabled", True)),
+            default_mode=str(conv_raw.get("default_mode", "chief_engineer")),
+            default_workspace=str(conv_raw.get("default_workspace", "wlcodex")),
+            summary_max_tokens=int(conv_raw.get("summary_max_tokens", 800)),
+        ),
+        orchestration=OrchestrationConfig(
+            enabled=bool(orch_raw.get("enabled", True)),
+            max_verify_rounds=int(orch_raw.get("max_verify_rounds", 3)),
+            auto_delegate_simple_edits=bool(orch_raw.get("auto_delegate_simple_edits", False)),
+        ),
+        claude=ClaudeConfig(
+            enabled=bool(claude_raw.get("enabled", False)),
+            binary=str(claude_raw.get("binary", "claude")),
+            startup_timeout_seconds=float(claude_raw.get("startup_timeout_seconds", 15.0)),
+            request_timeout_seconds=float(claude_raw.get("request_timeout_seconds", 600.0)),
+        ),
+        context_budget=ContextBudgetConfig(
+            codex_analysis_tokens=int(budget_raw.get("codex_analysis_tokens", 2500)),
+            codex_to_claude_tokens=int(budget_raw.get("codex_to_claude_tokens", 1500)),
+            claude_to_codex_tokens=int(budget_raw.get("claude_to_codex_tokens", 2500)),
+            conversation_summary_tokens=int(budget_raw.get("conversation_summary_tokens", 800)),
+        ),
+        streaming=StreamingConfig(
+            enabled=bool(streaming_raw.get("enabled", True)),
+            edit_min_interval_seconds=float(streaming_raw.get("edit_min_interval_seconds", 1.0)),
+        ),
+        menu=MenuConfig(
+            register_bot_commands=bool(menu_raw.get("register_bot_commands", True)),
+        ),
     )
 
 
