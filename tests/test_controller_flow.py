@@ -247,10 +247,10 @@ async def test_legacy_diff_command_with_id(ctrl: CommandController) -> None:
 @pytest.mark.asyncio
 async def test_help_shows_new_commands(ctrl: CommandController) -> None:
     response = await ctrl.handle("/help", {})
-    assert "/codex" in response.text
-    assert "/claude" in response.text
-    assert "/auto" in response.text
-    assert "总工程师" in response.text
+    assert "WLCodex" in response.text
+    assert "/new" in response.text
+    assert "/help" in response.text
+    assert len(response.text.splitlines()) <= 8
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,27 @@ Telegram transcripts. Token budget is a hard architectural constraint.
 **Menu commands**: `/new`, `/stop`, `/status`, `/sessions`, `/switch`, `/model`,
 `/verify`, `/health`, `/help`
 
+## Interaction profiles
+
+WLCodex separates runtime orchestration from Telegram presentation.
+
+```toml
+[interaction]
+profile = "natural"
+streaming_enabled = true
+show_footer = false
+edit_min_interval_seconds = 1.0
+```
+
+`natural` is the default chat surface: plain text starts or continues a
+conversation, Telegram shows typing while work starts, and model deltas stream
+into one edited message. This does not double model tokens because it forwards
+deltas from the same Codex/Claude run.
+
+`legacy` preserves task-card style behavior for operator workflows.
+
+`cockpit` is reserved for a future richer remote-control profile.
+
 ## V1 safety rules
 
 - Private Telegram chat only
@@ -84,13 +105,32 @@ export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
 
 ## Telegram Commands
 
+Primary conversation UX:
+
 | Command | Description |
 |---------|-------------|
 | `/start` / `/help` | Show help |
 | `/health` | Backend health check |
-| `/task <workspace> <prompt>` | Start a new Codex task |
-| `/task <id>` | Show task details |
-| `/tasks` / `/status` | List active tasks |
+| plain text | Continue the active conversation; default mode is chief-engineer orchestration |
+| `/new [title]` | Start a fresh conversation |
+| `/codex <prompt>` | Send one direct analysis turn to Codex |
+| `/claude <prompt>` | Send one direct implementation turn to Claude Code |
+| `/auto <prompt>` | Run Codex analysis → Claude implementation → Codex verification |
+| `/status` | Show active conversation/task status |
+| `/sessions` | List conversations/thread mappings |
+| `/switch <workspace>` | Switch the active conversation workspace |
+| `/model [name]` | Show or set the preferred model |
+| `/verify` | Ask Codex to verify the latest implementation evidence |
+| `/stop` | Stop the current active conversation task |
+
+Legacy task commands remain available for diagnostics and low-level app-server
+acceptance:
+
+| Command | Description |
+|---------|-------------|
+| `/task <workspace> <prompt>` | Start a raw Codex task |
+| `/task <id>` | Show raw task details |
+| `/tasks` | List active raw tasks |
 | `/continue <id> <prompt>` | Resume a historical task thread |
 | `/steer <id> <prompt>` | Steer the active turn |
 | `/tail <id>` | Show recent local log lines |
@@ -101,20 +141,27 @@ export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
 | `/abort <id>` | Abort a running task |
 | `/archive <id>` | Archive a completed task |
 | `/fork <id> <prompt>` | Fork a task to a new thread |
-| `/sessions` | List thread mappings |
 
 ## Manual smoke test
 
 1. Start the bot: `.venv/bin/wlcodex --config config/wlcodex.toml`
 2. In private Telegram chat with the bot:
    - Send `/health` → Should report backend status
-   - Send `/task <alias> Reply with exactly: smoke ok`
-   - Observe status updates
-   - Send `/tasks` → Should show the task
-   - Send `/task <id>` → Should show task details
-   - After task completes, send `/archive <id>`
+   - Send `/new 真人 smoke` → Should create a fresh conversation
+   - Send `请用中文只回复：wlcodex telegram live ok`
+   - Observe a conversation-first response, not a raw `/task` card
+   - Send `/status` → Should show the active conversation status
+   - Send `/sessions` → Should list the conversation/session
+
+Use `/codex <prompt>`, `/claude <prompt>`, or `/auto <prompt>` only when you
+want to force a specific route. Plain text is the default product path.
 
 ## Live Telegram Smoke (Real Acceptance)
+
+The primary human smoke is conversation-first, as above. The automated live
+pytest gate below still validates the lower-level legacy `/task` path because it
+asserts a real Codex app-server UUID in the SQLite `tasks` ledger. Treat it as a
+diagnostic app-server evidence gate, not the default user journey.
 
 Set the environment:
 
@@ -126,8 +173,8 @@ export WLCODEX_RUN_TELEGRAM_LIVE=1
 ```
 
 This preflight does not require `chat_id` or `task_id`; those only exist after
-a real human-to-bot interaction. Start WLCodex with the same config. From the
-authorized private Telegram chat, send:
+a real legacy `/task` interaction. Start WLCodex with the same config. From the
+authorized private Telegram chat, send this diagnostic sequence:
 
 ```text
 /health
@@ -149,7 +196,8 @@ private chat created by the allowlisted Telegram user and verifies the actual
 
 ### Approval Smoke
 
-Use a prompt that triggers a real app-server approval request:
+Approval smoke also uses legacy `/task`, because approval rows are tied to raw
+Codex task/app-server request evidence:
 
 ```text
 /task <workspace> Create file wlcodex_approval_probe.txt with text approval-ok. If permission is requested, wait for my Telegram approval.
