@@ -211,6 +211,7 @@ def main() -> None:
         backend_dead_grace_seconds=config.task.backend_dead_grace_seconds,
     )
     task_watchdog = TaskWatchdog(ledger, backend, liveness_config)
+    interaction_renderer = handlers.create_interaction_renderer()
     event_bridge = EventBridge(
         task_service=task_service,
         backend=backend,
@@ -220,6 +221,7 @@ def main() -> None:
         approval_service=approval_service,
         task_watchdog=task_watchdog,
         watchdog_interval_seconds=config.task.watchdog_interval_seconds,
+        interaction_renderer=interaction_renderer,
     )
 
     loop = asyncio.new_event_loop()

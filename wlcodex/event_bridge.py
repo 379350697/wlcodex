@@ -47,6 +47,7 @@ class EventBridge:
         approval_service: object,
         task_watchdog: object | None = None,
         watchdog_interval_seconds: int = TASK_WATCHDOG_INTERVAL_SECONDS,
+        interaction_renderer: object | None = None,
     ) -> None:
         self._service = task_service
         self._backend = backend
@@ -56,6 +57,7 @@ class EventBridge:
         self._approval_service = approval_service
         self._task_watchdog = task_watchdog
         self._watchdog_interval = watchdog_interval_seconds
+        self._interaction_renderer = interaction_renderer
         self._status_card_fingerprints: dict[int, tuple[str, str]] = {}
         self._running = False
 
@@ -130,6 +132,10 @@ class EventBridge:
             logger.exception("Failed to apply backend event: %s", event.event_type)
             return
 
+        # Forward agent message deltas to interaction renderer (before status-card skip)
+        if event.event_type == "agent_message_delta":
+            await self._forward_agent_delta(event)
+
         # Handle approval — send Telegram buttons
         if event.event_type == "approval_requested":
             await self._on_approval_requested(event)
@@ -145,6 +151,7 @@ class EventBridge:
                 TaskStatus.FAILED,
                 TaskStatus.ABORTED,
             ):
+                await self._forward_terminal_event(task_after)
                 await drain_workspace(
                     self._service, self._backend, task_after.workspace_alias
                 )
@@ -252,6 +259,48 @@ class EventBridge:
             self._status_card_fingerprints[current.id] = fingerprint
         except Exception:
             logger.exception("Failed to edit status card for task #%d", task.id)
+
+
+    async def _forward_agent_delta(self, event: BackendEvent) -> None:
+        if self._interaction_renderer is None:
+            return
+        thread_id = str(event.payload.get("threadId", ""))
+        task = self._service._find_by_thread(thread_id)
+        if task is None or task.telegram_chat_id is None:
+            return
+        delta = str(event.payload.get("delta", ""))
+        if not delta:
+            return
+        from wlcodex.interaction.events import InteractionEvent
+
+        await self._interaction_renderer.handle(
+            InteractionEvent(
+                event_type="text_delta",
+                chat_id=task.telegram_chat_id,
+                task_id=task.id,
+                thread_id=thread_id,
+                text=delta,
+            )
+        )
+
+    async def _forward_terminal_event(self, task) -> None:
+        if self._interaction_renderer is None:
+            return
+        if task.telegram_chat_id is None:
+            return
+        from wlcodex.interaction.events import InteractionEvent
+
+        event_type = "run_completed" if task.status == TaskStatus.DONE else "run_failed"
+        await self._interaction_renderer.handle(
+            InteractionEvent(
+                event_type=event_type,
+                chat_id=task.telegram_chat_id,
+                task_id=task.id,
+                thread_id=task.codex_thread_id or "",
+                text=task.last_error or "",
+                metadata={"has_diff": bool(task.changed_file_count)},
+            )
+        )
 
 
 def _should_refresh_status_card(event: BackendEvent, status: TaskStatus) -> bool:

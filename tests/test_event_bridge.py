@@ -380,3 +380,47 @@ async def test_watchdog_scan_runs_without_backend_events(tmp_path: Path, monkeyp
     finally:
         task.cancel()
         await task
+
+
+@pytest.mark.asyncio
+async def test_agent_message_delta_forwards_to_interaction_renderer(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run probe",
+        codex_thread_id="thread-1",
+        telegram_chat_id=123,
+    )
+    received = []
+
+    class Interaction:
+        async def handle(self, event):
+            received.append(event)
+
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=_send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+        interaction_renderer=Interaction(),
+    )
+
+    await bridge.process_event(
+        BackendEvent(
+            "agent_message_delta",
+            {"threadId": "thread-1", "delta": "hello"},
+        )
+    )
+
+    assert received
+    assert received[0].event_type == "text_delta"
+    assert received[0].chat_id == 123
+    assert received[0].task_id == task.id
+    assert received[0].text == "hello"
