@@ -78,6 +78,15 @@ conversation_summary_tokens = 800
 enabled = true
 edit_min_interval_seconds = 1.0
 
+[interaction]
+# natural = quiet chat + same-run streaming
+# legacy = existing task/status-card style
+# cockpit = reserved for richer remote-control UI; currently falls back to legacy
+profile = "natural"
+streaming_enabled = true
+show_footer = false
+edit_min_interval_seconds = 1.0
+
 [menu]
 register_bot_commands = true
 

@@ -107,6 +107,14 @@ class StreamingConfig:
 
 
 @dataclass(frozen=True)
+class InteractionConfig:
+    profile: str = "natural"
+    streaming_enabled: bool = True
+    show_footer: bool = False
+    edit_min_interval_seconds: float = 1.0
+
+
+@dataclass(frozen=True)
 class MenuConfig:
     register_bot_commands: bool = True
 
@@ -126,6 +134,7 @@ class AppConfig:
     claude: ClaudeConfig = ClaudeConfig()
     context_budget: ContextBudgetConfig = ContextBudgetConfig()
     streaming: StreamingConfig = StreamingConfig()
+    interaction: InteractionConfig = InteractionConfig()
     menu: MenuConfig = MenuConfig()
 
     def workspace_by_alias(self, alias: str) -> WorkspaceConfig:
@@ -156,6 +165,7 @@ def load_config(path: Path) -> AppConfig:
     claude_raw = data.get("claude", {})
     budget_raw = data.get("context_budget", {})
     streaming_raw = data.get("streaming", {})
+    interaction_raw = data.get("interaction", {})
     menu_raw = data.get("menu", {})
 
     return AppConfig(
@@ -244,8 +254,25 @@ def load_config(path: Path) -> AppConfig:
             enabled=bool(streaming_raw.get("enabled", True)),
             edit_min_interval_seconds=float(streaming_raw.get("edit_min_interval_seconds", 1.0)),
         ),
+        interaction=_interaction_config(interaction_raw),
         menu=MenuConfig(
             register_bot_commands=bool(menu_raw.get("register_bot_commands", True)),
+        ),
+    )
+
+
+def _interaction_config(data: dict[str, object]) -> InteractionConfig:
+    profile = str(data.get("profile", "natural"))
+    if profile not in {"natural", "legacy", "cockpit"}:
+        raise ConfigError(
+            "interaction.profile must be one of: natural, legacy, cockpit"
+        )
+    return InteractionConfig(
+        profile=profile,
+        streaming_enabled=bool(data.get("streaming_enabled", True)),
+        show_footer=bool(data.get("show_footer", False)),
+        edit_min_interval_seconds=float(
+            data.get("edit_min_interval_seconds", 1.0)
         ),
     )
 

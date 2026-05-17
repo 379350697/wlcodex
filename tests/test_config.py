@@ -214,3 +214,91 @@ allow_write = true
     assert config.task.max_waiting_approval_seconds == 10
     assert config.task.watchdog_interval_seconds == 5
     assert config.task.backend_dead_grace_seconds == 7
+
+
+def test_load_config_includes_default_interaction_section(tmp_path):
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+private_chat_only = true
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "demo"
+path = "/tmp/demo"
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.interaction.profile == "natural"
+    assert config.interaction.streaming_enabled is True
+    assert config.interaction.show_footer is False
+    assert config.interaction.edit_min_interval_seconds == 1.0
+
+
+def test_load_config_accepts_cockpit_interaction_profile(tmp_path):
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+private_chat_only = true
+
+[interaction]
+profile = "cockpit"
+streaming_enabled = false
+show_footer = true
+edit_min_interval_seconds = 2.5
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "demo"
+path = "/tmp/demo"
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.interaction.profile == "cockpit"
+    assert config.interaction.streaming_enabled is False
+    assert config.interaction.show_footer is True
+    assert config.interaction.edit_min_interval_seconds == 2.5
