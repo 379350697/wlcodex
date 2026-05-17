@@ -3,6 +3,7 @@
 import pytest
 from wlcodex.orchestrator import (
     ChiefEngineerOrchestrator,
+    OrchestrationProgress,
     OrchestrationResult,
     VerificationDecision,
 )
@@ -125,6 +126,21 @@ async def test_orchestrator_does_not_call_claude_for_noop_greeting() -> None:
     assert result.verify_round == 0
     assert fake_codex.calls == 1
     assert fake_claude.implement_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_does_not_implement_reply_only_probe() -> None:
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = ["wlcodex telegram live ok"]
+    claude = FakeClaudeWithSend()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude)
+    result = await orchestrator.run("请用中文只回复：wlcodex telegram live ok")
+
+    assert result.status == "passed"
+    assert result.verify_round == 0
+    assert len(codex.prompts) == 1
+    assert claude.prompts == []
 
 
 def test_verification_decision_parse_pass() -> None:
@@ -432,6 +448,32 @@ async def test_run_streaming_complete_has_result_status_needs_user() -> None:
 
     assert len(complete_events) == 1
     assert complete_events[0].result_status == "needs_user"
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_does_not_implement_reply_only_probe() -> None:
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = ["wlcodex telegram live ok"]
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude)
+    events = []
+    async for progress in orchestrator.run_streaming(
+        "请用中文只回复：wlcodex telegram live ok"
+    ):
+        events.append(progress)
+
+    assert len(codex.prompts) == 1
+    assert claude.prompts == []
+    assert not any(
+        event.phase == OrchestrationProgress.IMPL_DELTA for event in events
+    )
+    complete_events = [
+        event for event in events
+        if event.phase == OrchestrationProgress.COMPLETE
+    ]
+    assert complete_events[0].result_status == "passed"
+    assert complete_events[0].round_num == 0
 
 
 @pytest.mark.asyncio

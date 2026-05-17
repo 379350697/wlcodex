@@ -44,6 +44,21 @@ def _analysis_says_no_implementation_needed(text: str) -> bool:
     return any(marker in lowered or marker in text for marker in markers)
 
 
+def _is_reply_only_request(text: str) -> bool:
+    lowered = text.lower()
+    markers = (
+        "只回复",
+        "仅回复",
+        "只回答",
+        "仅回答",
+        "reply exactly",
+        "only reply",
+        "respond exactly",
+        "only respond",
+    )
+    return any(marker in lowered or marker in text for marker in markers)
+
+
 def _collect_workspace_evidence(workspace_path: str) -> tuple[list[str], str, str]:
     """Collect changed files, diff stat, and test info from workspace.
 
@@ -207,6 +222,11 @@ class ChiefEngineerOrchestrator:
             return result
 
         # Check if Codex says no implementation needed
+        if _is_reply_only_request(user_goal):
+            result.status = "passed"
+            result.verification_summary = analysis
+            return result
+
         if _analysis_says_no_implementation_needed(analysis):
             result.status = "passed"
             result.verification_summary = "Codex determined no implementation needed."
@@ -411,6 +431,18 @@ class ChiefEngineerOrchestrator:
         )
 
         # Check if Codex says no implementation needed
+        if _is_reply_only_request(user_goal):
+            result.status = "passed"
+            result.verification_summary = analysis
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.COMPLETE,
+                text="",
+                full_text=analysis,
+                agent="codex",
+                result_status="passed",
+            )
+            return
+
         if _analysis_says_no_implementation_needed(analysis):
             result.status = "passed"
             result.verification_summary = "Codex determined no implementation needed."

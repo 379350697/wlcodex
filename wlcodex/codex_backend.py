@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 import logging
@@ -242,7 +243,11 @@ class AppServerCodexBackend:
         self.sandbox = sandbox
         self._request_timeout_seconds = request_timeout_seconds
         self._client: JsonRpcClient | None = None
-        self._event_queue: list[BackendEvent] = []
+        # Durable queue for EventBridge plus ephemeral per-turn subscribers.
+        # Prompt aggregation must not consume the EventBridge stream.
+        self._bridge_event_queue: list[BackendEvent] = []
+        self._bridge_event_wakeup: asyncio.Event | None = None
+        self._event_subscribers: list[asyncio.Queue[BackendEvent]] = []
         self._websocket = None
         self._process_manager: object = None
         self._transport_inject: tuple | None = None
@@ -502,13 +507,16 @@ class AppServerCodexBackend:
         Exits immediately when the matching turn_completed or turn_failed event
         is consumed — does NOT wait for the full request_timeout_seconds.
         """
-        import asyncio as _asyncio
-        thread_id = await self.create_thread(workspace_path)
-        turn_id = await self.start_turn(thread_id, prompt)
+        prompt_events = self._subscribe_events()
+        try:
+            thread_id = await self.create_thread(workspace_path)
+            turn_id = await self.start_turn(thread_id, prompt)
+        except Exception:
+            self._unsubscribe_events(prompt_events)
+            raise
 
         deltas: list[str] = []
-        deadline = _asyncio.get_event_loop().time() + self._request_timeout_seconds
-        saw_turn_started = False
+        deadline = asyncio.get_event_loop().time() + self._request_timeout_seconds
         turn_ended = False
 
         def _event_turn_id(event: BackendEvent) -> str:
@@ -517,52 +525,39 @@ class AppServerCodexBackend:
                 return str(turn["id"])
             return str(event.payload.get("turnId", ""))
 
-        def _pop_next_target_event() -> BackendEvent | None:
-            for idx, event in enumerate(self._event_queue):
-                event_tid = str(event.payload.get("threadId", ""))
-                event_turn_id = _event_turn_id(event)
-                if event_tid == thread_id or event_turn_id == turn_id:
-                    return self._event_queue.pop(idx)
-            return None
+        def _event_matches_turn(event: BackendEvent) -> bool:
+            event_turn_id = _event_turn_id(event)
+            if event_turn_id:
+                return event_turn_id == turn_id
+            return str(event.payload.get("threadId", "")) == thread_id
 
-        while True:
-            remaining = deadline - _asyncio.get_event_loop().time()
-            if remaining <= 0:
-                break
-            # Poll with a short timeout so we can re-check the deadline and
-            # filter events from the shared queue without starving.
-            await _asyncio.sleep(0.05)
+        try:
             while True:
-                event = _pop_next_target_event()
-                if event is None:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
                     break
-                event_tid = str(event.payload.get("threadId", ""))
-                ev_turn = _event_turn_id(event)
+                try:
+                    event = await asyncio.wait_for(prompt_events.get(), timeout=remaining)
+                except TimeoutError:
+                    break
+                if not _event_matches_turn(event):
+                    continue
 
-                if event.event_type == "turn_started":
-                    if ev_turn == turn_id:
-                        saw_turn_started = True
-                elif event.event_type == "agent_message_delta":
-                    if ev_turn and ev_turn != turn_id:
-                        continue
-                    if not saw_turn_started and event_tid != thread_id and ev_turn != turn_id:
-                        continue
+                if event.event_type == "agent_message_delta":
                     delta = event.payload.get("delta", "")
                     if isinstance(delta, str):
                         deltas.append(delta)
                 elif event.event_type == "turn_completed":
-                    if ev_turn == turn_id or (event_tid == thread_id and not ev_turn):
-                        turn_ended = True
-                        break
+                    turn_ended = True
                 elif event.event_type in ("turn_failed",):
-                    if ev_turn == turn_id or (event_tid == thread_id and not ev_turn):
-                        error = event.payload.get("error", "unknown error")
-                        deltas.append(f"\n[Turn failed: {error}]")
-                        turn_ended = True
-                        break
+                    error = event.payload.get("error", "unknown error")
+                    deltas.append(f"\n[Turn failed: {error}]")
+                    turn_ended = True
 
-            if turn_ended:
-                break
+                if turn_ended:
+                    break
+        finally:
+            self._unsubscribe_events(prompt_events)
 
         if not deltas:
             return "(no Codex response)"
@@ -618,14 +613,31 @@ class AppServerCodexBackend:
 
     async def events(self) -> AsyncIterator[BackendEvent]:
         while True:
-            if self._event_queue:
-                yield self._event_queue.pop(0)
+            if self._bridge_event_queue:
+                yield self._bridge_event_queue.pop(0)
             else:
-                import asyncio
-                await asyncio.sleep(0.1)
+                if self._bridge_event_wakeup is None:
+                    self._bridge_event_wakeup = asyncio.Event()
+                await self._bridge_event_wakeup.wait()
+                self._bridge_event_wakeup.clear()
 
     def _emit(self, event: BackendEvent) -> None:
-        self._event_queue.append(event)
+        self._bridge_event_queue.append(event)
+        if self._bridge_event_wakeup is not None:
+            self._bridge_event_wakeup.set()
+        for queue in list(self._event_subscribers):
+            queue.put_nowait(event)
+
+    def _subscribe_events(self) -> asyncio.Queue[BackendEvent]:
+        queue: asyncio.Queue[BackendEvent] = asyncio.Queue()
+        self._event_subscribers.append(queue)
+        return queue
+
+    def _unsubscribe_events(self, queue: asyncio.Queue[BackendEvent]) -> None:
+        try:
+            self._event_subscribers.remove(queue)
+        except ValueError:
+            pass
 
     async def close(self) -> None:
         if self._client:

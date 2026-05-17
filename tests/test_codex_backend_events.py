@@ -1,5 +1,7 @@
 """Backend event translation tests."""
 
+import asyncio
+
 import pytest
 
 from wlcodex.codex_backend import (
@@ -92,7 +94,73 @@ async def test_backend_archive_thread() -> None:
 
 
 @pytest.mark.asyncio
-async def test_app_server_send_codex_prompt_scans_past_unrelated_thread_events() -> None:
+async def test_app_server_send_codex_prompt_uses_independent_turn_subscription() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+    global_events = backend.events()
+
+    async def create_thread(_workspace_path: str) -> str:
+        return "target-thread"
+
+    async def start_turn(_thread_id: str, _prompt: str) -> str:
+        backend._emit(BackendEvent("turn_started", {
+            "threadId": "other-thread",
+            "turnId": "other-turn",
+        }))
+        backend._emit(BackendEvent("turn_started", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+        }))
+        backend._emit(BackendEvent("agent_message_delta", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+            "delta": "ok",
+        }))
+        backend._emit(BackendEvent("turn_completed", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+        }))
+        return "target-turn"
+
+    backend.create_thread = create_thread
+    backend.start_turn = start_turn
+
+    result = await backend.send_codex_prompt("/tmp/demo", "prompt")
+
+    assert result == "ok"
+    assert backend._event_subscribers == []
+    assert (await anext(global_events)).payload["threadId"] == "other-thread"
+    assert (await anext(global_events)).payload["threadId"] == "target-thread"
+    assert (await anext(global_events)).payload["delta"] == "ok"
+    assert (await anext(global_events)).event_type == "turn_completed"
+    await global_events.aclose()
+
+
+@pytest.mark.asyncio
+async def test_app_server_events_wake_waiting_consumers() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+    global_events = backend.events()
+    next_event = asyncio.create_task(anext(global_events))
+
+    await asyncio.sleep(0)
+    backend._emit(BackendEvent("turn_started", {
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+    }))
+
+    event = await asyncio.wait_for(next_event, timeout=0.02)
+
+    assert event.event_type == "turn_started"
+    await global_events.aclose()
+
+
+@pytest.mark.asyncio
+async def test_app_server_send_codex_prompt_not_starved_by_global_events() -> None:
     backend = AppServerCodexBackend(
         endpoint="ws://127.0.0.1:17431",
         request_timeout_seconds=0.3,
@@ -102,35 +170,59 @@ async def test_app_server_send_codex_prompt_scans_past_unrelated_thread_events()
         return "target-thread"
 
     async def start_turn(_thread_id: str, _prompt: str) -> str:
+        backend._emit(BackendEvent("turn_started", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+        }))
+        backend._emit(BackendEvent("agent_message_delta", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+            "delta": "wlcodex",
+        }))
+        global_events = backend.events()
+        assert (await anext(global_events)).event_type == "turn_started"
+        assert (await anext(global_events)).payload["delta"] == "wlcodex"
+        await global_events.aclose()
+        backend._emit(BackendEvent("agent_message_delta", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+            "delta": " telegram live ok",
+        }))
+        backend._emit(BackendEvent("turn_completed", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+        }))
         return "target-turn"
 
     backend.create_thread = create_thread
     backend.start_turn = start_turn
-    backend._event_queue.extend([
-        BackendEvent("turn_started", {
-            "threadId": "other-thread",
-            "turnId": "other-turn",
-        }),
-        BackendEvent("turn_started", {
-            "threadId": "target-thread",
-            "turnId": "target-turn",
-        }),
-        BackendEvent("agent_message_delta", {
-            "threadId": "target-thread",
-            "turnId": "target-turn",
-            "delta": "ok",
-        }),
-        BackendEvent("turn_completed", {
-            "threadId": "target-thread",
-            "turnId": "target-turn",
-        }),
-    ])
 
     result = await backend.send_codex_prompt("/tmp/demo", "prompt")
 
-    assert result == "ok"
-    assert len(backend._event_queue) == 1
-    assert backend._event_queue[0].payload["threadId"] == "other-thread"
+    assert result == "wlcodex telegram live ok"
+    assert backend._event_subscribers == []
+
+
+@pytest.mark.asyncio
+async def test_app_server_send_codex_prompt_cleans_subscription_on_start_error() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+
+    async def create_thread(_workspace_path: str) -> str:
+        return "target-thread"
+
+    async def start_turn(_thread_id: str, _prompt: str) -> str:
+        raise RuntimeError("start failed")
+
+    backend.create_thread = create_thread
+    backend.start_turn = start_turn
+
+    with pytest.raises(RuntimeError, match="start failed"):
+        await backend.send_codex_prompt("/tmp/demo", "prompt")
+
+    assert backend._event_subscribers == []
 
 
 @pytest.mark.asyncio
@@ -147,7 +239,7 @@ async def test_app_server_legacy_exec_approval_emits_normalized_event() -> None:
         "req-legacy",
     )
 
-    event = backend._event_queue.pop(0)
+    event = backend._bridge_event_queue.pop(0)
     assert event.event_type == "approval_requested"
     assert event.payload["threadId"] == "thread-1"
     assert event.payload["codexRequestId"] == "req-legacy"
@@ -170,7 +262,7 @@ async def test_app_server_legacy_patch_approval_emits_normalized_event() -> None
         "req-patch",
     )
 
-    event = backend._event_queue.pop(0)
+    event = backend._bridge_event_queue.pop(0)
     assert event.event_type == "approval_requested"
     assert event.payload["threadId"] == "thread-1"
     assert event.payload["codexRequestId"] == "req-patch"
