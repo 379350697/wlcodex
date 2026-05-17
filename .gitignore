@@ -3,6 +3,8 @@
 .claude/
 .codex/
 .gitnexus/
+/AGENTS.md
+/CLAUDE.md
 .pytest_cache/
 .ruff_cache/
 __pycache__/
