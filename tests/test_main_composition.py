@@ -125,6 +125,7 @@ def test_composition_builds_telegram_app(tmp_path: Path) -> None:
 
     assert "task" in registered
     assert "start" in registered
+    assert "claude_mode" in registered
 
 
 def test_missing_token_exits(tmp_path: Path) -> None:

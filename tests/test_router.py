@@ -4,6 +4,7 @@ from wlcodex.router import (
     AbortCommand,
     ArchiveCommand,
     CodexSessionsCommand,
+    ClaudePermissionCommand,
     ContinueCommand,
     DiffCommand,
     EventsCommand,
@@ -128,6 +129,13 @@ def test_parse_rejects_unknown_command_only_slash() -> None:
 
 def test_parse_sessions_command() -> None:
     assert isinstance(parse_command("/sessions"), CodexSessionsCommand)
+
+
+def test_parse_claude_permission_command_with_chinese_mode() -> None:
+    assert parse_command("/claude_mode") == ClaudePermissionCommand(mode_name="")
+    assert parse_command("/claude_mode 允许编辑") == ClaudePermissionCommand(
+        mode_name="允许编辑"
+    )
 
 
 def test_parse_rejects_continue_no_prompt() -> None:

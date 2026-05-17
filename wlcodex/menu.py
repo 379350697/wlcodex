@@ -16,6 +16,7 @@ _PRIMARY_COMMANDS: list[tuple[str, str]] = [
     ("sessions", "会话列表"),
     ("switch", "切换工作区"),
     ("model", "切换模型"),
+    ("claude_mode", "Claude 权限"),
     ("diff", "查看 diff"),
     ("files", "相关文件"),
     ("verify", "Codex 验收"),
@@ -28,6 +29,7 @@ _NATURAL_COMMANDS: list[tuple[str, str]] = [
     ("stop", "停止"),
     ("status", "状态"),
     ("model", "模型"),
+    ("claude_mode", "Claude 权限"),
     ("diff", "查看 diff"),
     ("help", "帮助"),
 ]

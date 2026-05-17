@@ -62,6 +62,19 @@ def test_migrations_are_idempotent(tmp_path: Path) -> None:
     ledger.migrate()
 
 
+def test_runtime_settings_roundtrip(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    assert ledger.get_runtime_setting("claude.permission_mode") is None
+
+    ledger.set_runtime_setting("claude.permission_mode", "acceptEdits")
+    assert ledger.get_runtime_setting("claude.permission_mode") == "acceptEdits"
+
+    ledger.set_runtime_setting("claude.permission_mode", "plan")
+    assert ledger.get_runtime_setting("claude.permission_mode") == "plan"
+
+
 def test_approval_create_and_resolve(tmp_path: Path) -> None:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()

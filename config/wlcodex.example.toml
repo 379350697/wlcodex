@@ -67,6 +67,8 @@ enabled = false
 binary = "claude"
 startup_timeout_seconds = 15.0
 request_timeout_seconds = 600.0
+# User-facing switch: /claude_mode 允许编辑 / 自动模式 / 只规划 / 默认确认 / 不询问 / 跳过权限检查
+permission_mode = "acceptEdits"
 
 [context_budget]
 codex_analysis_tokens = 2500

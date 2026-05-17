@@ -220,6 +220,12 @@ class Ledger:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS runtime_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
 
@@ -612,6 +618,30 @@ class Ledger:
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (update_id, user_id, chat_id, update_type, int(allowed), _now()),
+        )
+        self._conn.commit()
+
+    # --- Runtime settings ---
+
+    def get_runtime_setting(self, key: str, default: str | None = None) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM runtime_settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return default
+        return str(row["value"])
+
+    def set_runtime_setting(self, key: str, value: str) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO runtime_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, _now()),
         )
         self._conn.commit()
 

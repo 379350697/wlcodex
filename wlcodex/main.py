@@ -9,6 +9,12 @@ from pathlib import Path
 from wlcodex.app_server_process import AppServerProcess, AppServerProcessConfig
 from wlcodex.approval import ApprovalService
 from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+from wlcodex.claude_permissions import (
+    RUNTIME_CLAUDE_PERMISSION_MODE_KEY,
+    ClaudePermissionState,
+    claude_permission_label,
+    normalize_claude_permission_mode,
+)
 from wlcodex.codex_backend import AppServerCodexBackend, FakeCodexBackend
 from wlcodex.config import load_config
 from wlcodex.controller import CommandController
@@ -174,6 +180,26 @@ def main() -> None:
         workspaces={ws.alias: ws for ws in config.workspaces},
     )
 
+    stored_permission_mode = ledger.get_runtime_setting(
+        RUNTIME_CLAUDE_PERMISSION_MODE_KEY
+    )
+    try:
+        claude_permission_mode = normalize_claude_permission_mode(
+            stored_permission_mode or config.claude.permission_mode
+        )
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid stored Claude permission mode: %s",
+            stored_permission_mode,
+        )
+        claude_permission_mode = config.claude.permission_mode
+    if stored_permission_mode != claude_permission_mode:
+        ledger.set_runtime_setting(
+            RUNTIME_CLAUDE_PERMISSION_MODE_KEY,
+            claude_permission_mode,
+        )
+    claude_permission_state = ClaudePermissionState(claude_permission_mode)
+
     # Claude backend (adapter for Claude Code subprocess)
     claude_backend = None
     if config.claude.enabled:
@@ -182,8 +208,13 @@ def main() -> None:
             binary=config.claude.binary,
             startup_timeout_seconds=config.claude.startup_timeout_seconds,
             request_timeout_seconds=config.claude.request_timeout_seconds,
-        ))
-        logger.info("Claude backend enabled (binary: %s)", config.claude.binary)
+            permission_mode=claude_permission_mode,
+        ), permission_state=claude_permission_state)
+        logger.info(
+            "Claude backend enabled (binary: %s, permission: %s)",
+            config.claude.binary,
+            claude_permission_label(claude_permission_mode),
+        )
     else:
         logger.info("Claude backend disabled (set claude.enabled = true to enable)")
 
@@ -191,6 +222,7 @@ def main() -> None:
     controller = CommandController(
         task_service, backend, inspector,
         ledger=ledger, claude_backend=claude_backend,
+        claude_permission_state=claude_permission_state,
         default_mode=config.conversation.default_mode,
         default_workspace=config.conversation.default_workspace,
     )

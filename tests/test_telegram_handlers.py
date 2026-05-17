@@ -606,6 +606,64 @@ async def test_claude_cmd_respects_already_rendered() -> None:
 
 
 @pytest.mark.asyncio
+async def test_settings_callback_routes_claude_permission() -> None:
+    """Claude permission inline buttons must route through the settings callback."""
+    from wlcodex.controller import ControllerResponse
+    from wlcodex.telegram_app import WlCodexHandlers
+
+    class Controller:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def handle(self, text, ctx):
+            self.calls.append((text, ctx))
+            return ControllerResponse(
+                "当前模式：允许编辑",
+                buttons=[[
+                    {
+                        "text": "允许编辑",
+                        "callback_data": "settings:claude_permission:acceptEdits",
+                    }
+                ]],
+            )
+
+    class Query:
+        def __init__(self) -> None:
+            self.data = "settings:claude_permission:acceptEdits"
+            self.answers: list[str] = []
+            self.edits: list[tuple[str, object]] = []
+
+        async def answer(self, text):
+            self.answers.append(text)
+
+        async def edit_message_text(self, text, reply_markup=None):
+            self.edits.append((text, reply_markup))
+
+    controller = Controller()
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=controller,
+        ledger=SimpleNamespace(record_telegram_update=lambda *a, **kw: None),
+        approval_service=None,
+        bot=SimpleNamespace(),
+    )
+    query = Query()
+    update = SimpleNamespace(
+        update_id=1,
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456, type="private"),
+        effective_message=None,
+        callback_query=query,
+    )
+
+    await handlers.callback_router(update, SimpleNamespace())
+
+    assert controller.calls == [("/claude_mode acceptEdits", {"chat_id": 456, "user_id": 123})]
+    assert query.answers == ["已切换"]
+    assert query.edits
+
+
+@pytest.mark.asyncio
 async def test_codex_cmd_respects_already_rendered() -> None:
     """codex_cmd must skip sending when controller response has already_rendered=True."""
     from wlcodex.telegram_app import WlCodexHandlers

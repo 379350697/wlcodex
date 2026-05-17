@@ -110,6 +110,11 @@ class ClaudeDirectCommand:
 
 
 @dataclass(frozen=True)
+class ClaudePermissionCommand:
+    mode_name: str = ""
+
+
+@dataclass(frozen=True)
 class AutoModeCommand:
     prompt: str
 
@@ -154,6 +159,7 @@ ParsedCommand = (
     | NewConversationCommand
     | CodexDirectCommand
     | ClaudeDirectCommand
+    | ClaudePermissionCommand
     | AutoModeCommand
     | StopCurrentCommand
     | SwitchWorkspaceCommand
@@ -195,6 +201,13 @@ def parse_command(text: str) -> ParsedCommand:
         if not prompt:
             raise ParseError("用法：/claude <prompt>")
         return ClaudeDirectCommand(prompt=prompt)
+
+    for verb in ("/claude_mode", "/claude_permission", "/claude-permission", "/claude权限"):
+        if stripped == verb:
+            return ClaudePermissionCommand()
+        if stripped.startswith(f"{verb} "):
+            mode_name = stripped.split(maxsplit=1)[1].strip()
+            return ClaudePermissionCommand(mode_name=mode_name)
 
     if stripped.startswith("/auto "):
         prompt = stripped.split(maxsplit=1)[1].strip()

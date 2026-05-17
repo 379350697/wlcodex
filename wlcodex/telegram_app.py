@@ -563,7 +563,17 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self._reply_with_buttons(update, response.text, response.buttons)
+
+    async def claude_permission_cmd(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        await self._reply_with_buttons(update, response.text, response.buttons)
 
     async def conversation_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle non-command text as a conversation message."""
@@ -644,7 +654,7 @@ class WlCodexHandlers:
     # --- Callback routing ---
 
     async def callback_router(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Route callbacks by prefix: approval:*, waiting:*, worktree_done:*."""
+        """Route callbacks by prefix: approval:*, waiting:*, worktree_done:*, settings:*."""
         query = update.callback_query
         if query is None:
             return
@@ -663,8 +673,41 @@ class WlCodexHandlers:
             await self._worktree_done_callback_impl(update, query, data)
         elif data.startswith("conv:"):
             await self._conversation_callback_impl(update, query, data)
+        elif data.startswith("settings:"):
+            await self._settings_callback_impl(update, query, data)
         else:
             await query.answer("未知回调类型。")
+
+    async def _settings_callback_impl(
+        self, update: Update, query: object, data: str
+    ) -> None:
+        parts = data.split(":", 2)
+        if len(parts) != 3 or parts[1] != "claude_permission":
+            await query.answer("无效的设置回调数据。")
+            return
+
+        try:
+            response = await self._controller.handle(
+                f"/claude_mode {parts[2]}",
+                _ctx(update),
+            )
+            await query.answer("已切换")
+            if response.buttons:
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                keyboard = [
+                    [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
+                     for b in row]
+                    for row in response.buttons
+                ]
+                await query.edit_message_text(
+                    response.text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            else:
+                await query.edit_message_text(response.text)
+        except Exception as exc:
+            logger.exception("Settings callback error")
+            await query.answer(f"错误：{exc}")
 
     async def _conversation_callback_impl(
         self, update: Update, query: object, data: str
@@ -840,6 +883,8 @@ def build_application(
     application.add_handler(CommandHandler("stop", handlers.stop_cmd))
     application.add_handler(CommandHandler("switch", handlers.switch_cmd))
     application.add_handler(CommandHandler("model", handlers.model_cmd))
+    application.add_handler(CommandHandler("claude_mode", handlers.claude_permission_cmd))
+    application.add_handler(CommandHandler("claude_permission", handlers.claude_permission_cmd))
     application.add_handler(CommandHandler("verify", handlers.verify_cmd))
 
     # Non-command text → conversation

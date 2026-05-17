@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import tomllib
 
+from wlcodex.claude_permissions import normalize_claude_permission_mode
+
 
 class ConfigError(ValueError):
     pass
@@ -90,6 +92,7 @@ class ClaudeConfig:
     binary: str = "claude"
     startup_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 600.0
+    permission_mode: str = "acceptEdits"
 
 
 @dataclass(frozen=True)
@@ -167,6 +170,12 @@ def load_config(path: Path) -> AppConfig:
     streaming_raw = data.get("streaming", {})
     interaction_raw = data.get("interaction", {})
     menu_raw = data.get("menu", {})
+    try:
+        claude_permission_mode = normalize_claude_permission_mode(
+            str(claude_raw.get("permission_mode", "acceptEdits"))
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
     return AppConfig(
         telegram=TelegramConfig(
@@ -243,6 +252,7 @@ def load_config(path: Path) -> AppConfig:
             binary=str(claude_raw.get("binary", "claude")),
             startup_timeout_seconds=float(claude_raw.get("startup_timeout_seconds", 15.0)),
             request_timeout_seconds=float(claude_raw.get("request_timeout_seconds", 600.0)),
+            permission_mode=claude_permission_mode,
         ),
         context_budget=ContextBudgetConfig(
             codex_analysis_tokens=int(budget_raw.get("codex_analysis_tokens", 2500)),

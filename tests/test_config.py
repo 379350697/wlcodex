@@ -37,6 +37,7 @@ path = "/tmp/wlcodex"
     assert config.conversation.enabled is True
     assert config.conversation.default_mode == "chief_engineer"
     assert config.claude.enabled is False
+    assert config.claude.permission_mode == "acceptEdits"
     assert config.context_budget.codex_to_claude_tokens == 1500
     assert config.orchestration.max_verify_rounds == 3
     assert config.streaming.edit_min_interval_seconds == 1.0
@@ -302,3 +303,46 @@ allow_write = true
     assert config.interaction.streaming_enabled is False
     assert config.interaction.show_footer is True
     assert config.interaction.edit_min_interval_seconds == 2.5
+
+
+def test_load_config_reads_claude_permission_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+private_chat_only = true
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[claude]
+enabled = true
+binary = "claude"
+permission_mode = "只规划"
+
+[[workspaces]]
+alias = "demo"
+path = "/tmp/demo"
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.claude.permission_mode == "plan"

@@ -29,11 +29,19 @@ from wlcodex.context_packets import (
     build_codex_verification_packet as make_verification_packet,
     trim_to_budget,
 )
+from wlcodex.claude_permissions import (
+    DEFAULT_CLAUDE_PERMISSION_MODE,
+    RUNTIME_CLAUDE_PERMISSION_MODE_KEY,
+    ClaudePermissionState,
+    build_claude_permission_buttons,
+    render_claude_permission_status,
+)
 from wlcodex.router import (
     AbortCommand,
     ArchiveCommand,
     AutoModeCommand,
     ClaudeDirectCommand,
+    ClaudePermissionCommand,
     CodexDirectCommand,
     CodexSessionsCommand,
     ContinueCommand,
@@ -124,6 +132,7 @@ class CommandController:
         inspector: TaskInspector,
         ledger: object | None = None,
         claude_backend: object | None = None,
+        claude_permission_state: ClaudePermissionState | None = None,
         default_mode: str = "chief_engineer",
         default_workspace: str = "wlcodex",
         interaction_renderer: object | None = None,
@@ -133,6 +142,7 @@ class CommandController:
         self._inspector = inspector
         self._ledger = ledger
         self._claude = claude_backend
+        self._claude_permission_state = claude_permission_state
         self._default_mode = default_mode
         self._default_workspace = default_workspace
         self._interaction_renderer = interaction_renderer
@@ -341,6 +351,9 @@ class CommandController:
 
             elif isinstance(command, ClaudeDirectCommand):
                 return await self.handle_claude_direct(command, telegram_context)
+
+            elif isinstance(command, ClaudePermissionCommand):
+                return await self.handle_claude_permission(command, telegram_context)
 
             elif isinstance(command, AutoModeCommand):
                 return await self.handle_auto_mode(command, telegram_context)
@@ -1574,6 +1587,51 @@ class CommandController:
         return ControllerResponse(
             f"对话「{updated.title}」工作区已切换至 {command.workspace_alias}。"
         )
+
+    async def handle_claude_permission(
+        self,
+        command: ClaudePermissionCommand,
+        ctx: dict[str, Any] | None = None,
+    ) -> ControllerResponse:
+        current = self._current_claude_permission_mode()
+
+        if command.mode_name:
+            try:
+                current = self._set_claude_permission_mode(command.mode_name)
+            except ValueError as exc:
+                return ControllerResponse(
+                    f"{exc}\n\n{render_claude_permission_status(current)}",
+                    buttons=build_claude_permission_buttons(current),
+                )
+
+        text = render_claude_permission_status(current)
+        if command.mode_name:
+            text = f"已切换 Claude 权限模式。\n\n{text}"
+        if self._claude is None or not getattr(self._claude, "enabled", False):
+            text += "\n\n提示：Claude 后端当前未启用，此设置会在启用后生效。"
+        return ControllerResponse(
+            text,
+            buttons=build_claude_permission_buttons(current),
+        )
+
+    def _current_claude_permission_mode(self) -> str:
+        if self._claude_permission_state is not None:
+            return self._claude_permission_state.get()
+        if self._claude is not None and hasattr(self._claude, "permission_mode"):
+            return str(getattr(self._claude, "permission_mode"))
+        return DEFAULT_CLAUDE_PERMISSION_MODE
+
+    def _set_claude_permission_mode(self, mode_name: str) -> str:
+        if self._claude_permission_state is None:
+            self._claude_permission_state = ClaudePermissionState(
+                self._current_claude_permission_mode()
+            )
+        current = self._claude_permission_state.set(mode_name)
+        if self._claude is not None and hasattr(self._claude, "set_permission_mode"):
+            self._claude.set_permission_mode(current)
+        if self._ledger is not None and hasattr(self._ledger, "set_runtime_setting"):
+            self._ledger.set_runtime_setting(RUNTIME_CLAUDE_PERMISSION_MODE_KEY, current)
+        return current
 
     async def handle_model(
         self, command: ModelCommand, ctx: dict[str, Any] | None = None

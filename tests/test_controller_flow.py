@@ -9,6 +9,7 @@ from wlcodex.agent_backend import AgentStreamEvent
 from wlcodex.codex_backend import BackendEvent, FakeCodexBackend
 from wlcodex.config import WorkspaceConfig
 from wlcodex.controller import CommandController
+from wlcodex.claude_permissions import ClaudePermissionState
 from wlcodex.db import Ledger
 from wlcodex.inspection import TaskInspector
 from wlcodex.models import AgentRunStatus, OrchestrationStatus, TaskStatus
@@ -26,6 +27,24 @@ def ctrl(tmp_path: Path) -> CommandController:
     ))
     inspector = TaskInspector(ledger, tmp_path / "logs")
     return CommandController(service, backend, inspector, ledger=ledger)
+
+
+@pytest.fixture
+def ctrl_with_claude_permission_state(tmp_path: Path) -> CommandController:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", Path("/tmp/wlcodex"), True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    return CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_permission_state=ClaudePermissionState("只规划"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +250,32 @@ async def test_switch_workspace_no_active_conversation(ctrl: CommandController) 
 async def test_model_no_active_conversation(ctrl: CommandController) -> None:
     response = await ctrl.handle("/model claude-sonnet-4-6", {"chat_id": 999, "user_id": 999})
     assert "没有活跃对话" in response.text
+
+
+@pytest.mark.asyncio
+async def test_claude_permission_command_switches_with_chinese_mode(
+    ctrl_with_claude_permission_state: CommandController,
+) -> None:
+    response = await ctrl_with_claude_permission_state.handle(
+        "/claude_mode 允许编辑",
+        {"chat_id": 999, "user_id": 999},
+    )
+
+    assert "当前模式：允许编辑" in response.text
+    assert "acceptEdits" not in response.text
+    assert ctrl_with_claude_permission_state._claude_permission_state.get() == "acceptEdits"
+    assert (
+        ctrl_with_claude_permission_state._ledger.get_runtime_setting(
+            "claude.permission_mode"
+        )
+        == "acceptEdits"
+    )
+    assert response.buttons
+    assert all(
+        "acceptEdits" not in button["text"]
+        for row in response.buttons
+        for button in row
+    )
 
 
 @pytest.mark.asyncio

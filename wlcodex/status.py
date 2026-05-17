@@ -183,6 +183,7 @@ def render_help() -> str:
   /sessions — 查看会话列表
   /switch <工作区> — 切换工作区
   /model — 切换或查看当前模型
+  /claude_mode — 切换 Claude 权限模式
   /diff — 查看变更
   /files — 相关文件
   /verify — Codex 验收
@@ -273,7 +274,7 @@ def render_conversation_help(profile: str = "natural") -> str:
                 "/new 新对话",
                 "/status 看状态",
                 "/diff 看变更",
-                "/model 切模型",
+                "/model 模型 · /claude_mode Claude 权限",
                 "/help 帮助",
             ]
         )
@@ -293,6 +294,7 @@ def render_conversation_help(profile: str = "natural") -> str:
   • /sessions — 查看所有会话
   • /switch <workspace> — 切换工作区
   • /model — 切换或查看当前模型
+  • /claude_mode — 切换 Claude 权限模式
   • /diff — 查看变更
   • /files — 相关文件
   • /health — 系统健康
