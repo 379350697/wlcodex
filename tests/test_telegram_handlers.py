@@ -455,3 +455,52 @@ async def test_claude_cmd_survives_streaming_renderer_failure() -> None:
     await handlers.claude_cmd(update, SimpleNamespace())
     # Controller must have been called
     assert len(controller.handle_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_conversation_text_natural_profile_uses_typing_without_ack() -> None:
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.controller import ControllerResponse
+
+    class Bot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.actions: list[tuple[int, str]] = []
+
+        async def send_message(self, **kwargs):
+            self.sent.append(kwargs["text"])
+            return SimpleNamespace(message_id=len(self.sent))
+
+        async def send_chat_action(self, **kwargs):
+            self.actions.append((kwargs["chat_id"], str(kwargs["action"])))
+
+    class Controller:
+        async def handle_conversation_text(self, text, ctx):
+            return ControllerResponse("自然回复")
+
+    message = SimpleNamespace(text="帮我看下 bug")
+    update = SimpleNamespace(
+        update_id=1,
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456, type="private"),
+        effective_message=message,
+    )
+    config = SimpleNamespace(
+        telegram=SimpleNamespace(allowed_user_ids=frozenset({123}), private_chat_only=True),
+        interaction=SimpleNamespace(profile="natural", streaming_enabled=True, edit_min_interval_seconds=0.0),
+    )
+    bot = Bot()
+    handlers = WlCodexHandlers(
+        config=config,
+        controller=Controller(),
+        ledger=SimpleNamespace(
+            record_telegram_update=lambda *a, **kw: None,
+        ),
+        approval_service=object(),
+        bot=bot,
+    )
+
+    await handlers.conversation_text(update, SimpleNamespace())
+
+    assert "正在处理你的消息，请稍候..." not in bot.sent
+    assert bot.sent == ["自然回复"]

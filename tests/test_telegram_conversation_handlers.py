@@ -49,3 +49,10 @@ def test_edit_telegram_handles_not_modified_with_buttons() -> None:
     from wlcodex.telegram_app import _is_message_not_modified_error
     exc = type("TelegramError", (Exception,), {})("message is not modified: ...")
     assert _is_message_not_modified_error(exc) is True
+
+
+def test_handlers_expose_interaction_renderer_factory() -> None:
+    from wlcodex.telegram_app import WlCodexHandlers
+
+    assert hasattr(WlCodexHandlers, "create_interaction_renderer")
+    assert callable(WlCodexHandlers.create_interaction_renderer)

@@ -18,6 +18,9 @@ from telegram.ext import (
 from wlcodex.config import AppConfig
 from wlcodex.controller import CommandController
 from wlcodex.db import Ledger
+from wlcodex.interaction.profiles import profile_from_name
+from wlcodex.interaction.renderer import InteractionRenderer
+from wlcodex.interaction.transport import TelegramTransport
 from wlcodex.streaming import StreamingRenderer
 
 logger = logging.getLogger(__name__)
@@ -150,6 +153,23 @@ class WlCodexHandlers:
 
         task = asyncio.create_task(_keep_typing())
         return task
+
+    def create_interaction_renderer(self) -> InteractionRenderer:
+        interaction = getattr(self._config, "interaction", None)
+        profile_name = getattr(interaction, "profile", "legacy")
+        min_interval = float(
+            getattr(interaction, "edit_min_interval_seconds", 1.0)
+        )
+        transport = TelegramTransport(
+            self.send_telegram,
+            self.edit_telegram,
+            self._start_typing,
+        )
+        return InteractionRenderer(
+            transport=transport,
+            profile=profile_from_name(profile_name),
+            min_interval_seconds=min_interval,
+        )
 
     def create_streaming_renderer(self, chat_id: int) -> StreamingRenderer:
         """Create a StreamingRenderer bound to this handler's send/edit callbacks."""
@@ -521,6 +541,20 @@ class WlCodexHandlers:
             return
         text = update.effective_message.text
         chat_id = update.effective_chat.id
+
+        interaction = getattr(self._config, "interaction", None)
+        profile_name = getattr(interaction, "profile", "legacy")
+
+        if profile_name == "natural":
+            typing_task = await self._start_typing(chat_id)
+            try:
+                response = await self._controller.handle_conversation_text(
+                    text, _ctx(update)
+                )
+            finally:
+                typing_task.cancel()
+            await self.send_telegram(chat_id, response.text, response.buttons)
+            return
 
         # Send ACK immediately — the controller may run a long orchestration.
         ack_msg_id = await self.send_telegram(
