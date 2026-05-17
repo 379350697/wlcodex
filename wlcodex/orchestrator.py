@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
+import subprocess
 from typing import Any
 
 from wlcodex.context_packets import (
@@ -19,6 +20,63 @@ from wlcodex.context_packets import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _collect_workspace_evidence(workspace_path: str) -> tuple[list[str], str, str]:
+    """Collect changed files, diff stat, and test info from workspace.
+
+    Returns (changed_files, diff_summary, test_results).
+    Never raises — returns empty evidence on any failure.
+    """
+    changed_files: list[str] = []
+    diff_summary = ""
+    test_results = ""
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", workspace_path, "diff", "--name-only", "HEAD"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            changed_files = [
+                f.strip() for f in result.stdout.strip().split("\n") if f.strip()
+            ]
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", workspace_path, "diff", "--stat", "HEAD"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            diff_summary = result.stdout.strip()
+    except Exception:
+        pass
+
+    # Collect test evidence — note what we could and couldn't run
+    try:
+        result = subprocess.run(
+            ["git", "-C", workspace_path, "diff", "HEAD", "--", "tests/", "test_"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            test_results = (
+                "Tests were modified in this change. "
+                "Test commands were NOT executed by the orchestrator — "
+                "manual verification required. "
+                "Run: pytest tests/ -q\n\n"
+                f"Test file changes:\n{result.stdout.strip()[:800]}"
+            )
+        else:
+            test_results = (
+                "No test files were modified in this change. "
+                "Manual verification of correctness is required."
+            )
+    except Exception:
+        test_results = "Unable to determine test changes. Manual verification required."
+
+    return changed_files, diff_summary, test_results
 
 
 @dataclass
@@ -192,10 +250,16 @@ class ChiefEngineerOrchestrator:
     async def _verify_with_codex(
         self, goal: str, analysis: str, impl: str, workspace: str
     ) -> str:
+        # Collect real workspace evidence — changed files, diff, test status
+        changed_files, diff_summary, test_results = _collect_workspace_evidence(workspace)
+
         packet = build_codex_verification_packet(
             user_goal=goal,
             codex_plan_summary=analysis,
             claude_completion_summary=impl,
+            changed_files=changed_files,
+            diff_summary=diff_summary,
+            test_results=test_results,
             workspace=workspace,
             budget=self._budget,
         )

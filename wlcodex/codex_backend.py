@@ -498,6 +498,9 @@ class AppServerCodexBackend:
 
         Filters events by the specific thread_id/turn_id created here to avoid
         consuming events from concurrent tasks (multi-task race condition).
+
+        Exits immediately when the matching turn_completed or turn_failed event
+        is consumed — does NOT wait for the full request_timeout_seconds.
         """
         import asyncio as _asyncio
         thread_id = await self.create_thread(workspace_path)
@@ -506,6 +509,7 @@ class AppServerCodexBackend:
         deltas: list[str] = []
         deadline = _asyncio.get_event_loop().time() + self._request_timeout_seconds
         saw_turn_started = False
+        turn_ended = False
 
         while True:
             remaining = deadline - _asyncio.get_event_loop().time()
@@ -538,13 +542,18 @@ class AppServerCodexBackend:
                     if ev_turn == turn_id or not saw_turn_started:
                         # Accept match by turn_id; if turn_started was never
                         # seen (race), accept the first completed turn.
+                        turn_ended = True
                         break
                 elif event.event_type in ("turn_failed",):
                     ev_turn = str(event.payload.get("turnId", ""))
                     if ev_turn == turn_id or (event_tid == thread_id and not saw_turn_started):
                         error = event.payload.get("error", "unknown error")
                         deltas.append(f"\n[Turn failed: {error}]")
+                        turn_ended = True
                         break
+
+            if turn_ended:
+                break
 
         if not deltas:
             return "(no Codex response)"

@@ -514,7 +514,12 @@ class CommandController:
         self, text: str, telegram_context: dict[str, Any] | None = None
     ) -> ControllerResponse:
         """Handle plain text as conversation message. Never injects status/log
-        into model prompts."""
+        into model prompts.
+
+        Chief-engineer mode (default): full Codex→Claude→Codex closed loop.
+        Codex-direct mode: Codex analysis only, no implementation.
+        When Claude is disabled, chief_engineer falls back to Codex-only.
+        """
         if self._ledger is None:
             return ControllerResponse("系统未完全初始化。请检查配置。")
 
@@ -532,8 +537,17 @@ class CommandController:
                 workspace_alias=self._default_workspace,
             )
 
-        # Build compact context packet — never include raw Telegram transcript.
-        # Enforce token budget on conversation summary to prevent context bloat.
+        # --- Chief-engineer mode with Claude enabled: full closed loop ---
+        claude_ready = self._claude is not None and getattr(self._claude, "enabled", False)
+        if active.mode == ConversationMode.CHIEF_ENGINEER.value and claude_ready:
+            # Build an AutoModeCommand-equivalent and run the full orchestrator
+            from wlcodex.router import AutoModeCommand
+            cmd = AutoModeCommand(prompt=text)
+            return await self._handle_chief_engineer_impl(
+                cmd, active, telegram_context
+            )
+
+        # --- Codex-direct or Claude-disabled: Codex analysis only ---
         budget = ContextBudget()
         packet = build_codex_analysis_packet(
             user_goal=text,
@@ -629,7 +643,78 @@ class CommandController:
     async def handle_codex_direct(
         self, command: CodexDirectCommand, ctx: dict[str, Any] | None = None
     ) -> ControllerResponse:
-        return await self.handle_conversation_text(command.prompt, ctx)
+        """Codex Direct Mode — analysis only, never enters implementation loop."""
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        user_id = ctx.get("user_id", 0) if ctx else 0
+
+        active = self._ledger.get_active_conversation(chat_id)
+        if active is None:
+            title = default_title(command.prompt)
+            active = self._ledger.create_conversation(
+                chat_id=chat_id,
+                user_id=user_id,
+                title=title,
+                mode=ConversationMode.CODEX_DIRECT.value,
+                workspace_alias=self._default_workspace,
+            )
+
+        budget = ContextBudget()
+        packet = build_codex_analysis_packet(
+            user_goal=command.prompt,
+            conversation_summary=trim_to_budget(
+                active.conversation_summary, budget.conversation_summary_tokens
+            ),
+            constraints=[],
+            workspace=active.workspace_alias,
+            budget=budget,
+        )
+
+        task = self._service.reserve_task(
+            active.workspace_alias,
+            command.prompt,
+            telegram_chat_id=chat_id,
+        )
+        self._ledger.set_conversation_active_task(active.id, task.id)
+
+        workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+        try:
+            thread_id = await self._backend.create_thread(workspace_path)
+            self._service.set_task_thread(task.id, thread_id)
+            await self._backend.start_turn(thread_id, packet.render())
+        except Exception as exc:
+            task = self._service.fail_task(task.id, str(exc))
+            return ControllerResponse(
+                f"Codex 启动失败：{exc}\n\n任务 #{task.id} 已失败。"
+            )
+
+        self._ledger.update_conversation_summary(
+            active.id,
+            trim_to_budget(f"用户请求：{command.prompt[:200]}", budget.conversation_summary_tokens),
+        )
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=active.id,
+            agent="codex",
+            role="analysis",
+            hidden_task_id=task.id,
+            prompt_packet_summary=packet.summary(),
+        )
+        self._ledger.set_conversation_active_task(active.id, task.id)
+
+        buttons: list[list[dict[str, str]]] = [[
+            {"text": "查看状态", "callback_data": encode_conversation_callback(active.id, CONTINUE)},
+        ]]
+
+        return ControllerResponse(
+            f"Codex 直聊 — 对话「{active.title}」\n\n"
+            f"正在分析你的需求…\n"
+            f"工作区：{active.workspace_alias}\n"
+            f"模式：{MODE_LABELS.get(active.mode, active.mode)}\n\n"
+            f"提示：Codex 直聊模式不会自动实施代码修改。",
+            buttons=buttons,
+        )
 
     async def handle_claude_direct(
         self, command: ClaudeDirectCommand, ctx: dict[str, Any] | None = None
@@ -711,8 +796,6 @@ class CommandController:
                 "请在配置中设置 claude.enabled = true，或使用 /codex 直接对话。"
             )
 
-        from wlcodex.orchestrator import ChiefEngineerOrchestrator
-
         chat_id = ctx.get("chat_id", 0) if ctx else 0
         user_id = ctx.get("user_id", 0) if ctx else 0
 
@@ -726,6 +809,21 @@ class CommandController:
                 mode=ConversationMode.CHIEF_ENGINEER.value,
                 workspace_alias=self._default_workspace,
             )
+
+        return await self._handle_chief_engineer_impl(command, active, ctx)
+
+    async def _handle_chief_engineer_impl(
+        self,
+        command: AutoModeCommand,
+        active: object,
+        ctx: dict[str, Any] | None = None,
+    ) -> ControllerResponse:
+        """Shared chief-engineer orchestration loop: Codex→Claude→Codex verify.
+
+        Called by both handle_auto_mode (/auto) and handle_conversation_text
+        (default plain-text in chief_engineer mode).
+        """
+        from wlcodex.orchestrator import ChiefEngineerOrchestrator
 
         # Create orchestration run record
         orch_run = self._ledger.create_orchestration_run(
@@ -829,6 +927,14 @@ class CommandController:
                 {"text": "停止", "callback_data": encode_conversation_callback(active.id, CONTINUE)},
             ])
 
+        self._ledger.update_conversation_summary(
+            active.id,
+            trim_to_budget(
+                f"总工程师第{result.verify_round}轮: {label}",
+                ContextBudget().conversation_summary_tokens,
+            ),
+        )
+
         return ControllerResponse(
             f"总工程师编排完成 — {label}\n\n"
             f"对话：{active.title}\n"
@@ -868,6 +974,7 @@ class CommandController:
         # Collect diff evidence from the workspace
         diff_summary = ""
         changed_files: list[str] = []
+        test_results = ""
         try:
             workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
             diff_result = self._inspector.diff(
@@ -884,6 +991,20 @@ class CommandController:
                     stripped = line.strip()
                     if stripped and not stripped.startswith("#"):
                         changed_files.append(stripped[:200])
+
+            # Collect test evidence from workspace
+            test_files = [f for f in changed_files if "test" in f.lower()]
+            if test_files:
+                test_results = (
+                    "Tests were modified in this change. "
+                    "Test commands were NOT executed — manual verification required. "
+                    f"Modified test files: {', '.join(test_files[:10])}"
+                )
+            else:
+                test_results = (
+                    "No test files were modified in this change. "
+                    "Manual verification of correctness is required."
+                )
         except Exception:
             pass
 
@@ -905,7 +1026,7 @@ class CommandController:
             claude_completion_summary=completion[:1500] if completion else "",
             changed_files=changed_files[:20],
             diff_summary=diff_summary[:1500] if diff_summary else "",
-            test_results="",  # Populated when test harness is integrated
+            test_results=test_results,
             workspace=active.workspace_alias,
         )
 
