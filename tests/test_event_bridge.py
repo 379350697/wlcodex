@@ -424,3 +424,78 @@ async def test_agent_message_delta_forwards_to_interaction_renderer(tmp_path: Pa
     assert received[0].chat_id == 123
     assert received[0].task_id == task.id
     assert received[0].text == "hello"
+
+
+@pytest.mark.asyncio
+async def test_agent_message_delta_skipped_when_renderer_is_none(tmp_path: Path) -> None:
+    """When interaction_renderer is None (streaming disabled / legacy profile),
+    agent_message_delta must NOT cause errors or try to forward."""
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    service.start_task(
+        "demo",
+        "Run probe",
+        codex_thread_id="thread-1",
+        telegram_chat_id=123,
+    )
+
+    # No interaction_renderer passed — should be a no-op
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=_send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+        interaction_renderer=None,
+    )
+
+    # Must not crash
+    await bridge.process_event(
+        BackendEvent(
+            "agent_message_delta",
+            {"threadId": "thread-1", "delta": "hello"},
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_skipped_when_renderer_is_none(tmp_path: Path) -> None:
+    """When interaction_renderer is None, terminal events must be skipped."""
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run probe",
+        codex_thread_id="thread-1",
+        telegram_chat_id=123,
+    )
+    ledger.set_status_message(task.id, 123, 456)
+
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=_send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+        interaction_renderer=None,
+    )
+
+    # Must not crash — terminal forward is a no-op when renderer is None
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-1", "turnId": "turn-1"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-1", "status": "completed"},
+    ))

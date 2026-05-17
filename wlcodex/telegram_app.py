@@ -454,6 +454,9 @@ class WlCodexHandlers:
             )
         finally:
             typing_task.cancel()
+        # Streaming path: renderer already handled all output
+        if response.already_rendered:
+            return
         sent = await self._reply_with_buttons(update, response.text, response.buttons)
         await self._track_status_from_response(response.text, chat_id, sent.message_id)
 
@@ -468,6 +471,10 @@ class WlCodexHandlers:
             )
         finally:
             typing_task.cancel()
+
+        # Streaming path: renderer already handled all output
+        if response.already_rendered:
+            return
 
         # Use streaming renderer when buttons are present (Claude completed)
         if response.buttons:
@@ -488,7 +495,24 @@ class WlCodexHandlers:
             return
         chat_id = update.effective_chat.id
 
-        # Send ACK immediately so the user never sees "no response".
+        interaction = getattr(self._config, "interaction", None)
+        profile_name = getattr(interaction, "profile", "legacy")
+
+        # Natural profile: streaming handles everything, no ACK needed
+        if profile_name == "natural":
+            typing_task = await self._start_typing(chat_id)
+            try:
+                response = await self._controller.handle(
+                    update.effective_message.text, _ctx(update)
+                )
+            finally:
+                typing_task.cancel()
+            if response.already_rendered:
+                return
+            await self.send_telegram(chat_id, response.text, response.buttons)
+            return
+
+        # Legacy: Send ACK immediately so the user never sees "no response".
         ack_msg_id = await self.send_telegram(
             chat_id, "正在分析你的需求，请稍候..."
         )
@@ -559,6 +583,9 @@ class WlCodexHandlers:
                 )
             finally:
                 typing_task.cancel()
+            # Streaming path: renderer already handled all output
+            if response.already_rendered:
+                return
             await self.send_telegram(chat_id, response.text, response.buttons)
             return
 

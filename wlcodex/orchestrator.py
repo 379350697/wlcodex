@@ -119,6 +119,24 @@ class OrchestrationStepResult:
 
 
 @dataclass
+class OrchestrationProgress:
+    phase: str  # analysis_started, analysis_complete, implementation_delta, etc.
+    text: str = ""
+    agent: str = ""
+    result_status: str = ""  # passed, failed, needs_user — set on COMPLETE
+
+    # Phase constants for controller dispatch
+    ANALYSIS_STARTED = "analysis_started"
+    ANALYSIS_COMPLETE = "analysis_complete"
+    IMPL_DELTA = "implementation_delta"
+    IMPL_COMPLETE = "implementation_complete"
+    VERIFY_STARTED = "verification_started"
+    VERIFY_COMPLETE = "verification_complete"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+@dataclass
 class VerificationDecision:
     decision: str  # pass, retry, stop, need_user
     summary: str = ""
@@ -318,4 +336,219 @@ class ChiefEngineerOrchestrator:
             return backend.fake_response(prompt)
         raise NotImplementedError(
             "Claude backend must implement send(AgentRequest) -> AgentResult"
+        )
+
+    async def _call_claude_streaming(self, prompt: str, workspace: str):
+        """Streaming variant: yields deltas from Claude send_streaming.
+        Also accumulates full text for the return value.
+        Falls back to blocking send() when send_streaming is not available.
+        """
+        backend = self._claude
+        if hasattr(backend, "send_streaming"):
+            from wlcodex.agent_backend import AgentRequest
+            accumulated = ""
+            async for stream_event in backend.send_streaming(AgentRequest(
+                prompt=prompt,
+                workspace_path=workspace,
+            )):
+                accumulated += stream_event.delta
+                yield stream_event.delta
+            return
+        # Fallback: blocking send
+        text = await self._call_claude(prompt, workspace)
+        yield text
+
+    async def run_streaming(
+        self,
+        user_goal: str,
+        conversation_context: dict[str, Any] | None = None,
+    ):
+        """Streaming variant of run(): yields OrchestrationProgress at each stage.
+
+        The caller consumes progress events and forwards them to the
+        interaction renderer.  This is the same orchestration logic as
+        run() but emits live progress instead of waiting until completion.
+        """
+        ctx = conversation_context or {}
+        workspace = ctx.get("workspace", "wlcodex")
+        result = OrchestrationResult(status="running")
+
+        # Phase 1: Codex analysis
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_STARTED,
+            text="Codex 正在分析需求...",
+            agent="codex",
+        )
+        try:
+            analysis = await self._analyze_with_codex(user_goal, workspace)
+            result.codex_analysis = analysis
+            result.steps.append(OrchestrationStepResult(
+                step="analyze", agent="codex", summary=analysis[:200],
+            ))
+        except Exception as exc:
+            result.status = "failed"
+            result.verification_summary = f"Codex analysis failed: {exc}"
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.FAILED,
+                text=f"Codex 分析失败：{exc}",
+                agent="codex",
+            )
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.COMPLETE,
+                text="",
+                agent="",
+                result_status="failed",
+            )
+            return
+
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_COMPLETE,
+            text=analysis[:200],
+            agent="codex",
+        )
+
+        # Check if Codex says no implementation needed
+        if _analysis_says_no_implementation_needed(analysis):
+            result.status = "passed"
+            result.verification_summary = "Codex determined no implementation needed."
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.COMPLETE,
+                text="Codex 认为无需实施代码修改。",
+                agent="codex",
+                result_status="passed",
+            )
+            return
+
+        # Phase 2-3: Implementation + verification loop
+        for round_num in range(1, self._max_verify_rounds + 1):
+            result.verify_round = round_num
+
+            # Claude implementation (streaming)
+            try:
+                impl_accumulated = ""
+                # Build the Claude handoff packet (same as _implement_with_claude)
+                claude_packet = build_claude_handoff_packet(
+                    user_goal=user_goal,
+                    codex_analysis=analysis,
+                    workspace=workspace,
+                    budget=self._budget,
+                )
+                async for delta in self._call_claude_streaming(
+                    claude_packet.render(), workspace
+                ):
+                    impl_accumulated += delta
+                    yield OrchestrationProgress(
+                        phase=OrchestrationProgress.IMPL_DELTA,
+                        text=delta,
+                        agent="claude",
+                    )
+                result.claude_implementation = impl_accumulated
+                result.steps.append(OrchestrationStepResult(
+                    step=f"implement_round_{round_num}", agent="claude",
+                    summary=impl_accumulated[:200],
+                ))
+            except Exception as exc:
+                result.status = "failed"
+                result.verification_summary = f"Claude implementation failed: {exc}"
+                yield OrchestrationProgress(
+                    phase=OrchestrationProgress.FAILED,
+                    text=f"Claude 实施失败：{exc}",
+                    agent="claude",
+                )
+                yield OrchestrationProgress(
+                    phase=OrchestrationProgress.COMPLETE,
+                    text="",
+                    agent="",
+                    result_status="failed",
+                )
+                return
+
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.IMPL_COMPLETE,
+                text=impl_accumulated[:200],
+                agent="claude",
+            )
+
+            # Codex verification
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.VERIFY_STARTED,
+                text="Codex 正在验收...",
+                agent="codex",
+            )
+            try:
+                verify_result = await self._verify_with_codex(
+                    user_goal, analysis, impl_accumulated, workspace
+                )
+                result.verification_summary = verify_result
+                result.steps.append(OrchestrationStepResult(
+                    step=f"verify_round_{round_num}", agent="codex",
+                    summary=verify_result[:200],
+                ))
+            except Exception as exc:
+                result.status = "failed"
+                result.verification_summary = f"Codex verification failed: {exc}"
+                yield OrchestrationProgress(
+                    phase=OrchestrationProgress.FAILED,
+                    text=f"Codex 验收失败：{exc}",
+                    agent="codex",
+                )
+                yield OrchestrationProgress(
+                    phase=OrchestrationProgress.COMPLETE,
+                    text="",
+                    agent="",
+                    result_status="failed",
+                )
+                return
+
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.VERIFY_COMPLETE,
+                text=verify_result[:200],
+                agent="codex",
+            )
+
+            decision = VerificationDecision.parse(verify_result)
+
+            if decision.decision == "pass":
+                result.status = "passed"
+                yield OrchestrationProgress(
+                    phase=OrchestrationProgress.COMPLETE,
+                    text="验收通过",
+                    agent="codex",
+                    result_status="passed",
+                )
+                return
+            elif decision.decision == "stop":
+                result.status = "failed"
+                result.verification_summary = decision.summary
+                yield OrchestrationProgress(
+                    phase=OrchestrationProgress.COMPLETE,
+                    text=f"验收停止：{decision.summary[:200]}",
+                    agent="codex",
+                    result_status="failed",
+                )
+                return
+            elif decision.decision == "need_user":
+                result.status = "needs_user"
+                result.verification_summary = decision.summary
+                yield OrchestrationProgress(
+                    phase=OrchestrationProgress.COMPLETE,
+                    text=f"需要用户判断：{decision.summary[:200]}",
+                    agent="codex",
+                    result_status="needs_user",
+                )
+                return
+            elif decision.decision == "retry":
+                analysis = f"Previous verification failed: {decision.required_fix}\n\nOriginal analysis: {analysis}"
+                continue
+
+        result.status = "needs_user"
+        result.verification_summary = (
+            f"Max verification rounds ({self._max_verify_rounds}) reached. "
+            "Please review the changes and provide guidance."
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.COMPLETE,
+            text=result.verification_summary[:200],
+            agent="codex",
+            result_status="needs_user",
         )

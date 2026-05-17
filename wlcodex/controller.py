@@ -112,6 +112,7 @@ def _is_lightweight_greeting(text: str) -> bool:
 class ControllerResponse:
     text: str
     buttons: list[list[dict[str, str]]] = field(default_factory=list)
+    already_rendered: bool = False
 
 
 class CommandController:
@@ -124,6 +125,7 @@ class CommandController:
         claude_backend: object | None = None,
         default_mode: str = "chief_engineer",
         default_workspace: str = "wlcodex",
+        interaction_renderer: object | None = None,
     ) -> None:
         self._service = task_service
         self._backend = backend
@@ -132,6 +134,11 @@ class CommandController:
         self._claude = claude_backend
         self._default_mode = default_mode
         self._default_workspace = default_workspace
+        self._interaction_renderer = interaction_renderer
+
+    def set_interaction_renderer(self, renderer: object) -> None:
+        """Set the interaction renderer after construction (created after handlers)."""
+        self._interaction_renderer = renderer
 
     async def handle(
         self, text: str, telegram_context: dict[str, Any] | None = None
@@ -717,6 +724,21 @@ class CommandController:
         )
         self._ledger.set_conversation_active_task(active.id, task.id)
 
+        # When interaction renderer is active, EventBridge forwards deltas and
+        # terminal events — don't send a duplicate static response.
+        if self._interaction_renderer is not None:
+            # Emit run_started so typing indicator begins
+            from wlcodex.interaction.events import InteractionEvent
+            await self._interaction_renderer.handle(
+                InteractionEvent(
+                    event_type="run_started",
+                    chat_id=chat_id,
+                    task_id=task.id,
+                    conversation_id=active.id,
+                )
+            )
+            return ControllerResponse("", already_rendered=True)
+
         buttons: list[list[dict[str, str]]] = [[
             {"text": "查看状态", "callback_data": encode_conversation_callback(active.id, CONTINUE)},
         ]]
@@ -760,10 +782,111 @@ class CommandController:
             workspace=active.workspace_alias,
         )
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+
+        # Create a hidden task for tracking (NOT set as active_codex_task_id)
+        task = self._service.reserve_task(
+            active.workspace_alias,
+            command.prompt,
+            telegram_chat_id=chat_id,
+        )
+
+        # Use streaming path when interaction renderer is available (natural profile)
+        if self._interaction_renderer is not None and hasattr(self._claude, "send_streaming"):
+            from wlcodex.interaction.events import InteractionEvent
+
+            await self._interaction_renderer.handle(
+                InteractionEvent(
+                    event_type="run_started",
+                    chat_id=chat_id,
+                    task_id=task.id,
+                    conversation_id=active.id,
+                )
+            )
+
+            accumulated = ""
+            had_error = False
+            try:
+                async for stream_event in self._claude.send_streaming(
+                    AgentRequest(prompt=packet.render(), workspace_path=workspace_path)
+                ):
+                    if stream_event.event_type == "error":
+                        had_error = True
+                        accumulated += stream_event.delta
+                        continue
+                    accumulated += stream_event.delta
+                    await self._interaction_renderer.handle(
+                        InteractionEvent(
+                            event_type="text_delta",
+                            chat_id=chat_id,
+                            task_id=task.id,
+                            conversation_id=active.id,
+                            text=stream_event.delta,
+                        )
+                    )
+            except Exception as exc:
+                logger.exception("Claude streaming failed")
+                self._service.fail_task(task.id, str(exc))
+                await self._interaction_renderer.handle(
+                    InteractionEvent(
+                        event_type="run_failed",
+                        chat_id=chat_id,
+                        task_id=task.id,
+                        text=str(exc),
+                    )
+                )
+                return ControllerResponse("", already_rendered=True)
+
+            if had_error:
+                self._service.fail_task(task.id, accumulated[:500] or "Claude streaming returned error")
+                self._ledger.create_agent_run(
+                    conversation_id=active.id,
+                    agent="claude",
+                    role="implementation",
+                    prompt_packet_summary=command.prompt[:120],
+                )
+                await self._interaction_renderer.handle(
+                    InteractionEvent(
+                        event_type="run_failed",
+                        chat_id=chat_id,
+                        task_id=task.id,
+                        text=accumulated[:500] or "Claude 返回了错误。",
+                    )
+                )
+                return ControllerResponse("", already_rendered=True)
+
+            self._ledger.set_task_status(task.id, TaskStatus.DONE)
+            agent_run = self._ledger.create_agent_run(
+                conversation_id=active.id,
+                agent="claude",
+                role="implementation",
+                prompt_packet_summary=command.prompt[:120],
+            )
+            self._ledger.update_agent_run_status(
+                agent_run.id,
+                "done",
+                token_input=len(packet.render()) // 4,
+                token_output=len(accumulated) // 4,
+                completion_summary=accumulated[:2000],
+            )
+            self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
+
+            await self._interaction_renderer.handle(
+                InteractionEvent(
+                    event_type="run_completed",
+                    chat_id=chat_id,
+                    task_id=task.id,
+                    conversation_id=active.id,
+                    metadata={"has_diff": bool(task.changed_file_count)},
+                )
+            )
+            return ControllerResponse("", already_rendered=True)
+
+        # Legacy path: blocking send()
         result = await self._claude.send(AgentRequest(
             prompt=packet.render(),
             workspace_path=workspace_path,
         ))
+        self._ledger.set_task_status(task.id, TaskStatus.DONE)
 
         agent_run = self._ledger.create_agent_run(
             conversation_id=active.id,
@@ -832,8 +955,12 @@ class CommandController:
 
         Called by both handle_auto_mode (/auto) and handle_conversation_text
         (default plain-text in chief_engineer mode).
+
+        When the interaction renderer is available (natural profile + streaming
+        enabled), uses the streaming orchestrator path so Claude deltas and
+        phase transitions are visible in real time.
         """
-        from wlcodex.orchestrator import ChiefEngineerOrchestrator
+        from wlcodex.orchestrator import ChiefEngineerOrchestrator, OrchestrationProgress
 
         # Create orchestration run record
         orch_run = self._ledger.create_orchestration_run(
@@ -851,6 +978,136 @@ class CommandController:
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
         orch = ChiefEngineerOrchestrator(self._backend, self._claude)
+
+        # Streaming path: forward live progress to interaction renderer
+        if self._interaction_renderer is not None:
+            from wlcodex.interaction.events import InteractionEvent
+
+            chat_id = ctx.get("chat_id", 0) if ctx else 0
+            task = self._service.reserve_task(
+                active.workspace_alias,
+                command.prompt,
+                telegram_chat_id=chat_id,
+            )
+            self._ledger.set_conversation_active_task(active.id, task.id)
+
+            await self._interaction_renderer.handle(
+                InteractionEvent(
+                    event_type="run_started",
+                    chat_id=chat_id,
+                    task_id=task.id,
+                    conversation_id=active.id,
+                )
+            )
+
+            terminal_sent = False
+            orch_result_status = "running"
+            try:
+                async for progress in orch.run_streaming(
+                    command.prompt,
+                    conversation_context={"workspace": workspace_path},
+                ):
+                    if terminal_sent:
+                        continue
+                    if progress.phase == OrchestrationProgress.IMPL_DELTA and progress.text:
+                        await self._interaction_renderer.handle(
+                            InteractionEvent(
+                                event_type="text_delta",
+                                chat_id=chat_id,
+                                task_id=task.id,
+                                conversation_id=active.id,
+                                text=progress.text,
+                            )
+                        )
+                    elif progress.phase in (
+                        OrchestrationProgress.ANALYSIS_STARTED,
+                        OrchestrationProgress.ANALYSIS_COMPLETE,
+                        OrchestrationProgress.IMPL_COMPLETE,
+                        OrchestrationProgress.VERIFY_STARTED,
+                        OrchestrationProgress.VERIFY_COMPLETE,
+                    ):
+                        if progress.text:
+                            await self._interaction_renderer.handle(
+                                InteractionEvent(
+                                    event_type="text_delta",
+                                    chat_id=chat_id,
+                                    task_id=task.id,
+                                    conversation_id=active.id,
+                                    text="\n\n" + progress.text,
+                                )
+                            )
+                    elif progress.phase == OrchestrationProgress.FAILED:
+                        terminal_sent = True
+                        orch_result_status = "failed"
+                        self._ledger.set_task_status(task.id, TaskStatus.FAILED)
+                        await self._interaction_renderer.handle(
+                            InteractionEvent(
+                                event_type="run_failed",
+                                chat_id=chat_id,
+                                task_id=task.id,
+                                text=progress.text,
+                            )
+                        )
+                    elif progress.phase == OrchestrationProgress.COMPLETE:
+                        terminal_sent = True
+                        orch_result_status = getattr(progress, "result_status", "") or "passed"
+                        if orch_result_status == "passed":
+                            self._ledger.set_task_status(task.id, TaskStatus.DONE)
+                            await self._interaction_renderer.handle(
+                                InteractionEvent(
+                                    event_type="run_completed",
+                                    chat_id=chat_id,
+                                    task_id=task.id,
+                                    conversation_id=active.id,
+                                    metadata={"has_diff": bool(task.changed_file_count)},
+                                )
+                            )
+                        elif orch_result_status == "needs_user":
+                            self._ledger.set_task_status(task.id, TaskStatus.FAILED)
+                            await self._interaction_renderer.handle(
+                                InteractionEvent(
+                                    event_type="run_failed",
+                                    chat_id=chat_id,
+                                    task_id=task.id,
+                                    text=progress.text or "需要用户输入以继续。",
+                                )
+                            )
+                        else:
+                            self._ledger.set_task_status(task.id, TaskStatus.FAILED)
+                            await self._interaction_renderer.handle(
+                                InteractionEvent(
+                                    event_type="run_failed",
+                                    chat_id=chat_id,
+                                    task_id=task.id,
+                                    text=progress.text or "编排未通过验收。",
+                                )
+                            )
+            except Exception as exc:
+                logger.exception("Chief engineer streaming orchestration failed")
+                self._ledger.update_orchestration_run(
+                    orch_run.id,
+                    status="failed",
+                    current_step="error",
+                    last_verification_result=str(exc)[:500],
+                )
+                return ControllerResponse("", already_rendered=True)
+
+            # Update ledger records
+            codex_run_status = "done" if orch_result_status == "passed" else "failed"
+            self._ledger.update_orchestration_run(
+                orch_run.id,
+                status=orch_result_status if orch_result_status != "running" else "failed",
+                verify_round=1,
+                current_step="complete",
+            )
+            self._ledger.update_agent_run_status(
+                codex_analysis_run.id,
+                codex_run_status,
+                completion_summary="Streaming orchestration completed",
+            )
+            return ControllerResponse("", already_rendered=True)
+
+        # Legacy path: blocking orchestration
         try:
             result = await orch.run(
                 command.prompt,

@@ -211,7 +211,16 @@ def main() -> None:
         backend_dead_grace_seconds=config.task.backend_dead_grace_seconds,
     )
     task_watchdog = TaskWatchdog(ledger, backend, liveness_config)
-    interaction_renderer = handlers.create_interaction_renderer()
+    # Only wire interaction streaming when profile is natural AND streaming enabled.
+    # Legacy/cockpit profiles and streaming_enabled=false must not receive
+    # streaming deltas in Telegram.
+    interaction_renderer = None
+    if (
+        config.interaction.profile == "natural"
+        and config.interaction.streaming_enabled
+    ):
+        interaction_renderer = handlers.create_interaction_renderer()
+    controller.set_interaction_renderer(interaction_renderer)
     event_bridge = EventBridge(
         task_service=task_service,
         backend=backend,

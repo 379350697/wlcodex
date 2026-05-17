@@ -504,3 +504,421 @@ async def test_conversation_text_natural_profile_uses_typing_without_ack() -> No
 
     assert "正在处理你的消息，请稍候..." not in bot.sent
     assert bot.sent == ["自然回复"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_text_natural_profile_respects_already_rendered() -> None:
+    """When controller returns already_rendered=True, handler must NOT send duplicate."""
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.controller import ControllerResponse
+
+    class Bot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_message(self, **kwargs):
+            self.sent.append(kwargs["text"])
+            return SimpleNamespace(message_id=len(self.sent))
+
+        async def send_chat_action(self, **kwargs):
+            pass
+
+    class Controller:
+        async def handle_conversation_text(self, text, ctx):
+            return ControllerResponse("不应该发送", already_rendered=True)
+
+    message = SimpleNamespace(text="帮我看下 bug")
+    update = SimpleNamespace(
+        update_id=1,
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456, type="private"),
+        effective_message=message,
+    )
+    config = SimpleNamespace(
+        telegram=SimpleNamespace(allowed_user_ids=frozenset({123}), private_chat_only=True),
+        interaction=SimpleNamespace(profile="natural", streaming_enabled=True, edit_min_interval_seconds=0.0),
+    )
+    bot = Bot()
+    handlers = WlCodexHandlers(
+        config=config,
+        controller=Controller(),
+        ledger=SimpleNamespace(
+            record_telegram_update=lambda *a, **kw: None,
+        ),
+        approval_service=object(),
+        bot=bot,
+    )
+
+    await handlers.conversation_text(update, SimpleNamespace())
+
+    # Must NOT send the response text since already_rendered=True
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_claude_cmd_respects_already_rendered() -> None:
+    """claude_cmd must skip sending when controller response has already_rendered=True."""
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.controller import ControllerResponse
+
+    class Bot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_message(self, **kwargs):
+            self.sent.append(kwargs["text"])
+            return SimpleNamespace(message_id=len(self.sent))
+
+        async def send_chat_action(self, **kwargs):
+            pass
+
+    class FakeCtrl:
+        def __init__(self) -> None:
+            self.handle_calls: list[str] = []
+
+        async def handle(self, text: str, ctx) -> ControllerResponse:
+            self.handle_calls.append(text)
+            return ControllerResponse("已完成", already_rendered=True)
+
+    controller = FakeCtrl()
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=controller,
+        ledger=SimpleNamespace(
+            list_tasks=lambda *a, **kw: [],
+            record_telegram_update=lambda *a, **kw: None,
+        ),
+        approval_service=object(),
+        bot=Bot(),
+    )
+
+    update = SimpleNamespace(
+        update_id=1,
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456, type="private"),
+        effective_message=SimpleNamespace(text="/claude fix bug"),
+    )
+    await handlers.claude_cmd(update, SimpleNamespace())
+
+    # Controller must have been called
+    assert len(controller.handle_calls) == 1
+    # But no message sent since already_rendered=True
+
+
+@pytest.mark.asyncio
+async def test_codex_cmd_respects_already_rendered() -> None:
+    """codex_cmd must skip sending when controller response has already_rendered=True."""
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.controller import ControllerResponse
+
+    class Bot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_message(self, **kwargs):
+            self.sent.append(kwargs["text"])
+            return SimpleNamespace(message_id=len(self.sent))
+
+        async def send_chat_action(self, **kwargs):
+            pass
+
+    class FakeCtrl:
+        def __init__(self) -> None:
+            self.handle_calls: list[str] = []
+
+        async def handle(self, text: str, ctx) -> ControllerResponse:
+            self.handle_calls.append(text)
+            return ControllerResponse("", already_rendered=True)
+
+    controller = FakeCtrl()
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=controller,
+        ledger=SimpleNamespace(
+            list_tasks=lambda *a, **kw: [],
+            record_telegram_update=lambda *a, **kw: None,
+        ),
+        approval_service=object(),
+        bot=Bot(),
+    )
+
+    update = SimpleNamespace(
+        update_id=1,
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456, type="private"),
+        effective_message=SimpleNamespace(text="/codex analyze"),
+    )
+    await handlers.codex_cmd(update, SimpleNamespace())
+
+    assert len(controller.handle_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_cmd_natural_profile_no_ack() -> None:
+    """auto_cmd in natural profile must not send textual ACK, uses streaming."""
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.controller import ControllerResponse
+
+    class Bot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_message(self, **kwargs):
+            self.sent.append(kwargs["text"])
+            return SimpleNamespace(message_id=len(self.sent))
+
+        async def send_chat_action(self, **kwargs):
+            pass
+
+    class FakeCtrl:
+        def __init__(self) -> None:
+            self.handle_calls: list[str] = []
+
+        async def handle(self, text: str, ctx) -> ControllerResponse:
+            self.handle_calls.append(text)
+            return ControllerResponse("done", already_rendered=True)
+
+    controller = FakeCtrl()
+    config = SimpleNamespace(
+        telegram=SimpleNamespace(allowed_user_ids=frozenset({123})),
+        interaction=SimpleNamespace(profile="natural", streaming_enabled=True, edit_min_interval_seconds=0.0),
+    )
+    handlers = WlCodexHandlers(
+        config=config,
+        controller=controller,
+        ledger=SimpleNamespace(
+            list_tasks=lambda *a, **kw: [],
+            record_telegram_update=lambda *a, **kw: None,
+        ),
+        approval_service=object(),
+        bot=Bot(),
+    )
+
+    update = SimpleNamespace(
+        update_id=1,
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456, type="private"),
+        effective_message=SimpleNamespace(text="/auto fix bug"),
+    )
+    await handlers.auto_cmd(update, SimpleNamespace())
+
+    assert len(controller.handle_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_profile_conversation_text_uses_ack() -> None:
+    """Legacy profile must still send ACK before processing."""
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.controller import ControllerResponse
+
+    class Bot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_message(self, **kwargs):
+            self.sent.append(kwargs["text"])
+            return SimpleNamespace(message_id=len(self.sent))
+
+        async def send_chat_action(self, **kwargs):
+            pass
+
+        async def edit_message_text(self, **kwargs):
+            pass
+
+    class Controller:
+        async def handle_conversation_text(self, text, ctx):
+            return ControllerResponse("处理完成")
+
+    config = SimpleNamespace(
+        telegram=SimpleNamespace(allowed_user_ids=frozenset({123}), private_chat_only=True),
+        interaction=SimpleNamespace(profile="legacy", streaming_enabled=False, edit_min_interval_seconds=1.0),
+    )
+    bot = Bot()
+    handlers = WlCodexHandlers(
+        config=config,
+        controller=Controller(),
+        ledger=SimpleNamespace(
+            record_telegram_update=lambda *a, **kw: None,
+        ),
+        approval_service=object(),
+        bot=bot,
+    )
+
+    message = SimpleNamespace(text="帮我看下 bug")
+    update = SimpleNamespace(
+        update_id=1,
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456, type="private"),
+        effective_message=message,
+    )
+    await handlers.conversation_text(update, SimpleNamespace())
+
+    # Legacy must send the ACK
+    assert any("稍候" in s or "处理" in s for s in bot.sent)
+
+
+# ---------------------------------------------------------------------------
+# Claude streaming error handling (Issue 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_claude_cmd_streaming_error_triggers_run_failed() -> None:
+    """When Claude send_streaming yields only error events, controller must
+    mark task as FAILED, not DONE."""
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.controller import ControllerResponse, CommandController
+    from wlcodex.agent_backend import AgentStreamEvent, AgentRequest
+
+    received_events: list[object] = []
+
+    class FakeRenderer:
+        async def handle(self, event):
+            received_events.append(event)
+
+    class ErrorClaude:
+        enabled = True
+
+        async def send_streaming(self, request):
+            yield AgentStreamEvent(delta="Claude binary not found", event_type="error")
+
+    class FakeTaskService:
+        def reserve_task(self, *a, **kw):
+            return SimpleNamespace(id=99, changed_file_count=0)
+
+        def fail_task(self, task_id, error):
+            pass
+
+        def get_workspace(self, alias):
+            return SimpleNamespace(path="/tmp/test")
+
+    class FakeLedger:
+        def get_active_conversation(self, chat_id):
+            return SimpleNamespace(
+                id=1, title="test", mode="claude_direct",
+                workspace_alias="demo", conversation_summary="",
+                active_codex_task_id=None, active_claude_run_id=None,
+            )
+
+        def create_conversation(self, **kw):
+            return SimpleNamespace(id=1, title="test")
+
+        def create_agent_run(self, **kw):
+            return SimpleNamespace(id=10)
+
+        def set_conversation_active_task(self, *a):
+            pass
+
+        def set_task_status(self, *a):
+            pass
+
+        def set_conversation_active_claude_run(self, *a):
+            pass
+
+        def update_agent_run_status(self, *a, **kw):
+            pass
+
+        def update_conversation_summary(self, *a):
+            pass
+
+    controller = CommandController(
+        task_service=FakeTaskService(),
+        backend=SimpleNamespace(),
+        inspector=SimpleNamespace(),
+        ledger=FakeLedger(),
+        claude_backend=ErrorClaude(),
+        interaction_renderer=FakeRenderer(),
+    )
+
+    update = SimpleNamespace(
+        update_id=1,
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456, type="private"),
+        effective_message=SimpleNamespace(text="/claude fix bug"),
+    )
+
+    response = await controller.handle("/claude fix bug", {"chat_id": 456, "user_id": 123})
+    assert response.already_rendered
+
+    # Must have received run_started and run_failed (NOT run_completed)
+    event_types = [e.event_type for e in received_events]
+    assert "run_started" in event_types
+    assert "run_failed" in event_types
+    assert "run_completed" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_claude_cmd_streaming_mixed_error_and_text_triggers_run_failed() -> None:
+    """When Claude send_streaming yields error then text, controller must
+    still mark as FAILED because error came first."""
+    from wlcodex.controller import ControllerResponse, CommandController
+    from wlcodex.agent_backend import AgentStreamEvent, AgentRequest
+
+    received_events: list[object] = []
+
+    class FakeRenderer:
+        async def handle(self, event):
+            received_events.append(event)
+
+    class MixedClaude:
+        enabled = True
+
+        async def send_streaming(self, request):
+            yield AgentStreamEvent(delta="binary missing", event_type="error")
+            yield AgentStreamEvent(delta=" some text", event_type="text")
+
+    class FakeTaskService:
+        def reserve_task(self, *a, **kw):
+            return SimpleNamespace(id=99, changed_file_count=0)
+
+        def fail_task(self, task_id, error):
+            pass
+
+        def get_workspace(self, alias):
+            return SimpleNamespace(path="/tmp/test")
+
+    class FakeLedger:
+        def get_active_conversation(self, chat_id):
+            return SimpleNamespace(
+                id=1, title="test", mode="claude_direct",
+                workspace_alias="demo", conversation_summary="",
+                active_codex_task_id=None, active_claude_run_id=None,
+            )
+
+        def create_conversation(self, **kw):
+            return SimpleNamespace(id=1, title="test")
+
+        def create_agent_run(self, **kw):
+            return SimpleNamespace(id=10)
+
+        def set_conversation_active_task(self, *a):
+            pass
+
+        def set_task_status(self, *a):
+            pass
+
+        def set_conversation_active_claude_run(self, *a):
+            pass
+
+        def update_agent_run_status(self, *a, **kw):
+            pass
+
+        def update_conversation_summary(self, *a):
+            pass
+
+    controller = CommandController(
+        task_service=FakeTaskService(),
+        backend=SimpleNamespace(),
+        inspector=SimpleNamespace(),
+        ledger=FakeLedger(),
+        claude_backend=MixedClaude(),
+        interaction_renderer=FakeRenderer(),
+    )
+
+    response = await controller.handle("/claude fix bug", {"chat_id": 456, "user_id": 123})
+    assert response.already_rendered
+
+    event_types = [e.event_type for e in received_events]
+    assert "run_started" in event_types
+    assert "run_failed" in event_types
+    assert "run_completed" not in event_types

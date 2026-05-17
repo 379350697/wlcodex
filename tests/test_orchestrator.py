@@ -244,3 +244,304 @@ async def test_orchestrator_handles_codex_retry_with_real_interfaces() -> None:
     assert result.verify_round == 2
     assert len(codex.prompts) == 3  # analyze + 2 verifications
     assert len(claude.prompts) == 2  # 2 implementations
+
+
+# ---------------------------------------------------------------------------
+# Streaming orchestrator tests
+# ---------------------------------------------------------------------------
+
+
+class FakeClaudeStreaming:
+    """Fake Claude that implements send_streaming (real streaming interface)."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self._deltas: list[str] = ["impl", "ementation", " done"]
+
+    async def send_streaming(self, request):
+        from wlcodex.agent_backend import AgentStreamEvent
+        self.prompts.append(request.prompt)
+        for delta in self._deltas:
+            yield AgentStreamEvent(delta=delta, event_type="text")
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_yields_progress_events() -> None:
+    """run_streaming must yield OrchestrationProgress events at each stage."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    codex = FakeCodexWithSendPrompt()
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    events = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        events.append(progress)
+
+    # Must have at least: analysis_started, analysis_complete, impl deltas,
+    # impl_complete, verify_started, verify_complete, complete
+    phases = [e.phase for e in events]
+    assert OrchestrationProgress.ANALYSIS_STARTED in phases
+    assert OrchestrationProgress.ANALYSIS_COMPLETE in phases
+    assert OrchestrationProgress.IMPL_DELTA in phases
+    assert OrchestrationProgress.IMPL_COMPLETE in phases
+    assert OrchestrationProgress.VERIFY_STARTED in phases
+    assert OrchestrationProgress.VERIFY_COMPLETE in phases
+    assert OrchestrationProgress.COMPLETE in phases
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_forwards_claude_deltas() -> None:
+    """run_streaming must yield each Claude delta as IMPL_DELTA progress."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    codex = FakeCodexWithSendPrompt()
+    claude = FakeClaudeStreaming()
+    claude._deltas = ["chunk1", "chunk2", "chunk3"]
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    deltas = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        if progress.phase == OrchestrationProgress.IMPL_DELTA:
+            deltas.append(progress.text)
+
+    assert deltas == ["chunk1", "chunk2", "chunk3"]
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_does_not_second_call() -> None:
+    """Streaming must not launch a second model call — same run, same deltas."""
+    codex = FakeCodexWithSendPrompt()
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    async for _ in orchestrator.run_streaming("修复登录 bug"):
+        pass
+
+    # One analysis call (send_codex_prompt), one Claude streaming call
+    assert len(codex.prompts) == 2  # analyze + verify
+    assert len(claude.prompts) == 1  # single implementation call (streaming)
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_emits_failed_on_codex_error() -> None:
+    """run_streaming must yield FAILED event when Codex analysis fails."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    class FailingCodex:
+        def __init__(self) -> None:
+            self.prompts: list[tuple[str, str]] = []
+
+        async def send_codex_prompt(self, workspace_path: str, prompt: str) -> str:
+            self.prompts.append((workspace_path, prompt))
+            raise RuntimeError("Codex unavailable")
+
+    codex = FailingCodex()
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude)
+    phases = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        phases.append(progress.phase)
+
+    assert OrchestrationProgress.FAILED in phases
+    assert OrchestrationProgress.COMPLETE in phases
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_falls_back_to_blocking_send() -> None:
+    """When send_streaming is not available, run_streaming falls back to send()."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    codex = FakeCodexWithSendPrompt()
+    claude = FakeClaudeWithSend()  # Only has send(), no send_streaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    deltas = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        if progress.phase == OrchestrationProgress.IMPL_DELTA:
+            deltas.append(progress.text)
+
+    # Should still work (fallback to send)
+    assert len(deltas) >= 1  # Full text returned as single delta
+    assert len(claude.prompts) == 1
+
+
+# ---------------------------------------------------------------------------
+# result_status on COMPLETE events (Issue 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_complete_has_result_status_passed() -> None:
+    """COMPLETE event after verification pass must carry result_status='passed'."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    codex = FakeCodexWithSendPrompt()
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    complete_events = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        if progress.phase == OrchestrationProgress.COMPLETE:
+            complete_events.append(progress)
+
+    assert len(complete_events) == 1
+    assert complete_events[0].result_status == "passed"
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_complete_has_result_status_failed_on_stop() -> None:
+    """COMPLETE after verification stop must carry result_status='failed'."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = [
+        "Root cause analysis: fix needed in auth.py.",
+        "decision: stop\n无法完成",
+    ]
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    complete_events = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        if progress.phase == OrchestrationProgress.COMPLETE:
+            complete_events.append(progress)
+
+    assert len(complete_events) == 1
+    assert complete_events[0].result_status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_complete_has_result_status_needs_user() -> None:
+    """COMPLETE after verification needs_user must carry result_status='needs_user'."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = [
+        "Root cause analysis: fix needed in auth.py.",
+        "decision: need_user\n需要用户输入",
+    ]
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    complete_events = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        if progress.phase == OrchestrationProgress.COMPLETE:
+            complete_events.append(progress)
+
+    assert len(complete_events) == 1
+    assert complete_events[0].result_status == "needs_user"
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_failed_has_result_status_on_codex_error() -> None:
+    """COMPLETE after Codex analysis failure must carry result_status='failed'."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    class FailingCodex:
+        async def send_codex_prompt(self, workspace_path: str, prompt: str) -> str:
+            raise RuntimeError("Codex unavailable")
+
+    codex = FailingCodex()
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude)
+    complete_events = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        if progress.phase == OrchestrationProgress.COMPLETE:
+            complete_events.append(progress)
+
+    assert len(complete_events) == 1
+    assert complete_events[0].result_status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Phase event forwarding (Issue 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_emits_all_phase_events() -> None:
+    """run_streaming must emit analysis_started, impl_complete, verify_started,
+    and verify_complete phase events so the controller can forward them."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    codex = FakeCodexWithSendPrompt()
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    phases = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        phases.append(progress.phase)
+
+    assert OrchestrationProgress.ANALYSIS_STARTED in phases
+    assert OrchestrationProgress.ANALYSIS_COMPLETE in phases
+    assert OrchestrationProgress.IMPL_COMPLETE in phases
+    assert OrchestrationProgress.VERIFY_STARTED in phases
+    assert OrchestrationProgress.VERIFY_COMPLETE in phases
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_phase_events_have_text() -> None:
+    """Phase events ANALYSIS_STARTED, VERIFY_STARTED must carry user-visible text."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    codex = FakeCodexWithSendPrompt()
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        if progress.phase == OrchestrationProgress.ANALYSIS_STARTED:
+            assert "Codex" in progress.text or "分析" in progress.text
+        elif progress.phase == OrchestrationProgress.VERIFY_STARTED:
+            assert "Codex" in progress.text or "验收" in progress.text
+
+
+# ---------------------------------------------------------------------------
+# Claude streaming error handling (Issue 4)
+# ---------------------------------------------------------------------------
+
+
+class ErrorThenTextClaudeStreaming:
+    """Fake Claude that emits an error delta before text deltas."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def send_streaming(self, request):
+        from wlcodex.agent_backend import AgentStreamEvent
+        self.prompts.append(request.prompt)
+        yield AgentStreamEvent(delta="binary missing", event_type="error")
+        yield AgentStreamEvent(delta="some text after error", event_type="text")
+
+
+class PureErrorClaudeStreaming:
+    """Fake Claude that only emits error deltas."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def send_streaming(self, request):
+        from wlcodex.agent_backend import AgentStreamEvent
+        self.prompts.append(request.prompt)
+        yield AgentStreamEvent(delta="Claude binary not found", event_type="error")
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_handles_error_delta_in_stream() -> None:
+    """run_streaming must forward error deltas as text (caller decides failure)."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    codex = FakeCodexWithSendPrompt()
+    claude = ErrorThenTextClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    deltas = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        if progress.phase == OrchestrationProgress.IMPL_DELTA:
+            deltas.append(progress.text)
+
+    # Error delta text is forwarded (caller decides what to do)
+    assert "binary missing" in deltas
+    assert "some text after error" in deltas
