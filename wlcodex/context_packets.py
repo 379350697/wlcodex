@@ -9,6 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+CHINESE_OUTPUT_POLICY = (
+    "必须使用中文回复用户可见内容；不要输出英文，除非用户明确要求英文，"
+    "或代码、命令、文件名、错误原文必须保留。"
+)
+
+
 def approx_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
@@ -39,6 +45,7 @@ class ContextPacket:
     recent_user_constraints: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     token_budget: int = 0
+    output_language_policy: str = CHINESE_OUTPUT_POLICY
 
     def render(self) -> str:
         lines: list[str] = []
@@ -58,6 +65,8 @@ class ContextPacket:
             lines.append(f"recent_user_constraints: {'; '.join(self.recent_user_constraints)}")
         if self.acceptance_criteria:
             lines.append(f"acceptance_criteria: {'; '.join(self.acceptance_criteria)}")
+        if self.output_language_policy:
+            lines.append(f"output_language_policy: {self.output_language_policy}")
         if self.token_budget:
             lines.append(f"token_budget: {self.token_budget}")
         return "\n".join(lines)

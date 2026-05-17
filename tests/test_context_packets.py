@@ -184,6 +184,7 @@ def test_build_codex_analysis_packet() -> None:
     rendered = packet.render()
     assert "Analyze auth module" in rendered
     assert "auth.py" in rendered
+    assert "必须使用中文" in rendered
 
 
 def test_build_codex_verification_packet() -> None:
@@ -199,6 +200,20 @@ def test_build_codex_verification_packet() -> None:
     assert "Fix login bug" in rendered
     assert "Add null guard" in rendered
     assert "Modified 2 files" in rendered
+    assert "必须使用中文" in rendered
+
+
+def test_all_built_packets_require_chinese_output() -> None:
+    packets = [
+        build_codex_analysis_packet(user_goal="分析问题"),
+        build_claude_handoff_packet(user_goal="实现修复", codex_analysis="方案"),
+        build_codex_verification_packet(user_goal="验收修复"),
+    ]
+
+    for packet in packets:
+        rendered = packet.render()
+        assert "必须使用中文" in rendered
+        assert "不要输出英文" in rendered
 
 
 def test_packet_summary_is_compact() -> None:

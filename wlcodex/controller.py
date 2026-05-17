@@ -93,6 +93,20 @@ logger = logging.getLogger(__name__)
 HELP_TEXT = render_conversation_help()
 
 
+def _is_lightweight_greeting(text: str) -> bool:
+    normalized = text.strip().lower()
+    normalized = normalized.strip(" \t\r\n.!?。！？~～")
+    return normalized in {
+        "hi",
+        "hello",
+        "hey",
+        "你好",
+        "您好",
+        "哈喽",
+        "嗨",
+    }
+
+
 @dataclass
 class ControllerResponse:
     text: str
@@ -537,6 +551,18 @@ class CommandController:
                 workspace_alias=self._default_workspace,
             )
 
+        if _is_lightweight_greeting(text):
+            self._ledger.update_conversation_summary(
+                active.id,
+                trim_to_budget("用户打招呼，等待具体任务。", ContextBudget().conversation_summary_tokens),
+            )
+            return ControllerResponse(
+                f"你好，我在。\n\n"
+                f"当前对话：{active.title}\n"
+                f"工作区：{active.workspace_alias}\n\n"
+                f"你可以直接说要分析、修改或验收什么；需要单独指定时也可以用 /codex、/claude 或 /auto。"
+            )
+
         # --- Chief-engineer mode with Claude enabled: full closed loop ---
         claude_ready = self._claude is not None and getattr(self._claude, "enabled", False)
         if active.mode == ConversationMode.CHIEF_ENGINEER.value and claude_ready:
@@ -940,9 +966,9 @@ class CommandController:
             f"对话：{active.title}\n"
             f"轮次：第 {result.verify_round} 轮\n"
             f"步骤数：{len(result.steps)}\n"
-            f"Codex 分析：{_trim_result_text(result.codex_analysis, 300)}\n"
-            f"Claude 实施：{_trim_result_text(result.claude_implementation, 300)}\n"
-            f"验证结果：{_trim_result_text(result.verification_summary, 300)}",
+            f"Codex 分析：{_telegram_visible_model_summary(result.codex_analysis, 300)}\n"
+            f"Claude 实施：{_telegram_visible_model_summary(result.claude_implementation, 300)}\n"
+            f"验证结果：{_telegram_visible_model_summary(result.verification_summary, 300)}",
             buttons=buttons,
         )
 
@@ -1563,6 +1589,19 @@ def _trim_result_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars - 1].rstrip() + "…"
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _telegram_visible_model_summary(text: str, max_chars: int) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return "暂无内容。"
+    if not _contains_cjk(stripped) and any(char.isalpha() for char in stripped):
+        return "模型返回了非中文内容，已隐藏原文；详细记录已保留在运行日志中。"
+    return _trim_result_text(stripped, max_chars)
 
 
 def _build_worktree_done_buttons(task_id: int) -> list[list[dict[str, str]]]:

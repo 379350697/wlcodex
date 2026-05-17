@@ -328,6 +328,21 @@ def ctrl_with_claude(tmp_path: Path) -> CommandController:
 
 
 @pytest.mark.asyncio
+async def test_plain_greeting_replies_without_agent_loop(
+    ctrl_with_claude: CommandController,
+) -> None:
+    response = await ctrl_with_claude.handle_conversation_text(
+        "你好",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert "你好" in response.text
+    assert "总工程师编排完成" not in response.text
+    assert len(ctrl_with_claude._backend.turns) == 0
+    assert len(ctrl_with_claude._claude.calls) == 0
+
+
+@pytest.mark.asyncio
 async def test_claude_direct_uses_real_send_interface(ctrl_with_claude: CommandController) -> None:
     """Claude direct mode must call backend.send(), not echo/fake_response."""
     response = await ctrl_with_claude.handle(
@@ -398,6 +413,22 @@ async def test_auto_mode_runs_real_orchestration(ctrl_with_claude: CommandContro
         {"chat_id": 100, "user_id": 200},
     )
     assert "总工程师编排完成" in response.text
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_hides_english_model_snippets(
+    ctrl_with_claude: CommandController,
+) -> None:
+    response = await ctrl_with_claude.handle(
+        "/auto 修复登录 bug",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert "总工程师编排完成" in response.text
+    assert "Analysis complete" not in response.text
+    assert "Fake Claude implementation result" not in response.text
+    assert "confidence: high" not in response.text
+    assert "非中文内容" in response.text
 
 
 @pytest.mark.asyncio

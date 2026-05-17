@@ -22,6 +22,28 @@ from wlcodex.context_packets import (
 logger = logging.getLogger(__name__)
 
 
+def _analysis_says_no_implementation_needed(text: str) -> bool:
+    """Return true when Codex analysis says the request is informational/no-op."""
+    lowered = text.lower()
+    markers = (
+        "no code changes",
+        "no implementation needed",
+        "no implementation is needed",
+        "no changes needed",
+        "不需要修改",
+        "无需修改",
+        "无需实施",
+        "无需实现",
+        "无需编程",
+        "无需代码变更",
+        "无需实施计划",
+        "没有具体故障",
+        "没有具体任务",
+        "暂无可分析的根因",
+    )
+    return any(marker in lowered or marker in text for marker in markers)
+
+
 def _collect_workspace_evidence(workspace_path: str) -> tuple[list[str], str, str]:
     """Collect changed files, diff stat, and test info from workspace.
 
@@ -165,7 +187,7 @@ class ChiefEngineerOrchestrator:
             return result
 
         # Check if Codex says no implementation needed
-        if "不需要修改" in analysis or "no code changes" in analysis.lower():
+        if _analysis_says_no_implementation_needed(analysis):
             result.status = "passed"
             result.verification_summary = "Codex determined no implementation needed."
             return result

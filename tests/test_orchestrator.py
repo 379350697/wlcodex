@@ -102,6 +102,31 @@ async def test_orchestrator_needs_user() -> None:
     assert result.status == "needs_user"
 
 
+@pytest.mark.asyncio
+async def test_orchestrator_does_not_call_claude_for_noop_greeting() -> None:
+    class NoopCodex:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def echo(self, prompt: str) -> str:
+            self.calls += 1
+            return (
+                "当前没有具体故障或变更请求，只有问候语，所以暂无可分析的根因。\n"
+                "无需实施计划。"
+            )
+
+    fake_codex = NoopCodex()
+    fake_claude = FakeClaudeForOrch()
+
+    orchestrator = ChiefEngineerOrchestrator(fake_codex, fake_claude)
+    result = await orchestrator.run("你好")
+
+    assert result.status == "passed"
+    assert result.verify_round == 0
+    assert fake_codex.calls == 1
+    assert fake_claude.implement_call_count == 0
+
+
 def test_verification_decision_parse_pass() -> None:
     d = VerificationDecision.parse("decision: pass\nsummary: All checks passed")
     assert d.decision == "pass"
