@@ -867,15 +867,35 @@ class CommandController:
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
         orch = ChiefEngineerOrchestrator(self._backend, self._claude)
-        result = await orch.run(
-            command.prompt,
-            conversation_context={"workspace": workspace_path},
-        )
+        try:
+            result = await orch.run(
+                command.prompt,
+                conversation_context={"workspace": workspace_path},
+            )
+        except Exception as exc:
+            logger.exception("Chief engineer orchestration failed")
+            self._ledger.update_orchestration_run(
+                orch_run.id,
+                status="failed",
+                current_step="error",
+                last_verification_result=str(exc)[:500],
+            )
+            self._ledger.update_agent_run_status(
+                codex_analysis_run.id,
+                "failed",
+                completion_summary=str(exc)[:2000],
+            )
+            return ControllerResponse(
+                f"总工程师编排失败：{exc}\n\n"
+                f"对话：{active.title}\n"
+                f"错误已记录到运行日志。可用 /status 查看详情。"
+            )
 
         # Update Codex analysis run with result
+        agent_run_status = "done" if result.status == "passed" else "failed"
         self._ledger.update_agent_run_status(
             codex_analysis_run.id,
-            "done",
+            agent_run_status,
             completion_summary=result.codex_analysis[:2000] if result.codex_analysis else "",
         )
 

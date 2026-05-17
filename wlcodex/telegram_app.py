@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from telegram import Update
+from telegram.error import NetworkError, TelegramError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -19,6 +21,25 @@ from wlcodex.db import Ledger
 from wlcodex.streaming import StreamingRenderer
 
 logger = logging.getLogger(__name__)
+
+
+def _is_telegram_network_error(exc: Exception) -> bool:
+    """Return True if the exception is a transient Telegram network error."""
+    if isinstance(exc, (TimedOut, NetworkError)):
+        return True
+    msg = str(exc).lower()
+    return any(
+        m in msg
+        for m in ("timed out", "connect timeout", "connectionerror", "networkerror")
+    )
+
+
+def _is_message_not_modified_error(exc: Exception) -> bool:
+    return "message is not modified" in str(exc).lower()
+
+
+# Sentinel returned when a Telegram send fails due to a network error.
+SEND_FAILED = -1
 
 
 def is_authorized(
@@ -143,7 +164,8 @@ class WlCodexHandlers:
     async def send_telegram(
         self, chat_id: int, text: str, buttons: list[list[dict[str, str]]] | None = None
     ) -> int:
-        """Send a message via the bot. Returns message_id."""
+        """Send a message via the bot. Returns message_id, or SEND_FAILED (-1)
+        on transient network errors so handlers don't crash."""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         reply_markup = None
@@ -155,16 +177,35 @@ class WlCodexHandlers:
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-        msg = await self._bot.send_message(
-            chat_id=chat_id, text=text, reply_markup=reply_markup
-        )
-        return msg.message_id
+        try:
+            msg = await self._bot.send_message(
+                chat_id=chat_id, text=text, reply_markup=reply_markup
+            )
+            return msg.message_id
+        except (TimedOut, NetworkError) as exc:
+            logger.warning(
+                "Telegram send timed out: chat_id=%s text_len=%d exc=%s",
+                chat_id, len(text), exc,
+            )
+            return SEND_FAILED
+        except TelegramError as exc:
+            if _is_telegram_network_error(exc):
+                logger.warning(
+                    "Telegram send network error: chat_id=%s text_len=%d exc=%s",
+                    chat_id, len(text), exc,
+                )
+                return SEND_FAILED
+            raise
 
     async def edit_telegram(
         self, chat_id: int, message_id: int, text: str,
         buttons: list[list[dict[str, str]]] | None = None,
     ) -> None:
-        """Edit an existing message, optionally with inline keyboard buttons."""
+        """Edit an existing message, optionally with inline keyboard buttons.
+
+        Network errors are caught and logged; they do NOT fall back to
+        send_message (which would likely also fail on the same network).
+        """
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         reply_markup = None
@@ -183,8 +224,6 @@ class WlCodexHandlers:
             )
         except Exception as exc:
             if _is_message_not_modified_error(exc):
-                # Text unchanged but buttons may need applying.
-                # Append zero-width space to force the edit through.
                 try:
                     await self._bot.edit_message_text(
                         chat_id=chat_id, message_id=message_id,
@@ -194,11 +233,25 @@ class WlCodexHandlers:
                 except Exception:
                     pass
                 return
+
+            if _is_telegram_network_error(exc):
+                logger.warning(
+                    "Telegram edit network error: chat_id=%s msg_id=%s exc=%s",
+                    chat_id, message_id, exc,
+                )
+                return
+
             logger.debug("Failed to edit message %d, sending new one", message_id)
-            new_msg = await self._bot.send_message(
-                chat_id=chat_id, text=text, reply_markup=reply_markup,
-            )
-            # Update status message mapping if the old one was a task card
+            try:
+                new_msg = await self._bot.send_message(
+                    chat_id=chat_id, text=text, reply_markup=reply_markup,
+                )
+            except Exception as send_exc:
+                logger.warning(
+                    "Telegram edit fallback send failed: chat_id=%s exc=%s",
+                    chat_id, send_exc,
+                )
+                return
             for task in self._ledger.list_tasks(limit=50, include_archived=True):
                 if task.telegram_status_message_id == message_id:
                     self._ledger.set_status_message(task.id, chat_id, new_msg.message_id)
@@ -393,8 +446,14 @@ class WlCodexHandlers:
         # Use streaming renderer when buttons are present (Claude completed)
         if response.buttons:
             renderer = self.create_streaming_renderer(chat_id)
-            await renderer.start(chat_id, response.text)
-            await renderer.finish(buttons=response.buttons)
+            try:
+                await renderer.start(chat_id, response.text)
+                await renderer.finish(buttons=response.buttons)
+            except Exception as exc:
+                logger.warning(
+                    "Claude streaming renderer failed: chat_id=%s exc=%s", chat_id, exc
+                )
+                await self.send_telegram(chat_id, response.text)
         else:
             await update.effective_message.reply_text(response.text)
 
@@ -402,6 +461,12 @@ class WlCodexHandlers:
         if not self._guard(update):
             return
         chat_id = update.effective_chat.id
+
+        # Send ACK immediately so the user never sees "no response".
+        ack_msg_id = await self.send_telegram(
+            chat_id, "正在分析你的需求，请稍候..."
+        )
+
         typing_task = await self._start_typing(chat_id)
         try:
             response = await self._controller.handle(
@@ -409,12 +474,11 @@ class WlCodexHandlers:
             )
         finally:
             typing_task.cancel()
-        if response.buttons:
-            renderer = self.create_streaming_renderer(chat_id)
-            await renderer.start(chat_id, response.text)
-            await renderer.finish(buttons=response.buttons)
-        else:
-            await update.effective_message.reply_text(response.text)
+
+        # Try to edit the ACK message with results; fall back to new message.
+        await self._edit_or_send_result(
+            chat_id, ack_msg_id, response.text, response.buttons
+        )
 
     async def verify_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -458,15 +522,57 @@ class WlCodexHandlers:
         text = update.effective_message.text
         chat_id = update.effective_chat.id
 
-        # Start typing indicator while processing
+        # Send ACK immediately — the controller may run a long orchestration.
+        ack_msg_id = await self.send_telegram(
+            chat_id, "正在处理你的消息，请稍候..."
+        )
+
         typing_task = await self._start_typing(chat_id)
         try:
             response = await self._controller.handle_conversation_text(text, _ctx(update))
         finally:
             typing_task.cancel()
 
-        sent = await self._reply_with_buttons(update, response.text, response.buttons)
-        await self._track_status_from_response(response.text, chat_id, sent.message_id)
+        await self._edit_or_send_result(
+            chat_id, ack_msg_id, response.text, response.buttons
+        )
+
+    # --- Result delivery helper ---
+
+    async def _edit_or_send_result(
+        self,
+        chat_id: int,
+        ack_msg_id: int,
+        text: str,
+        buttons: list[list[dict[str, str]]] | None = None,
+    ) -> None:
+        """Edit the ACK message with results, or send a new message if edit fails."""
+        if ack_msg_id != SEND_FAILED:
+            try:
+                await self.edit_telegram(chat_id, ack_msg_id, text, buttons=buttons)
+                return
+            except Exception:
+                pass
+
+        # ACK never sent or edit failed — send a fresh message.
+        if buttons:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            keyboard = [
+                [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
+                 for b in row]
+                for row in buttons
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            try:
+                await self._bot.send_message(
+                    chat_id=chat_id, text=text, reply_markup=reply_markup,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to send result message: chat_id=%s exc=%s", chat_id, exc
+                )
+        else:
+            await self.send_telegram(chat_id, text)
 
     # --- Callback routing ---
 
@@ -690,7 +796,3 @@ def _ctx(update: Update) -> dict[str, Any]:
         "chat_id": update.effective_chat.id,
         "user_id": update.effective_user.id,
     }
-
-
-def _is_message_not_modified_error(exc: Exception) -> bool:
-    return "message is not modified" in str(exc).lower()

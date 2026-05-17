@@ -112,3 +112,98 @@ def test_recovery_does_not_pause_waiting_slot(tmp_path: Path) -> None:
     assert ledger.get_task(t_run.id).status == TaskStatus.PAUSED
     assert ledger.get_task(t_wait.id).status == TaskStatus.WAITING_SLOT
     assert ledger.get_task(t_done.id).status == TaskStatus.DONE
+
+
+# ---------------------------------------------------------------------------
+# Hanging conversation runs recovery
+# ---------------------------------------------------------------------------
+
+
+def test_recovery_marks_hanging_orchestration_runs(tmp_path: Path) -> None:
+    """Startup recovery must mark running orchestration_runs as failed."""
+    from wlcodex.models import OrchestrationStatus
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+
+    # Create a conversation first (FK constraint)
+    convo = ledger.create_conversation(
+        chat_id=123, user_id=456, title="Test",
+        mode="chief_engineer", workspace_alias="demo",
+    )
+
+    # Create orchestration runs in various states
+    orch_running = ledger.create_orchestration_run(convo.id, "goal 1")
+    # It's already 'running' by default
+
+    # Create another and manually set to passed (should be left alone)
+    orch_passed = ledger.create_orchestration_run(convo.id, "goal 2")
+    ledger.update_orchestration_run(orch_passed.id, status="passed")
+
+    orch_marked, agent_marked = ledger.mark_hanging_conversation_runs_recovery()
+
+    assert orch_marked == 1
+    assert agent_marked == 0
+
+    running_after = ledger.get_orchestration_run(orch_running.id)
+    assert running_after.status == OrchestrationStatus.FAILED.value
+
+    passed_after = ledger.get_orchestration_run(orch_passed.id)
+    assert passed_after.status == OrchestrationStatus.PASSED.value
+
+
+def test_recovery_marks_hanging_agent_runs(tmp_path: Path) -> None:
+    """Startup recovery must mark running agent_runs as failed."""
+    from wlcodex.models import AgentRunStatus
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+
+    convo = ledger.create_conversation(
+        chat_id=123, user_id=456, title="Test",
+        mode="chief_engineer", workspace_alias="demo",
+    )
+
+    agent_running = ledger.create_agent_run(
+        convo.id, agent="claude", role="implementation",
+    )
+    ledger.update_agent_run_status(agent_running.id, "running")
+
+    agent_done = ledger.create_agent_run(
+        convo.id, agent="codex", role="analysis",
+    )
+    ledger.update_agent_run_status(agent_done.id, "done")
+
+    orch_marked, agent_marked = ledger.mark_hanging_conversation_runs_recovery()
+
+    assert orch_marked == 0
+    assert agent_marked == 1
+
+    running_after = ledger.get_agent_run(agent_running.id)
+    assert running_after.status == AgentRunStatus.FAILED.value
+
+    done_after = ledger.get_agent_run(agent_done.id)
+    assert done_after.status == AgentRunStatus.DONE.value
+
+
+def test_recovery_hanging_runs_idempotent(tmp_path: Path) -> None:
+    """mark_hanging_conversation_runs_recovery is idempotent."""
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+
+    convo = ledger.create_conversation(
+        chat_id=123, user_id=456, title="Test",
+        mode="chief_engineer", workspace_alias="demo",
+    )
+    ledger.create_orchestration_run(convo.id, "goal")
+    ledger.create_agent_run(convo.id, agent="claude", role="implementation")
+    # agent_run starts as 'queued' — need to update to 'running'
+    agent_run = ledger.create_agent_run(convo.id, agent="codex", role="analysis")
+    ledger.update_agent_run_status(agent_run.id, "running")
+
+    ledger.mark_hanging_conversation_runs_recovery()
+    # Second call should not change anything further
+    orch2, agent2 = ledger.mark_hanging_conversation_runs_recovery()
+
+    assert orch2 == 0  # Already failed, not re-marked
+    assert agent2 == 0  # Already failed, not re-marked

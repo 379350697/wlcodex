@@ -23,6 +23,49 @@ from wlcodex.watchdog import TaskLivenessConfig, TaskWatchdog
 
 logger = logging.getLogger(__name__)
 
+# Startup retry configuration for Telegram Bot API initialization.
+_INITIALIZE_MAX_RETRIES = 3
+_INITIALIZE_BACKOFF_BASE = 1.5  # seconds, exponential: 1.5, 2.25, 3.375
+
+
+async def _initialize_app_with_retry(
+    app: object,
+    max_retries: int = _INITIALIZE_MAX_RETRIES,
+    backoff_base: float = _INITIALIZE_BACKOFF_BASE,
+) -> bool:
+    """Call app.initialize() with retry/backoff for transient network errors.
+
+    Returns True on success, False if all retries are exhausted.
+    Does NOT leak the bot token in log messages.
+    """
+    import asyncio as _asyncio
+    from telegram.error import NetworkError, TimedOut
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            await app.initialize()
+            return True
+        except (TimedOut, NetworkError) as exc:
+            if attempt < max_retries:
+                delay = backoff_base ** attempt
+                logger.warning(
+                    "Telegram initialize attempt %d/%d timed out, retrying in %.1fs",
+                    attempt, max_retries, delay,
+                )
+                await _asyncio.sleep(delay)
+            else:
+                logger.error(
+                    "Telegram initialize failed after %d attempts: %s",
+                    max_retries, exc,
+                )
+        except Exception as exc:
+            # Non-network errors are likely permanent (bad token, etc.) —
+            # don't retry.
+            logger.error("Telegram initialize failed with non-network error: %s", exc)
+            return False
+
+    return False
+
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
@@ -54,6 +97,14 @@ def main() -> None:
     if paused_ids:
         logger.info(
             "Recovery: paused %d active task(s): %s", len(paused_ids), paused_ids
+        )
+
+    # Recovery: mark hanging conversation runs as failed
+    orch_marked, agent_marked = ledger.mark_hanging_conversation_runs_recovery()
+    if orch_marked or agent_marked:
+        logger.info(
+            "Recovery: marked %d hanging orchestration run(s) and %d agent run(s) as failed",
+            orch_marked, agent_marked,
         )
 
     config.storage.task_log_dir.mkdir(parents=True, exist_ok=True)
@@ -181,7 +232,14 @@ def main() -> None:
         updater_started = False
         logger.info("WLCodex starting. Polling Telegram...")
         try:
-            await app.initialize()
+            # Initialize with retry for transient Telegram network errors.
+            initialized = await _initialize_app_with_retry(app)
+            if not initialized:
+                logger.critical(
+                    "Cannot connect to Telegram Bot API after retries. "
+                    "Check network and bot token. Exiting to avoid restart loop."
+                )
+                return
             app_initialized = True
             # Register Telegram BotCommands menu
             if getattr(config, "menu", None) and getattr(config.menu, "register_bot_commands", False):

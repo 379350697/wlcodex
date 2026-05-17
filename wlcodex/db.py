@@ -708,6 +708,48 @@ class Ledger:
 
         return paused_ids
 
+    def mark_hanging_conversation_runs_recovery(self) -> tuple[int, int]:
+        """Mark running orchestration_runs and agent_runs as failed on startup.
+
+        Returns (orchestration_runs_marked, agent_runs_marked).
+        """
+        now = _now()
+        orch_marked = 0
+        agent_marked = 0
+
+        orch_rows = self._conn.execute(
+            "SELECT id FROM orchestration_runs WHERE status = ?",
+            (OrchestrationStatus.RUNNING.value,),
+        ).fetchall()
+        if orch_rows:
+            ids = [int(r["id"]) for r in orch_rows]
+            placeholders = ",".join("?" for _ in ids)
+            self._conn.execute(
+                f"UPDATE orchestration_runs SET status = ?, updated_at = ? "
+                f"WHERE id IN ({placeholders})",
+                (OrchestrationStatus.FAILED.value, now, *ids),
+            )
+            orch_marked = len(ids)
+
+        agent_rows = self._conn.execute(
+            "SELECT id FROM agent_runs WHERE status = ?",
+            (AgentRunStatus.RUNNING.value,),
+        ).fetchall()
+        if agent_rows:
+            ids = [int(r["id"]) for r in agent_rows]
+            placeholders = ",".join("?" for _ in ids)
+            self._conn.execute(
+                f"UPDATE agent_runs SET status = ?, updated_at = ? "
+                f"WHERE id IN ({placeholders})",
+                (AgentRunStatus.FAILED.value, now, *ids),
+            )
+            agent_marked = len(ids)
+
+        if orch_marked or agent_marked:
+            self._conn.commit()
+
+        return orch_marked, agent_marked
+
     # --- Liveness helpers ---
 
     def list_active_tasks(self, limit: int = 100) -> list[Task]:

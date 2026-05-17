@@ -504,3 +504,74 @@ async def test_stop_with_claude_run_interrupts_claude(ctrl_with_claude: CommandC
     response = await ctrl_with_claude.handle("/stop", {"chat_id": 100, "user_id": 200})
     assert "对话" in response.text
     assert "已停止" in response.text
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator exception → run marked as failed (no hanging runs)
+# ---------------------------------------------------------------------------
+
+
+class _RaisingCodexBackend:
+    """Fake backend that raises on send_codex_prompt to test error paths."""
+
+    def __init__(self) -> None:
+        self.turns: list[tuple[str, str]] = []
+        self.steers: list[tuple] = []
+
+    async def send_codex_prompt(self, workspace: str, prompt: str) -> str:
+        raise RuntimeError("Simulated Codex backend crash")
+
+    async def create_thread(self, workspace: str) -> str:
+        return "thread-1"
+
+    async def start_turn(self, thread_id: str, prompt: str) -> None:
+        self.turns.append((thread_id, prompt))
+
+    def health(self):
+        return type("h", (), {"is_healthy": True})()
+
+    async def close(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_exception_marks_runs_as_failed(tmp_path: Path) -> None:
+    """When orchestrator raises, orchestration_run and agent_run must be marked failed."""
+    from wlcodex.controller import CommandController
+    from wlcodex.db import Ledger
+    from wlcodex.inspection import TaskInspector
+    from wlcodex.task_service import TaskService
+    from wlcodex.config import WorkspaceConfig
+    from wlcodex.models import OrchestrationStatus, AgentRunStatus
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = _RaisingCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("demo", Path("/tmp/demo"), True),
+        WorkspaceConfig("wlcodex", Path("/tmp/wlcodex"), True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+
+    claude = FakeClaudeBackendForController()
+
+    ctrl = CommandController(service, backend, inspector, ledger=ledger, claude_backend=claude)
+
+    response = await ctrl.handle(
+        "/auto 修复崩溃 bug",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert "失败" in response.text or "错误" in response.text
+
+    # Verify orchestration run is marked as failed (not left running)
+    active = ledger.get_active_conversation(100)
+    orch_runs = ledger.list_orchestration_runs(active.id)
+    assert len(orch_runs) >= 1
+    assert orch_runs[0].status == OrchestrationStatus.FAILED.value
+
+    # Verify agent run is marked as failed (not left running)
+    agent_runs = ledger.list_agent_runs(active.id)
+    analysis_runs = [r for r in agent_runs if r.agent == "codex" and r.role == "analysis"]
+    assert len(analysis_runs) >= 1
+    assert analysis_runs[0].status == AgentRunStatus.FAILED.value

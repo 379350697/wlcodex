@@ -199,3 +199,259 @@ async def test_edit_telegram_ignores_message_not_modified() -> None:
     await handlers.edit_telegram(123, 456, "same text")
 
     assert bot.sent == 0
+
+
+# ---------------------------------------------------------------------------
+# Network resilience: send_telegram / edit_telegram
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_telegram_returns_send_failed_on_timeout() -> None:
+    """send_telegram must return SEND_FAILED on TimedOut, not crash."""
+    from telegram.error import TimedOut
+    from wlcodex.telegram_app import WlCodexHandlers, SEND_FAILED
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise TimedOut("Connection timed out")
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=object(),
+        ledger=SimpleNamespace(),
+        approval_service=object(),
+        bot=Bot(),
+    )
+    result = await handlers.send_telegram(123, "test message")
+    assert result == SEND_FAILED
+
+
+@pytest.mark.asyncio
+async def test_send_telegram_returns_send_failed_on_network_error() -> None:
+    """send_telegram must return SEND_FAILED on NetworkError."""
+    from telegram.error import NetworkError
+    from wlcodex.telegram_app import WlCodexHandlers, SEND_FAILED
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise NetworkError("Network unavailable")
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=object(),
+        ledger=SimpleNamespace(),
+        approval_service=object(),
+        bot=Bot(),
+    )
+    result = await handlers.send_telegram(123, "test")
+    assert result == SEND_FAILED
+
+
+@pytest.mark.asyncio
+async def test_send_telegram_reraises_non_network_telegram_error() -> None:
+    """send_telegram must re-raise non-network TelegramError (e.g. 403 Forbidden)."""
+    from telegram.error import Forbidden
+    from wlcodex.telegram_app import WlCodexHandlers
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise Forbidden("Bot was blocked by the user")
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=object(),
+        ledger=SimpleNamespace(),
+        approval_service=object(),
+        bot=Bot(),
+    )
+    with pytest.raises(Forbidden):
+        await handlers.send_telegram(123, "test")
+
+
+@pytest.mark.asyncio
+async def test_edit_telegram_survives_network_timeout() -> None:
+    """edit_telegram must log and return on network timeout, not crash."""
+    from telegram.error import TimedOut
+    from wlcodex.telegram_app import WlCodexHandlers
+
+    class Bot:
+        def __init__(self) -> None:
+            self.sent = 0
+
+        async def edit_message_text(self, **kwargs):
+            raise TimedOut("Edit timed out")
+
+        async def send_message(self, **kwargs):
+            self.sent += 1
+            return SimpleNamespace(message_id=999)
+
+    bot = Bot()
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=object(),
+        ledger=SimpleNamespace(list_tasks=lambda *args, **kwargs: []),
+        approval_service=object(),
+        bot=bot,
+    )
+    # Must not raise
+    await handlers.edit_telegram(123, 456, "test edit")
+    # Network timeout should NOT fall back to sending a new message
+    assert bot.sent == 0
+
+
+# ---------------------------------------------------------------------------
+# ACK-before-orchestration: auto_cmd sends ACK first
+# ---------------------------------------------------------------------------
+
+
+class _FakeControllerForAutoAck:
+    """Controller that records call order for ACK-first testing."""
+
+    def __init__(self) -> None:
+        self.handle_calls: list[str] = []
+
+    async def handle(self, text: str, ctx) -> object:
+        self.handle_calls.append(text)
+        from wlcodex.controller import ControllerResponse
+        return ControllerResponse("编排完成结果")
+
+
+class _FakeUpdateForAutoAck:
+    effective_user = SimpleNamespace(id=123)
+    effective_chat = SimpleNamespace(id=456, type="private")
+    effective_message = SimpleNamespace(text="/auto fix bug")
+    update_id = 1
+
+
+@pytest.mark.asyncio
+async def test_auto_cmd_sends_ack_before_controller_call() -> None:
+    """auto_cmd must send an ACK message BEFORE calling controller.handle()."""
+    from wlcodex.telegram_app import WlCodexHandlers, SEND_FAILED
+
+    send_order: list[str] = []
+    sent_messages: list[str] = []
+
+    class Bot:
+        async def send_message(self, chat_id, text, **kwargs):
+            send_order.append("send:" + text[:20])
+            sent_messages.append(text)
+            return SimpleNamespace(message_id=len(sent_messages))
+
+        async def send_chat_action(self, chat_id, action, **kwargs):
+            pass
+
+        async def edit_message_text(self, chat_id, message_id, text, **kwargs):
+            send_order.append("edit:" + text[:20])
+
+    bot = Bot()
+    controller = _FakeControllerForAutoAck()
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=controller,
+        ledger=SimpleNamespace(
+            list_tasks=lambda *a, **kw: [],
+            record_telegram_update=lambda *a, **kw: None,
+        ),
+        approval_service=object(),
+        bot=bot,
+    )
+
+    update = _FakeUpdateForAutoAck()
+    await handlers.auto_cmd(update, SimpleNamespace())
+
+    # The first send must be the ACK
+    assert len(sent_messages) >= 1
+    assert "稍候" in sent_messages[0] or "分析" in sent_messages[0]
+    # Controller must have been called (after ACK send)
+    assert len(controller.handle_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_cmd_survives_ack_send_failure() -> None:
+    """auto_cmd must still run orchestration even when ACK send fails."""
+    from telegram.error import TimedOut
+    from wlcodex.telegram_app import WlCodexHandlers, SEND_FAILED
+
+    controller = _FakeControllerForAutoAck()
+
+    class Bot:
+        async def send_message(self, chat_id, text, **kwargs):
+            raise TimedOut("ACK send timed out")
+
+        async def send_chat_action(self, chat_id, action, **kwargs):
+            pass
+
+        async def edit_message_text(self, chat_id, message_id, text, **kwargs):
+            pass
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=controller,
+        ledger=SimpleNamespace(
+            list_tasks=lambda *a, **kw: [],
+            record_telegram_update=lambda *a, **kw: None,
+        ),
+        approval_service=object(),
+        bot=Bot(),
+    )
+
+    update = _FakeUpdateForAutoAck()
+    # Must not raise — handler survives ACK failure
+    await handlers.auto_cmd(update, SimpleNamespace())
+    # Controller must still have been called
+    assert len(controller.handle_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_cmd_survives_streaming_renderer_failure() -> None:
+    """claude_cmd must not crash when streaming renderer fails with network error."""
+    from telegram.error import TimedOut
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.controller import ControllerResponse
+
+    sent_count = 0
+
+    class Bot:
+        async def send_message(self, chat_id, text, **kwargs):
+            nonlocal sent_count
+            sent_count += 1
+            return SimpleNamespace(message_id=sent_count)
+
+        async def send_chat_action(self, chat_id, action, **kwargs):
+            pass
+
+        async def edit_message_text(self, chat_id, message_id, text, **kwargs):
+            raise TimedOut("Edit timed out during streaming")
+
+    class FakeCtrlWithButtons:
+        def __init__(self) -> None:
+            self.handle_calls: list[str] = []
+
+        async def handle(self, text: str, ctx) -> ControllerResponse:
+            self.handle_calls.append(text)
+            return ControllerResponse(
+                "Claude 已完成。",
+                buttons=[[{"text": "查看 diff", "callback_data": "conv:1:diff"}]],
+            )
+
+    controller = FakeCtrlWithButtons()
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=controller,
+        ledger=SimpleNamespace(
+            list_tasks=lambda *a, **kw: [],
+            record_telegram_update=lambda *a, **kw: None,
+        ),
+        approval_service=object(),
+        bot=Bot(),
+    )
+
+    update = _FakeUpdateForAutoAck()
+    update.effective_message = SimpleNamespace(text="/claude fix auth")
+    # Must not raise
+    await handlers.claude_cmd(update, SimpleNamespace())
+    # Controller must have been called
+    assert len(controller.handle_calls) == 1

@@ -317,6 +317,73 @@ async def test_recovery_notification_sends_for_paused_restart_task(tmp_path: Pat
     assert "已暂停" in edited[0][2]
 
 
+# ---------------------------------------------------------------------------
+# Initialize-with-retry tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeAppWithInitialize:
+    """Fake PTB Application that counts initialize attempts."""
+
+    def __init__(self, fail_count: int = 0, fail_with: type[Exception] | None = None) -> None:
+        self.initialize_count = 0
+        self._fail_count = fail_count
+        self._fail_with = fail_with
+
+    async def initialize(self) -> None:
+        self.initialize_count += 1
+        if self.initialize_count <= self._fail_count:
+            if self._fail_with:
+                raise self._fail_with("Simulated timeout")
+            raise RuntimeError("Simulated failure")
+
+
+@pytest.mark.asyncio
+async def test_initialize_app_with_retry_succeeds_first_try() -> None:
+    """_initialize_app_with_retry returns True on first success."""
+    from wlcodex.main import _initialize_app_with_retry
+
+    app = _FakeAppWithInitialize(fail_count=0)
+    result = await _initialize_app_with_retry(app, max_retries=3, backoff_base=0.01)
+    assert result is True
+    assert app.initialize_count == 1
+
+
+@pytest.mark.asyncio
+async def test_initialize_app_with_retry_succeeds_after_retries() -> None:
+    """_initialize_app_with_retry retries on network errors and succeeds."""
+    from telegram.error import TimedOut
+    from wlcodex.main import _initialize_app_with_retry
+
+    app = _FakeAppWithInitialize(fail_count=2, fail_with=TimedOut)
+    result = await _initialize_app_with_retry(app, max_retries=3, backoff_base=0.01)
+    assert result is True
+    assert app.initialize_count == 3
+
+
+@pytest.mark.asyncio
+async def test_initialize_app_with_retry_fails_after_all_retries() -> None:
+    """_initialize_app_with_retry returns False when all retries exhausted."""
+    from telegram.error import NetworkError
+    from wlcodex.main import _initialize_app_with_retry
+
+    app = _FakeAppWithInitialize(fail_count=3, fail_with=NetworkError)
+    result = await _initialize_app_with_retry(app, max_retries=3, backoff_base=0.01)
+    assert result is False
+    assert app.initialize_count == 3
+
+
+@pytest.mark.asyncio
+async def test_initialize_app_with_retry_does_not_retry_non_network_error() -> None:
+    """_initialize_app_with_retry does NOT retry non-network errors (e.g. bad token)."""
+    from wlcodex.main import _initialize_app_with_retry
+
+    app = _FakeAppWithInitialize(fail_count=1, fail_with=ValueError)
+    result = await _initialize_app_with_retry(app, max_retries=3, backoff_base=0.01)
+    assert result is False
+    assert app.initialize_count == 1  # Only tried once, no retry
+
+
 def _write_test_config_with_path(config_path: Path, sqlite_path: Path, task_log_dir: Path) -> None:
     config_path.parent.mkdir(exist_ok=True)
     config_path.write_text(
