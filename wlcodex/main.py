@@ -247,7 +247,10 @@ def main() -> None:
             if getattr(config, "menu", None) and getattr(config.menu, "register_bot_commands", False):
                 from telegram import BotCommand
                 commands = [
-                    BotCommand(cmd, desc) for cmd, desc in build_bot_commands()
+                    BotCommand(cmd, desc)
+                    for cmd, desc in build_bot_commands(
+                        getattr(config.interaction, "profile", "natural")
+                    )
                 ]
                 await app.bot.set_my_commands(commands)
                 logger.info("Registered %d bot commands in Telegram menu", len(commands))

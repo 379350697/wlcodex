@@ -171,3 +171,13 @@ def test_render_task_card_waiting_slot_shows_blocker_and_position() -> None:
     text = render_task_card(task, blocker_id=1, blocker_status="运行中", queue_position=1)
     assert "阻塞者：#1（运行中）" in text
     assert "队列位置：第 1 位" in text
+
+
+def test_render_conversation_help_is_compact_for_natural_profile() -> None:
+    from wlcodex.status import render_conversation_help
+
+    text = render_conversation_help(profile="natural")
+
+    assert "直接发消息" in text
+    assert "/task" not in text
+    assert len(text.splitlines()) <= 8

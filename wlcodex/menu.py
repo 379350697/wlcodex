@@ -23,12 +23,23 @@ _PRIMARY_COMMANDS: list[tuple[str, str]] = [
     ("help", "帮助"),
 ]
 
+_NATURAL_COMMANDS: list[tuple[str, str]] = [
+    ("new", "新对话"),
+    ("stop", "停止"),
+    ("status", "状态"),
+    ("model", "模型"),
+    ("diff", "查看 diff"),
+    ("help", "帮助"),
+]
 
-def build_bot_commands() -> list[tuple[str, str]]:
-    """Return primary bot commands as (command, description) pairs.
+
+def build_bot_commands(profile: str = "natural") -> list[tuple[str, str]]:
+    """Return bot commands as (command, description) pairs.
 
     Legacy commands like /task, /continue, /steer, /tail, /events,
     /archive, /fork, /codex-sessions are excluded from the menu to
     keep the primary UX conversation-first.
     """
+    if profile == "natural":
+        return list(_NATURAL_COMMANDS)
     return list(_PRIMARY_COMMANDS)

@@ -263,7 +263,20 @@ def render_conversation_status(
     return "\n".join(lines)
 
 
-def render_conversation_help() -> str:
+def render_conversation_help(profile: str = "natural") -> str:
+    if profile == "natural":
+        return "\n".join(
+            [
+                "WLCodex",
+                "",
+                "直接发消息就能继续当前对话。",
+                "/new 新对话",
+                "/status 看状态",
+                "/diff 看变更",
+                "/model 切模型",
+                "/help 帮助",
+            ]
+        )
     return """WLCodex — 你的总工程师驾驶舱
 
 对话模式：

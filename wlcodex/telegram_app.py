@@ -281,14 +281,20 @@ class WlCodexHandlers:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
-        from wlcodex.status import render_help
-        await update.effective_message.reply_text(render_help())
+        profile_name = getattr(
+            getattr(self._config, "interaction", None), "profile", "legacy"
+        )
+        from wlcodex.status import render_conversation_help
+        await update.effective_message.reply_text(render_conversation_help(profile=profile_name))
 
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
-        from wlcodex.status import render_help
-        await update.effective_message.reply_text(render_help())
+        profile_name = getattr(
+            getattr(self._config, "interaction", None), "profile", "legacy"
+        )
+        from wlcodex.status import render_conversation_help
+        await update.effective_message.reply_text(render_conversation_help(profile=profile_name))
 
     async def task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
