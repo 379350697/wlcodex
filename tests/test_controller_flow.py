@@ -178,7 +178,7 @@ async def test_new_conversation_command(ctrl: CommandController) -> None:
 async def test_codex_direct_creates_task(ctrl: CommandController) -> None:
     response = await ctrl.handle("/codex 分析 router.py", {"chat_id": 200, "user_id": 300})
 
-    assert "Codex" in response.text or "分析" in response.text
+    assert "看一下" in response.text
     tasks = ctrl._service.list_tasks()
     assert len(tasks) >= 1
 
@@ -192,7 +192,7 @@ async def test_plain_text_creates_conversation_and_task(ctrl: CommandController)
         "帮我分析 router.py",
         {"chat_id": 100, "user_id": 200},
     )
-    assert "Codex" in response.text or "分析" in response.text
+    assert "看一下" in response.text
 
 
 @pytest.mark.asyncio

@@ -93,3 +93,33 @@ def test_unknown_command_raises() -> None:
 def test_parse_stop_with_args_ignores() -> None:
     cmd = parse_command("/stop 随便什么东西")
     assert isinstance(cmd, StopCurrentCommand)
+
+
+@pytest.mark.asyncio
+async def test_lightweight_greeting_is_short_and_hides_metadata(tmp_path):
+    from pathlib import Path
+    from wlcodex.codex_backend import FakeCodexBackend
+    from wlcodex.config import WorkspaceConfig
+    from wlcodex.controller import CommandController
+    from wlcodex.db import Ledger
+    from wlcodex.inspection import TaskInspector
+    from wlcodex.task_service import TaskService
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("demo", Path("/tmp/demo"), True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    controller = CommandController(service, backend, inspector, ledger=ledger)
+
+    response = await controller.handle_conversation_text(
+        "你好",
+        {"chat_id": 123, "user_id": 456},
+    )
+
+    assert response.text == "你好！直接说需要我看什么就行。"
+    assert "工作区" not in response.text
+    assert "当前对话" not in response.text
+    assert "模式" not in response.text

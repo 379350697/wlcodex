@@ -556,12 +556,7 @@ class CommandController:
                 active.id,
                 trim_to_budget("用户打招呼，等待具体任务。", ContextBudget().conversation_summary_tokens),
             )
-            return ControllerResponse(
-                f"你好，我在。\n\n"
-                f"当前对话：{active.title}\n"
-                f"工作区：{active.workspace_alias}\n\n"
-                f"你可以直接说要分析、修改或验收什么；需要单独指定时也可以用 /codex、/claude 或 /auto。"
-            )
+            return ControllerResponse("你好！直接说需要我看什么就行。")
 
         # --- Chief-engineer mode with Claude enabled: full closed loop ---
         claude_ready = self._claude is not None and getattr(self._claude, "enabled", False)
@@ -623,11 +618,7 @@ class CommandController:
         ]]
 
         return ControllerResponse(
-            f"对话「{active.title}」\n\n"
-            f"正在分析你的需求…\n"
-            f"工作区：{active.workspace_alias}\n"
-            f"模式：{MODE_LABELS.get(active.mode, active.mode)}\n\n"
-            f"提示：当分析完成后会通知你。",
+            "我先看一下。完成后会把结论发在这里。",
             buttons=buttons,
         )
 
@@ -734,11 +725,7 @@ class CommandController:
         ]]
 
         return ControllerResponse(
-            f"Codex 直聊 — 对话「{active.title}」\n\n"
-            f"正在分析你的需求…\n"
-            f"工作区：{active.workspace_alias}\n"
-            f"模式：{MODE_LABELS.get(active.mode, active.mode)}\n\n"
-            f"提示：Codex 直聊模式不会自动实施代码修改。",
+            "我先看一下。完成后会把结论发在这里。",
             buttons=buttons,
         )
 
