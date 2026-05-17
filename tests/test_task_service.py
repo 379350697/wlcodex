@@ -97,6 +97,35 @@ def test_apply_backend_event_updates_state(service: TaskService) -> None:
     assert updated.active_turn_id == "turn-1"
 
 
+def test_apply_backend_event_finds_task_by_bound_codex_thread_alias(
+    service: TaskService,
+) -> None:
+    from wlcodex.codex_backend import BackendEvent
+
+    task = service.reserve_task("demo", "Hidden orchestration prompt")
+    service.set_task_thread(task.id, "analysis-thread")
+    service.set_task_thread(task.id, "verify-thread")
+
+    service.apply_backend_event(BackendEvent(
+        event_type="approval_requested",
+        payload={
+            "threadId": "analysis-thread",
+            "codexRequestId": "req-analysis",
+            "codexItemId": "item-1",
+            "codexTurnId": "turn-1",
+            "kind": "command",
+            "summary": "Run tests",
+            "command": "pytest",
+        },
+    ))
+
+    updated = service.get_task(task.id)
+    approvals = service._ledger.pending_approvals(task.id)
+    assert updated.codex_thread_id == "verify-thread"
+    assert updated.status == TaskStatus.WAITING_APPROVAL
+    assert [approval.codex_request_id for approval in approvals] == ["req-analysis"]
+
+
 def test_complete_turn_sets_done(service: TaskService) -> None:
     from wlcodex.codex_backend import BackendEvent
 

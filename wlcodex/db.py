@@ -73,6 +73,19 @@ class Ledger:
             CREATE INDEX IF NOT EXISTS idx_tasks_workspace_status
                 ON tasks(workspace_alias, status);
 
+            CREATE TABLE IF NOT EXISTS task_thread_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                thread_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES tasks(id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_task_thread_bindings_thread_id
+                ON task_thread_bindings(thread_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_task_thread_bindings_task_thread
+                ON task_thread_bindings(task_id, thread_id);
+
             CREATE TABLE IF NOT EXISTS task_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id INTEGER NOT NULL,
@@ -298,11 +311,19 @@ class Ledger:
                 ON approval_requests(task_id, codex_request_id)
             """
         )
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO task_thread_bindings (task_id, thread_id, created_at)
+            SELECT id, codex_thread_id, updated_at
+            FROM tasks
+            WHERE codex_thread_id IS NOT NULL AND codex_thread_id != ''
+            """
+        )
 
         # Record schema version
         self._conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
-            ("schema_version", "2"),
+            ("schema_version", "3"),
         )
 
         self._conn.commit()
@@ -341,8 +362,17 @@ class Ledger:
                 now,
             ),
         )
+        task_id = int(cur.lastrowid)
+        if codex_thread_id:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO task_thread_bindings (task_id, thread_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (task_id, codex_thread_id, now),
+            )
         self._conn.commit()
-        return self.get_task(int(cur.lastrowid))
+        return self.get_task(task_id)
 
     def get_task(self, task_id: int) -> Task:
         row = self._conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -658,11 +688,53 @@ class Ledger:
     # --- Thread id helper ---
 
     def set_thread_id(self, task_id: int, codex_thread_id: str) -> None:
+        now = _now()
         self._conn.execute(
             "UPDATE tasks SET codex_thread_id = ?, updated_at = ? WHERE id = ?",
-            (codex_thread_id, _now(), task_id),
+            (codex_thread_id, now, task_id),
+        )
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO task_thread_bindings (task_id, thread_id, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (task_id, codex_thread_id, now),
         )
         self._conn.commit()
+
+    def list_task_thread_ids(self, task_id: int) -> list[str]:
+        rows = self._conn.execute(
+            """
+            SELECT thread_id FROM task_thread_bindings
+            WHERE task_id = ?
+            ORDER BY id ASC
+            """,
+            (task_id,),
+        ).fetchall()
+        return [str(row["thread_id"]) for row in rows]
+
+    def find_task_by_thread_id(self, thread_id: str) -> Task | None:
+        row = self._conn.execute(
+            """
+            SELECT tasks.* FROM tasks
+            JOIN task_thread_bindings ON task_thread_bindings.task_id = tasks.id
+            WHERE task_thread_bindings.thread_id = ?
+            ORDER BY task_thread_bindings.id DESC
+            LIMIT 1
+            """,
+            (thread_id,),
+        ).fetchone()
+        if row is None:
+            row = self._conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE codex_thread_id = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (thread_id,),
+            ).fetchone()
+        return _task(row) if row is not None else None
 
     def set_worktree_info(
         self, task_id: int, worktree_path: str, worktree_branch: str

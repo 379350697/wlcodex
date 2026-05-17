@@ -28,7 +28,12 @@ class InvalidTransition(RuntimeError):
 
 
 _VALID_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.QUEUED: {TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.ABORTED},
+    TaskStatus.QUEUED: {
+        TaskStatus.RUNNING,
+        TaskStatus.WAITING_APPROVAL,
+        TaskStatus.FAILED,
+        TaskStatus.ABORTED,
+    },
     TaskStatus.RUNNING: {
         TaskStatus.WAITING_APPROVAL,
         TaskStatus.DONE,
@@ -702,6 +707,8 @@ class TaskService:
             existing_approval = self._ledger.get_approval_by_codex_id(
                 codex_request_id, task_id=task.id
             )
+            if codex_turn_id and task.active_turn_id is None:
+                self._ledger.set_active_turn(task.id, codex_turn_id)
             self._ledger.create_approval(
                 task_id=task.id,
                 codex_request_id=codex_request_id,
@@ -874,10 +881,7 @@ class TaskService:
             pass  # Best effort — inspection falls back to SQLite events
 
     def _find_by_thread(self, thread_id: str) -> Task | None:
-        for task in self._ledger.list_tasks(limit=100):
-            if task.codex_thread_id == thread_id:
-                return task
-        return None
+        return self._ledger.find_task_by_thread_id(thread_id)
 
     def _transition(self, task_id: int, new_status: TaskStatus) -> None:
         task = self._ledger.get_task(task_id)

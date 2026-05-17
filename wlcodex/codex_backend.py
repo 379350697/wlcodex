@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 import logging
 import uuid
@@ -206,7 +206,13 @@ class FakeCodexBackend:
             yield event
         self._injected_events.clear()
 
-    async def send_codex_prompt(self, workspace_path: str, prompt: str) -> str:
+    async def send_codex_prompt(
+        self,
+        workspace_path: str,
+        prompt: str,
+        *,
+        on_thread_created: Callable[[str], None] | None = None,
+    ) -> str:
         """Send a prompt to Codex and return the response text synchronously.
 
         For the fake backend, returns programmed responses from
@@ -214,8 +220,10 @@ class FakeCodexBackend:
         """
         self._codex_call_count += 1
         # Record turn like real backend does
-        await self.create_thread(workspace_path)
-        await self.start_turn("fake-thread", prompt)
+        thread_id = await self.create_thread(workspace_path)
+        if on_thread_created is not None:
+            on_thread_created(thread_id)
+        await self.start_turn(thread_id, prompt)
         if self._codex_call_count <= len(self._codex_responses):
             return self._codex_responses[self._codex_call_count - 1]
         return (
@@ -498,7 +506,13 @@ class AppServerCodexBackend:
             "turnId": turn_id,
         })
 
-    async def send_codex_prompt(self, workspace_path: str, prompt: str) -> str:
+    async def send_codex_prompt(
+        self,
+        workspace_path: str,
+        prompt: str,
+        *,
+        on_thread_created: Callable[[str], None] | None = None,
+    ) -> str:
         """Send prompt to Codex and block until its turn completes. Returns response text.
 
         Filters events by the specific thread_id/turn_id created here to avoid
@@ -510,6 +524,8 @@ class AppServerCodexBackend:
         prompt_events = self._subscribe_events()
         try:
             thread_id = await self.create_thread(workspace_path)
+            if on_thread_created is not None:
+                on_thread_created(thread_id)
             turn_id = await self.start_turn(thread_id, prompt)
         except Exception:
             self._unsubscribe_events(prompt_events)

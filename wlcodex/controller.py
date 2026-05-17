@@ -124,6 +124,27 @@ class ControllerResponse:
     already_rendered: bool = False
 
 
+class _TaskBoundCodexBackend:
+    def __init__(self, backend: object, service: TaskService, task_id: int) -> None:
+        self._backend = backend
+        self._service = service
+        self._task_id = task_id
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._backend, name)
+
+    def _bind_thread(self, thread_id: str) -> None:
+        self._service.set_task_thread(self._task_id, thread_id)
+
+    async def send_codex_prompt(self, workspace_path: str, prompt: str) -> str:
+        send_codex_prompt = getattr(self._backend, "send_codex_prompt")
+        return await send_codex_prompt(
+            workspace_path,
+            prompt,
+            on_thread_created=self._bind_thread,
+        )
+
+
 class CommandController:
     def __init__(
         self,
@@ -1017,7 +1038,6 @@ class CommandController:
         self._ledger.update_agent_run_status(codex_analysis_run.id, "running")
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
-        orch = ChiefEngineerOrchestrator(self._backend, self._claude)
 
         # Streaming path: forward live progress to interaction renderer
         if self._interaction_renderer is not None:
@@ -1030,6 +1050,10 @@ class CommandController:
                 telegram_chat_id=chat_id,
             )
             self._ledger.set_conversation_active_task(active.id, task.id)
+            orch = ChiefEngineerOrchestrator(
+                _TaskBoundCodexBackend(self._backend, self._service, task.id),
+                self._claude,
+            )
 
             await self._interaction_renderer.handle(
                 InteractionEvent(
@@ -1266,6 +1290,7 @@ class CommandController:
             return ControllerResponse("", already_rendered=True)
 
         # Legacy path: blocking orchestration
+        orch = ChiefEngineerOrchestrator(self._backend, self._claude)
         try:
             result = await orch.run(
                 command.prompt,

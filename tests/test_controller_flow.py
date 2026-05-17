@@ -378,6 +378,30 @@ class StreamingClaudeWritesTrackedFile:
         yield AgentStreamEvent(delta="Implementation complete.", event_type="text")
 
 
+class RecordingThreadCodexBackend(FakeCodexBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self._codex_responses = [
+            "Root cause: tracked.txt needs a change. Implementation needed.",
+            "decision: pass\nsummary: Verified changed workspace.",
+        ]
+        self.created_prompt_threads: list[str] = []
+
+    async def send_codex_prompt(
+        self,
+        workspace_path: str,
+        prompt: str,
+        *,
+        on_thread_created=None,
+    ) -> str:
+        thread_id = f"hidden-thread-{len(self.created_prompt_threads) + 1}"
+        self.created_prompt_threads.append(thread_id)
+        if on_thread_created is not None:
+            on_thread_created(thread_id)
+        await self.start_turn(thread_id, prompt)
+        return self._codex_responses[len(self.created_prompt_threads) - 1]
+
+
 class StreamingClaudeError:
     enabled = True
 
@@ -590,6 +614,43 @@ async def test_streaming_auto_records_full_ledger_and_real_diff(tmp_path: Path) 
     ]
     assert completed_events
     assert completed_events[-1].metadata["has_diff"] is True
+
+
+@pytest.mark.asyncio
+async def test_streaming_auto_binds_all_hidden_codex_threads_to_task(tmp_path: Path) -> None:
+    """Hidden Codex analysis/verify threads must stay routable for EventBridge approvals."""
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = RecordingThreadCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    renderer = RecordingInteractionRenderer()
+    claude = StreamingClaudeWritesTrackedFile(workspace)
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=claude,
+        interaction_renderer=renderer,
+    )
+
+    response = await ctrl.handle(
+        "/auto 修改 tracked.txt",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert response.already_rendered
+    active = ledger.get_active_conversation(100)
+    assert active is not None
+    assert active.active_codex_task_id is not None
+    thread_ids = ledger.list_task_thread_ids(active.active_codex_task_id)
+    assert thread_ids == ["hidden-thread-1", "hidden-thread-2"]
 
 
 @pytest.mark.asyncio

@@ -94,6 +94,46 @@ async def test_backend_archive_thread() -> None:
 
 
 @pytest.mark.asyncio
+async def test_app_server_send_codex_prompt_reports_created_thread_before_turn() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+    callbacks: list[str] = []
+    start_seen: list[list[str]] = []
+
+    async def create_thread(_workspace_path: str) -> str:
+        return "target-thread"
+
+    async def start_turn(_thread_id: str, _prompt: str) -> str:
+        start_seen.append(list(callbacks))
+        backend._emit(BackendEvent("agent_message_delta", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+            "delta": "ok",
+        }))
+        backend._emit(BackendEvent("turn_completed", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+        }))
+        return "target-turn"
+
+    backend.create_thread = create_thread
+    backend.start_turn = start_turn
+
+    result = await backend.send_codex_prompt(
+        "/tmp/demo",
+        "prompt",
+        on_thread_created=callbacks.append,
+    )
+
+    assert result == "ok"
+    assert callbacks == ["target-thread"]
+    assert start_seen == [["target-thread"]]
+    assert backend._event_subscribers == []
+
+
+@pytest.mark.asyncio
 async def test_app_server_send_codex_prompt_uses_independent_turn_subscription() -> None:
     backend = AppServerCodexBackend(
         endpoint="ws://127.0.0.1:17431",
