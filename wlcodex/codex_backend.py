@@ -494,33 +494,57 @@ class AppServerCodexBackend:
         })
 
     async def send_codex_prompt(self, workspace_path: str, prompt: str) -> str:
-        """Send prompt to Codex and block until turn completes. Returns response text."""
+        """Send prompt to Codex and block until its turn completes. Returns response text.
+
+        Filters events by the specific thread_id/turn_id created here to avoid
+        consuming events from concurrent tasks (multi-task race condition).
+        """
         import asyncio as _asyncio
         thread_id = await self.create_thread(workspace_path)
         turn_id = await self.start_turn(thread_id, prompt)
 
         deltas: list[str] = []
         deadline = _asyncio.get_event_loop().time() + self._request_timeout_seconds
+        saw_turn_started = False
 
-        event_iter = self.events()
         while True:
             remaining = deadline - _asyncio.get_event_loop().time()
             if remaining <= 0:
                 break
-            try:
-                event = await _asyncio.wait_for(event_iter.__anext__(), timeout=min(remaining, 5.0))
-            except _asyncio.TimeoutError:
-                continue
-            if event.event_type == "agent_message_delta":
-                delta = event.payload.get("delta", "")
-                if isinstance(delta, str):
-                    deltas.append(delta)
-            elif event.event_type == "turn_completed":
-                break
-            elif event.event_type == "turn_failed":
-                error = event.payload.get("error", "unknown error")
-                deltas.append(f"\n[Turn failed: {error}]")
-                break
+            # Poll with a short timeout so we can re-check the deadline and
+            # filter events from the shared queue without starving.
+            await _asyncio.sleep(0.05)
+            while self._event_queue:
+                event = self._event_queue[0]
+                event_tid = str(event.payload.get("threadId", ""))
+                if event_tid and event_tid != thread_id:
+                    # This event belongs to a different thread — leave it in
+                    # the queue for the consumer that owns it.
+                    break
+                self._event_queue.pop(0)
+
+                if event.event_type == "turn_started":
+                    ev_turn = str(event.payload.get("turnId", ""))
+                    if ev_turn == turn_id:
+                        saw_turn_started = True
+                elif event.event_type == "agent_message_delta":
+                    if not saw_turn_started:
+                        continue  # delta from an earlier turn on same thread
+                    delta = event.payload.get("delta", "")
+                    if isinstance(delta, str):
+                        deltas.append(delta)
+                elif event.event_type == "turn_completed":
+                    ev_turn = str(event.payload.get("turnId", ""))
+                    if ev_turn == turn_id or not saw_turn_started:
+                        # Accept match by turn_id; if turn_started was never
+                        # seen (race), accept the first completed turn.
+                        break
+                elif event.event_type in ("turn_failed",):
+                    ev_turn = str(event.payload.get("turnId", ""))
+                    if ev_turn == turn_id or (event_tid == thread_id and not saw_turn_started):
+                        error = event.payload.get("error", "unknown error")
+                        deltas.append(f"\n[Turn failed: {error}]")
+                        break
 
         if not deltas:
             return "(no Codex response)"

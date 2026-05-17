@@ -168,26 +168,30 @@ def render_health_card(
 
 
 def render_help() -> str:
-    return """WLCodex — Telegram 远程 Codex 控制台
+    return """WLCodex — 总工程师驾驶舱
 
-命令：
-  /help — 查看帮助
-  /health — 查看后端健康状态
-  /task <workspace> <prompt> — 创建新的 Codex 任务
-  /task <id> — 查看任务详情
-  /tasks — 查看活跃任务
-  /status — 同 /tasks
-  /continue <id> <prompt> — 继续历史任务线程
-  /steer <id> <prompt> — 给当前运行中的 turn 追加指令
-  /tail <id> — 查看最近本地日志
-  /events <id> — 查看事件记录
-  /diff <id> — 查看最近文件变更
-  /files <id> — 查看涉及文件
-  /pause <id> — 暂停运行中的任务
-  /abort <id> — 中止运行中的任务
-  /archive <id> — 归档已结束任务
-  /fork <id> <prompt> — 从任务 fork 新线程
-  /sessions — 查看 Codex 线程映射
+对话模式 — 直接发消息开始：
+  • 默认交给总工程师（Codex 分析 + 验收）
+  • /codex <提示> — 直接和 Codex 对话
+  • /claude <提示> — 直接叫 Claude Code 实施
+  • /auto <提示> — 完整 Codex 分析 → Claude 实施 → Codex 验收
+
+常用命令：
+  /new — 开始新对话
+  /stop — 停止当前运行
+  /status — 查看当前对话和任务
+  /sessions — 查看会话列表
+  /switch <工作区> — 切换工作区
+  /model — 切换或查看当前模型
+  /diff — 查看变更
+  /files — 相关文件
+  /verify — Codex 验收
+  /health — 系统健康
+  /help — 此帮助
+
+高级命令（诊断用）：
+  /task /continue /steer /tail /events
+  /pause /abort /archive /fork
 
 安全规则：
   • 只允许私聊

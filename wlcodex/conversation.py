@@ -18,7 +18,7 @@ def mode_from_command(command_name: str) -> str:
         "claude": ConversationMode.CLAUDE_DIRECT.value,
         "auto": ConversationMode.CHIEF_ENGINEER.value,
     }
-    return mapping.get(command_name.lower(), ConversationMode.CODEX_DIRECT.value)
+    return mapping.get(command_name.lower(), ConversationMode.CHIEF_ENGINEER.value)
 
 
 def is_direct_agent_mode(mode: str) -> bool:

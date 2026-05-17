@@ -140,6 +140,8 @@ def main() -> None:
     controller = CommandController(
         task_service, backend, inspector,
         ledger=ledger, claude_backend=claude_backend,
+        default_mode=config.conversation.default_mode,
+        default_workspace=config.conversation.default_workspace,
     )
 
     # Telegram app

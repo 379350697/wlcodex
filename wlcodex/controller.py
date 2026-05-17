@@ -22,8 +22,10 @@ from wlcodex.conversation_callback import (
     encode_conversation_callback,
 )
 from wlcodex.context_packets import (
+    ContextBudget,
     build_codex_analysis_packet,
     build_codex_verification_packet as make_verification_packet,
+    trim_to_budget,
 )
 from wlcodex.router import (
     AbortCommand,
@@ -54,6 +56,7 @@ from wlcodex.router import (
     parse_command,
 )
 from wlcodex.status import (
+    MODE_LABELS,
     render_conversation_help,
     render_conversation_status,
     render_session_list,
@@ -104,12 +107,16 @@ class CommandController:
         inspector: TaskInspector,
         ledger: object | None = None,
         claude_backend: object | None = None,
+        default_mode: str = "chief_engineer",
+        default_workspace: str = "wlcodex",
     ) -> None:
         self._service = task_service
         self._backend = backend
         self._inspector = inspector
         self._ledger = ledger
         self._claude = claude_backend
+        self._default_mode = default_mode
+        self._default_workspace = default_workspace
 
     async def handle(
         self, text: str, telegram_context: dict[str, Any] | None = None
@@ -521,16 +528,21 @@ class CommandController:
                 chat_id=chat_id,
                 user_id=user_id,
                 title=title,
-                mode=ConversationMode.CODEX_DIRECT.value,
-                workspace_alias="wlcodex",
+                mode=self._default_mode,
+                workspace_alias=self._default_workspace,
             )
 
-        # Build compact context packet — never include raw Telegram transcript
+        # Build compact context packet — never include raw Telegram transcript.
+        # Enforce token budget on conversation summary to prevent context bloat.
+        budget = ContextBudget()
         packet = build_codex_analysis_packet(
             user_goal=text,
-            conversation_summary=active.conversation_summary,
+            conversation_summary=trim_to_budget(
+                active.conversation_summary, budget.conversation_summary_tokens
+            ),
             constraints=[],
             workspace=active.workspace_alias,
+            budget=budget,
         )
 
         # Reserve a hidden task through TaskService
@@ -554,22 +566,29 @@ class CommandController:
 
         self._ledger.update_conversation_summary(
             active.id,
-            f"用户请求：{text[:120]}",
+            trim_to_budget(f"用户请求：{text[:200]}", budget.conversation_summary_tokens),
         )
-        self._ledger.create_agent_run(
+        agent_run = self._ledger.create_agent_run(
             conversation_id=active.id,
             agent="codex",
             role="analysis",
             hidden_task_id=task.id,
             prompt_packet_summary=packet.summary(),
         )
+        self._ledger.set_conversation_active_task(active.id, task.id)
+
+        # Inline buttons for next actions
+        buttons: list[list[dict[str, str]]] = [[
+            {"text": "查看状态", "callback_data": encode_conversation_callback(active.id, CONTINUE)},
+        ]]
 
         return ControllerResponse(
             f"对话「{active.title}」\n\n"
-            f"正在用 Codex 分析你的需求。\n"
+            f"正在分析你的需求…\n"
             f"工作区：{active.workspace_alias}\n"
-            f"后台任务 #{task.id}\n\n"
-            f"提示：当 Codex 完成分析后会通知你。"
+            f"模式：{MODE_LABELS.get(active.mode, active.mode)}\n\n"
+            f"提示：当分析完成后会通知你。",
+            buttons=buttons,
         )
 
     async def handle_new_conversation(
@@ -591,14 +610,20 @@ class CommandController:
             chat_id=chat_id,
             user_id=user_id,
             title=title,
-            mode=ConversationMode.CODEX_DIRECT.value,
-            workspace_alias="wlcodex",
+            mode=self._default_mode,
+            workspace_alias=self._default_workspace,
         )
+        mode_label = MODE_LABELS.get(self._default_mode, self._default_mode)
+        buttons: list[list[dict[str, str]]] = [[
+            {"text": "查看状态", "callback_data": encode_conversation_callback(convo.id, CONTINUE)},
+            {"text": "切换模式", "callback_data": encode_conversation_callback(convo.id, NEW_CONVO)},
+        ]]
         return ControllerResponse(
             f"新对话已创建：「{convo.title}」\n"
-            f"模式：Codex 直聊\n"
+            f"模式：{mode_label}\n"
             f"工作区：{convo.workspace_alias}\n\n"
-            f"直接发消息开始对话，或用 /codex /claude /auto 切换模式。"
+            f"直接发消息开始对话，或用 /codex /claude /auto 切换模式。",
+            buttons=buttons,
         )
 
     async def handle_codex_direct(
@@ -628,7 +653,7 @@ class CommandController:
                 user_id=user_id,
                 title=title,
                 mode=ConversationMode.CLAUDE_DIRECT.value,
-                workspace_alias="wlcodex",
+                workspace_alias=self._default_workspace,
             )
 
         from wlcodex.agent_backend import AgentRequest
@@ -656,6 +681,7 @@ class CommandController:
             "done",
             token_input=result.token_input,
             token_output=result.token_output,
+            completion_summary=result.text[:2000],
         )
         self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
 
@@ -698,8 +724,22 @@ class CommandController:
                 user_id=user_id,
                 title=title,
                 mode=ConversationMode.CHIEF_ENGINEER.value,
-                workspace_alias="wlcodex",
+                workspace_alias=self._default_workspace,
             )
+
+        # Create orchestration run record
+        orch_run = self._ledger.create_orchestration_run(
+            conversation_id=active.id,
+            goal=command.prompt,
+        )
+
+        # Create Codex analysis agent run
+        codex_analysis_run = self._ledger.create_agent_run(
+            conversation_id=active.id,
+            agent="codex",
+            role="analysis",
+        )
+        self._ledger.update_agent_run_status(codex_analysis_run.id, "running")
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
         orch = ChiefEngineerOrchestrator(self._backend, self._claude)
@@ -708,14 +748,60 @@ class CommandController:
             conversation_context={"workspace": workspace_path},
         )
 
-        orch_run = self._ledger.create_orchestration_run(
-            conversation_id=active.id,
-            goal=command.prompt,
+        # Update Codex analysis run with result
+        self._ledger.update_agent_run_status(
+            codex_analysis_run.id,
+            "done",
+            completion_summary=result.codex_analysis[:2000] if result.codex_analysis else "",
         )
+
+        # Create Claude implementation agent runs from steps
+        for step in result.steps:
+            if step.agent == "claude":
+                claude_run = self._ledger.create_agent_run(
+                    conversation_id=active.id,
+                    agent="claude",
+                    role="implementation",
+                    prompt_packet_summary=step.summary[:120],
+                )
+                self._ledger.update_agent_run_status(
+                    claude_run.id,
+                    "done",
+                    completion_summary=step.summary[:2000],
+                )
+                self._ledger.set_conversation_active_claude_run(active.id, claude_run.id)
+
+        # Create Codex verification agent run
+        if result.verification_summary:
+            verify_run = self._ledger.create_agent_run(
+                conversation_id=active.id,
+                agent="codex",
+                role="verification",
+                prompt_packet_summary=result.verification_summary[:120],
+            )
+            self._ledger.update_agent_run_status(
+                verify_run.id,
+                "done",
+                completion_summary=result.verification_summary[:2000],
+            )
+
+        # Record orchestration decisions
+        for step in result.steps:
+            if step.step.startswith("verify"):
+                decision = "verify_passed" if result.status == "passed" else "verify_failed_retry"
+                self._ledger.record_orchestration_decision(
+                    run_id=orch_run.id,
+                    decision=decision,
+                    reason=step.summary[:500],
+                    next_agent="claude" if result.status != "passed" else "",
+                )
+
+        # Update orchestration run
         self._ledger.update_orchestration_run(
             orch_run.id,
             status=result.status,
             verify_round=result.verify_round,
+            current_step="verify" if result.status == "passed" else "retry",
             last_codex_analysis=result.codex_analysis[:500] if result.codex_analysis else "",
             last_claude_summary=result.claude_implementation[:500] if result.claude_implementation else "",
             last_verification_result=result.verification_summary[:500],
@@ -728,18 +814,26 @@ class CommandController:
         }
         label = status_labels.get(result.status, result.status)
 
+        # Build comprehensive buttons for all outcomes
         buttons: list[list[dict[str, str]]] = [[
             {"text": "查看 diff", "callback_data": encode_conversation_callback(active.id, DIFF)},
+            {"text": "Codex 验收", "callback_data": encode_conversation_callback(active.id, VERIFY)},
         ]]
         if result.status == "failed":
-            buttons[0].append(
-                {"text": "继续修改", "callback_data": encode_conversation_callback(active.id, RETRY)}
-            )
+            buttons.append([
+                {"text": "继续修改", "callback_data": encode_conversation_callback(active.id, RETRY)},
+            ])
+        elif result.status == "needs_user":
+            buttons.append([
+                {"text": "继续修改", "callback_data": encode_conversation_callback(active.id, RETRY)},
+                {"text": "停止", "callback_data": encode_conversation_callback(active.id, CONTINUE)},
+            ])
 
         return ControllerResponse(
             f"总工程师编排完成 — {label}\n\n"
             f"对话：{active.title}\n"
             f"轮次：第 {result.verify_round} 轮\n"
+            f"步骤数：{len(result.steps)}\n"
             f"Codex 分析：{_trim_result_text(result.codex_analysis, 300)}\n"
             f"Claude 实施：{_trim_result_text(result.claude_implementation, 300)}\n"
             f"验证结果：{_trim_result_text(result.verification_summary, 300)}",
@@ -762,13 +856,56 @@ class CommandController:
         if not runs:
             return ControllerResponse("当前对话没有已完成的运行。")
 
-        latest_run = runs[-1]
+        # Find the latest completed Claude run for verification evidence
+        latest_claude_run: object | None = None
+        for r in reversed(runs):
+            if r.agent == "claude" and r.status == "done":
+                latest_claude_run = r
+                break
+        if latest_claude_run is None:
+            latest_claude_run = runs[-1]
 
-        # Build verification packet and call Codex
+        # Collect diff evidence from the workspace
+        diff_summary = ""
+        changed_files: list[str] = []
+        try:
+            workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+            diff_result = self._inspector.diff(
+                latest_claude_run.hidden_task_id or 0, workspace_path
+            )
+            if diff_result and diff_result.body:
+                diff_summary = diff_result.body[:1500]
+            # Extract file paths from diff or use inspector
+            files_result = self._inspector.files(
+                latest_claude_run.hidden_task_id or 0
+            )
+            if files_result and files_result.body:
+                for line in files_result.body.split("\n"):
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("#"):
+                        changed_files.append(stripped[:200])
+        except Exception:
+            pass
+
+        # Get actual Claude completion output (not the input prompt)
+        completion = getattr(latest_claude_run, "completion_summary", "")
+        if not completion:
+            completion = getattr(latest_claude_run, "prompt_packet_summary", "")
+
+        # Build verification packet with real evidence
         verify_payload = command.prompt if command.prompt else active.title
+        codex_plan = ""
+        orch_runs = self._ledger.list_orchestration_runs(active.id, limit=1)
+        if orch_runs:
+            codex_plan = orch_runs[0].last_codex_analysis
+
         packet = make_verification_packet(
             user_goal=verify_payload,
-            claude_completion_summary=latest_run.prompt_packet_summary,
+            codex_plan_summary=codex_plan[:800] if codex_plan else "",
+            claude_completion_summary=completion[:1500] if completion else "",
+            changed_files=changed_files[:20],
+            diff_summary=diff_summary[:1500] if diff_summary else "",
+            test_results="",  # Populated when test harness is integrated
             workspace=active.workspace_alias,
         )
 
@@ -781,11 +918,11 @@ class CommandController:
                     verification_text = f"已向 Codex 发送验收请求。\n" \
                                         f"对话：{active.title}\n" \
                                         f"线程：{task.codex_thread_id}\n" \
-                                        f"验收标准：{packet.acceptance_criteria or '由 Codex 分析'}"
+                                        f"变更文件：{len(changed_files)} 个\n" \
+                                        f"验收证据：Codex 分析计划 + Claude 输出摘要 + diff"
                 else:
                     verification_text = "Codex 线程未就绪，无法发送验收。"
             else:
-                # No existing Codex task — create one for verification
                 workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
                 thread_id = await self._backend.create_thread(workspace_path)
                 task = self._service.reserve_task(
@@ -798,16 +935,19 @@ class CommandController:
                 await self._backend.start_turn(thread_id, packet.render())
                 verification_text = f"已创建 Codex 验证任务 #{task.id}。\n" \
                                     f"对话：{active.title}\n" \
-                                    f"验收内容：{verify_payload}"
+                                    f"验收内容：{verify_payload}\n" \
+                                    f"变更文件：{len(changed_files)} 个"
         except Exception as exc:
             logger.warning("verify: Codex call failed: %s", exc)
             verification_text = f"Codex 验收请求失败：{exc}"
 
         return ControllerResponse(
             f"Codex 验收 — 对话「{active.title}」\n\n"
-            f"最近运行：#{latest_run.id}（{latest_run.agent}/{latest_run.status}）\n"
-            f"摘要：{latest_run.prompt_packet_summary}\n"
-            f"Token：{latest_run.token_input} 输入 / {latest_run.token_output} 输出\n\n"
+            f"最近运行：#{latest_claude_run.id}（{latest_claude_run.agent}/{latest_claude_run.status}）\n"
+            f"输入摘要：{latest_claude_run.prompt_packet_summary[:200]}\n"
+            f"输出摘要：{completion[:200] if completion else '(无)'}\n"
+            f"变更文件：{len(changed_files)} 个\n"
+            f"Token：{latest_claude_run.token_input} 输入 / {latest_claude_run.token_output} 输出\n\n"
             f"{verification_text}"
         )
 

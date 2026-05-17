@@ -277,6 +277,11 @@ class Ledger:
         self._add_column_if_missing(
             "approval_requests", "resolved_at", "resolved_at TEXT"
         )
+        # Agent run completion summary for verification evidence
+        self._add_column_if_missing(
+            "agent_runs", "completion_summary",
+            "completion_summary TEXT NOT NULL DEFAULT ''",
+        )
         # codex_request_id values are scoped to a task/thread by the app-server.
         # Older databases had a global unique index, which incorrectly dropped
         # approvals when different tasks reused ids like "0" or "1".
@@ -941,24 +946,26 @@ class Ledger:
         token_input: int = 0,
         token_output: int = 0,
         external_session_id: str | None = None,
+        completion_summary: str | None = None,
     ) -> AgentRun:
-        params: list[object] = [status, token_input, token_output, _now(), run_id]
+        sets: list[str] = ["status = ?", "token_input = ?", "token_output = ?"]
+        params: list[object] = [status, token_input, token_output]
+
         if external_session_id is not None:
-            params.insert(3, external_session_id)
-            self._conn.execute(
-                """UPDATE agent_runs
-                   SET status = ?, token_input = ?, token_output = ?,
-                       external_session_id = ?, updated_at = ?
-                   WHERE id = ?""",
-                params,
-            )
-        else:
-            self._conn.execute(
-                """UPDATE agent_runs
-                   SET status = ?, token_input = ?, token_output = ?, updated_at = ?
-                   WHERE id = ?""",
-                params,
-            )
+            sets.append("external_session_id = ?")
+            params.append(external_session_id)
+        if completion_summary is not None:
+            sets.append("completion_summary = ?")
+            params.append(completion_summary)
+
+        sets.append("updated_at = ?")
+        params.append(_now())
+        params.append(run_id)
+
+        self._conn.execute(
+            f"UPDATE agent_runs SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
         self._conn.commit()
         return self.get_agent_run(run_id)
 
@@ -1196,6 +1203,7 @@ def _agent_run(row: sqlite3.Row) -> AgentRun:
         hidden_task_id=row["hidden_task_id"],
         external_session_id=row["external_session_id"],
         prompt_packet_summary=str(row["prompt_packet_summary"] or ""),
+        completion_summary=str(row["completion_summary"] or ""),
         token_input=int(row["token_input"] or 0),
         token_output=int(row["token_output"] or 0),
         created_at=_dt(str(row["created_at"])),

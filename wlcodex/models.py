@@ -188,6 +188,7 @@ class AgentRun:
     hidden_task_id: int | None
     external_session_id: str | None
     prompt_packet_summary: str
+    completion_summary: str
     token_input: int
     token_output: int
     created_at: datetime
