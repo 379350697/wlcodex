@@ -156,6 +156,17 @@ class ApprovalService:
 
         # 7. Decrement pending count
         ledger.decrement_pending_approvals(approval.task_id)
+        batch_count = 0
+        if (
+            callback.action == "approve_session"
+            and approval.kind == ApprovalKind.COMMAND
+        ):
+            batch_count = await self._approve_pending_command_batch(
+                task_id=approval.task_id,
+                clicked_approval_id=approval.id,
+                backend=backend,
+                ledger=ledger,
+            )
 
         # 8. Move task back to running if waiting and no pending remain
         from wlcodex.models import TaskStatus
@@ -165,6 +176,11 @@ class ApprovalService:
             if not remaining:
                 ledger.set_task_status(approval.task_id, TaskStatus.RUNNING)
 
+        if batch_count:
+            return (
+                f"审批 #{approval.id} 已处理：{_action_label(resolution)}，"
+                f"另外释放 {batch_count} 个命令审批"
+            )
         return f"审批 #{approval.id} 已处理：{_action_label(resolution)}"
 
     def _build_backend_response(
@@ -180,12 +196,65 @@ class ApprovalService:
                 action=action,
                 allow_session=self._allow_session_approval,
             )
+        if (
+            action == "approve_session"
+            and self._allow_session_approval
+            and approval.kind == ApprovalKind.COMMAND
+        ):
+            amendment = _proposed_execpolicy_amendment(approval)
+            if amendment:
+                return {
+                    "decision": {
+                        "acceptWithExecpolicyAmendment": {
+                            "execpolicy_amendment": amendment,
+                        }
+                    }
+                }
         return build_approval_response(
             kind=approval.kind,
             action=action,
             requested_permissions=requested_permissions,
             allow_session=self._allow_session_approval,
         )
+
+    async def _approve_pending_command_batch(
+        self,
+        *,
+        task_id: int,
+        clicked_approval_id: int,
+        backend: object,
+        ledger: Ledger,
+    ) -> int:
+        """Resolve already-pending command approvals for the same task/session."""
+        released = 0
+        for pending in ledger.pending_approvals(task_id):
+            if pending.id == clicked_approval_id:
+                continue
+            if pending.kind != ApprovalKind.COMMAND:
+                continue
+            response = self._build_backend_response(
+                approval=pending,
+                action="approve_session",
+                requested_permissions={},
+            )
+            try:
+                await backend.resolve_approval(pending.codex_request_id, response)
+            except Exception as exc:
+                logger.error(
+                    "Failed to batch-resolve approval #%d to backend: %s",
+                    pending.id,
+                    exc,
+                )
+                ledger.set_approval_error(pending.id, str(exc))
+                continue
+            ledger.resolve_approval(
+                pending.id,
+                ApprovalStatus.APPROVED,
+                "approve_session",
+            )
+            ledger.decrement_pending_approvals(task_id)
+            released += 1
+        return released
 
     async def _send_backend_expiry(
         self, approval: object, backend: object, ledger: Ledger | None = None
@@ -296,6 +365,21 @@ def _uses_legacy_review_decision(approval: object) -> bool:
         isinstance(payload, dict)
         and payload.get("response_schema") == "legacy_review_decision"
     )
+
+
+def _proposed_execpolicy_amendment(approval: object) -> list[str]:
+    """Return a stored app-server execpolicy amendment, if present."""
+    command_json = str(getattr(approval, "command_json", "") or "")
+    try:
+        payload = json.loads(command_json)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    amendment = payload.get("proposed_execpolicy_amendment")
+    if not isinstance(amendment, list):
+        return []
+    return [str(item) for item in amendment if str(item)]
 
 
 def _action_label(action: str) -> str:

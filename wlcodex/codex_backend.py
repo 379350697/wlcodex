@@ -541,12 +541,30 @@ class AppServerCodexBackend:
                 return str(turn["id"])
             return str(event.payload.get("turnId", ""))
 
+        def _event_turn_status(event: BackendEvent) -> str:
+            turn = event.payload.get("turn")
+            if isinstance(turn, dict) and turn.get("status"):
+                return str(turn["status"])
+            return str(event.payload.get("status", ""))
+
+        def _event_error_message(event: BackendEvent) -> str:
+            turn = event.payload.get("turn")
+            error = None
+            if isinstance(turn, dict):
+                error = turn.get("error")
+            if error is None:
+                error = event.payload.get("error")
+            if isinstance(error, dict):
+                return str(error.get("message") or error.get("codexErrorInfo") or error)
+            return str(error or "unknown error")
+
         def _event_matches_turn(event: BackendEvent) -> bool:
             event_turn_id = _event_turn_id(event)
             if event_turn_id:
                 return event_turn_id == turn_id
             return str(event.payload.get("threadId", "")) == thread_id
 
+        turn_error: str | None = None
         try:
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
@@ -564,16 +582,36 @@ class AppServerCodexBackend:
                     if isinstance(delta, str):
                         deltas.append(delta)
                 elif event.event_type == "turn_completed":
+                    status = _event_turn_status(event)
+                    if status in ("failed", "interrupted", "cancelled", "canceled"):
+                        turn_error = _event_error_message(event)
                     turn_ended = True
                 elif event.event_type in ("turn_failed",):
-                    error = event.payload.get("error", "unknown error")
-                    deltas.append(f"\n[Turn failed: {error}]")
+                    turn_error = _event_error_message(event)
                     turn_ended = True
 
                 if turn_ended:
                     break
         finally:
             self._unsubscribe_events(prompt_events)
+
+        if turn_error is not None:
+            raise RuntimeError(f"Codex turn {turn_id} failed: {turn_error}")
+
+        if not turn_ended:
+            try:
+                await self.interrupt_turn(thread_id, turn_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to interrupt timed-out Codex turn %s/%s: %s",
+                    thread_id,
+                    turn_id,
+                    exc,
+                )
+            raise TimeoutError(
+                f"Codex turn {turn_id} did not complete within "
+                f"{self._request_timeout_seconds:g} seconds"
+            )
 
         if not deltas:
             return "(no Codex response)"

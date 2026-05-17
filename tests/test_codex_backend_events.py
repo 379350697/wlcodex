@@ -266,6 +266,70 @@ async def test_app_server_send_codex_prompt_cleans_subscription_on_start_error()
 
 
 @pytest.mark.asyncio
+async def test_app_server_send_codex_prompt_interrupts_and_fails_on_timeout() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.02,
+    )
+    interrupts: list[tuple[str, str]] = []
+
+    async def create_thread(_workspace_path: str) -> str:
+        return "target-thread"
+
+    async def start_turn(_thread_id: str, _prompt: str) -> str:
+        backend._emit(BackendEvent("agent_message_delta", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+            "delta": "partial analysis",
+        }))
+        return "target-turn"
+
+    async def interrupt_turn(thread_id: str, turn_id: str) -> None:
+        interrupts.append((thread_id, turn_id))
+
+    backend.create_thread = create_thread
+    backend.start_turn = start_turn
+    backend.interrupt_turn = interrupt_turn
+
+    with pytest.raises(TimeoutError, match="did not complete"):
+        await backend.send_codex_prompt("/tmp/demo", "prompt")
+
+    assert interrupts == [("target-thread", "target-turn")]
+    assert backend._event_subscribers == []
+
+
+@pytest.mark.asyncio
+async def test_app_server_send_codex_prompt_raises_on_failed_turn_status() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+
+    async def create_thread(_workspace_path: str) -> str:
+        return "target-thread"
+
+    async def start_turn(_thread_id: str, _prompt: str) -> str:
+        backend._emit(BackendEvent("turn_completed", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+            "turn": {
+                "id": "target-turn",
+                "status": "failed",
+                "error": {"message": "analysis failed"},
+            },
+        }))
+        return "target-turn"
+
+    backend.create_thread = create_thread
+    backend.start_turn = start_turn
+
+    with pytest.raises(RuntimeError, match="analysis failed"):
+        await backend.send_codex_prompt("/tmp/demo", "prompt")
+
+    assert backend._event_subscribers == []
+
+
+@pytest.mark.asyncio
 async def test_app_server_legacy_exec_approval_emits_normalized_event() -> None:
     backend = AppServerCodexBackend(endpoint="ws://127.0.0.1:17431")
 

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -281,6 +282,41 @@ def test_approval_summary_falls_back_to_reason(service: TaskService) -> None:
 
     approval = service._ledger.pending_approvals(1)[0]
     assert approval.summary == "Allow writing /home/wl/probe outside the workspace?"
+
+
+def test_command_approval_stores_execpolicy_amendment(service: TaskService) -> None:
+    from wlcodex.codex_backend import BackendEvent
+
+    service.start_task("demo", "Fix bug", codex_thread_id="thread-1")
+    service.apply_backend_event(BackendEvent(
+        event_type="turn_started",
+        payload={"threadId": "thread-1", "turnId": "turn-1"},
+    ))
+
+    service.apply_backend_event(BackendEvent(
+        event_type="approval_requested",
+        payload={
+            "threadId": "thread-1",
+            "codexRequestId": "req-1",
+            "kind": "command",
+            "summary": "Run: rtk rg approval",
+            "command": "rtk rg approval",
+            "availableDecisions": [
+                "accept",
+                "acceptWithExecpolicyAmendment",
+            ],
+            "proposedExecpolicyAmendment": ["rtk", "rg"],
+        },
+    ))
+
+    approval = service._ledger.pending_approvals(1)[0]
+    stored = json.loads(approval.command_json)
+    assert stored["command"] == "rtk rg approval"
+    assert stored["available_decisions"] == [
+        "accept",
+        "acceptWithExecpolicyAmendment",
+    ]
+    assert stored["proposed_execpolicy_amendment"] == ["rtk", "rg"]
 
 
 def test_approval_requested_while_paused_preserves_paused_state(

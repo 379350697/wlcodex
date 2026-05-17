@@ -187,6 +187,19 @@ def test_build_codex_analysis_packet() -> None:
     assert "必须使用中文" in rendered
 
 
+def test_build_codex_analysis_packet_is_analysis_only() -> None:
+    packet = build_codex_analysis_packet(
+        user_goal="实现 /summary 命令",
+        workspace="wlcodex",
+    )
+
+    rendered = packet.render()
+
+    assert "不要编辑文件" in rendered
+    assert "不要运行测试" in rendered
+    assert "交给 Claude" in rendered
+
+
 def test_build_codex_verification_packet() -> None:
     packet = build_codex_verification_packet(
         user_goal="Fix login bug",

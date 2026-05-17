@@ -690,7 +690,6 @@ class TaskService:
             # For permissions approvals, save the requested permissions profile.
             # For command/file-change approvals, save the command string.
             if approval_kind == ApprovalKind.PERMISSIONS:
-                import json
                 perms = payload.get("permissions", {})
                 stored_payload = json.dumps(perms, ensure_ascii=False) if isinstance(perms, dict) else str(perms)
             elif payload.get("responseSchema") == "legacy_review_decision":
@@ -702,7 +701,16 @@ class TaskService:
                     ensure_ascii=False,
                 )
             else:
-                stored_payload = str(payload.get("command", payload.get("permissions", "{}")))
+                stored_payload = json.dumps(
+                    {
+                        "command": payload.get("command", ""),
+                        "available_decisions": payload.get("availableDecisions"),
+                        "proposed_execpolicy_amendment": payload.get(
+                            "proposedExecpolicyAmendment"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
 
             existing_approval = self._ledger.get_approval_by_codex_id(
                 codex_request_id, task_id=task.id

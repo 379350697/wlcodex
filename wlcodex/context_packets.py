@@ -169,15 +169,24 @@ def build_codex_analysis_packet(
     budget: ContextBudget | None = None,
 ) -> CodexAnalysisPacket:
     bgt = budget or ContextBudget()
+    analysis_only_constraints = [
+        "Codex 本轮只做需求分析和实现设计，不要编辑文件。",
+        "不要运行测试、格式化、构建、apply_patch 或任何实现命令。",
+        "把实现交给 Claude，输出交接包：目标、文件、步骤、验收标准和禁止事项。",
+    ]
     return CodexAnalysisPacket(
         mode="chief_engineer",
         workspace=workspace,
         user_goal=user_goal,
         conversation_summary=trim_to_budget(conversation_summary, bgt.conversation_summary_tokens),
         relevant_files=relevant_files or [],
-        recent_user_constraints=constraints or [],
+        recent_user_constraints=analysis_only_constraints + (constraints or []),
         token_budget=bgt.codex_analysis_tokens,
-        requested_output="Root cause analysis, implementation plan if needed, verification acceptance criteria",
+        requested_output=(
+            "Analysis-only Claude handoff packet: root cause, files_to_touch, "
+            "implementation_steps, acceptance_criteria, verification_plan, "
+            "prohibited_changes. Do not implement."
+        ),
     )
 
 

@@ -172,6 +172,99 @@ async def test_resolved_approval_decrements_pending_count(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_approve_session_uses_execpolicy_amendment(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    task = ledger.create_task("demo", "/tmp/demo", "Test", "thread-1", None)
+    ledger.increment_pending_approvals(task.id, 1)
+    approval = ledger.create_approval(
+        task.id,
+        "req-rtk",
+        None,
+        None,
+        ApprovalKind.COMMAND,
+        "Run rtk rg",
+        command_json=(
+            '{"command":"rtk rg approval",'
+            '"proposed_execpolicy_amendment":["rtk","rg"]}'
+        ),
+    )
+    backend = FakeCodexBackend()
+    svc = ApprovalService(callback_timeout_seconds=3600, allow_session_approval=True)
+    cb = decode_approval_callback(
+        encode_approval_callback(approval.id, "approve_session")
+    )
+
+    await svc.resolve_callback(cb, backend, ledger)
+
+    assert backend._approval_resolutions == [
+        (
+            "req-rtk",
+            {
+                "decision": {
+                    "acceptWithExecpolicyAmendment": {
+                        "execpolicy_amendment": ["rtk", "rg"],
+                    }
+                }
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_approve_session_resolves_pending_command_batch(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    task = ledger.create_task("demo", "/tmp/demo", "Test", "thread-1", None)
+    ledger.set_task_status(task.id, TaskStatus.WAITING_APPROVAL)
+    ledger.increment_pending_approvals(task.id, 3)
+    first = ledger.create_approval(
+        task.id,
+        "req-1",
+        None,
+        None,
+        ApprovalKind.COMMAND,
+        "Run rtk rg",
+        command_json='{"command":"rtk rg approval"}',
+    )
+    second = ledger.create_approval(
+        task.id,
+        "req-2",
+        None,
+        None,
+        ApprovalKind.COMMAND,
+        "Run rtk sed",
+        command_json='{"command":"rtk sed -n 1,20p"}',
+    )
+    file_change = ledger.create_approval(
+        task.id,
+        "req-file",
+        None,
+        None,
+        ApprovalKind.FILE_CHANGE,
+        "Apply patch",
+    )
+    backend = FakeCodexBackend()
+    svc = ApprovalService(callback_timeout_seconds=3600, allow_session_approval=True)
+    cb = decode_approval_callback(
+        encode_approval_callback(first.id, "approve_session")
+    )
+
+    msg = await svc.resolve_callback(cb, backend, ledger)
+
+    assert "另外释放 1 个命令审批" in msg
+    assert backend._approval_resolutions == [
+        ("req-1", {"decision": "acceptForSession"}),
+        ("req-2", {"decision": "acceptForSession"}),
+    ]
+    assert ledger.get_approval(first.id).status == ApprovalStatus.APPROVED
+    assert ledger.get_approval(second.id).status == ApprovalStatus.APPROVED
+    assert ledger.get_approval(file_change.id).status == ApprovalStatus.PENDING
+    assert ledger.get_task(task.id).pending_approval_count == 1
+    assert ledger.get_task(task.id).status == TaskStatus.WAITING_APPROVAL
+
+
+@pytest.mark.asyncio
 async def test_expired_approval_unlocks_backend_before_local_expire(
     tmp_path: Path,
 ) -> None:
