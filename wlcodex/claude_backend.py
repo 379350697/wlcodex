@@ -1,12 +1,8 @@
 """Claude Code subprocess adapter and event normalization.
 
-The first implementation is line-buffered subprocess execution. It:
-- Accepts a compact prompt packet (never full Telegram transcripts).
-- Sets cwd to the selected workspace.
-- Captures stdout and stderr.
-- Returns exit status and summary.
-- Avoids shell=True.
-- Exposes a fake-friendly interface for tests.
+Calls the Claude CLI binary with -p (--print) for non-interactive output.
+Sets cwd to the selected workspace, captures stdout/stderr, and returns
+exit status and summary. Avoids shell=True.
 """
 
 from __future__ import annotations
@@ -44,8 +40,7 @@ class ClaudeBackend:
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._config.binary,
-                "--print",
-                "--no-detach",
+                "-p",
                 request.prompt,
                 cwd=request.workspace_path or None,
                 stdout=asyncio.subprocess.PIPE,
@@ -97,8 +92,7 @@ class ClaudeBackend:
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._config.binary,
-                "--print",
-                "--no-detach",
+                "-p",
                 request.prompt,
                 cwd=request.workspace_path or None,
                 stdout=asyncio.subprocess.PIPE,

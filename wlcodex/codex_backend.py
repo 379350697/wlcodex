@@ -511,6 +511,20 @@ class AppServerCodexBackend:
         saw_turn_started = False
         turn_ended = False
 
+        def _event_turn_id(event: BackendEvent) -> str:
+            turn = event.payload.get("turn")
+            if isinstance(turn, dict) and turn.get("id"):
+                return str(turn["id"])
+            return str(event.payload.get("turnId", ""))
+
+        def _pop_next_target_event() -> BackendEvent | None:
+            for idx, event in enumerate(self._event_queue):
+                event_tid = str(event.payload.get("threadId", ""))
+                event_turn_id = _event_turn_id(event)
+                if event_tid == thread_id or event_turn_id == turn_id:
+                    return self._event_queue.pop(idx)
+            return None
+
         while True:
             remaining = deadline - _asyncio.get_event_loop().time()
             if remaining <= 0:
@@ -518,35 +532,30 @@ class AppServerCodexBackend:
             # Poll with a short timeout so we can re-check the deadline and
             # filter events from the shared queue without starving.
             await _asyncio.sleep(0.05)
-            while self._event_queue:
-                event = self._event_queue[0]
-                event_tid = str(event.payload.get("threadId", ""))
-                if event_tid and event_tid != thread_id:
-                    # This event belongs to a different thread — leave it in
-                    # the queue for the consumer that owns it.
+            while True:
+                event = _pop_next_target_event()
+                if event is None:
                     break
-                self._event_queue.pop(0)
+                event_tid = str(event.payload.get("threadId", ""))
+                ev_turn = _event_turn_id(event)
 
                 if event.event_type == "turn_started":
-                    ev_turn = str(event.payload.get("turnId", ""))
                     if ev_turn == turn_id:
                         saw_turn_started = True
                 elif event.event_type == "agent_message_delta":
-                    if not saw_turn_started:
-                        continue  # delta from an earlier turn on same thread
+                    if ev_turn and ev_turn != turn_id:
+                        continue
+                    if not saw_turn_started and event_tid != thread_id and ev_turn != turn_id:
+                        continue
                     delta = event.payload.get("delta", "")
                     if isinstance(delta, str):
                         deltas.append(delta)
                 elif event.event_type == "turn_completed":
-                    ev_turn = str(event.payload.get("turnId", ""))
-                    if ev_turn == turn_id or not saw_turn_started:
-                        # Accept match by turn_id; if turn_started was never
-                        # seen (race), accept the first completed turn.
+                    if ev_turn == turn_id or (event_tid == thread_id and not ev_turn):
                         turn_ended = True
                         break
                 elif event.event_type in ("turn_failed",):
-                    ev_turn = str(event.payload.get("turnId", ""))
-                    if ev_turn == turn_id or (event_tid == thread_id and not saw_turn_started):
+                    if ev_turn == turn_id or (event_tid == thread_id and not ev_turn):
                         error = event.payload.get("error", "unknown error")
                         deltas.append(f"\n[Turn failed: {error}]")
                         turn_ended = True

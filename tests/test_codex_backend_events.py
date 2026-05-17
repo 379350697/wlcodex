@@ -92,6 +92,48 @@ async def test_backend_archive_thread() -> None:
 
 
 @pytest.mark.asyncio
+async def test_app_server_send_codex_prompt_scans_past_unrelated_thread_events() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+
+    async def create_thread(_workspace_path: str) -> str:
+        return "target-thread"
+
+    async def start_turn(_thread_id: str, _prompt: str) -> str:
+        return "target-turn"
+
+    backend.create_thread = create_thread
+    backend.start_turn = start_turn
+    backend._event_queue.extend([
+        BackendEvent("turn_started", {
+            "threadId": "other-thread",
+            "turnId": "other-turn",
+        }),
+        BackendEvent("turn_started", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+        }),
+        BackendEvent("agent_message_delta", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+            "delta": "ok",
+        }),
+        BackendEvent("turn_completed", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+        }),
+    ])
+
+    result = await backend.send_codex_prompt("/tmp/demo", "prompt")
+
+    assert result == "ok"
+    assert len(backend._event_queue) == 1
+    assert backend._event_queue[0].payload["threadId"] == "other-thread"
+
+
+@pytest.mark.asyncio
 async def test_app_server_legacy_exec_approval_emits_normalized_event() -> None:
     backend = AppServerCodexBackend(endpoint="ws://127.0.0.1:17431")
 
