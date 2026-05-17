@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+from wlcodex.models import TaskStatus
+from wlcodex.models import Task
+
+if TYPE_CHECKING:
+    from wlcodex.health_snapshot import HealthSnapshot
+
+
+STATUS_LABELS = {
+    TaskStatus.QUEUED: "排队中",
+    TaskStatus.RUNNING: "运行中",
+    TaskStatus.WAITING_APPROVAL: "等待审批",
+    TaskStatus.PAUSED: "已暂停",
+    TaskStatus.WAITING_SLOT: "等待中",
+    TaskStatus.DONE: "已完成",
+    TaskStatus.FAILED: "已失败",
+    TaskStatus.ABORTED: "已中止",
+    TaskStatus.ARCHIVED: "已归档",
+}
+
+KIND_LABELS = {
+    "command": "命令",
+    "file_change": "文件变更",
+    "permissions": "权限",
+}
+
+
+def render_task_card(
+    task: Task,
+    *,
+    blocker_id: int | None = None,
+    blocker_status: str = "",
+    queue_position: int = 0,
+) -> str:
+    lines = [
+        f"任务 #{task.id} — {_status_label(task.status)}",
+        f"工作区：{task.workspace_alias}",
+        f"标题：{_trim(task.title, 120)}",
+    ]
+    if task.status == TaskStatus.WAITING_SLOT:
+        if blocker_id is not None:
+            lines.append(f"阻塞者：#{blocker_id}（{blocker_status}）")
+        if queue_position > 0:
+            lines.append(f"队列位置：第 {queue_position} 位")
+    if task.is_force_parallel:
+        lines.append("⚠️ 同目录强制并行")
+    if task.worktree_path:
+        lines.append(f"隔离 worktree：{task.worktree_path}")
+    if task.worktree_branch:
+        lines.append(f"Worktree 分支：{task.worktree_branch}")
+    if task.last_phase:
+        lines.append(f"阶段：{_trim(task.last_phase, 120)}")
+    if task.last_summary:
+        lines.append(f"摘要：{_trim(task.last_summary, 240)}")
+    if task.last_error:
+        lines.append(f"错误：{_trim(task.last_error, 240)}")
+    if task.changed_file_count:
+        lines.append(f"变更文件：{task.changed_file_count}")
+    if task.pending_approval_count:
+        lines.append(f"待审批：{task.pending_approval_count}")
+    if task.token_input or task.token_output:
+        lines.append(f"Token：{task.token_input} 输入 / {task.token_output} 输出")
+    if task.active_turn_id:
+        lines.append(f"当前 turn：{task.active_turn_id}")
+    if task.codex_thread_id:
+        lines.append(f"线程：{task.codex_thread_id}")
+    return "\n".join(lines)
+
+
+def render_task_list(
+    tasks: Sequence[Task],
+    *,
+    waiting_meta: dict[int, tuple[int, str, int]] | None = None,
+) -> str:
+    """Render a compact task list.
+
+    waiting_meta maps task_id → (blocker_id, blocker_status, queue_position)
+    for waiting_slot tasks.  Callers should pre-compute this from the service
+    so the renderer stays a pure function.
+    """
+    if not tasks:
+        return "暂无任务。用 /task <workspace> <prompt> 创建新任务。"
+    lines = ["任务列表："]
+    for task in tasks:
+        status_mark = {
+            "running": "▶",
+            "queued": "○",
+            "waiting_approval": "⏸",
+            "paused": "⏸",
+            "waiting_slot": "⏳",
+            "done": "✓",
+            "failed": "✗",
+            "aborted": "✗",
+            "archived": "📦",
+        }.get(task.status.value, " ")
+        line = (
+            f"{status_mark} #{task.id} {task.workspace_alias} "
+            f"{_status_label(task.status)}  {_trim(task.title, 80)}"
+        )
+        if task.status == TaskStatus.WAITING_SLOT and waiting_meta:
+            meta = waiting_meta.get(task.id)
+            if meta is not None:
+                blocker_id, blocker_status, position = meta
+                line += (
+                    f"  ← 阻塞者 #{blocker_id}（{blocker_status}）"
+                    f" 第 {position} 位"
+                )
+        if task.is_force_parallel:
+            line += "  ⚠️并行"
+        if task.worktree_path:
+            line += f"  WT:{task.worktree_branch or task.worktree_path[-20:]}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def render_approval_card(
+    task_id: int, approval_id: int, kind: str, summary: str
+) -> str:
+    lines = [
+        f"审批 #{approval_id}（任务 #{task_id}）",
+        f"类型：{KIND_LABELS.get(kind, kind)}",
+        f"摘要：{_trim(summary, 200)}",
+        "",
+        "请使用下面按钮批准或拒绝。",
+    ]
+    return "\n".join(lines)
+
+
+def render_health_card(
+    health: object, *, snapshot: HealthSnapshot | None = None
+) -> str:
+    if hasattr(health, "is_healthy"):
+        if bool(health.is_healthy):  # type: ignore[union-attr]
+            prefix = "后端健康"
+        elif hasattr(health, "summary"):
+            prefix = f"后端异常：{health.summary()}"  # type: ignore[union-attr]
+        else:
+            prefix = "后端异常"
+    elif hasattr(health, "summary"):
+        s = health.summary()  # type: ignore[union-attr]
+        prefix = f"后端状态：{s}"
+    else:
+        prefix = f"后端状态：{health}"
+
+    if snapshot is None:
+        return prefix
+
+    lines = [prefix, ""]
+    lines.append(f"活跃任务：{snapshot.active_task_count}")
+    if snapshot.running_count:
+        lines.append(f"  运行中：{snapshot.running_count}")
+    if snapshot.waiting_approval_count:
+        lines.append(f"  等待审批：{snapshot.waiting_approval_count}")
+    if snapshot.queued_count:
+        lines.append(f"  排队中：{snapshot.queued_count}")
+    if snapshot.paused_count:
+        lines.append(f"  已暂停：{snapshot.paused_count}")
+    if snapshot.waiting_count:
+        lines.append(f"  等待中：{snapshot.waiting_count}")
+    if snapshot.isolated_running_count:
+        lines.append(f"  隔离 worktree：{snapshot.isolated_running_count}")
+    return "\n".join(lines)
+
+
+def render_help() -> str:
+    return """WLCodex — Telegram 远程 Codex 控制台
+
+命令：
+  /help — 查看帮助
+  /health — 查看后端健康状态
+  /task <workspace> <prompt> — 创建新的 Codex 任务
+  /task <id> — 查看任务详情
+  /tasks — 查看活跃任务
+  /status — 同 /tasks
+  /continue <id> <prompt> — 继续历史任务线程
+  /steer <id> <prompt> — 给当前运行中的 turn 追加指令
+  /tail <id> — 查看最近本地日志
+  /events <id> — 查看事件记录
+  /diff <id> — 查看最近文件变更
+  /files <id> — 查看涉及文件
+  /pause <id> — 暂停运行中的任务
+  /abort <id> — 中止运行中的任务
+  /archive <id> — 归档已结束任务
+  /fork <id> <prompt> — 从任务 fork 新线程
+  /sessions — 查看 Codex 线程映射
+
+安全规则：
+  • 只允许私聊
+  • 只允许白名单用户
+  • 每个工作区同一时间只允许一个写任务
+  • 状态和日志永远不会回灌到 Codex 上下文"""
+
+
+def render_inspection_result(title: str, body: str) -> str:
+    return f"{title}\n\n{body}"
+
+
+def _trim(value: str, max_chars: int) -> str:
+    cleaned = " ".join(value.split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1].rstrip() + "…"
+
+
+def _status_label(status: TaskStatus) -> str:
+    return STATUS_LABELS.get(status, status.value)

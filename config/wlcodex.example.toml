@@ -1,0 +1,57 @@
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123456789]
+private_chat_only = true
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+# worktree_root must be outside ALL workspaces — otherwise worktree
+# creation will pollute workspace git status and block merge preflight.
+# Default: ~/.local/state/wlcodex/worktrees
+# worktree_root = "/home/wl/.local/state/wlcodex/worktrees"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[backend]
+startup_timeout_seconds = 15
+request_timeout_seconds = 60
+event_log_max_chars = 20000
+
+[approval]
+callback_timeout_seconds = 3600
+allow_session_approval = true
+
+[task]
+max_running_seconds = 7200
+max_queued_seconds = 1800
+max_waiting_approval_seconds = 3600
+watchdog_interval_seconds = 60
+backend_dead_grace_seconds = 120
+
+# Live Telegram smoke env vars (for real acceptance gate):
+#   WLCODEX_RUN_TELEGRAM_LIVE=1
+#   WLCODEX_TELEGRAM_BOT_TOKEN=...
+#   WLCODEX_TELEGRAM_ALLOWED_USER_ID=...
+# Optional before first real interaction:
+#   WLCODEX_LIVE_WORKSPACE_ALIAS=...
+#   WLCODEX_LIVE_SQLITE_PATH=...
+# Optional after first real /task:
+#   WLCODEX_TELEGRAM_CHAT_ID=...
+#   WLCODEX_LIVE_SMOKE_TASK_ID=...
+#   WLCODEX_LIVE_APPROVAL_REQUIRED=1  (after running approval smoke)
+
+[[workspaces]]
+alias = "wlcodex"
+path = "/media/wl/新加卷/codex/wlcodex"
+allow_write = true

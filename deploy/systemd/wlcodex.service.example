@@ -1,0 +1,20 @@
+[Unit]
+Description=WLCodex Telegram remote Codex cockpit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/media/wl/新加卷/codex/wlcodex
+EnvironmentFile=%h/.config/wlcodex/env
+Environment=PATH=/home/wl/.nvm/versions/node/v22.22.2/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/media/wl/新加卷/codex/wlcodex/.venv/bin/wlcodex --config /media/wl/新加卷/codex/wlcodex/config/wlcodex.toml
+Restart=always
+RestartSec=5
+
+# Provide token through the private environment file:
+#   /home/wl/.config/wlcodex/env
+#   WLCODEX_TELEGRAM_BOT_TOKEN=<real-token>
+
+[Install]
+WantedBy=default.target

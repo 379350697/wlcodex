@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
+
+
+class TaskStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    WAITING_APPROVAL = "waiting_approval"
+    PAUSED = "paused"
+    WAITING_SLOT = "waiting_slot"
+    DONE = "done"
+    FAILED = "failed"
+    ABORTED = "aborted"
+    ARCHIVED = "archived"
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class ApprovalKind(StrEnum):
+    COMMAND = "command"
+    FILE_CHANGE = "file_change"
+    PERMISSIONS = "permissions"
+
+
+class BackendRequestStatus(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class Task:
+    id: int
+    workspace_alias: str
+    workspace_path: str
+    title: str
+    status: TaskStatus
+    codex_thread_id: str | None
+    active_turn_id: str | None
+    parent_task_id: int | None
+    telegram_chat_id: int | None
+    telegram_status_message_id: int | None
+    created_at: datetime
+    updated_at: datetime
+    last_summary: str
+    last_phase: str
+    last_error: str
+    changed_file_count: int = 0
+    pending_approval_count: int = 0
+    token_input: int = 0
+    token_output: int = 0
+    worktree_path: str = ""
+    worktree_branch: str = ""
+    is_force_parallel: bool = False
+
+
+@dataclass(frozen=True)
+class TaskEvent:
+    id: int
+    task_id: int
+    event_type: str
+    payload: dict[str, Any]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class ApprovalRequest:
+    id: int
+    task_id: int
+    codex_request_id: str
+    codex_item_id: str | None
+    codex_turn_id: str | None
+    kind: ApprovalKind
+    summary: str
+    command_json: str
+    status: ApprovalStatus
+    telegram_message_id: int | None
+    resolution: str | None
+    created_at: datetime
+    resolved_at: datetime | None
+
+
+@dataclass(frozen=True)
+class BackendRequest:
+    id: int
+    jsonrpc_id: int
+    method: str
+    task_id: int | None
+    status: BackendRequestStatus
+    created_at: datetime
+    completed_at: datetime | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class TouchedFile:
+    id: int
+    task_id: int
+    path: str
+    change_kind: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class TelegramUpdate:
+    id: int
+    telegram_update_id: int
+    user_id: int
+    chat_id: int
+    update_type: str
+    allowed: bool
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class TaskSnapshot:
+    """Read-only render snapshot for status cards."""
+    task: Task
+    events: list[TaskEvent] = field(default_factory=list)
+    approvals: list[ApprovalRequest] = field(default_factory=list)
+    touched_files: list[TouchedFile] = field(default_factory=list)
