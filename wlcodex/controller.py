@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
+import subprocess
 from typing import Any
 
 from wlcodex.health_snapshot import build_health_snapshot
@@ -812,7 +813,7 @@ class CommandController:
                     if stream_event.event_type == "error":
                         had_error = True
                         accumulated += stream_event.delta
-                        continue
+                        break
                     accumulated += stream_event.delta
                     await self._interaction_renderer.handle(
                         InteractionEvent(
@@ -826,6 +827,19 @@ class CommandController:
             except Exception as exc:
                 logger.exception("Claude streaming failed")
                 self._service.fail_task(task.id, str(exc))
+                agent_run = self._ledger.create_agent_run(
+                    conversation_id=active.id,
+                    agent="claude",
+                    role="implementation",
+                    prompt_packet_summary=command.prompt[:120],
+                )
+                self._ledger.update_agent_run_status(
+                    agent_run.id,
+                    "failed",
+                    token_input=len(packet.render()) // 4,
+                    completion_summary=str(exc)[:2000],
+                )
+                self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
                 await self._interaction_renderer.handle(
                     InteractionEvent(
                         event_type="run_failed",
@@ -838,12 +852,20 @@ class CommandController:
 
             if had_error:
                 self._service.fail_task(task.id, accumulated[:500] or "Claude streaming returned error")
-                self._ledger.create_agent_run(
+                agent_run = self._ledger.create_agent_run(
                     conversation_id=active.id,
                     agent="claude",
                     role="implementation",
                     prompt_packet_summary=command.prompt[:120],
                 )
+                self._ledger.update_agent_run_status(
+                    agent_run.id,
+                    "failed",
+                    token_input=len(packet.render()) // 4,
+                    token_output=len(accumulated) // 4,
+                    completion_summary=accumulated[:2000],
+                )
+                self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
                 await self._interaction_renderer.handle(
                     InteractionEvent(
                         event_type="run_failed",
@@ -876,7 +898,12 @@ class CommandController:
                     chat_id=chat_id,
                     task_id=task.id,
                     conversation_id=active.id,
-                    metadata={"has_diff": bool(task.changed_file_count)},
+                    metadata={
+                        "has_diff": (
+                            _workspace_has_changes(workspace_path)
+                            or bool(task.changed_file_count)
+                        ),
+                    },
                 )
             )
             return ControllerResponse("", already_rendered=True)
@@ -1002,6 +1029,12 @@ class CommandController:
 
             terminal_sent = False
             orch_result_status = "running"
+            verify_round = 0
+            codex_analysis_text = ""
+            claude_implementation_text = ""
+            verification_text = ""
+            terminal_text = ""
+            codex_analysis_status = "running"
             try:
                 async for progress in orch.run_streaming(
                     command.prompt,
@@ -1010,6 +1043,7 @@ class CommandController:
                     if terminal_sent:
                         continue
                     if progress.phase == OrchestrationProgress.IMPL_DELTA and progress.text:
+                        claude_implementation_text += progress.text
                         await self._interaction_renderer.handle(
                             InteractionEvent(
                                 event_type="text_delta",
@@ -1036,10 +1070,74 @@ class CommandController:
                                     text="\n\n" + progress.text,
                                 )
                             )
+                        if progress.phase == OrchestrationProgress.ANALYSIS_COMPLETE:
+                            codex_analysis_text = progress.full_text or progress.text
+                            self._ledger.update_agent_run_status(
+                                codex_analysis_run.id,
+                                "done",
+                                completion_summary=codex_analysis_text[:2000],
+                            )
+                            codex_analysis_status = "done"
+                        elif progress.phase == OrchestrationProgress.IMPL_COMPLETE:
+                            claude_implementation_text = progress.full_text or progress.text
+                            claude_run = self._ledger.create_agent_run(
+                                conversation_id=active.id,
+                                agent="claude",
+                                role="implementation",
+                                prompt_packet_summary=command.prompt[:120],
+                            )
+                            self._ledger.update_agent_run_status(
+                                claude_run.id,
+                                "done",
+                                completion_summary=claude_implementation_text[:2000],
+                            )
+                            self._ledger.set_conversation_active_claude_run(
+                                active.id, claude_run.id
+                            )
+                        elif progress.phase == OrchestrationProgress.VERIFY_STARTED:
+                            verify_round = progress.round_num or verify_round
+                        elif progress.phase == OrchestrationProgress.VERIFY_COMPLETE:
+                            verify_round = progress.round_num or verify_round
+                            verification_text = progress.full_text or progress.text
+                            verify_run = self._ledger.create_agent_run(
+                                conversation_id=active.id,
+                                agent="codex",
+                                role="verification",
+                                prompt_packet_summary=verification_text[:120],
+                            )
+                            self._ledger.update_agent_run_status(
+                                verify_run.id,
+                                "done",
+                                completion_summary=verification_text[:2000],
+                            )
                     elif progress.phase == OrchestrationProgress.FAILED:
                         terminal_sent = True
                         orch_result_status = "failed"
+                        verify_round = progress.round_num or verify_round
+                        terminal_text = progress.full_text or progress.text
                         self._ledger.set_task_status(task.id, TaskStatus.FAILED)
+                        if progress.agent == "claude":
+                            claude_run = self._ledger.create_agent_run(
+                                conversation_id=active.id,
+                                agent="claude",
+                                role="implementation",
+                                prompt_packet_summary=command.prompt[:120],
+                            )
+                            self._ledger.update_agent_run_status(
+                                claude_run.id,
+                                "failed",
+                                completion_summary=terminal_text[:2000],
+                            )
+                            self._ledger.set_conversation_active_claude_run(
+                                active.id, claude_run.id
+                            )
+                        elif progress.agent == "codex" and not codex_analysis_text:
+                            self._ledger.update_agent_run_status(
+                                codex_analysis_run.id,
+                                "failed",
+                                completion_summary=terminal_text[:2000],
+                            )
+                            codex_analysis_status = "failed"
                         await self._interaction_renderer.handle(
                             InteractionEvent(
                                 event_type="run_failed",
@@ -1051,6 +1149,9 @@ class CommandController:
                     elif progress.phase == OrchestrationProgress.COMPLETE:
                         terminal_sent = True
                         orch_result_status = getattr(progress, "result_status", "") or "passed"
+                        verify_round = progress.round_num or verify_round
+                        if progress.text or progress.full_text:
+                            terminal_text = progress.full_text or progress.text
                         if orch_result_status == "passed":
                             self._ledger.set_task_status(task.id, TaskStatus.DONE)
                             await self._interaction_renderer.handle(
@@ -1059,7 +1160,12 @@ class CommandController:
                                     chat_id=chat_id,
                                     task_id=task.id,
                                     conversation_id=active.id,
-                                    metadata={"has_diff": bool(task.changed_file_count)},
+                                    metadata={
+                                        "has_diff": (
+                                            _workspace_has_changes(workspace_path)
+                                            or bool(task.changed_file_count)
+                                        ),
+                                    },
                                 )
                             )
                         elif orch_result_status == "needs_user":
@@ -1084,26 +1190,65 @@ class CommandController:
                             )
             except Exception as exc:
                 logger.exception("Chief engineer streaming orchestration failed")
+                self._ledger.set_task_status(task.id, TaskStatus.FAILED)
                 self._ledger.update_orchestration_run(
                     orch_run.id,
                     status="failed",
                     current_step="error",
                     last_verification_result=str(exc)[:500],
                 )
+                self._ledger.update_agent_run_status(
+                    codex_analysis_run.id,
+                    "failed",
+                    completion_summary=str(exc)[:2000],
+                )
                 return ControllerResponse("", already_rendered=True)
 
             # Update ledger records
-            codex_run_status = "done" if orch_result_status == "passed" else "failed"
+            if not codex_analysis_text and orch_result_status == "failed":
+                codex_analysis_text = terminal_text
+            if verification_text:
+                decision = (
+                    "verify_passed"
+                    if orch_result_status == "passed"
+                    else "verify_failed_retry"
+                )
+                self._ledger.record_orchestration_decision(
+                    run_id=orch_run.id,
+                    decision=decision,
+                    reason=verification_text[:500],
+                    next_agent="" if orch_result_status == "passed" else "claude",
+                )
             self._ledger.update_orchestration_run(
                 orch_run.id,
                 status=orch_result_status if orch_result_status != "running" else "failed",
-                verify_round=1,
-                current_step="complete",
+                verify_round=verify_round,
+                current_step="verify" if orch_result_status == "passed" else "retry",
+                last_codex_analysis=codex_analysis_text[:500],
+                last_claude_summary=claude_implementation_text[:500],
+                last_verification_result=(verification_text or terminal_text)[:500],
             )
-            self._ledger.update_agent_run_status(
-                codex_analysis_run.id,
-                codex_run_status,
-                completion_summary="Streaming orchestration completed",
+            codex_run_status = codex_analysis_status
+            if codex_run_status == "running":
+                codex_run_status = "failed" if orch_result_status == "failed" else "done"
+            if codex_analysis_text or codex_run_status == "failed":
+                self._ledger.update_agent_run_status(
+                    codex_analysis_run.id,
+                    codex_run_status,
+                    completion_summary=codex_analysis_text[:2000],
+                )
+            status_labels = {
+                "passed": "验收通过",
+                "failed": "验证失败",
+                "needs_user": "需要用户输入",
+            }
+            label = status_labels.get(orch_result_status, orch_result_status)
+            self._ledger.update_conversation_summary(
+                active.id,
+                trim_to_budget(
+                    f"总工程师第{verify_round}轮: {label}",
+                    ContextBudget().conversation_summary_tokens,
+                ),
             )
             return ControllerResponse("", already_rendered=True)
 
@@ -1850,6 +1995,19 @@ def _trim_result_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars - 1].rstrip() + "…"
+
+
+def _workspace_has_changes(workspace_path: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "-C", workspace_path, "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def _contains_cjk(text: str) -> bool:

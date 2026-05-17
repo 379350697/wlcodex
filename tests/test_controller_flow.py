@@ -1,15 +1,17 @@
 """Controller flow tests with fake backend."""
 
 from pathlib import Path
+import subprocess
 
 import pytest
 
+from wlcodex.agent_backend import AgentStreamEvent
 from wlcodex.codex_backend import BackendEvent, FakeCodexBackend
 from wlcodex.config import WorkspaceConfig
 from wlcodex.controller import CommandController
 from wlcodex.db import Ledger
 from wlcodex.inspection import TaskInspector
-from wlcodex.models import TaskStatus
+from wlcodex.models import AgentRunStatus, OrchestrationStatus, TaskStatus
 from wlcodex.task_service import TaskService
 
 
@@ -310,6 +312,60 @@ class FakeClaudeBackendForController:
         return type("h", (), {"is_healthy": True})()
 
 
+class RecordingInteractionRenderer:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    async def handle(self, event: object) -> None:
+        self.events.append(event)
+
+
+class StreamingClaudeWritesTrackedFile:
+    enabled = True
+
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+        self.prompts: list[str] = []
+
+    async def send_streaming(self, request):
+        self.prompts.append(request.prompt)
+        (self.workspace / "tracked.txt").write_text("changed by claude\n", encoding="utf-8")
+        yield AgentStreamEvent(delta="Implementation complete.", event_type="text")
+
+
+class StreamingClaudeError:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def send_streaming(self, request):
+        self.prompts.append(request.prompt)
+        yield AgentStreamEvent(delta="Claude binary not found", event_type="error")
+
+
+def _init_git_workspace(path: Path) -> None:
+    path.mkdir()
+    (path / "tracked.txt").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "add", "tracked.txt"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+
+
 @pytest.fixture
 def ctrl_with_claude(tmp_path: Path) -> CommandController:
     ledger = Ledger.open(tmp_path / "db.sqlite3")
@@ -429,6 +485,152 @@ async def test_auto_mode_hides_english_model_snippets(
     assert "Fake Claude implementation result" not in response.text
     assert "confidence: high" not in response.text
     assert "非中文内容" in response.text
+
+
+@pytest.mark.asyncio
+async def test_streaming_auto_records_full_ledger_and_real_diff(tmp_path: Path) -> None:
+    """Natural streaming /auto must leave the same audit trail as legacy orchestration."""
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    backend._codex_responses = [
+        "Root cause: tracked.txt needs a change. Implementation needed.",
+        "decision: pass\nsummary: Verified changed workspace.",
+    ]
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    renderer = RecordingInteractionRenderer()
+    claude = StreamingClaudeWritesTrackedFile(workspace)
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=claude,
+        interaction_renderer=renderer,
+    )
+
+    response = await ctrl.handle(
+        "/auto 修改 tracked.txt",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert response.already_rendered
+    active = ledger.get_active_conversation(100)
+    assert active is not None
+    assert active.active_claude_run_id is not None
+    assert "总工程师" in active.conversation_summary
+
+    agent_runs = ledger.list_agent_runs(active.id)
+    assert [(run.agent, run.role, run.status) for run in agent_runs] == [
+        ("codex", "analysis", AgentRunStatus.DONE.value),
+        ("claude", "implementation", AgentRunStatus.DONE.value),
+        ("codex", "verification", AgentRunStatus.DONE.value),
+    ]
+
+    orch_runs = ledger.list_orchestration_runs(active.id)
+    assert orch_runs[0].status == OrchestrationStatus.PASSED.value
+    decisions = ledger.list_orchestration_decisions(orch_runs[0].id)
+    assert decisions
+    assert decisions[-1].decision == "verify_passed"
+
+    completed_events = [
+        event for event in renderer.events
+        if getattr(event, "event_type", "") == "run_completed"
+    ]
+    assert completed_events
+    assert completed_events[-1].metadata["has_diff"] is True
+
+
+@pytest.mark.asyncio
+async def test_streaming_auto_fails_ledger_on_claude_stream_error(tmp_path: Path) -> None:
+    """Claude stream errors in /auto must fail the run, not continue to verification."""
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    backend._codex_responses = [
+        "Root cause: tracked.txt needs a change. Implementation needed.",
+        "decision: pass\nsummary: this verification must not run.",
+    ]
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    renderer = RecordingInteractionRenderer()
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=StreamingClaudeError(),
+        interaction_renderer=renderer,
+    )
+
+    response = await ctrl.handle(
+        "/auto 修改 tracked.txt",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert response.already_rendered
+    active = ledger.get_active_conversation(100)
+    assert active is not None
+    orch_runs = ledger.list_orchestration_runs(active.id)
+    assert orch_runs[0].status == OrchestrationStatus.FAILED.value
+    assert len(backend.turns) == 1  # analysis only; no Codex verification after Claude error
+
+    agent_runs = ledger.list_agent_runs(active.id)
+    assert [(run.agent, run.role, run.status) for run in agent_runs] == [
+        ("codex", "analysis", AgentRunStatus.DONE.value),
+        ("claude", "implementation", AgentRunStatus.FAILED.value),
+    ]
+
+    event_types = [getattr(event, "event_type", "") for event in renderer.events]
+    assert "run_failed" in event_types
+    assert "run_completed" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_claude_direct_streaming_error_marks_agent_run_failed(tmp_path: Path) -> None:
+    """Direct /claude stream errors must not leave the agent run queued."""
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    renderer = RecordingInteractionRenderer()
+    ctrl = CommandController(
+        service,
+        FakeCodexBackend(),
+        inspector,
+        ledger=ledger,
+        claude_backend=StreamingClaudeError(),
+        interaction_renderer=renderer,
+    )
+
+    response = await ctrl.handle(
+        "/claude 修改 tracked.txt",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert response.already_rendered
+    active = ledger.get_active_conversation(100)
+    assert active is not None
+    agent_runs = ledger.list_agent_runs(active.id)
+    assert [(run.agent, run.role, run.status) for run in agent_runs] == [
+        ("claude", "implementation", AgentRunStatus.FAILED.value),
+    ]
 
 
 @pytest.mark.asyncio

@@ -122,8 +122,10 @@ class OrchestrationStepResult:
 class OrchestrationProgress:
     phase: str  # analysis_started, analysis_complete, implementation_delta, etc.
     text: str = ""
+    full_text: str = ""
     agent: str = ""
     result_status: str = ""  # passed, failed, needs_user — set on COMPLETE
+    round_num: int = 0
 
     # Phase constants for controller dispatch
     ANALYSIS_STARTED = "analysis_started"
@@ -339,24 +341,23 @@ class ChiefEngineerOrchestrator:
         )
 
     async def _call_claude_streaming(self, prompt: str, workspace: str):
-        """Streaming variant: yields deltas from Claude send_streaming.
-        Also accumulates full text for the return value.
+        """Streaming variant: yields AgentStreamEvent objects.
+
         Falls back to blocking send() when send_streaming is not available.
         """
+        from wlcodex.agent_backend import AgentRequest, AgentStreamEvent
+
         backend = self._claude
         if hasattr(backend, "send_streaming"):
-            from wlcodex.agent_backend import AgentRequest
-            accumulated = ""
             async for stream_event in backend.send_streaming(AgentRequest(
                 prompt=prompt,
                 workspace_path=workspace,
             )):
-                accumulated += stream_event.delta
-                yield stream_event.delta
+                yield stream_event
             return
         # Fallback: blocking send
         text = await self._call_claude(prompt, workspace)
-        yield text
+        yield AgentStreamEvent(delta=text, event_type="text")
 
     async def run_streaming(
         self,
@@ -391,6 +392,7 @@ class ChiefEngineerOrchestrator:
             yield OrchestrationProgress(
                 phase=OrchestrationProgress.FAILED,
                 text=f"Codex 分析失败：{exc}",
+                full_text=str(exc),
                 agent="codex",
             )
             yield OrchestrationProgress(
@@ -404,6 +406,7 @@ class ChiefEngineerOrchestrator:
         yield OrchestrationProgress(
             phase=OrchestrationProgress.ANALYSIS_COMPLETE,
             text=analysis[:200],
+            full_text=analysis,
             agent="codex",
         )
 
@@ -414,6 +417,7 @@ class ChiefEngineerOrchestrator:
             yield OrchestrationProgress(
                 phase=OrchestrationProgress.COMPLETE,
                 text="Codex 认为无需实施代码修改。",
+                full_text=result.verification_summary,
                 agent="codex",
                 result_status="passed",
             )
@@ -436,11 +440,33 @@ class ChiefEngineerOrchestrator:
                 async for delta in self._call_claude_streaming(
                     claude_packet.render(), workspace
                 ):
-                    impl_accumulated += delta
+                    if delta.event_type == "error":
+                        error_text = delta.delta or "Claude streaming returned error"
+                        result.status = "failed"
+                        result.verification_summary = (
+                            f"Claude implementation failed: {error_text}"
+                        )
+                        yield OrchestrationProgress(
+                            phase=OrchestrationProgress.FAILED,
+                            text=f"Claude 实施失败：{error_text}",
+                            full_text=error_text,
+                            agent="claude",
+                            round_num=round_num,
+                        )
+                        yield OrchestrationProgress(
+                            phase=OrchestrationProgress.COMPLETE,
+                            text="",
+                            agent="",
+                            result_status="failed",
+                            round_num=round_num,
+                        )
+                        return
+                    impl_accumulated += delta.delta
                     yield OrchestrationProgress(
                         phase=OrchestrationProgress.IMPL_DELTA,
-                        text=delta,
+                        text=delta.delta,
                         agent="claude",
+                        round_num=round_num,
                     )
                 result.claude_implementation = impl_accumulated
                 result.steps.append(OrchestrationStepResult(
@@ -453,20 +479,25 @@ class ChiefEngineerOrchestrator:
                 yield OrchestrationProgress(
                     phase=OrchestrationProgress.FAILED,
                     text=f"Claude 实施失败：{exc}",
+                    full_text=str(exc),
                     agent="claude",
+                    round_num=round_num,
                 )
                 yield OrchestrationProgress(
                     phase=OrchestrationProgress.COMPLETE,
                     text="",
                     agent="",
                     result_status="failed",
+                    round_num=round_num,
                 )
                 return
 
             yield OrchestrationProgress(
                 phase=OrchestrationProgress.IMPL_COMPLETE,
                 text=impl_accumulated[:200],
+                full_text=impl_accumulated,
                 agent="claude",
+                round_num=round_num,
             )
 
             # Codex verification
@@ -474,6 +505,7 @@ class ChiefEngineerOrchestrator:
                 phase=OrchestrationProgress.VERIFY_STARTED,
                 text="Codex 正在验收...",
                 agent="codex",
+                round_num=round_num,
             )
             try:
                 verify_result = await self._verify_with_codex(
@@ -490,20 +522,25 @@ class ChiefEngineerOrchestrator:
                 yield OrchestrationProgress(
                     phase=OrchestrationProgress.FAILED,
                     text=f"Codex 验收失败：{exc}",
+                    full_text=str(exc),
                     agent="codex",
+                    round_num=round_num,
                 )
                 yield OrchestrationProgress(
                     phase=OrchestrationProgress.COMPLETE,
                     text="",
                     agent="",
                     result_status="failed",
+                    round_num=round_num,
                 )
                 return
 
             yield OrchestrationProgress(
                 phase=OrchestrationProgress.VERIFY_COMPLETE,
                 text=verify_result[:200],
+                full_text=verify_result,
                 agent="codex",
+                round_num=round_num,
             )
 
             decision = VerificationDecision.parse(verify_result)
@@ -513,8 +550,10 @@ class ChiefEngineerOrchestrator:
                 yield OrchestrationProgress(
                     phase=OrchestrationProgress.COMPLETE,
                     text="验收通过",
+                    full_text=verify_result,
                     agent="codex",
                     result_status="passed",
+                    round_num=round_num,
                 )
                 return
             elif decision.decision == "stop":
@@ -523,8 +562,10 @@ class ChiefEngineerOrchestrator:
                 yield OrchestrationProgress(
                     phase=OrchestrationProgress.COMPLETE,
                     text=f"验收停止：{decision.summary[:200]}",
+                    full_text=decision.summary,
                     agent="codex",
                     result_status="failed",
+                    round_num=round_num,
                 )
                 return
             elif decision.decision == "need_user":
@@ -533,8 +574,10 @@ class ChiefEngineerOrchestrator:
                 yield OrchestrationProgress(
                     phase=OrchestrationProgress.COMPLETE,
                     text=f"需要用户判断：{decision.summary[:200]}",
+                    full_text=decision.summary,
                     agent="codex",
                     result_status="needs_user",
+                    round_num=round_num,
                 )
                 return
             elif decision.decision == "retry":
@@ -549,6 +592,8 @@ class ChiefEngineerOrchestrator:
         yield OrchestrationProgress(
             phase=OrchestrationProgress.COMPLETE,
             text=result.verification_summary[:200],
+            full_text=result.verification_summary,
             agent="codex",
             result_status="needs_user",
+            round_num=self._max_verify_rounds,
         )

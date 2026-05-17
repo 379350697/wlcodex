@@ -156,6 +156,40 @@ acceptance:
 Use `/codex <prompt>`, `/claude <prompt>`, or `/auto <prompt>` only when you
 want to force a specific route. Plain text is the default product path.
 
+### Human smoke pass criteria
+
+Use this as the real product acceptance smoke for the current `natural`
+interaction profile:
+
+1. Config has `[interaction] profile = "natural"` and `streaming_enabled = true`.
+2. A plain text message starts or continues a conversation without a mechanical
+   textual ACK such as "正在处理你的消息，请稍候".
+3. Telegram shows typing while the run is being prepared.
+4. Visible model output streams into one edited message instead of a sequence of
+   duplicate status cards.
+5. The normal reply body does not expose task id, thread id, workspace, mode, or
+   token counters. Those details remain available through `/status` and
+   diagnostic commands.
+6. Completion shows a compact action row. `查看 diff` appears when the workspace
+   really has a git diff, including changes made by Claude Code.
+7. `/codex <prompt>` streams Codex deltas from the same Codex run. It must not
+   start a second model call just to render Telegram output.
+8. `/claude <prompt>` streams Claude output when Claude is enabled. If Claude
+   returns a streaming error, the Telegram run fails visibly and the agent run is
+   recorded as `failed`, not left `queued`.
+9. `/auto <prompt>` runs the full Codex analysis → Claude implementation →
+   Codex verification chain. A passing run records analysis, implementation,
+   verification, orchestration status, decision, active Claude run, and
+   conversation summary in SQLite.
+10. If Claude fails during `/auto`, the orchestration stops as `failed`; Codex
+    verification must not continue after the Claude stream error.
+11. Approval requests still appear as explicit approval cards with buttons, not
+    as mixed natural-chat text.
+
+The human smoke is considered passed only when the visible Telegram behavior and
+the ledger state both match the criteria above. A green unit test run alone is
+not enough evidence for this smoke.
+
 ## Live Telegram Smoke (Real Acceptance)
 
 The primary human smoke is conversation-first, as above. The automated live

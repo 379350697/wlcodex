@@ -529,19 +529,29 @@ class PureErrorClaudeStreaming:
 
 
 @pytest.mark.asyncio
-async def test_run_streaming_handles_error_delta_in_stream() -> None:
-    """run_streaming must forward error deltas as text (caller decides failure)."""
+async def test_run_streaming_fails_on_claude_error_delta() -> None:
+    """Claude stream errors must stop chief-engineer before Codex verification."""
     from wlcodex.orchestrator import OrchestrationProgress
 
     codex = FakeCodexWithSendPrompt()
     claude = ErrorThenTextClaudeStreaming()
 
     orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
-    deltas = []
+    events = []
     async for progress in orchestrator.run_streaming("修复登录 bug"):
-        if progress.phase == OrchestrationProgress.IMPL_DELTA:
-            deltas.append(progress.text)
+        events.append(progress)
 
-    # Error delta text is forwarded (caller decides what to do)
-    assert "binary missing" in deltas
-    assert "some text after error" in deltas
+    phases = [event.phase for event in events]
+    complete_events = [
+        event for event in events if event.phase == OrchestrationProgress.COMPLETE
+    ]
+    failed_events = [
+        event for event in events if event.phase == OrchestrationProgress.FAILED
+    ]
+
+    assert failed_events
+    assert complete_events
+    assert complete_events[0].result_status == "failed"
+    assert "binary missing" in failed_events[0].text
+    assert OrchestrationProgress.VERIFY_STARTED not in phases
+    assert len(codex.prompts) == 1  # analysis only; no verification after Claude error
