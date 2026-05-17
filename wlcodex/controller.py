@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from wlcodex.health_snapshot import build_health_snapshot
+from wlcodex.interaction.errors import classify_user_error
 from wlcodex.inspection import TaskInspector
 from wlcodex.models import TaskStatus
 from wlcodex.conversation import default_title, mode_from_command
@@ -595,9 +596,7 @@ class CommandController:
             await self._backend.start_turn(thread_id, packet.render())
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
-            return ControllerResponse(
-                f"Codex 启动失败：{exc}\n\n任务 #{task.id} 已失败。"
-            )
+            return ControllerResponse(classify_user_error(exc))
 
         self._ledger.update_conversation_summary(
             active.id,
@@ -703,9 +702,7 @@ class CommandController:
             await self._backend.start_turn(thread_id, packet.render())
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
-            return ControllerResponse(
-                f"Codex 启动失败：{exc}\n\n任务 #{task.id} 已失败。"
-            )
+            return ControllerResponse(classify_user_error(exc))
 
         self._ledger.update_conversation_summary(
             active.id,
