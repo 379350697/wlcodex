@@ -12,6 +12,67 @@ from wlcodex.jsonrpc import JsonRpcClient
 
 logger = logging.getLogger(__name__)
 
+_PLANNING_THREAD_CONFIG: dict[str, object] = {
+    "model_reasoning_effort": "low",
+    "model_reasoning_summary": "none",
+    "model_verbosity": "low",
+}
+
+_READ_ONLY_SANDBOX_POLICY: dict[str, object] = {
+    "type": "readOnly",
+    "networkAccess": False,
+}
+
+_CODEX_ANALYSIS_OUTPUT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "required": [
+        "summary",
+        "needs_implementation",
+        "files_to_touch",
+        "implementation_steps",
+        "acceptance_criteria",
+        "prohibited_changes",
+    ],
+    "properties": {
+        "summary": {"type": "string"},
+        "needs_implementation": {"type": "boolean"},
+        "files_to_touch": {"type": "array", "items": {"type": "string"}},
+        "implementation_steps": {"type": "array", "items": {"type": "string"}},
+        "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+        "prohibited_changes": {"type": "array", "items": {"type": "string"}},
+    },
+    "additionalProperties": False,
+}
+
+
+def _planning_developer_instructions(interaction_mode: str) -> str:
+    if interaction_mode == "verification":
+        return (
+            "你是 WLCodex 的 Codex 验收子流程。不要调用工具、不要读取文件、"
+            "不要运行命令、不要编辑文件。只根据用户目标、Codex 方案、Claude "
+            "完成摘要和已提供的 diff/test 摘要验收，并用 decision: pass/retry/"
+            "stop/need_user 格式输出简短中文结果。"
+        )
+    return (
+        "你是 WLCodex 的 Codex 分析子流程。不要调用工具、不要读取文件、"
+        "不要运行命令、不要编辑文件。只根据输入做需求分析，并输出交给 Claude "
+        "执行的结构化实现交接包。"
+    )
+
+
+def _planning_turn_options(interaction_mode: str) -> dict[str, object]:
+    options: dict[str, object] = {
+        "effort": "low",
+        "approval_policy": "never",
+        "sandbox_policy": _READ_ONLY_SANDBOX_POLICY,
+        "summary": "none",
+        "personality": "pragmatic",
+        "service_tier": "fast",
+    }
+    if interaction_mode == "analysis":
+        options["output_schema"] = _CODEX_ANALYSIS_OUTPUT_SCHEMA
+    return options
+
 
 # ---------------------------------------------------------------------------
 # Protocol helpers — encode/decode app-server JSON-RPC payloads
@@ -23,17 +84,62 @@ def _text_input(prompt: str) -> list[dict[str, str]]:
 
 
 def build_thread_start_params(
-    workspace_path: str, approval_policy: str, sandbox: str
+    workspace_path: str,
+    approval_policy: str,
+    sandbox: str,
+    *,
+    developer_instructions: str | None = None,
+    base_instructions: str | None = None,
+    config: dict[str, object] | None = None,
+    personality: str | None = None,
+    service_tier: str | None = None,
 ) -> dict[str, object]:
-    return {
+    params: dict[str, object] = {
         "cwd": workspace_path,
         "approvalPolicy": approval_policy,
         "sandbox": sandbox,
     }
+    if developer_instructions is not None:
+        params["developerInstructions"] = developer_instructions
+    if base_instructions is not None:
+        params["baseInstructions"] = base_instructions
+    if config is not None:
+        params["config"] = config
+    if personality is not None:
+        params["personality"] = personality
+    if service_tier is not None:
+        params["serviceTier"] = service_tier
+    return params
 
 
-def build_turn_start_params(thread_id: str, prompt: str) -> dict[str, object]:
-    return {"threadId": thread_id, "input": _text_input(prompt)}
+def build_turn_start_params(
+    thread_id: str,
+    prompt: str,
+    *,
+    effort: str | None = None,
+    approval_policy: str | None = None,
+    sandbox_policy: dict[str, object] | None = None,
+    output_schema: dict[str, object] | None = None,
+    summary: str | None = None,
+    personality: str | None = None,
+    service_tier: str | None = None,
+) -> dict[str, object]:
+    params: dict[str, object] = {"threadId": thread_id, "input": _text_input(prompt)}
+    if effort is not None:
+        params["effort"] = effort
+    if approval_policy is not None:
+        params["approvalPolicy"] = approval_policy
+    if sandbox_policy is not None:
+        params["sandboxPolicy"] = sandbox_policy
+    if output_schema is not None:
+        params["outputSchema"] = output_schema
+    if summary is not None:
+        params["summary"] = summary
+    if personality is not None:
+        params["personality"] = personality
+    if service_tier is not None:
+        params["serviceTier"] = service_tier
+    return params
 
 
 def build_turn_steer_params(
@@ -212,6 +318,7 @@ class FakeCodexBackend:
         prompt: str,
         *,
         on_thread_created: Callable[[str], None] | None = None,
+        interaction_mode: str = "general",
     ) -> str:
         """Send a prompt to Codex and return the response text synchronously.
 
@@ -475,11 +582,49 @@ class AppServerCodexBackend:
         )
         return parse_thread_start_response(result)
 
+    async def _create_prompt_thread(
+        self, workspace_path: str, interaction_mode: str
+    ) -> str:
+        if interaction_mode not in ("analysis", "verification"):
+            return await self.create_thread(workspace_path)
+        client = await self._ensure_client()
+        result = await client.request(
+            "thread/start",
+            build_thread_start_params(
+                workspace_path,
+                "never",
+                "read-only",
+                developer_instructions=_planning_developer_instructions(
+                    interaction_mode
+                ),
+                config=_PLANNING_THREAD_CONFIG,
+                personality="pragmatic",
+                service_tier="fast",
+            ),
+        )
+        return parse_thread_start_response(result)
+
     async def start_turn(self, thread_id: str, prompt: str) -> str:
         client = await self._ensure_client()
         result = await client.request(
             "turn/start",
             build_turn_start_params(thread_id, prompt),
+        )
+        return parse_turn_response(result)
+
+    async def _start_prompt_turn(
+        self, thread_id: str, prompt: str, interaction_mode: str
+    ) -> str:
+        if interaction_mode not in ("analysis", "verification"):
+            return await self.start_turn(thread_id, prompt)
+        client = await self._ensure_client()
+        result = await client.request(
+            "turn/start",
+            build_turn_start_params(
+                thread_id,
+                prompt,
+                **_planning_turn_options(interaction_mode),
+            ),
         )
         return parse_turn_response(result)
 
@@ -512,6 +657,7 @@ class AppServerCodexBackend:
         prompt: str,
         *,
         on_thread_created: Callable[[str], None] | None = None,
+        interaction_mode: str = "general",
     ) -> str:
         """Send prompt to Codex and block until its turn completes. Returns response text.
 
@@ -523,10 +669,17 @@ class AppServerCodexBackend:
         """
         prompt_events = self._subscribe_events()
         try:
-            thread_id = await self.create_thread(workspace_path)
+            thread_id = await self._create_prompt_thread(
+                workspace_path,
+                interaction_mode,
+            )
             if on_thread_created is not None:
                 on_thread_created(thread_id)
-            turn_id = await self.start_turn(thread_id, prompt)
+            turn_id = await self._start_prompt_turn(
+                thread_id,
+                prompt,
+                interaction_mode,
+            )
         except Exception:
             self._unsubscribe_events(prompt_events)
             raise

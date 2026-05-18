@@ -8,6 +8,8 @@ The orchestrator enforces compact context packets for every model call.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
+import json
 import logging
 import subprocess
 from typing import Any
@@ -22,8 +24,27 @@ from wlcodex.context_packets import (
 logger = logging.getLogger(__name__)
 
 
+def _accepts_keyword(func: object, name: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        or parameter.name == name
+        for parameter in signature.parameters.values()
+    )
+
+
 def _analysis_says_no_implementation_needed(text: str) -> bool:
     """Return true when Codex analysis says the request is informational/no-op."""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and parsed.get("needs_implementation") is False:
+        return True
+
     lowered = text.lower()
     markers = (
         "no code changes",
@@ -296,7 +317,11 @@ class ChiefEngineerOrchestrator:
             workspace=workspace,
             budget=self._budget,
         )
-        return await self._call_codex(packet.render(), workspace)
+        return await self._call_codex(
+            packet.render(),
+            workspace,
+            interaction_mode="analysis",
+        )
 
     async def _implement_with_claude(
         self, goal: str, analysis: str, workspace: str
@@ -325,13 +350,30 @@ class ChiefEngineerOrchestrator:
             workspace=workspace,
             budget=self._budget,
         )
-        return await self._call_codex(packet.render(), workspace)
+        return await self._call_codex(
+            packet.render(),
+            workspace,
+            interaction_mode="verification",
+        )
 
-    async def _call_codex(self, prompt: str, workspace: str) -> str:
+    async def _call_codex(
+        self,
+        prompt: str,
+        workspace: str,
+        *,
+        interaction_mode: str = "general",
+    ) -> str:
         backend = self._codex
         # Prefer real send_codex_prompt interface
         if hasattr(backend, "send_codex_prompt"):
-            return await backend.send_codex_prompt(workspace, prompt)
+            send_codex_prompt = backend.send_codex_prompt
+            if _accepts_keyword(send_codex_prompt, "interaction_mode"):
+                return await send_codex_prompt(
+                    workspace,
+                    prompt,
+                    interaction_mode=interaction_mode,
+                )
+            return await send_codex_prompt(workspace, prompt)
         # Legacy test compatibility (echo/fake_response ignore workspace)
         if hasattr(backend, "echo"):
             return backend.echo(prompt)

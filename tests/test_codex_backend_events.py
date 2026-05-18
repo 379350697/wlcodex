@@ -266,6 +266,64 @@ async def test_app_server_send_codex_prompt_cleans_subscription_on_start_error()
 
 
 @pytest.mark.asyncio
+async def test_app_server_send_codex_analysis_prompt_uses_planning_overrides() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    class RecordingClient:
+        async def request(
+            self, method: str, params: dict[str, object] | None = None
+        ) -> dict[str, object]:
+            requests.append((method, params or {}))
+            if method == "thread/start":
+                return {"threadId": "analysis-thread"}
+            if method == "turn/start":
+                backend._emit(BackendEvent("agent_message_delta", {
+                    "threadId": "analysis-thread",
+                    "turnId": "analysis-turn",
+                    "delta": "{\"summary\":\"ok\"}",
+                }))
+                backend._emit(BackendEvent("turn_completed", {
+                    "threadId": "analysis-thread",
+                    "turnId": "analysis-turn",
+                }))
+                return {"turnId": "analysis-turn"}
+            raise AssertionError(method)
+
+    backend._client = RecordingClient()
+
+    result = await backend.send_codex_prompt(
+        "/tmp/demo",
+        "prompt",
+        interaction_mode="analysis",
+    )
+
+    assert result == "{\"summary\":\"ok\"}"
+    thread_method, thread_params = requests[0]
+    turn_method, turn_params = requests[1]
+    assert thread_method == "thread/start"
+    assert thread_params["approvalPolicy"] == "never"
+    assert thread_params["sandbox"] == "read-only"
+    assert "不要调用工具" in str(thread_params["developerInstructions"])
+    assert thread_params["config"] == {
+        "model_reasoning_effort": "low",
+        "model_reasoning_summary": "none",
+        "model_verbosity": "low",
+    }
+    assert turn_method == "turn/start"
+    assert turn_params["effort"] == "low"
+    assert turn_params["approvalPolicy"] == "never"
+    assert turn_params["sandboxPolicy"] == {
+        "type": "readOnly",
+        "networkAccess": False,
+    }
+    assert "outputSchema" in turn_params
+
+
+@pytest.mark.asyncio
 async def test_app_server_send_codex_prompt_interrupts_and_fails_on_timeout() -> None:
     backend = AppServerCodexBackend(
         endpoint="ws://127.0.0.1:17431",

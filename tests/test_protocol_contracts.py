@@ -38,6 +38,50 @@ def test_thread_start_includes_policy_and_sandbox() -> None:
     assert params["sandbox"] == "workspace-write"
 
 
+def test_thread_start_supports_planning_overrides() -> None:
+    params = build_thread_start_params(
+        "/tmp/work",
+        "never",
+        "read-only",
+        developer_instructions="No tools.",
+        config={"model_reasoning_effort": "low"},
+        personality="pragmatic",
+    )
+
+    assert params["approvalPolicy"] == "never"
+    assert params["sandbox"] == "read-only"
+    assert params["developerInstructions"] == "No tools."
+    assert params["config"] == {"model_reasoning_effort": "low"}
+    assert params["personality"] == "pragmatic"
+
+
+def test_turn_start_supports_planning_overrides() -> None:
+    output_schema = {
+        "type": "object",
+        "required": ["summary"],
+        "properties": {"summary": {"type": "string"}},
+    }
+    params = build_turn_start_params(
+        "thread-1",
+        "hello",
+        effort="low",
+        approval_policy="never",
+        sandbox_policy={"type": "readOnly", "networkAccess": False},
+        output_schema=output_schema,
+        summary="none",
+        personality="pragmatic",
+    )
+
+    assert params["threadId"] == "thread-1"
+    assert params["input"] == [{"type": "text", "text": "hello"}]
+    assert params["effort"] == "low"
+    assert params["approvalPolicy"] == "never"
+    assert params["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
+    assert params["outputSchema"] == output_schema
+    assert params["summary"] == "none"
+    assert params["personality"] == "pragmatic"
+
+
 def test_parse_nested_thread_and_turn_responses() -> None:
     assert parse_thread_start_response({"thread": {"id": "thread-1"}}) == "thread-1"
     assert parse_turn_response({"turn": {"id": "turn-1"}}) == "turn-1"

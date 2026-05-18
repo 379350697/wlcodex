@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import inspect
 import logging
 import subprocess
 from typing import Any
@@ -103,6 +104,18 @@ logger = logging.getLogger(__name__)
 HELP_TEXT = render_conversation_help()
 
 
+def _accepts_keyword(func: object, name: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        or parameter.name == name
+        for parameter in signature.parameters.values()
+    )
+
+
 def _is_lightweight_greeting(text: str) -> bool:
     normalized = text.strip().lower()
     normalized = normalized.strip(" \t\r\n.!?。！？~～")
@@ -136,12 +149,23 @@ class _TaskBoundCodexBackend:
     def _bind_thread(self, thread_id: str) -> None:
         self._service.set_task_thread(self._task_id, thread_id)
 
-    async def send_codex_prompt(self, workspace_path: str, prompt: str) -> str:
+    async def send_codex_prompt(
+        self,
+        workspace_path: str,
+        prompt: str,
+        **kwargs: object,
+    ) -> str:
         send_codex_prompt = getattr(self._backend, "send_codex_prompt")
+        supported_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if _accepts_keyword(send_codex_prompt, key)
+        }
         return await send_codex_prompt(
             workspace_path,
             prompt,
             on_thread_created=self._bind_thread,
+            **supported_kwargs,
         )
 
 

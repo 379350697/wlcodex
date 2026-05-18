@@ -6,6 +6,7 @@ from wlcodex.orchestrator import (
     OrchestrationProgress,
     OrchestrationResult,
     VerificationDecision,
+    _analysis_says_no_implementation_needed,
 )
 
 
@@ -173,6 +174,13 @@ def test_verification_decision_parse_unknown() -> None:
     assert d.decision == "need_user"
 
 
+def test_analysis_json_false_means_no_implementation_needed() -> None:
+    assert _analysis_says_no_implementation_needed(
+        '{"summary":"这是查询类请求","needs_implementation":false,'
+        '"files_to_touch":[],"implementation_steps":[]}'
+    )
+
+
 # ---------------------------------------------------------------------------
 # Real interface tests: orchestrator uses send_codex_prompt and send()
 # ---------------------------------------------------------------------------
@@ -206,6 +214,25 @@ class FakeClaudeWithSend:
         return AgentResult(text=text, exit_code=0, token_input=100, token_output=200)
 
 
+class FakeCodexWithPromptModes:
+    def __init__(self) -> None:
+        self.modes: list[str] = []
+        self._responses = [
+            "Root cause: implementation needed.",
+            "decision: pass\nsummary: verified",
+        ]
+
+    async def send_codex_prompt(
+        self,
+        workspace_path: str,
+        prompt: str,
+        *,
+        interaction_mode: str = "general",
+    ) -> str:
+        self.modes.append(interaction_mode)
+        return self._responses.pop(0)
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_uses_send_codex_prompt_interface() -> None:
     """Orchestrator must prefer send_codex_prompt over echo when available."""
@@ -223,6 +250,18 @@ async def test_orchestrator_uses_send_codex_prompt_interface() -> None:
         assert "修复登录 bug" in prompt or "verification" in prompt.lower() or "login" in prompt.lower()
     # Must have called send (real Claude interface)
     assert len(claude.prompts) == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_marks_codex_analysis_and_verification_modes() -> None:
+    codex = FakeCodexWithPromptModes()
+    claude = FakeClaudeWithSend()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    result = await orchestrator.run("实现一个小功能")
+
+    assert result.status == "passed"
+    assert codex.modes == ["analysis", "verification"]
 
 
 @pytest.mark.asyncio
