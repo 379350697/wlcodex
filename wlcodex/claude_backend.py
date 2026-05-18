@@ -28,7 +28,7 @@ class ClaudeConfig:
     enabled: bool = False
     binary: str = "claude"
     startup_timeout_seconds: float = 15.0
-    request_timeout_seconds: float = 600.0
+    request_timeout_seconds: float = 3600.0
     stream_drain_grace_seconds: float = 0.1
     permission_mode: str = "acceptEdits"
     model: str = "deepseek-v4-pro"

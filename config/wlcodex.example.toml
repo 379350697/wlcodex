@@ -73,7 +73,7 @@ auto_delegate_simple_edits = false
 enabled = false
 binary = "claude"
 startup_timeout_seconds = 15.0
-request_timeout_seconds = 600.0
+request_timeout_seconds = 3600.0
 # Keep Claude implementation runs on the strongest configured backend profile.
 model = "deepseek-v4-pro"
 effort = "max"

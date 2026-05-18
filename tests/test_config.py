@@ -40,6 +40,7 @@ path = "/tmp/wlcodex"
     assert config.claude.permission_mode == "acceptEdits"
     assert config.claude.model == "deepseek-v4-pro"
     assert config.claude.effort == "max"
+    assert config.claude.request_timeout_seconds == 3600
     assert config.context_budget.codex_to_claude_tokens == 1500
     assert config.orchestration.max_verify_rounds == 3
     assert config.streaming.edit_min_interval_seconds == 1.0

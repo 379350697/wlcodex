@@ -55,7 +55,7 @@ def test_claude_config_defaults() -> None:
     assert config.enabled is False
     assert config.binary == "claude"
     assert config.startup_timeout_seconds == 15.0
-    assert config.request_timeout_seconds == 600.0
+    assert config.request_timeout_seconds == 3600.0
     assert config.stream_drain_grace_seconds == 0.1
     assert config.permission_mode == "acceptEdits"
     assert config.model == "deepseek-v4-pro"
