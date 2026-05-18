@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +29,7 @@ class ClaudeConfig:
     binary: str = "claude"
     startup_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 600.0
+    stream_drain_grace_seconds: float = 0.1
     permission_mode: str = "acceptEdits"
     model: str = "deepseek-v4-pro"
     effort: str = "max"
@@ -65,6 +68,7 @@ class ClaudeBackend:
                 cwd=request.workspace_path or None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
 
             async def _read() -> tuple[str, str]:
@@ -120,6 +124,7 @@ class ClaudeBackend:
                 cwd=request.workspace_path or None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
             )
 
             if proc.stdout is None:
@@ -127,22 +132,69 @@ class ClaudeBackend:
                 return
 
             accumulated: list[str] = []
+            reader_task: asyncio.Task[bytes] | None = None
+            wait_task: asyncio.Task[int] | None = None
             try:
                 async with asyncio.timeout(self._config.request_timeout_seconds):
-                    async for line in proc.stdout:
-                        decoded = line.decode("utf-8", errors="replace")
-                        accumulated.append(decoded)
-                        current_text = "".join(accumulated)
-                        if _looks_like_permission_request(current_text):
-                            await _kill_process(proc)
-                            yield AgentStreamEvent(
-                                delta=_permission_error_message(current_text),
-                                event_type="error",
-                            )
-                            return
-                        yield AgentStreamEvent(delta=decoded, event_type="text")
+                    reader_task = asyncio.create_task(proc.stdout.readline())
+                    wait_task = asyncio.create_task(proc.wait())
+                    process_exited = False
+                    stdout_eof = False
 
-                    await proc.wait()
+                    while True:
+                        if _process_has_exited(proc):
+                            process_exited = True
+
+                        done: set[asyncio.Task[object]] = set()
+                        wait_items: set[asyncio.Task[object]] = set()
+                        if reader_task is not None and reader_task.done():
+                            done.add(reader_task)
+                        elif reader_task is not None:
+                            wait_items.add(reader_task)
+                        if wait_task is not None and wait_task.done():
+                            done.add(wait_task)
+                        elif wait_task is not None:
+                            wait_items.add(wait_task)
+
+                        if not done and not wait_items:
+                            break
+
+                        if not done:
+                            done, _pending = await asyncio.wait(
+                                wait_items,
+                                timeout=self._config.stream_drain_grace_seconds,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if not done:
+                                if process_exited or _process_has_exited(proc):
+                                    await _kill_process_group(proc)
+                                    break
+                                continue
+
+                        if wait_task is not None and wait_task in done:
+                            process_exited = True
+
+                        if reader_task is not None and reader_task in done:
+                            line = reader_task.result()
+                            if not line:
+                                stdout_eof = True
+                                reader_task = None
+                            else:
+                                decoded = line.decode("utf-8", errors="replace")
+                                accumulated.append(decoded)
+                                current_text = "".join(accumulated)
+                                if _looks_like_permission_request(current_text):
+                                    await _kill_process(proc)
+                                    yield AgentStreamEvent(
+                                        delta=_permission_error_message(current_text),
+                                        event_type="error",
+                                    )
+                                    return
+                                yield AgentStreamEvent(delta=decoded, event_type="text")
+                                reader_task = asyncio.create_task(proc.stdout.readline())
+
+                        if process_exited and stdout_eof:
+                            break
             except TimeoutError:
                 await _kill_process(proc)
                 yield AgentStreamEvent(
@@ -153,6 +205,13 @@ class ClaudeBackend:
                     event_type="error",
                 )
                 return
+            finally:
+                if reader_task is not None and not reader_task.done():
+                    reader_task.cancel()
+                if wait_task is not None and not wait_task.done():
+                    if _process_has_exited(proc):
+                        _close_subprocess_transport(proc)
+                    wait_task.cancel()
 
             text = "".join(accumulated)
             if _looks_like_permission_request(text):
@@ -255,8 +314,45 @@ def _permission_error_message(raw_text: str) -> str:
 async def _kill_process(proc: asyncio.subprocess.Process) -> None:
     if proc.returncode is not None:
         return
+    await _kill_process_group(proc)
     try:
         proc.kill()
     except ProcessLookupError:
-        return
+        pass
     await proc.wait()
+
+
+async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _process_has_exited(proc: asyncio.subprocess.Process) -> bool:
+    if proc.returncode is not None:
+        return True
+    pid = getattr(proc, "pid", None)
+    if not pid:
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        state = stat.rsplit(") ", 1)[1].split(maxsplit=1)[0]
+    except IndexError:
+        return False
+    return state == "Z"
+
+
+def _close_subprocess_transport(proc: asyncio.subprocess.Process) -> None:
+    transport = getattr(proc, "_transport", None)
+    if transport is None:
+        return
+    try:
+        transport.close()
+    except Exception:
+        logger.debug("Failed to close subprocess transport", exc_info=True)

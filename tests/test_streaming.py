@@ -83,3 +83,20 @@ async def test_streaming_renderer_empty_start() -> None:
 
     await renderer.append("first text")
     assert "first text" in fake_bot.last_text
+
+
+@pytest.mark.asyncio
+async def test_streaming_renderer_caps_telegram_text() -> None:
+    fake_bot = FakeBot()
+    renderer = StreamingRenderer(
+        fake_bot.send,
+        fake_bot.edit,
+        min_interval_seconds=0.0,
+        max_text_length=40,
+    )
+
+    await renderer.start(chat_id=1)
+    await renderer.append("x" * 100)
+
+    assert len(fake_bot.last_text) <= 40
+    assert "已截断" in fake_bot.last_text

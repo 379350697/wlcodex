@@ -16,11 +16,13 @@ class StreamingRenderer:
         send_fn,
         edit_fn,
         min_interval_seconds: float = 1.0,
+        max_text_length: int = 3900,
         clock=None,
     ) -> None:
         self._send = send_fn
         self._edit = edit_fn
         self._min_interval = min_interval_seconds
+        self._max_text_length = max_text_length
         self._clock = clock or time
         self._buffer: list[str] = []
         self._last_edit_time = -float("inf")
@@ -55,7 +57,7 @@ class StreamingRenderer:
     ) -> None:
         if self._chat_id is None:
             return
-        text = "".join(self._buffer)
+        text = _fit_text("".join(self._buffer), self._max_text_length)
         if self._message_id is not None:
             try:
                 await self._edit(self._chat_id, self._message_id, text, buttons=buttons)
@@ -66,3 +68,12 @@ class StreamingRenderer:
                 pass
         self._message_id = await self._send(self._chat_id, text)
         self._last_edit_time = self._clock.time()
+
+
+def _fit_text(text: str, max_length: int) -> str:
+    if max_length <= 0 or len(text) <= max_length:
+        return text
+    marker = "\n\n...内容过长，已截断。"
+    if max_length <= len(marker):
+        return text[:max_length]
+    return text[: max_length - len(marker)] + marker

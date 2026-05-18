@@ -144,6 +144,39 @@ def test_complete_turn_sets_done(service: TaskService) -> None:
     assert updated.status == TaskStatus.DONE
 
 
+def test_orchestration_managed_turn_completion_keeps_task_running(
+    service: TaskService,
+) -> None:
+    from wlcodex.codex_backend import BackendEvent
+
+    task = service.start_task("demo", "Chief engineer task", codex_thread_id="thread-1")
+    conversation = service._ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="新对话",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    service._ledger.set_conversation_active_task(conversation.id, task.id)
+    service._ledger.create_orchestration_run(conversation.id, "Chief engineer task")
+
+    service.apply_backend_event(BackendEvent(
+        event_type="turn_started",
+        payload={"threadId": "thread-1", "turnId": "turn-1"},
+    ))
+    service.apply_backend_event(BackendEvent(
+        event_type="turn_completed",
+        payload={"threadId": "thread-1", "turnId": "turn-1"},
+    ))
+
+    updated = service.get_task(task.id)
+    assert updated.status == TaskStatus.RUNNING
+    assert updated.active_turn_id is None
+    assert "turn_completed" in [
+        event.event_type for event in service._ledger.list_events(task.id)
+    ]
+
+
 def test_failed_turn_does_not_mark_done(service: TaskService) -> None:
     from wlcodex.codex_backend import BackendEvent
 

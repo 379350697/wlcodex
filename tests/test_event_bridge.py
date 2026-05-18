@@ -427,6 +427,57 @@ async def test_agent_message_delta_forwards_to_interaction_renderer(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_orchestration_managed_delta_not_forwarded_to_interaction_renderer(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Chief engineer task",
+        codex_thread_id="thread-1",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="新对话",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    ledger.create_orchestration_run(conversation.id, "Chief engineer task")
+    received = []
+
+    class Interaction:
+        async def handle(self, event):
+            received.append(event)
+
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=_send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+        interaction_renderer=Interaction(),
+    )
+
+    await bridge.process_event(
+        BackendEvent(
+            "agent_message_delta",
+            {"threadId": "thread-1", "delta": "large internal codex packet"},
+        )
+    )
+
+    assert received == []
+
+
+@pytest.mark.asyncio
 async def test_agent_message_delta_skipped_when_renderer_is_none(tmp_path: Path) -> None:
     """When interaction_renderer is None (streaming disabled / legacy profile),
     agent_message_delta must NOT cause errors or try to forward."""

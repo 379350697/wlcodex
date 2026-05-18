@@ -268,6 +268,8 @@ class EventBridge:
         task = self._service._find_by_thread(thread_id)
         if task is None or task.telegram_chat_id is None:
             return
+        if self._service.is_orchestration_managed_task(task.id):
+            return
         delta = str(event.payload.get("delta", ""))
         if not delta:
             return

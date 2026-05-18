@@ -1201,6 +1201,20 @@ class Ledger:
         ).fetchall()
         return [_orchestration_run(row) for row in rows]
 
+    def task_has_running_orchestration(self, task_id: int) -> bool:
+        row = self._conn.execute(
+            """
+            SELECT 1
+            FROM conversation_sessions AS c
+            JOIN orchestration_runs AS o ON o.conversation_id = c.id
+            WHERE c.active_codex_task_id = ?
+              AND o.status = 'running'
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        return row is not None
+
     # --- Orchestration decisions ---
 
     def record_orchestration_decision(

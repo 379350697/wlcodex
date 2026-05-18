@@ -660,6 +660,8 @@ class TaskService:
                     )
                 else:
                     self._transition(task.id, TaskStatus.WAITING_APPROVAL)
+            elif self.is_orchestration_managed_task(task.id):
+                self._ledger.set_task_status(task.id, TaskStatus.RUNNING)
             else:
                 self._transition(task.id, TaskStatus.DONE)
             self._ledger.add_event(
@@ -805,10 +807,11 @@ class TaskService:
             delta = str(payload.get("delta", ""))
             if delta:
                 summary = str(payload.get("summary", delta))[:240]
-                self._ledger.set_task_status(
-                    task.id, task.status,
-                    summary=summary,
-                )
+                if not self.is_orchestration_managed_task(task.id):
+                    self._ledger.set_task_status(
+                        task.id, task.status,
+                        summary=summary,
+                    )
                 self._ledger.add_event(
                     task.id,
                     "agent_message_delta",
@@ -890,6 +893,9 @@ class TaskService:
 
     def _find_by_thread(self, thread_id: str) -> Task | None:
         return self._ledger.find_task_by_thread_id(thread_id)
+
+    def is_orchestration_managed_task(self, task_id: int) -> bool:
+        return self._ledger.task_has_running_orchestration(task_id)
 
     def _transition(self, task_id: int, new_status: TaskStatus) -> None:
         task = self._ledger.get_task(task_id)

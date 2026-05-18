@@ -56,6 +56,7 @@ def test_claude_config_defaults() -> None:
     assert config.binary == "claude"
     assert config.startup_timeout_seconds == 15.0
     assert config.request_timeout_seconds == 600.0
+    assert config.stream_drain_grace_seconds == 0.1
     assert config.permission_mode == "acceptEdits"
     assert config.model == "deepseek-v4-pro"
     assert config.effort == "max"
@@ -182,3 +183,55 @@ async def test_claude_streaming_times_out(tmp_path: Path) -> None:
     assert events
     assert events[-1].event_type == "error"
     assert "超时" in events[-1].delta or "timed out" in events[-1].delta.lower()
+
+
+@pytest.mark.asyncio
+async def test_claude_streaming_finishes_when_child_keeps_stdout_open(
+    tmp_path: Path,
+) -> None:
+    fake_claude = tmp_path / "fake-claude"
+    pid_file = tmp_path / "held-stdout.pid"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import sys\n"
+        "import time\n"
+        "print('implemented', flush=True)\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(1)\n"
+        "    os._exit(0)\n"
+        f"open({str(pid_file)!r}, 'w', encoding='utf-8').write(str(pid))\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            binary=str(fake_claude),
+            request_timeout_seconds=0.2,
+        )
+    )
+
+    try:
+        events = [
+            event
+            async for event in backend.send_streaming(AgentRequest(
+                prompt="implement feature",
+                workspace_path=str(tmp_path),
+            ))
+        ]
+    finally:
+        if pid_file.exists():
+            import os
+            import signal
+
+            try:
+                os.kill(int(pid_file.read_text(encoding="utf-8").strip()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+
+    assert [event.delta for event in events] == ["implemented\n"]
+    assert all(event.event_type == "text" for event in events)
