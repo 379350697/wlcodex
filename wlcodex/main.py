@@ -24,6 +24,12 @@ from wlcodex.inspection import TaskInspector
 from wlcodex.menu import build_bot_commands
 from wlcodex.orchestration_runner import OrchestrationRunner
 from wlcodex.recovery_notifications import notify_recovery_paused_tasks
+from wlcodex.runtime_diagnostics import (
+    append_recovery_events,
+    find_non_terminal_agent_runs,
+)
+from wlcodex.runtime_event_store import RuntimeEventStore
+from wlcodex.runtime_projector import RuntimeProjector
 from wlcodex.task_service import TaskService
 from wlcodex.telegram_app import build_application
 from wlcodex.watchdog import TaskLivenessConfig, TaskWatchdog
@@ -99,6 +105,9 @@ def main() -> None:
     ledger = Ledger.open(config.storage.sqlite_path)
     ledger.migrate()
 
+    # Runtime event store — append-only source of truth
+    runtime_store = RuntimeEventStore(ledger._conn)
+
     # Recovery: pause any active tasks from previous run
     paused_ids = ledger.mark_active_tasks_recovery_paused()
     if paused_ids:
@@ -113,6 +122,24 @@ def main() -> None:
             "Recovery: marked %d hanging orchestration run(s) and %d agent run(s) as failed",
             orch_marked, agent_marked,
         )
+
+    # Runtime recovery: find and mark orphaned agent runs
+    try:
+        orphaned_ids = find_non_terminal_agent_runs(runtime_store)
+        if orphaned_ids:
+            recovered = append_recovery_events(
+                runtime_store,
+                orphaned_agent_run_ids=orphaned_ids,
+            )
+            logger.info(
+                "Runtime recovery: %d orphaned agent run(s) found, %d recovery events appended",
+                len(orphaned_ids), len(recovered),
+            )
+    except Exception as exc:
+        logger.warning("Runtime recovery scan failed (non-fatal): %s", exc)
+
+    # Runtime projector — updates compatibility tables from runtime events
+    runtime_projector = RuntimeProjector(ledger._conn, store=runtime_store)
 
     config.storage.task_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -240,6 +267,7 @@ def main() -> None:
         claude_permission_state=claude_permission_state,
         default_mode=config.conversation.default_mode,
         default_workspace=config.conversation.default_workspace,
+        runtime_event_store=runtime_store,
     )
 
     # Telegram app
@@ -267,6 +295,25 @@ def main() -> None:
         and config.interaction.streaming_enabled
     ):
         interaction_renderer = handlers.create_interaction_renderer()
+        # Wire runtime progress manager for deterministic progress messages
+        from wlcodex.interaction.runtime_renderer import RuntimeProgressManager
+        from wlcodex.interaction.transport import TelegramTransport
+
+        async def _noop_typing(_chat_id: int) -> object:
+            return None
+
+        runtime_progress = RuntimeProgressManager(
+            transport=TelegramTransport(
+                handlers.send_telegram,
+                handlers.edit_telegram,
+                _noop_typing,
+            ),
+            verbosity=1,
+            min_edit_interval=float(
+                getattr(config.interaction, "edit_min_interval_seconds", 2.0)
+            ),
+        )
+        interaction_renderer._runtime_progress = runtime_progress
     controller.set_interaction_renderer(interaction_renderer)
     if interaction_renderer is not None and claude_backend is not None:
         controller.set_orchestration_runner(
@@ -276,6 +323,7 @@ def main() -> None:
                 claude_backend=claude_backend,
                 ledger=ledger,
                 interaction_renderer=interaction_renderer,
+                runtime_event_store=runtime_store,
             )
         )
     event_bridge = EventBridge(

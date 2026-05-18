@@ -733,3 +733,271 @@ def test_task_service_token_usage_recording_failure_is_silent(tmp_path: Path) ->
     # Legacy fields should default to 0
     updated = ledger.get_task(task.id)
     assert updated.token_input == 0
+
+
+# ---------------------------------------------------------------------------
+# Runtime event callback integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_runtime_callback_receives_emitted_events() -> None:
+    """BackendEvent subscribers and runtime callback both receive events."""
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+    callbacks: list[BackendEvent] = []
+
+    def record(event: BackendEvent) -> None:
+        callbacks.append(event)
+
+    backend.set_runtime_event_callback(record)
+
+    backend._emit(BackendEvent("thread_started", {"threadId": "th-1"}))
+    backend._emit(BackendEvent("turn_started", {"threadId": "th-1", "turnId": "tu-1"}))
+
+    assert len(callbacks) == 2
+    assert callbacks[0].event_type == "thread_started"
+    assert callbacks[1].event_type == "turn_started"
+
+
+@pytest.mark.asyncio
+async def test_runtime_callback_does_not_block_existing_subscribers() -> None:
+    """Existing BackendEvent subscribers still receive events when callback is set."""
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+    global_events = backend.events()
+
+    backend.set_runtime_event_callback(lambda e: None)
+    backend._emit(BackendEvent("turn_started", {
+        "threadId": "th-1", "turnId": "tu-1",
+    }))
+
+    event = await asyncio.wait_for(anext(global_events), timeout=0.02)
+    assert event.event_type == "turn_started"
+    await global_events.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_callback_error_does_not_crash_backend() -> None:
+    """A crashing callback must not break the main event fan-out."""
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+
+    def crash(_event: BackendEvent) -> None:
+        raise RuntimeError("callback explosion")
+
+    backend.set_runtime_event_callback(crash)
+
+    # Must not raise — callback errors are caught and logged.
+    backend._emit(BackendEvent("thread_started", {"threadId": "th-1"}))
+
+    # Bridge event queue still received the event.
+    assert len(backend._bridge_event_queue) == 1
+    assert backend._bridge_event_queue[0].event_type == "thread_started"
+
+
+@pytest.mark.asyncio
+async def test_runtime_callback_error_does_not_prevent_subscriber_delivery() -> None:
+    """A crashing callback must not prevent subscriber queues from receiving events."""
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+    global_events = backend.events()
+
+    def crash(_event: BackendEvent) -> None:
+        raise RuntimeError("callback explosion")
+
+    backend.set_runtime_event_callback(crash)
+    backend._emit(BackendEvent("turn_started", {
+        "threadId": "th-1", "turnId": "tu-1",
+    }))
+
+    event = await asyncio.wait_for(anext(global_events), timeout=0.02)
+    assert event.event_type == "turn_started"
+    await global_events.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_callback_not_set_has_no_effect() -> None:
+    """Without a callback, _emit works exactly as before."""
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+    global_events = backend.events()
+
+    backend._emit(BackendEvent("agent_message_delta", {
+        "threadId": "th-1",
+        "turnId": "tu-1",
+        "delta": "hello",
+    }))
+
+    event = await asyncio.wait_for(anext(global_events), timeout=0.02)
+    assert event.payload["delta"] == "hello"
+    await global_events.aclose()
+
+
+@pytest.mark.asyncio
+async def test_approval_events_still_work_with_runtime_callback() -> None:
+    """Approval semantics are unchanged when runtime callback is active."""
+    backend = AppServerCodexBackend(endpoint="ws://127.0.0.1:17431")
+    runtime_events: list[BackendEvent] = []
+    backend.set_runtime_event_callback(runtime_events.append)
+
+    await backend._on_legacy_exec_approval_request(
+        {
+            "conversationId": "thread-1",
+            "callId": "call-1",
+            "command": ["python3", "probe.py"],
+            "reason": "needs write access",
+        },
+        "req-rt",
+    )
+
+    # Bridge queue has the approval event for TaskService
+    assert len(backend._bridge_event_queue) == 1
+    bridge_event = backend._bridge_event_queue[0]
+    assert bridge_event.event_type == "approval_requested"
+    assert bridge_event.payload["codexRequestId"] == "req-rt"
+
+    # Runtime callback also received the event
+    assert len(runtime_events) == 1
+    assert runtime_events[0].event_type == "approval_requested"
+    assert runtime_events[0].payload["codexRequestId"] == "req-rt"
+
+
+@pytest.mark.asyncio
+async def test_codex_runtime_source_wired_through_callback() -> None:
+    """Full pipeline: BackendEvent → CodexRuntimeSource → RuntimeEvent."""
+    from wlcodex.codex_runtime_source import CodexRuntimeSource
+
+    backend = AppServerCodexBackend(endpoint="ws://127.0.0.1:17431")
+    runtime_events: list[object] = []
+
+    source = CodexRuntimeSource(
+        correlation_id="corr-wired",
+        agent_run_id=42,
+        conversation_id=1,
+    )
+
+    def wire(event: BackendEvent) -> None:
+        runtime_events.extend(source.map_event(event))
+
+    backend.set_runtime_event_callback(wire)
+
+    # Simulate a full turn lifecycle through the real _emit path
+    backend._emit(BackendEvent("thread_started", {"threadId": "th-wired"}))
+    backend._emit(BackendEvent("turn_started", {
+        "threadId": "th-wired", "turnId": "tu-wired",
+    }))
+    backend._emit(BackendEvent("agent_message_delta", {
+        "threadId": "th-wired", "turnId": "tu-wired",
+        "delta": "Codex 分析结果：通过验收",
+        "item": {"id": "msg-1", "type": "agentMessage"},
+    }))
+    backend._emit(BackendEvent("token_usage_updated", {
+        "threadId": "th-wired",
+        "turnId": "tu-wired",
+        "tokenUsage": {
+            "last": {"inputTokens": 500, "outputTokens": 200, "totalTokens": 700},
+        },
+    }))
+    backend._emit(BackendEvent("turn_completed", {
+        "threadId": "th-wired", "turnId": "tu-wired",
+    }))
+
+    assert len(runtime_events) == 5
+
+    from wlcodex.runtime_events import EventType
+    types = [getattr(e, "event_type") for e in runtime_events]
+    assert types == [
+        EventType.AGENT_RUN_ACTIVITY,
+        EventType.AGENT_RUN_ACTIVITY,
+        EventType.MODEL_TEXT_DELTA,
+        EventType.MODEL_USAGE_UPDATED,
+        EventType.AGENT_RUN_ACTIVITY,
+    ]
+
+    # All events share the correlation context
+    for e in runtime_events:
+        assert getattr(e, "correlation_id") == "corr-wired"
+        assert getattr(e, "agent_run_id") == 42
+        assert getattr(e, "source") == "codex"
+
+
+# ---------------------------------------------------------------------------
+# resolve_approval emits approval_resolved BackendEvent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_approval_emits_approval_resolved_backend_event() -> None:
+    """resolve_approval emits approval_resolved so runtime source can map it."""
+    backend = AppServerCodexBackend(endpoint="ws://127.0.0.1:17431")
+
+    class _FakeClient:
+        def resolve_server_request(self, request_id: str, response: dict) -> None:
+            pass
+
+    backend._client = _FakeClient()
+
+    runtime_events: list[BackendEvent] = []
+    backend.set_runtime_event_callback(runtime_events.append)
+
+    await backend.resolve_approval("req-1", {"decision": "accept"})
+
+    assert len(runtime_events) == 1
+    assert runtime_events[0].event_type == "approval_resolved"
+    assert runtime_events[0].payload["codexRequestId"] == "req-1"
+    assert runtime_events[0].payload["response"] == {"decision": "accept"}
+
+    # Bridge queue also received it
+    assert backend._bridge_event_queue[0].event_type == "approval_resolved"
+
+
+@pytest.mark.asyncio
+async def test_resolve_approval_with_runtime_source_full_pipeline() -> None:
+    """resolve_approval → approval.resolved RuntimeEvent via CodexRuntimeSource."""
+    from wlcodex.codex_runtime_source import CodexRuntimeSource
+
+    backend = AppServerCodexBackend(endpoint="ws://127.0.0.1:17431")
+
+    class _FakeClient:
+        def resolve_server_request(self, request_id: str, response: dict) -> None:
+            pass
+
+    backend._client = _FakeClient()
+
+    runtime_events: list[object] = []
+    source = CodexRuntimeSource(
+        correlation_id="corr-appr",
+        agent_run_id=7,
+        conversation_id=1,
+    )
+
+    def wire(event: BackendEvent) -> None:
+        runtime_events.extend(source.map_event(event))
+
+    backend.set_runtime_event_callback(wire)
+
+    await backend.resolve_approval("req-1", {"decision": "accept"})
+
+    assert len(runtime_events) == 1
+    e = runtime_events[0]
+    assert getattr(e, "event_type") == "approval.resolved"
+    assert getattr(e, "aggregate_type") == "approval"
+    assert getattr(e, "aggregate_id") == "req-1"
+    assert getattr(e, "payload")["codexRequestId"] == "req-1"
+    assert getattr(e, "payload")["decision"] == "accept"
+
+    # Existing FakeCodexBackend resolve_approval test still works independently
+    fake = FakeCodexBackend()
+    await fake.resolve_approval("req-5", {"decision": "accept"})
+    assert fake._approval_resolutions == [("req-5", {"decision": "accept"})]

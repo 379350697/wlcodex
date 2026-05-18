@@ -441,3 +441,394 @@ async def test_orchestration_runner_legacy_compat_token_fields_preserved(
 
     # Conversation summary is updated
     assert "验收通过" in ledger.get_conversation(conversation.id).conversation_summary
+
+
+# ---------------------------------------------------------------------------
+# Runtime event integration tests (Lane G)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_runtime_events_emitted_for_full_chief_engineer_loop(
+    tmp_path: Path,
+) -> None:
+    """Every phase transition and agent lifecycle emits runtime events."""
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=100, user_id=200, title="RT", mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "rt test", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "rt test")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: FakeStreamingOrchestrator(),
+        runtime_event_store=store,
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="rt test",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+        correlation_id="test-cid-001",
+    )
+    await background_task
+
+    events = store.list_by_correlation("test-cid-001")
+    event_types = [e.event_type for e in events]
+
+    # Must include run lifecycle events
+    assert EventType.RUN_STARTED in event_types
+    assert EventType.RUN_PHASE_CHANGED in event_types
+    assert EventType.RUN_COMPLETED in event_types
+
+    # Must include agent lifecycle events
+    assert EventType.AGENT_RUN_STARTED in event_types
+    assert EventType.AGENT_RUN_COMPLETED in event_types
+
+    # Must include verification events
+    assert EventType.VERIFICATION_STARTED in event_types
+    assert EventType.VERIFICATION_DECISION_RECORDED in event_types
+    assert EventType.VERIFICATION_COMPLETED in event_types
+
+    # All events share the same correlation_id
+    for e in events:
+        assert e.correlation_id == "test-cid-001"
+
+    # Events are in id order
+    for i in range(1, len(events)):
+        assert events[i].id > events[i - 1].id
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_run_created_before_claude_streams(
+    tmp_path: Path,
+) -> None:
+    """Claude agent_run must be created with 'running' status before Claude emits deltas."""
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=100, user_id=200, title="CR", mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "cr test", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "cr test")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: FakeStreamingOrchestrator(),
+        runtime_event_store=store,
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="cr test",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+        correlation_id="test-cid-002",
+    )
+    await background_task
+
+    events = store.list_by_correlation("test-cid-002")
+
+    # Find first Claude agent.run.started event and first IMPL_DELTA
+    claude_started = None
+    first_claude_impl_phase = None
+    for e in events:
+        if e.event_type == EventType.AGENT_RUN_STARTED and e.actor == "claude":
+            claude_started = e
+            break
+    # Find first run.phase.changed to running_implementation
+    for e in events:
+        if (e.event_type == EventType.RUN_PHASE_CHANGED
+                and e.payload.get("phase") == "running_implementation"):
+            first_claude_impl_phase = e
+            break
+
+    assert claude_started is not None, "Claude agent.run.started must exist"
+    # Claude agent.run.started must be emitted at or before the implementation phase
+    if first_claude_impl_phase is not None:
+        assert claude_started.id <= first_claude_impl_phase.id, (
+            "agent.run.started must come at or before running_implementation phase"
+        )
+
+    # The agent_runs table must show a claude run with running/done status
+    claude_runs = [
+        r for r in ledger.list_agent_runs(conversation.id)
+        if r.agent == "claude"
+    ]
+    assert len(claude_runs) >= 1
+    assert claude_runs[0].status in (AgentRunStatus.RUNNING, AgentRunStatus.DONE)
+
+
+@pytest.mark.asyncio
+async def test_verification_retry_not_marked_as_completed(
+    tmp_path: Path,
+) -> None:
+    """verification.retry.requested must be emitted for retry, NOT verification.completed."""
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    # An orchestrator that always retries verification then passes on round 2
+    class RetryThenPassOrchestrator:
+        async def run_streaming(
+            self,
+            _prompt: str,
+            conversation_context: dict | None = None,
+        ):
+            from wlcodex.orchestrator import OrchestrationProgress
+            # Round 1
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.ANALYSIS_STARTED,
+                text="analysis start", agent="codex",
+            )
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.ANALYSIS_COMPLETE,
+                text="analysis done", full_text="analysis full", agent="codex",
+            )
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.IMPL_DELTA,
+                text="impl round 1", agent="claude", round_num=1,
+            )
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.IMPL_COMPLETE,
+                text="impl done r1", full_text="impl done r1", agent="claude", round_num=1,
+            )
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.VERIFY_STARTED,
+                text="verify start r1", agent="codex", round_num=1,
+            )
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.VERIFY_COMPLETE,
+                text="decision: retry\nrequired_fix: fix the bug", full_text="decision: retry\nrequired_fix: fix the bug",
+                agent="codex", round_num=1,
+            )
+            # Round 2
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.IMPL_DELTA,
+                text="impl round 2", agent="claude", round_num=2,
+            )
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.IMPL_COMPLETE,
+                text="impl done r2", full_text="impl done r2", agent="claude", round_num=2,
+            )
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.VERIFY_STARTED,
+                text="verify start r2", agent="codex", round_num=2,
+            )
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.VERIFY_COMPLETE,
+                text="decision: pass\nsummary: ok", full_text="decision: pass\nsummary: ok",
+                agent="codex", round_num=2,
+            )
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.COMPLETE,
+                text="验收通过", full_text="decision: pass\nsummary: ok",
+                agent="codex", result_status="passed", round_num=2,
+            )
+
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=100, user_id=200, title="VR", mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "vr test", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "vr test")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: RetryThenPassOrchestrator(),
+        runtime_event_store=store,
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="vr test",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+        correlation_id="test-cid-003",
+    )
+    await background_task
+
+    events = store.list_by_correlation("test-cid-003")
+    event_types = [e.event_type for e in events]
+
+    # Must contain retry requested
+    assert EventType.VERIFICATION_RETRY_REQUESTED in event_types, (
+        "verification.retry.requested must be emitted when decision is retry"
+    )
+
+    # The retry must appear BEFORE the first verification.completed
+    retry_idx = event_types.index(EventType.VERIFICATION_RETRY_REQUESTED)
+    completion_indices = [
+        i for i, t in enumerate(event_types)
+        if t == EventType.VERIFICATION_COMPLETED
+    ]
+    if completion_indices:
+        assert retry_idx < completion_indices[0], (
+            "verification.retry.requested must come before verification.completed"
+        )
+
+    # run.completed must exist (final pass)
+    assert EventType.RUN_COMPLETED in event_types
+
+    # Orchestration run should be marked as passed
+    assert ledger.get_orchestration_run(orch_run.id).status == OrchestrationStatus.PASSED
+
+
+@pytest.mark.asyncio
+async def test_correlation_id_links_all_events_in_user_request(
+    tmp_path: Path,
+) -> None:
+    """Every event in a chief-engineer run shares the same correlation_id."""
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=100, user_id=200, title="CID", mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "cid test", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "cid test")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: FakeStreamingOrchestrator(),
+        runtime_event_store=store,
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="cid test",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+        correlation_id="test-cid-004",
+    )
+    await background_task
+
+    events = store.list_by_correlation("test-cid-004")
+    assert len(events) >= 5  # meaningful run has at least a few events
+
+    for e in events:
+        assert e.correlation_id == "test-cid-004"
+
+    # Verify events are queryable by agent_run_id
+    analysis_events = store.list_by_agent_run(codex_run.id)
+    assert any(
+        e.event_type == EventType.AGENT_RUN_STARTED for e in analysis_events
+    )
+    assert any(
+        e.event_type == EventType.AGENT_RUN_COMPLETED for e in analysis_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_telegram_deterministic_progress_no_raw_model_text(
+    tmp_path: Path,
+) -> None:
+    """Telegram progress must use deterministic Chinese templates, never raw model text."""
+    from wlcodex.runtime_event_store import RuntimeEventStore
+
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=100, user_id=200, title="DP", mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "dp test", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "dp test")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: RawVerboseStreamingOrchestrator(),
+        runtime_event_store=store,
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="dp test",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+        correlation_id="test-cid-005",
+    )
+    await background_task
+
+    # Telegram visible text must NOT contain raw model output
+    visible_text = "\n".join(
+        event.text for event in renderer.events if event.event_type == "text_delta"
+    )
+    assert "RAW_" not in visible_text
+    assert "交给 Claude" in visible_text or "Claude" in visible_text
+
+    # Runtime events store the full raw text (as payload/record)
+    events = store.list_by_correlation("test-cid-005")
+    run_completed_events = [
+        e for e in events if e.event_type == "run.completed"
+    ]
+    assert len(run_completed_events) >= 1
+
+    # Final event is run_completed
+    terminal = renderer.events[-1]
+    assert terminal.event_type == "run_completed"

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import inspect
 import logging
 import subprocess
+import uuid
 from typing import Any
 
 from wlcodex.health_snapshot import build_health_snapshot
@@ -36,6 +37,14 @@ from wlcodex.claude_permissions import (
     ClaudePermissionState,
     build_claude_permission_buttons,
     render_claude_permission_status,
+)
+from wlcodex.runtime_events import (
+    AggregateType,
+    EventSource,
+    EventType,
+    RuntimeEvent,
+    Visibility,
+    now_iso,
 )
 from wlcodex.router import (
     AbortCommand,
@@ -183,6 +192,7 @@ class CommandController:
         default_workspace: str = "wlcodex",
         interaction_renderer: object | None = None,
         orchestration_runner: object | None = None,
+        runtime_event_store: object | None = None,
     ) -> None:
         self._service = task_service
         self._backend = backend
@@ -194,6 +204,7 @@ class CommandController:
         self._default_workspace = default_workspace
         self._interaction_renderer = interaction_renderer
         self._orchestration_runner = orchestration_runner
+        self._store = runtime_event_store
 
     def set_interaction_renderer(self, renderer: object) -> None:
         """Set the interaction renderer after construction (created after handlers)."""
@@ -202,6 +213,14 @@ class CommandController:
     def set_orchestration_runner(self, runner: object | None) -> None:
         """Set the background orchestration runner after runtime wiring."""
         self._orchestration_runner = runner
+
+    def _emit_event(self, event: RuntimeEvent) -> RuntimeEvent:
+        if self._store is None:
+            return event
+        return self._store.append(event)
+
+    def _new_correlation_id(self) -> str:
+        return str(uuid.uuid4())
 
     async def handle(
         self, text: str, telegram_context: dict[str, Any] | None = None
@@ -632,6 +651,22 @@ class CommandController:
             )
             return ControllerResponse("你好！直接说需要我看什么就行。")
 
+        # Emit user.message.received
+        cid = self._new_correlation_id()
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            aggregate_type=AggregateType.CONVERSATION,
+            aggregate_id=str(active.id),
+            correlation_id=cid,
+            source=EventSource.TELEGRAM,
+            actor="user",
+            visibility=Visibility.USER,
+            payload={"text_preview": text[:200]},
+            occurred_at=now_iso(),
+            conversation_id=active.id,
+        ))
+
         # --- Chief-engineer mode with Claude enabled: full closed loop ---
         claude_ready = self._claude is not None and getattr(self._claude, "enabled", False)
         if active.mode == ConversationMode.CHIEF_ENGINEER.value and claude_ready:
@@ -639,7 +674,7 @@ class CommandController:
             from wlcodex.router import AutoModeCommand
             cmd = AutoModeCommand(prompt=text)
             return await self._handle_chief_engineer_impl(
-                cmd, active, telegram_context
+                cmd, active, telegram_context, correlation_id=cid
             )
 
         # --- Codex-direct or Claude-disabled: Codex analysis only ---
@@ -1082,13 +1117,29 @@ class CommandController:
                 workspace_alias=self._default_workspace,
             )
 
-        return await self._handle_chief_engineer_impl(command, active, ctx)
+        cid = self._new_correlation_id()
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            aggregate_type=AggregateType.CONVERSATION,
+            aggregate_id=str(active.id),
+            correlation_id=cid,
+            source=EventSource.TELEGRAM,
+            actor="user",
+            visibility=Visibility.USER,
+            payload={"text_preview": command.prompt[:200]},
+            occurred_at=now_iso(),
+            conversation_id=active.id,
+        ))
+
+        return await self._handle_chief_engineer_impl(command, active, ctx, correlation_id=cid)
 
     async def _handle_chief_engineer_impl(
         self,
         command: AutoModeCommand,
         active: object,
         ctx: dict[str, Any] | None = None,
+        correlation_id: str = "",
     ) -> ControllerResponse:
         """Shared chief-engineer orchestration loop: Codex→Claude→Codex verify.
 
@@ -1100,6 +1151,8 @@ class CommandController:
         phase transitions are visible in real time.
         """
         from wlcodex.orchestrator import ChiefEngineerOrchestrator, OrchestrationProgress
+
+        cid = correlation_id or self._new_correlation_id()
 
         # Create orchestration run record
         orch_run = self._ledger.create_orchestration_run(
@@ -1114,6 +1167,22 @@ class CommandController:
             role="analysis",
         )
         self._ledger.update_agent_run_status(codex_analysis_run.id, "running")
+
+        # Emit run.requested
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.RUN_REQUESTED,
+            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+            aggregate_id=str(orch_run.id),
+            correlation_id=cid,
+            source=EventSource.CONTROLLER,
+            actor="controller",
+            visibility=Visibility.OPERATOR,
+            payload={"goal": command.prompt, "max_verify_rounds": 3},
+            occurred_at=now_iso(),
+            conversation_id=active.id,
+            orchestration_run_id=orch_run.id,
+        ))
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
 
@@ -1146,6 +1215,7 @@ class CommandController:
                 codex_analysis_run_id=codex_analysis_run.id,
                 chat_id=chat_id,
                 workspace_path=workspace_path,
+                correlation_id=cid,
             )
             return ControllerResponse("", already_rendered=True)
 

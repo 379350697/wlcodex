@@ -1,0 +1,262 @@
+"""Runtime event envelope, type constants, enums, and redaction.
+
+Defines the single immutable RuntimeEvent contract shared by all lanes.
+Other lanes import from here; they never need raw SQL for runtime events.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from enum import StrEnum
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+
+SCHEMA_VERSION = 1
+
+# ---------------------------------------------------------------------------
+# Payload safety
+# ---------------------------------------------------------------------------
+
+MAX_PAYLOAD_STRING_LENGTH = 10_000
+
+REDACTED_PLACEHOLDER = "[REDACTED]"
+
+# Tokens/metrics that are counts — never redacted.
+_TOKEN_METRIC_SEGMENTS = frozenset({
+    "input", "output", "total", "cached", "reasoning", "workflow", "overhead",
+})
+
+# Modifiers that make "key"/"keys" a sensitive match.
+_KEY_SENSITIVE_MODIFIERS = frozenset({
+    "api", "sign", "signing", "auth", "secret", "private", "master", "encrypt",
+})
+
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+class AggregateType(StrEnum):
+    CONVERSATION = "conversation"
+    ORCHESTRATION_RUN = "orchestration_run"
+    AGENT_RUN = "agent_run"
+    APPROVAL = "approval"
+    TELEGRAM_MESSAGE = "telegram_message"
+    SYSTEM = "system"
+
+
+class Visibility(StrEnum):
+    INTERNAL = "internal"
+    OPERATOR = "operator"
+    USER = "user"
+
+
+class EventSource(StrEnum):
+    TELEGRAM = "telegram"
+    CONTROLLER = "controller"
+    ORCHESTRATOR = "orchestrator"
+    CODEX = "codex"
+    CLAUDE = "claude"
+    PROJECTOR = "projector"
+    WATCHDOG = "watchdog"
+    SYSTEM = "system"
+
+
+# ---------------------------------------------------------------------------
+# Event type constants (dot-separated, shared across all lanes)
+# ---------------------------------------------------------------------------
+
+class EventType:
+    """Dot-separated event type constants used by all lanes."""
+
+    # User / Telegram
+    USER_MESSAGE_RECEIVED = "user.message.received"
+    TELEGRAM_MESSAGE_SENT = "telegram.message.sent"
+    TELEGRAM_MESSAGE_EDITED = "telegram.message.edited"
+    TELEGRAM_MESSAGE_FAILED = "telegram.message.failed"
+    TELEGRAM_CALLBACK_RECEIVED = "telegram.callback.received"
+
+    # Run lifecycle
+    RUN_REQUESTED = "run.requested"
+    RUN_STARTED = "run.started"
+    RUN_PHASE_CHANGED = "run.phase.changed"
+    RUN_COMPLETED = "run.completed"
+    RUN_FAILED = "run.failed"
+    RUN_CANCEL_REQUESTED = "run.cancel.requested"
+    RUN_CANCELLED = "run.cancelled"
+
+    # Agent lifecycle
+    AGENT_RUN_QUEUED = "agent.run.queued"
+    AGENT_RUN_STARTED = "agent.run.started"
+    AGENT_RUN_ACTIVITY = "agent.run.activity"
+    AGENT_RUN_HEARTBEAT = "agent.run.heartbeat"
+    AGENT_RUN_WAITING_FOR_APPROVAL = "agent.run.waiting_for_approval"
+    AGENT_RUN_COMPLETED = "agent.run.completed"
+    AGENT_RUN_FAILED = "agent.run.failed"
+    AGENT_RUN_TIMED_OUT = "agent.run.timed_out"
+    AGENT_RUN_ORPHANED = "agent.run.orphaned"
+
+    # Model / message output
+    MODEL_TEXT_DELTA = "model.text.delta"
+    MODEL_MESSAGE_COMPLETED = "model.message.completed"
+    MODEL_REASONING_DELTA = "model.reasoning.delta"
+    MODEL_USAGE_UPDATED = "model.usage.updated"
+    MODEL_API_RETRY = "model.api.retry"
+
+    # Tool / command / file / approval
+    TOOL_CALL_STARTED = "tool.call.started"
+    TOOL_CALL_PROGRESS = "tool.call.progress"
+    TOOL_CALL_COMPLETED = "tool.call.completed"
+    TOOL_CALL_FAILED = "tool.call.failed"
+    COMMAND_STARTED = "command.started"
+    COMMAND_OUTPUT_DELTA = "command.output.delta"
+    COMMAND_COMPLETED = "command.completed"
+    COMMAND_FAILED = "command.failed"
+    FILE_READ = "file.read"
+    FILE_CHANGED = "file.changed"
+    DIFF_UPDATED = "diff.updated"
+    APPROVAL_REQUESTED = "approval.requested"
+    APPROVAL_RESOLVED = "approval.resolved"
+    APPROVAL_EXPIRED = "approval.expired"
+
+    # Verification
+    VERIFICATION_STARTED = "verification.started"
+    VERIFICATION_DECISION_RECORDED = "verification.decision.recorded"
+    VERIFICATION_COMPLETED = "verification.completed"
+    VERIFICATION_RETRY_REQUESTED = "verification.retry.requested"
+
+    # Timeout / recovery
+    WATCHDOG_IDLE_TIMEOUT = "watchdog.idle_timeout"
+    WATCHDOG_HARD_TIMEOUT = "watchdog.hard_timeout"
+    SYSTEM_STARTED = "system.started"
+    SYSTEM_RECOVERY_STARTED = "system.recovery.started"
+    SYSTEM_RECOVERY_COMPLETED = "system.recovery.completed"
+    PROJECTION_REBUILT = "projection.rebuilt"
+    PROJECTION_FAILED = "projection.failed"
+    RUNTIME_CAPABILITY_MISSING = "runtime.capability.missing"
+
+
+# ---------------------------------------------------------------------------
+# Envelope
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RuntimeEvent:
+    """Immutable runtime event envelope — the single source of truth.
+
+    Every meaningful runtime fact is recorded as a RuntimeEvent.
+    The ``id`` is 0 before append and set by SQLite afterwards.
+    """
+
+    schema_version: int
+    event_type: str
+    aggregate_type: str
+    aggregate_id: str
+    correlation_id: str
+    source: str
+    actor: str
+    visibility: str
+    payload: dict[str, Any]
+    occurred_at: str
+    conversation_id: int | None = None
+    orchestration_run_id: int | None = None
+    agent_run_id: int | None = None
+    task_id: int | None = None
+    causation_id: int | None = None
+    id: int = 0
+
+    def with_id(self, event_id: int) -> "RuntimeEvent":
+        """Return a copy with *id* set (after SQLite append)."""
+        return replace(self, id=event_id)
+
+
+# ---------------------------------------------------------------------------
+# Redaction
+# ---------------------------------------------------------------------------
+
+def _split_key(key: str) -> set[str]:
+    """Split *key* on common separators into lowercase segments."""
+    return set(key.lower().replace("-", "_").split("_"))
+
+
+def _is_sensitive_key(key: str) -> bool:
+    """Return True when *key* names a value that should be redacted.
+
+    Uses segment-based matching (split on ``_`` and ``-``) so that
+    ``input_tokens`` (a count) is not redacted while ``auth_token`` or
+    standalone ``token`` is.
+    """
+    segments = _split_key(key)
+
+    # Unambiguous — always redact.
+    if segments & {"secret", "secrets", "password", "passwords",
+                   "credential", "credentials"}:
+        return True
+
+    # "auth" as a segment, or as a substring (handles "Authorization", etc.).
+    if "auth" in segments or any("auth" in seg for seg in segments):
+        return True
+
+    # "token"/"tokens" is sensitive unless it is a known metric (input_tokens, etc.).
+    if ("token" in segments or "tokens" in segments) and not (
+        segments & _TOKEN_METRIC_SEGMENTS
+    ):
+        return True
+
+    # "key"/"keys" combined with api/sign/auth/secret/private modifiers.
+    if ("key" in segments or "keys" in segments) and (
+        segments & _KEY_SENSITIVE_MODIFIERS
+    ):
+        return True
+
+    return False
+
+
+def redact_payload(payload: dict[str, Any], *, max_str_len: int = MAX_PAYLOAD_STRING_LENGTH) -> dict[str, Any]:
+    """Return a deep-copied payload with sensitive values redacted and
+    string lengths capped.
+
+    Keys matching ``secret``, ``token``, ``auth``, ``header``,
+    ``password``, ``key``, ``credential``, or ``api_key`` (case-insensitive
+    substring match) are replaced with ``[REDACTED]``.
+
+    String values longer than *max_str_len* are truncated and suffixed with
+    ``...<truncated>``.
+    """
+    result: dict[str, Any] = {}
+    for k, v in payload.items():
+        if _is_sensitive_key(k):
+            result[k] = REDACTED_PLACEHOLDER
+        elif isinstance(v, dict):
+            result[k] = redact_payload(v, max_str_len=max_str_len)
+        elif isinstance(v, list):
+            result[k] = [
+                redact_payload(item, max_str_len=max_str_len) if isinstance(item, dict)
+                else _cap_string(item, max_str_len) if isinstance(item, str)
+                else item
+                for item in v
+            ]
+        elif isinstance(v, str):
+            result[k] = _cap_string(v, max_str_len)
+        else:
+            result[k] = v
+    return result
+
+
+def _cap_string(value: str, max_len: int) -> str:
+    if len(value) <= max_len:
+        return value
+    return value[:max_len] + "...<truncated>"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def now_iso() -> str:
+    """Return current UTC time as an ISO-8601 string."""
+    return datetime.now(timezone.utc).isoformat()

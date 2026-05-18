@@ -11,6 +11,8 @@ from wlcodex.db import Ledger
 
 if TYPE_CHECKING:
     from wlcodex.models import TaskEvent
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_diagnostics import RuntimeTrace
 
 
 @dataclass
@@ -112,6 +114,69 @@ class TaskInspector:
             body="\n".join(lines),
         )
 
+    # --- Runtime Trace ---
+
+    def trace_runtime(
+        self,
+        runtime_store: "RuntimeEventStore",
+        conversation_id: int,
+        *,
+        limit: int = 20,
+        visibility_filter: str | None = None,
+    ) -> InspectionResult:
+        """Build a sanitized trace from runtime events for a conversation.
+
+        Uses the runtime event store to produce a human-readable timeline.
+        Falls back gracefully when no runtime store or events are available.
+        """
+        from wlcodex.runtime_diagnostics import (
+            build_runtime_trace,
+            format_trace_display,
+        )
+
+        trace = build_runtime_trace(
+            runtime_store,
+            conversation_id,
+            limit=limit,
+            visibility_filter=visibility_filter,
+        )
+        body = format_trace_display(trace)
+        return InspectionResult(
+            title=f"对话 #{conversation_id} 的运行时事件记录",
+            body=body,
+        )
+
+    def trace_agent_run(
+        self,
+        runtime_store: "RuntimeEventStore",
+        agent_run_id: int,
+        *,
+        limit: int = 50,
+    ) -> InspectionResult:
+        """Show runtime events for a specific agent run."""
+        events = runtime_store.list_by_agent_run(agent_run_id, limit=limit)
+        if not events:
+            return InspectionResult(
+                title=f"Agent 运行 #{agent_run_id} 的事件",
+                body="暂无事件记录。",
+            )
+
+        from wlcodex.runtime_diagnostics import _sanitize_event_for_display
+
+        lines = [f"Agent 运行 #{agent_run_id} 的事件（共 {len(events)} 条）："]
+        for ev in events:
+            d = _sanitize_event_for_display(ev)
+            eid = d.get("id", "?")
+            etype = d.get("event_type", "")
+            occurred = str(d.get("occurred_at", ""))[:19]
+            psum = _summarize_runtime_payload(d.get("payload", {}))
+            lines.append(f"  [#{eid}] {occurred} {etype} {psum}")
+
+        return InspectionResult(
+            title=f"Agent 运行 #{agent_run_id} 的事件",
+            body="\n".join(lines),
+        )
+
     # --- Diff ---
 
     def diff(self, task_id: int, workspace_path: str | None = None) -> InspectionResult:
@@ -189,4 +254,22 @@ def _summarize(event: "TaskEvent") -> str:
         return str(p["type"])
     if "summary" in p:
         return str(p["summary"])[:100]
+    return "—"
+
+
+def _summarize_runtime_payload(payload: dict) -> str:
+    if "phase" in payload:
+        return str(payload["phase"])[:80]
+    if "agent" in payload:
+        return f"agent={payload['agent']}"
+    if "reason" in payload:
+        return str(payload["reason"])[:80]
+    if "summary" in payload:
+        return str(payload["summary"])[:80]
+    if "delta" in payload:
+        return str(payload["delta"])[:80]
+    if "orphaned_run_count" in payload:
+        return f"orphaned={payload['orphaned_run_count']}"
+    if "tool_name" in payload:
+        return f"tool={payload['tool_name']}"
     return "—"

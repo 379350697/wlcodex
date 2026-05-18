@@ -280,6 +280,38 @@ class Ledger:
                 ON usage_events(task_id, id);
             CREATE INDEX IF NOT EXISTS idx_usage_events_agent
                 ON usage_events(agent, created_at);
+
+            CREATE TABLE IF NOT EXISTS runtime_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schema_version INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                aggregate_type TEXT NOT NULL,
+                aggregate_id TEXT NOT NULL,
+                conversation_id INTEGER,
+                orchestration_run_id INTEGER,
+                agent_run_id INTEGER,
+                task_id INTEGER,
+                correlation_id TEXT NOT NULL,
+                causation_id INTEGER,
+                source TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                occurred_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_correlation
+                ON runtime_events(correlation_id, id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_aggregate
+                ON runtime_events(aggregate_type, aggregate_id, id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_conversation
+                ON runtime_events(conversation_id, id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_orchestration_run
+                ON runtime_events(orchestration_run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_agent_run
+                ON runtime_events(agent_run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_event_type
+                ON runtime_events(event_type, id);
             """
         )
 
@@ -364,7 +396,7 @@ class Ledger:
         # Record schema version
         self._conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
-            ("schema_version", "3"),
+            ("schema_version", "4"),
         )
 
         self._conn.commit()

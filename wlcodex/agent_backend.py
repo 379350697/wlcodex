@@ -33,6 +33,7 @@ class AgentStreamEvent:
     delta: str = ""
     event_type: str = "text"
     usage: dict | None = None  # optional usage info from result event
+    session_id: str = ""  # external session id from Claude/Codex subprocess
 
 
 class AgentBackend(Protocol):

@@ -550,3 +550,131 @@ async def test_terminal_event_skipped_when_renderer_is_none(tmp_path: Path) -> N
         "turn_completed",
         {"threadId": "thread-1", "status": "completed"},
     ))
+
+
+# ===================================================================
+# Runtime event bridge contract tests (Lane E)
+# ===================================================================
+
+
+@pytest.mark.asyncio
+async def test_runtime_progress_event_flows_to_renderer(tmp_path: Path) -> None:
+    """runtime_progress events flow through the interaction renderer."""
+    from wlcodex.interaction.events import InteractionEvent
+    from wlcodex.interaction.runtime_renderer import RuntimeRunState
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    received: list[InteractionEvent] = []
+
+    class Interaction:
+        async def handle(self, event):
+            received.append(event)
+
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=_send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+        interaction_renderer=Interaction(),
+    )
+
+    # Simulate runtime_progress event coming through the bridge
+    state = RuntimeRunState(phase="running_implementation", active_agent="claude")
+    await bridge._interaction_renderer.handle(
+        InteractionEvent(
+            event_type="runtime_progress",
+            chat_id=123,
+            conversation_id=1,
+            metadata={"runtime_state": state},
+        )
+    )
+
+    assert len(received) == 1
+    assert received[0].event_type == "runtime_progress"
+    assert received[0].metadata["runtime_state"] is state
+
+
+@pytest.mark.asyncio
+async def test_runtime_progress_noop_when_renderer_is_none(tmp_path: Path) -> None:
+    """runtime_progress must not crash when interaction_renderer is None."""
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=_send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+        interaction_renderer=None,
+    )
+
+    assert bridge._interaction_renderer is None
+    # No crash expected
+
+
+@pytest.mark.asyncio
+async def test_runtime_events_dont_interfere_with_approval_cards(tmp_path: Path) -> None:
+    """Runtime progress and approval events can coexist without collision."""
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    service.start_task(
+        "demo",
+        "Run probe",
+        codex_thread_id="thread-1",
+        telegram_chat_id=123,
+    )
+    sent: list[str] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append(text)
+        return len(sent)
+
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+    )
+
+    # Process approval (existing flow)
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-1", "turnId": "turn-1"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "approval_requested",
+        {
+            "threadId": "thread-1",
+            "codexRequestId": "0",
+            "kind": "command",
+            "reason": "Allow?",
+        },
+    ))
+
+    # Approval was sent
+    assert any("审批" in s for s in sent)
+
+    # Runtime events don't break subsequent processing
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-1", "status": "completed"},
+    ))

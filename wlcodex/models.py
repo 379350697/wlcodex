@@ -5,6 +5,15 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+# Re-export runtime event types so all lanes can import from one place.
+from wlcodex.runtime_events import (  # noqa: F401  — re-exported for convenience
+    AggregateType,
+    EventSource,
+    EventType,
+    RuntimeEvent,
+    Visibility,
+)
+
 
 class TaskStatus(StrEnum):
     QUEUED = "queued"

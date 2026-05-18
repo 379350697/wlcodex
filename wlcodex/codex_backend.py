@@ -390,9 +390,20 @@ class AppServerCodexBackend:
         self._transport_inject: tuple | None = None
         self._last_health_error: str | None = None
         self._ever_connected: bool = False
+        self._runtime_event_callback: Callable[[BackendEvent], None] | None = None
 
     def set_transport(self, send_fn, recv_fn) -> None:
         self._transport_inject = (send_fn, recv_fn)
+
+    def set_runtime_event_callback(
+        self, callback: Callable[[BackendEvent], None]
+    ) -> None:
+        """Register a callback that receives every BackendEvent.
+
+        The callback is invoked synchronously during ``_emit``.  Errors
+        in the callback are logged and do not block the main event flow.
+        """
+        self._runtime_event_callback = callback
 
     def set_process_manager(self, pm: object) -> None:
         self._process_manager = pm
@@ -881,9 +892,14 @@ class AppServerCodexBackend:
         """Resolve a held approval server request.
 
         Sends the JSON-RPC response to the app-server with the given response dict.
+        Also emits a BackendEvent so runtime event sources can record approval.resolved.
         """
         client = await self._ensure_client()
         client.resolve_server_request(codex_request_id, response)
+        self._emit(BackendEvent("approval_resolved", {
+            "codexRequestId": codex_request_id,
+            "response": response,
+        }))
 
     def set_health_error(self, error: str) -> None:
         self._last_health_error = error
@@ -929,6 +945,13 @@ class AppServerCodexBackend:
             self._bridge_event_wakeup.set()
         for queue in list(self._event_subscribers):
             queue.put_nowait(event)
+        # Runtime event callback — fire-and-forget, errors must not
+        # break the main event fan-out.
+        if self._runtime_event_callback is not None:
+            try:
+                self._runtime_event_callback(event)
+            except Exception:
+                logger.exception("Runtime event callback failed")
 
     def _subscribe_events(self) -> asyncio.Queue[BackendEvent]:
         queue: asyncio.Queue[BackendEvent] = asyncio.Queue()

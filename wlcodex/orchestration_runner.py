@@ -4,15 +4,30 @@ import asyncio
 import inspect
 import logging
 import subprocess
+import uuid
 from collections.abc import Callable
 from typing import Any
 
+from wlcodex.agent_backend import AgentRequest, AgentStreamEvent
 from wlcodex.claude_backend import record_claude_usage_event
 from wlcodex.context_packets import ContextBudget, approx_tokens, trim_to_budget
 from wlcodex.interaction.events import InteractionEvent
+from wlcodex.interaction.runtime_renderer import RuntimeRunState
 from wlcodex.models import ConversationSession, TaskStatus
 from wlcodex.orchestration_progress_text import render_user_progress_text
-from wlcodex.orchestrator import ChiefEngineerOrchestrator, OrchestrationProgress
+from wlcodex.orchestrator import (
+    ChiefEngineerOrchestrator,
+    OrchestrationProgress,
+    VerificationDecision,
+)
+from wlcodex.runtime_events import (
+    AggregateType,
+    EventSource,
+    EventType,
+    RuntimeEvent,
+    Visibility,
+    now_iso,
+)
 from wlcodex.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -62,6 +77,182 @@ class _TaskBoundCodexBackend:
         )
 
 
+class _ClaudeRuntimeWrapper:
+    """Wraps a Claude backend to emit runtime events before, during, and after
+    ``send_streaming``.  Creates the agent_run row and emits
+    ``agent.run.started`` BEFORE the first delta so Claude is observable
+    from the moment it launches.
+    """
+
+    def __init__(
+        self,
+        backend: object,
+        *,
+        store: object,
+        correlation_id: str,
+        conversation_id: int,
+        orchestration_run_id: int,
+        task_id: int,
+        ledger: object,
+        prompt_packet_summary: str = "",
+    ) -> None:
+        self._backend = backend
+        self._store = store
+        self._correlation_id = correlation_id
+        self._conversation_id = conversation_id
+        self._orchestration_run_id = orchestration_run_id
+        self._task_id = task_id
+        self._ledger = ledger
+        self._prompt_packet_summary = prompt_packet_summary
+        self._agent_run_id: int | None = None
+        self._events: list[RuntimeEvent] = []
+
+    @property
+    def enabled(self) -> bool:
+        return getattr(self._backend, "enabled", False)
+
+    @property
+    def agent_run_id(self) -> int | None:
+        return self._agent_run_id
+
+    @property
+    def activity_events(self) -> list[RuntimeEvent]:
+        return list(self._events)
+
+    async def send_streaming(self, request: AgentRequest):
+        """Create agent_run, emit started, then forward deltas with activity events."""
+        # Create agent_run BEFORE launching Claude subprocess
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=self._conversation_id,
+            agent="claude",
+            role="implementation",
+            prompt_packet_summary=self._prompt_packet_summary[:120],
+        )
+        self._agent_run_id = agent_run.id
+        self._ledger.update_agent_run_status(agent_run.id, "running")
+        self._ledger.set_conversation_active_claude_run(
+            self._conversation_id, agent_run.id
+        )
+
+        # Emit agent.run.started
+        if self._store is not None:
+            agg_id = str(agent_run.id)
+            started_event = RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.AGENT_RUN_STARTED,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id=agg_id,
+                correlation_id=self._correlation_id,
+                source=EventSource.ORCHESTRATOR,
+                actor="claude",
+                visibility=Visibility.OPERATOR,
+                payload={
+                    "agent": "claude",
+                    "role": "implementation",
+                    "prompt_summary": self._prompt_packet_summary[:200],
+                },
+                occurred_at=now_iso(),
+                conversation_id=self._conversation_id,
+                orchestration_run_id=self._orchestration_run_id,
+                agent_run_id=agent_run.id,
+                task_id=self._task_id,
+            )
+            self._store.append(started_event)
+            self._events.append(started_event)
+
+        error_text = ""
+        had_error = False
+        backend_exception = False
+        try:
+            async for stream_event in self._backend.send_streaming(request):
+                if stream_event.event_type == "error":
+                    had_error = True
+                    error_text = stream_event.delta
+                if self._store is not None and agent_run:
+                    activity = RuntimeEvent(
+                        schema_version=1,
+                        event_type=EventType.AGENT_RUN_ACTIVITY,
+                        aggregate_type=AggregateType.AGENT_RUN,
+                        aggregate_id=agg_id,
+                        correlation_id=self._correlation_id,
+                        source=EventSource.CLAUDE,
+                        actor="claude",
+                        visibility=Visibility.INTERNAL,
+                        payload={
+                            "delta_preview": (stream_event.delta or "")[:200],
+                            "event_type": stream_event.event_type,
+                        },
+                        occurred_at=now_iso(),
+                        conversation_id=self._conversation_id,
+                        orchestration_run_id=self._orchestration_run_id,
+                        agent_run_id=agent_run.id,
+                        task_id=self._task_id,
+                    )
+                    self._store.append(activity)
+                    self._events.append(activity)
+                yield stream_event
+        except Exception as exc:
+            had_error = True
+            error_text = str(exc)
+            backend_exception = True
+
+        # Emit agent.run.completed or agent.run.failed
+        if self._store is not None and agent_run:
+            if had_error:
+                fail_event = RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.AGENT_RUN_FAILED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=agg_id,
+                    correlation_id=self._correlation_id,
+                    source=EventSource.ORCHESTRATOR,
+                    actor="claude",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "agent": "claude",
+                        "role": "implementation",
+                        "reason": error_text[:500] or "Claude streaming returned error",
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=self._conversation_id,
+                    orchestration_run_id=self._orchestration_run_id,
+                    agent_run_id=agent_run.id,
+                    task_id=self._task_id,
+                )
+                self._store.append(fail_event)
+                self._events.append(fail_event)
+            else:
+                complete_event = RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.AGENT_RUN_COMPLETED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=agg_id,
+                    correlation_id=self._correlation_id,
+                    source=EventSource.ORCHESTRATOR,
+                    actor="claude",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "agent": "claude",
+                        "role": "implementation",
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=self._conversation_id,
+                    orchestration_run_id=self._orchestration_run_id,
+                    agent_run_id=agent_run.id,
+                    task_id=self._task_id,
+                )
+                self._store.append(complete_event)
+                self._events.append(complete_event)
+
+        # Re-raise backend exceptions so the orchestrator sees the failure.
+        # stream_event error events are already handled by the orchestrator
+        # and must not be re-raised (orchestrator already yielded FAILED).
+        if backend_exception:
+            if error_text:
+                raise RuntimeError(error_text) from None
+            raise RuntimeError("Claude streaming failed")
+
+
 class OrchestrationRunner:
     """Owns long-running chief-engineer orchestration outside Telegram handlers."""
 
@@ -74,6 +265,7 @@ class OrchestrationRunner:
         ledger: object,
         interaction_renderer: object | None = None,
         orchestrator_factory: Callable[[object, object], object] | None = None,
+        runtime_event_store: object | None = None,
     ) -> None:
         self._service = task_service
         self._codex = codex_backend
@@ -81,6 +273,7 @@ class OrchestrationRunner:
         self._ledger = ledger
         self._interaction_renderer = interaction_renderer
         self._orchestrator_factory = orchestrator_factory or ChiefEngineerOrchestrator
+        self._store = runtime_event_store
         self._tasks: set[asyncio.Task[None]] = set()
 
     def start_chief_engineer(
@@ -93,6 +286,7 @@ class OrchestrationRunner:
         codex_analysis_run_id: int,
         chat_id: int,
         workspace_path: str,
+        correlation_id: str = "",
     ) -> asyncio.Task[None]:
         task = asyncio.create_task(
             self._run_chief_engineer(
@@ -103,6 +297,7 @@ class OrchestrationRunner:
                 codex_analysis_run_id=codex_analysis_run_id,
                 chat_id=chat_id,
                 workspace_path=workspace_path,
+                correlation_id=correlation_id or str(uuid.uuid4()),
             ),
             name=f"chief-engineer-{orchestration_run_id}",
         )
@@ -120,6 +315,27 @@ class OrchestrationRunner:
                 "Background orchestration crashed",
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
+
+    def _emit_event(self, event: RuntimeEvent) -> RuntimeEvent:
+        if self._store is None:
+            return event
+        return self._store.append(event)
+
+    def _build_runtime_state(
+        self,
+        phase: str,
+        active_agent: str = "",
+        agent_status: str = "",
+        retry_count: int = 0,
+        is_terminal: bool = False,
+    ) -> RuntimeRunState:
+        return RuntimeRunState(
+            phase=phase,
+            active_agent=active_agent,
+            agent_status=agent_status,
+            retry_count=retry_count,
+            is_terminal=is_terminal,
+        )
 
     def _record_workflow_overhead(
         self,
@@ -160,9 +376,41 @@ class OrchestrationRunner:
         codex_analysis_run_id: int,
         chat_id: int,
         workspace_path: str,
+        correlation_id: str = "",
     ) -> None:
+        cid = correlation_id or str(uuid.uuid4())
         codex = _TaskBoundCodexBackend(self._codex, self._service, task_id)
-        orch = self._orchestrator_factory(codex, self._claude)
+
+        # Wrap Claude backend so runtime events are emitted before/after
+        # every send_streaming call and during every delta.
+        claude_backend = _ClaudeRuntimeWrapper(
+            self._claude,
+            store=self._store,
+            correlation_id=cid,
+            conversation_id=conversation.id,
+            orchestration_run_id=orchestration_run_id,
+            task_id=task_id,
+            ledger=self._ledger,
+            prompt_packet_summary=prompt[:120],
+        )
+        orch = self._orchestrator_factory(codex, claude_backend)
+
+        # Emit run.started
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.RUN_STARTED,
+            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+            aggregate_id=str(orchestration_run_id),
+            correlation_id=cid,
+            source=EventSource.ORCHESTRATOR,
+            actor="orchestrator",
+            visibility=Visibility.OPERATOR,
+            payload={"goal": prompt, "phase": "running_analysis"},
+            occurred_at=now_iso(),
+            conversation_id=conversation.id,
+            orchestration_run_id=orchestration_run_id,
+            task_id=task_id,
+        ))
 
         terminal_sent = False
         orch_result_status = "running"
@@ -187,6 +435,55 @@ class OrchestrationRunner:
                         claude_implementation_text += progress.text
                         if not implementation_notice_sent:
                             implementation_notice_sent = True
+                            # Emit Claude agent.run.started if wrapper hasn't already
+                            # (wrapper does this for real orchestrations; here as fallback
+                            # for fake orchestrators used in tests)
+                            if claude_backend.agent_run_id is None:
+                                claude_run = self._ledger.create_agent_run(
+                                    conversation_id=conversation.id,
+                                    agent="claude",
+                                    role="implementation",
+                                    prompt_packet_summary=prompt[:120],
+                                )
+                                self._ledger.update_agent_run_status(claude_run.id, "running")
+                                self._ledger.set_conversation_active_claude_run(
+                                    conversation.id, claude_run.id
+                                )
+                                # Track fallback agent_run_id so IMPL_COMPLETE doesn't create another
+                                # (only needed when wrapper isn't used, e.g. fake orchestrators)
+                                claude_backend._agent_run_id = claude_run.id
+                                self._emit_event(RuntimeEvent(
+                                    schema_version=1,
+                                    event_type=EventType.AGENT_RUN_STARTED,
+                                    aggregate_type=AggregateType.AGENT_RUN,
+                                    aggregate_id=str(claude_run.id),
+                                    correlation_id=cid,
+                                    source=EventSource.ORCHESTRATOR,
+                                    actor="claude",
+                                    visibility=Visibility.OPERATOR,
+                                    payload={"agent": "claude", "role": "implementation"},
+                                    occurred_at=now_iso(),
+                                    conversation_id=conversation.id,
+                                    orchestration_run_id=orchestration_run_id,
+                                    agent_run_id=claude_run.id,
+                                    task_id=task_id,
+                                ))
+                            # Emit run.phase.changed to running_implementation
+                            self._emit_event(RuntimeEvent(
+                                schema_version=1,
+                                event_type=EventType.RUN_PHASE_CHANGED,
+                                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                                aggregate_id=str(orchestration_run_id),
+                                correlation_id=cid,
+                                source=EventSource.ORCHESTRATOR,
+                                actor="orchestrator",
+                                visibility=Visibility.OPERATOR,
+                                payload={"phase": "running_implementation", "verify_round": progress.round_num or verify_round},
+                                occurred_at=now_iso(),
+                                conversation_id=conversation.id,
+                                orchestration_run_id=orchestration_run_id,
+                                task_id=task_id,
+                            ))
                             await self._emit_text_delta(
                                 chat_id,
                                 task_id,
@@ -196,6 +493,22 @@ class OrchestrationRunner:
                                     first_impl_delta=True,
                                 ),
                             )
+                            # Send runtime progress to renderer
+                            if self._interaction_renderer is not None:
+                                await self._interaction_renderer.handle(
+                                    InteractionEvent(
+                                        event_type="runtime_progress",
+                                        chat_id=chat_id,
+                                        task_id=task_id,
+                                        conversation_id=conversation.id,
+                                        metadata={
+                                            "runtime_state": self._build_runtime_state(
+                                                "running_implementation", "claude", "running",
+                                                retry_count=(progress.round_num or 1) - 1,
+                                            ),
+                                        },
+                                    )
+                                )
                 elif progress.phase in (
                     OrchestrationProgress.ANALYSIS_STARTED,
                     OrchestrationProgress.ANALYSIS_COMPLETE,
@@ -209,7 +522,54 @@ class OrchestrationRunner:
                         task_id=task_id,
                         conversation_id=conversation.id,
                     )
-                    if progress.phase == OrchestrationProgress.ANALYSIS_COMPLETE:
+                    if progress.phase == OrchestrationProgress.ANALYSIS_STARTED:
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.RUN_PHASE_CHANGED,
+                            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                            aggregate_id=str(orchestration_run_id),
+                            correlation_id=cid,
+                            source=EventSource.ORCHESTRATOR,
+                            actor="codex",
+                            visibility=Visibility.OPERATOR,
+                            payload={"phase": "running_analysis"},
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            task_id=task_id,
+                        ))
+                        # Emit agent.run.started for codex analysis
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.AGENT_RUN_STARTED,
+                            aggregate_type=AggregateType.AGENT_RUN,
+                            aggregate_id=str(codex_analysis_run_id),
+                            correlation_id=cid,
+                            source=EventSource.CODEX,
+                            actor="codex",
+                            visibility=Visibility.OPERATOR,
+                            payload={"agent": "codex", "role": "analysis"},
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            agent_run_id=codex_analysis_run_id,
+                            task_id=task_id,
+                        ))
+                        if self._interaction_renderer is not None:
+                            await self._interaction_renderer.handle(
+                                InteractionEvent(
+                                    event_type="runtime_progress",
+                                    chat_id=chat_id,
+                                    task_id=task_id,
+                                    conversation_id=conversation.id,
+                                    metadata={
+                                        "runtime_state": self._build_runtime_state(
+                                            "running_analysis", "codex", "running",
+                                        ),
+                                    },
+                                )
+                            )
+                    elif progress.phase == OrchestrationProgress.ANALYSIS_COMPLETE:
                         codex_analysis_text = progress.full_text or progress.text
                         self._ledger.update_agent_run_status(
                             codex_analysis_run_id,
@@ -217,6 +577,23 @@ class OrchestrationRunner:
                             completion_summary=codex_analysis_text[:2000],
                         )
                         codex_analysis_status = "done"
+                        # Emit agent.run.completed for codex analysis
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.AGENT_RUN_COMPLETED,
+                            aggregate_type=AggregateType.AGENT_RUN,
+                            aggregate_id=str(codex_analysis_run_id),
+                            correlation_id=cid,
+                            source=EventSource.CODEX,
+                            actor="codex",
+                            visibility=Visibility.OPERATOR,
+                            payload={"agent": "codex", "role": "analysis", "completion_summary": codex_analysis_text[:2000]},
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            agent_run_id=codex_analysis_run_id,
+                            task_id=task_id,
+                        ))
                         self._record_workflow_overhead(
                             phase="codex_analysis",
                             overhead_input_tokens=approx_tokens(codex_analysis_text),
@@ -227,33 +604,137 @@ class OrchestrationRunner:
                         )
                     elif progress.phase == OrchestrationProgress.IMPL_COMPLETE:
                         claude_implementation_text = progress.full_text or progress.text
-                        claude_run = self._ledger.create_agent_run(
-                            conversation_id=conversation.id,
-                            agent="claude",
-                            role="implementation",
-                            prompt_packet_summary=prompt[:120],
-                        )
+                        # Use the wrapper's agent_run_id if available (already created
+                        # before send_streaming), otherwise create one as fallback.
+                        impl_run_id = claude_backend.agent_run_id
+                        if impl_run_id is None:
+                            claude_run = self._ledger.create_agent_run(
+                                conversation_id=conversation.id,
+                                agent="claude",
+                                role="implementation",
+                                prompt_packet_summary=prompt[:120],
+                            )
+                            impl_run_id = claude_run.id
                         self._ledger.update_agent_run_status(
-                            claude_run.id,
+                            impl_run_id,
                             "done",
                             completion_summary=claude_implementation_text[:2000],
-                        )
-                        self._ledger.set_conversation_active_claude_run(
-                            conversation.id, claude_run.id
                         )
                         self._record_workflow_overhead(
                             phase="codex_to_claude_handoff",
                             overhead_input_tokens=approx_tokens(claude_implementation_text),
                             conversation_id=conversation.id,
                             orchestration_run_id=orchestration_run_id,
-                            agent_run_id=claude_run.id,
+                            agent_run_id=impl_run_id,
                             task_id=task_id,
                         )
+                        if self._interaction_renderer is not None:
+                            await self._interaction_renderer.handle(
+                                InteractionEvent(
+                                    event_type="runtime_progress",
+                                    chat_id=chat_id,
+                                    task_id=task_id,
+                                    conversation_id=conversation.id,
+                                    metadata={
+                                        "runtime_state": self._build_runtime_state(
+                                            "running_implementation", "claude", "running",
+                                            retry_count=(progress.round_num or 1) - 1,
+                                        ),
+                                    },
+                                )
+                            )
                     elif progress.phase == OrchestrationProgress.VERIFY_STARTED:
                         verify_round = progress.round_num or verify_round
+                        # Emit run.phase.changed to running_verification
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.RUN_PHASE_CHANGED,
+                            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                            aggregate_id=str(orchestration_run_id),
+                            correlation_id=cid,
+                            source=EventSource.ORCHESTRATOR,
+                            actor="codex",
+                            visibility=Visibility.OPERATOR,
+                            payload={"phase": "running_verification", "verify_round": verify_round},
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            task_id=task_id,
+                        ))
+                        # Emit verification.started
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.VERIFICATION_STARTED,
+                            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                            aggregate_id=str(orchestration_run_id),
+                            correlation_id=cid,
+                            source=EventSource.ORCHESTRATOR,
+                            actor="codex",
+                            visibility=Visibility.OPERATOR,
+                            payload={"verify_round": verify_round},
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            task_id=task_id,
+                        ))
+                        if self._interaction_renderer is not None:
+                            await self._interaction_renderer.handle(
+                                InteractionEvent(
+                                    event_type="runtime_progress",
+                                    chat_id=chat_id,
+                                    task_id=task_id,
+                                    conversation_id=conversation.id,
+                                    metadata={
+                                        "runtime_state": self._build_runtime_state(
+                                            "running_verification", "codex", "running",
+                                            retry_count=(progress.round_num or 1) - 1,
+                                        ),
+                                    },
+                                )
+                            )
                     elif progress.phase == OrchestrationProgress.VERIFY_COMPLETE:
                         verify_round = progress.round_num or verify_round
                         verification_text = progress.full_text or progress.text
+                        # Parse the verification decision
+                        try:
+                            vd = VerificationDecision.parse(verification_text)
+                            actual_decision = vd.decision
+                        except Exception:
+                            actual_decision = "need_user"
+                        # Emit verification.decision.recorded
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.VERIFICATION_DECISION_RECORDED,
+                            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                            aggregate_id=str(orchestration_run_id),
+                            correlation_id=cid,
+                            source=EventSource.ORCHESTRATOR,
+                            actor="codex",
+                            visibility=Visibility.OPERATOR,
+                            payload={"decision": actual_decision, "reason": verification_text[:500], "verify_round": verify_round},
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            task_id=task_id,
+                        ))
+                        # Emit verification.retry.requested NOT verification.completed for retry
+                        if actual_decision == "retry":
+                            self._emit_event(RuntimeEvent(
+                                schema_version=1,
+                                event_type=EventType.VERIFICATION_RETRY_REQUESTED,
+                                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                                aggregate_id=str(orchestration_run_id),
+                                correlation_id=cid,
+                                source=EventSource.ORCHESTRATOR,
+                                actor="codex",
+                                visibility=Visibility.OPERATOR,
+                                payload={"verify_round": verify_round, "reason": verification_text[:500]},
+                                occurred_at=now_iso(),
+                                conversation_id=conversation.id,
+                                orchestration_run_id=orchestration_run_id,
+                                task_id=task_id,
+                            ))
+                        # Create verification agent run (backward compat)
                         verify_run = self._ledger.create_agent_run(
                             conversation_id=conversation.id,
                             agent="codex",
@@ -273,6 +754,23 @@ class OrchestrationRunner:
                             agent_run_id=verify_run.id,
                             task_id=task_id,
                         )
+                        # Emit verification.completed (only if decision is NOT retry)
+                        if actual_decision != "retry":
+                            self._emit_event(RuntimeEvent(
+                                schema_version=1,
+                                event_type=EventType.VERIFICATION_COMPLETED,
+                                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                                aggregate_id=str(orchestration_run_id),
+                                correlation_id=cid,
+                                source=EventSource.ORCHESTRATOR,
+                                actor="codex",
+                                visibility=Visibility.OPERATOR,
+                                payload={"decision": actual_decision, "verify_round": verify_round},
+                                occurred_at=now_iso(),
+                                conversation_id=conversation.id,
+                                orchestration_run_id=orchestration_run_id,
+                                task_id=task_id,
+                            ))
                 elif progress.phase == OrchestrationProgress.FAILED:
                     terminal_sent = True
                     orch_result_status = "failed"
@@ -280,19 +778,22 @@ class OrchestrationRunner:
                     terminal_text = progress.full_text or progress.text
                     self._ledger.set_task_status(task_id, TaskStatus.FAILED)
                     if progress.agent == "claude":
-                        claude_run = self._ledger.create_agent_run(
-                            conversation_id=conversation.id,
-                            agent="claude",
-                            role="implementation",
-                            prompt_packet_summary=prompt[:120],
-                        )
+                        impl_run_id = claude_backend.agent_run_id
+                        if impl_run_id is None:
+                            claude_run = self._ledger.create_agent_run(
+                                conversation_id=conversation.id,
+                                agent="claude",
+                                role="implementation",
+                                prompt_packet_summary=prompt[:120],
+                            )
+                            impl_run_id = claude_run.id
                         self._ledger.update_agent_run_status(
-                            claude_run.id,
+                            impl_run_id,
                             "failed",
                             completion_summary=terminal_text[:2000],
                         )
                         self._ledger.set_conversation_active_claude_run(
-                            conversation.id, claude_run.id
+                            conversation.id, impl_run_id
                         )
                     elif progress.agent == "codex" and not codex_analysis_text:
                         self._ledger.update_agent_run_status(
@@ -301,6 +802,25 @@ class OrchestrationRunner:
                             completion_summary=terminal_text[:2000],
                         )
                         codex_analysis_status = "failed"
+                    # Emit run.failed
+                    self._emit_event(RuntimeEvent(
+                        schema_version=1,
+                        event_type=EventType.RUN_FAILED,
+                        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                        aggregate_id=str(orchestration_run_id),
+                        correlation_id=cid,
+                        source=EventSource.ORCHESTRATOR,
+                        actor="orchestrator",
+                        visibility=Visibility.USER,
+                        payload={
+                            "reason": terminal_text[:500],
+                            "last_active_agent": progress.agent or "unknown",
+                        },
+                        occurred_at=now_iso(),
+                        conversation_id=conversation.id,
+                        orchestration_run_id=orchestration_run_id,
+                        task_id=task_id,
+                    ))
                     await self._emit_failed(chat_id, task_id, progress.text)
                 elif progress.phase == OrchestrationProgress.COMPLETE:
                     terminal_sent = True
@@ -310,11 +830,42 @@ class OrchestrationRunner:
                         terminal_text = progress.full_text or progress.text
                     if orch_result_status == "passed":
                         self._ledger.set_task_status(task_id, TaskStatus.DONE)
+                        # Emit verification.completed + run.completed
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.RUN_COMPLETED,
+                            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                            aggregate_id=str(orchestration_run_id),
+                            correlation_id=cid,
+                            source=EventSource.ORCHESTRATOR,
+                            actor="orchestrator",
+                            visibility=Visibility.USER,
+                            payload={"verify_round": verify_round},
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            task_id=task_id,
+                        ))
                         await self._emit_completed(
                             chat_id, task_id, conversation.id, workspace_path
                         )
                     elif orch_result_status == "needs_user":
                         self._ledger.set_task_status(task_id, TaskStatus.FAILED)
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.RUN_FAILED,
+                            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                            aggregate_id=str(orchestration_run_id),
+                            correlation_id=cid,
+                            source=EventSource.ORCHESTRATOR,
+                            actor="orchestrator",
+                            visibility=Visibility.USER,
+                            payload={"reason": "needs_user", "verify_round": verify_round},
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            task_id=task_id,
+                        ))
                         await self._emit_failed(
                             chat_id,
                             task_id,
@@ -322,6 +873,21 @@ class OrchestrationRunner:
                         )
                     else:
                         self._ledger.set_task_status(task_id, TaskStatus.FAILED)
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.RUN_FAILED,
+                            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                            aggregate_id=str(orchestration_run_id),
+                            correlation_id=cid,
+                            source=EventSource.ORCHESTRATOR,
+                            actor="orchestrator",
+                            visibility=Visibility.USER,
+                            payload={"reason": "verification_failed", "verify_round": verify_round},
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            task_id=task_id,
+                        ))
                         await self._emit_failed(
                             chat_id,
                             task_id,
@@ -344,6 +910,22 @@ class OrchestrationRunner:
                 "failed",
                 completion_summary=str(exc)[:2000],
             )
+            # Emit run.failed for exception
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.RUN_FAILED,
+                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                aggregate_id=str(orchestration_run_id),
+                correlation_id=cid,
+                source=EventSource.ORCHESTRATOR,
+                actor="orchestrator",
+                visibility=Visibility.USER,
+                payload={"reason": str(exc)[:500], "last_active_agent": "unknown"},
+                occurred_at=now_iso(),
+                conversation_id=conversation.id,
+                orchestration_run_id=orchestration_run_id,
+                task_id=task_id,
+            ))
             await self._emit_failed(chat_id, task_id, str(exc))
 
         if not codex_analysis_text and orch_result_status == "failed":

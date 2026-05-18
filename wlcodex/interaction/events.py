@@ -11,6 +11,9 @@ InteractionEventType = Literal[
     "run_completed",
     "run_failed",
     "status_refresh",
+    "runtime_progress",
+    "runtime_heartbeat",
+    "runtime_final",
 ]
 
 

@@ -20,6 +20,8 @@ from wlcodex.claude_permissions import (
     ClaudePermissionState,
     normalize_claude_permission_mode,
 )
+from wlcodex.runtime_events import EventType
+from wlcodex.claude_stream_parser import ClaudeStreamEvent, parse_line
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +44,14 @@ class ClaudeBackend:
         self,
         config: ClaudeConfig,
         permission_state: ClaudePermissionState | None = None,
+        runtime_source: object | None = None,
     ) -> None:
         self._config = config
         self._permission_state = permission_state or ClaudePermissionState(
             config.permission_mode
         )
+        self._runtime_source = runtime_source
+        self._hook_events_supported: bool | None = None
 
     @property
     def enabled(self) -> bool:
@@ -119,6 +124,9 @@ class ClaudeBackend:
             yield AgentStreamEvent(delta="Claude Code is not enabled.", event_type="error")
             return
 
+        # Probe hook-events capability once (cached after first call).
+        await self._probe_hook_events()
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._config.binary,
@@ -131,8 +139,15 @@ class ClaudeBackend:
             )
 
             if proc.stdout is None:
+                _emit_runtime_lifecycle(
+                    self._runtime_source,
+                    EventType.AGENT_RUN_FAILED,
+                    payload={"reason": "no_stdout"},
+                )
                 yield AgentStreamEvent(delta="(no output)", event_type="error")
                 return
+
+            _emit_runtime_lifecycle(self._runtime_source, EventType.AGENT_RUN_STARTED)
 
             accumulated: list[str] = []
             assistant_text = ""
@@ -210,17 +225,20 @@ class ClaudeBackend:
                         else:
                             last_activity_at = loop.time()
                             decoded = line.decode("utf-8", errors="replace")
-                            events, assistant_text = _claude_stream_events_from_line(
+                            parsed_events, assistant_text = parse_line(
                                 decoded,
-                                assistant_text,
-                                bool(accumulated),
+                                assistant_text=assistant_text,
+                                has_emitted_text=bool(accumulated),
                             )
-                            if not events:
-                                reader_task = asyncio.create_task(proc.stdout.readline())
-                                continue
-                            for event in events:
-                                if event.event_type == "text":
-                                    accumulated.append(event.delta)
+                            for parsed in parsed_events:
+                                # Emit to runtime store when wired.
+                                _emit_runtime(self._runtime_source, parsed)
+                                # Yield AgentStreamEvent for backward compat.
+                                agent_event = _to_agent_stream_event(parsed)
+                                if agent_event is None:
+                                    continue
+                                if agent_event.event_type == "text" and agent_event.delta:
+                                    accumulated.append(agent_event.delta)
                                     current_text = "".join(accumulated)
                                     if _looks_like_permission_request(current_text):
                                         await _kill_process(proc)
@@ -229,7 +247,7 @@ class ClaudeBackend:
                                             event_type="error",
                                         )
                                         return
-                                yield event
+                                yield agent_event
                             reader_task = asyncio.create_task(proc.stdout.readline())
 
                     if process_exited and stdout_eof:
@@ -238,6 +256,19 @@ class ClaudeBackend:
                 if timeout_reason:
                     await _kill_process(proc)
                     if timeout_reason == "idle":
+                        _emit_runtime_lifecycle(
+                            self._runtime_source,
+                            EventType.WATCHDOG_IDLE_TIMEOUT,
+                            payload={
+                                "idle_seconds": self._config.stream_idle_timeout_seconds,
+                                "elapsed_total_seconds": round(loop.time() - started_at, 3),
+                            },
+                        )
+                        _emit_runtime_lifecycle(
+                            self._runtime_source,
+                            EventType.AGENT_RUN_TIMED_OUT,
+                            payload={"reason": "idle_timeout"},
+                        )
                         yield AgentStreamEvent(
                             delta=(
                                 "Claude Code 运行超时："
@@ -247,6 +278,19 @@ class ClaudeBackend:
                             event_type="error",
                         )
                     else:
+                        _emit_runtime_lifecycle(
+                            self._runtime_source,
+                            EventType.WATCHDOG_HARD_TIMEOUT,
+                            payload={
+                                "hard_seconds": self._config.request_timeout_seconds,
+                                "elapsed_total_seconds": round(loop.time() - started_at, 3),
+                            },
+                        )
+                        _emit_runtime_lifecycle(
+                            self._runtime_source,
+                            EventType.AGENT_RUN_TIMED_OUT,
+                            payload={"reason": "hard_timeout"},
+                        )
                         yield AgentStreamEvent(
                             delta=(
                                 "Claude Code 运行超时："
@@ -257,6 +301,18 @@ class ClaudeBackend:
                     return
             except TimeoutError:
                 await _kill_process(proc)
+                _emit_runtime_lifecycle(
+                    self._runtime_source,
+                    EventType.WATCHDOG_HARD_TIMEOUT,
+                    payload={
+                        "hard_seconds": self._config.request_timeout_seconds,
+                    },
+                )
+                _emit_runtime_lifecycle(
+                    self._runtime_source,
+                    EventType.AGENT_RUN_TIMED_OUT,
+                    payload={"reason": "asyncio_timeout_error"},
+                )
                 yield AgentStreamEvent(
                     delta=(
                         "Claude Code 运行超时："
@@ -275,24 +331,52 @@ class ClaudeBackend:
 
             text = "".join(accumulated)
             if _looks_like_permission_request(text):
+                _emit_runtime_lifecycle(
+                    self._runtime_source,
+                    EventType.AGENT_RUN_FAILED,
+                    payload={"reason": "permission_request"},
+                )
                 yield AgentStreamEvent(
                     delta=_permission_error_message(text),
                     event_type="error",
                 )
                 return
             if (proc.returncode or 0) != 0:
+                _emit_runtime_lifecycle(
+                    self._runtime_source,
+                    EventType.AGENT_RUN_FAILED,
+                    payload={
+                        "reason": "non_zero_exit",
+                        "exit_code": proc.returncode,
+                    },
+                )
                 yield AgentStreamEvent(
                     delta=text or f"Claude Code exited with status {proc.returncode}.",
                     event_type="error",
                 )
+                return
+            _emit_runtime_lifecycle(self._runtime_source, EventType.AGENT_RUN_COMPLETED)
 
         except FileNotFoundError:
+            _emit_runtime_lifecycle(
+                self._runtime_source,
+                EventType.AGENT_RUN_FAILED,
+                payload={
+                    "reason": "binary_not_found",
+                    "binary": self._config.binary,
+                },
+            )
             yield AgentStreamEvent(
                 delta=f"Claude binary not found: {self._config.binary}",
                 event_type="error",
             )
         except Exception as exc:
             logger.exception("Claude streaming error")
+            _emit_runtime_lifecycle(
+                self._runtime_source,
+                EventType.AGENT_RUN_FAILED,
+                payload={"reason": "exception", "error": str(exc)[:2000]},
+            )
             yield AgentStreamEvent(delta=f"Error: {exc}", event_type="error")
 
     def interrupt(self, session_id: str | None = None) -> None:
@@ -320,7 +404,102 @@ class ClaudeBackend:
                 "--verbose",
                 "--include-partial-messages",
             ])
+            if self._hook_events_supported:
+                args.append("--include-hook-events")
         return args
+
+    async def _probe_hook_events(self) -> bool:
+        """Check whether the Claude binary supports ``--include-hook-events``.
+
+        Runs ``claude --help`` with a short timeout.  The result is cached on
+        ``_hook_events_supported`` so the probe only runs once.
+        """
+        if self._hook_events_supported is not None:
+            return self._hook_events_supported
+
+        supported = False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._config.binary,
+                "--help",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=5.0,
+            )
+            help_text = stdout.decode("utf-8", errors="replace")
+            supported = "--include-hook-events" in help_text
+        except Exception:
+            logger.debug("Hook-events capability probe failed", exc_info=True)
+
+        self._hook_events_supported = supported
+
+        if not supported and self._runtime_source is not None:
+            try:
+                from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+                if isinstance(self._runtime_source, ClaudeRuntimeSource):
+                    self._runtime_source.emit_capability_missing(
+                        "include-hook-events"
+                    )
+            except Exception:
+                logger.debug("Failed to emit capability missing event", exc_info=True)
+
+        return supported
+
+
+def _emit_runtime(runtime_source: object | None, parsed: ClaudeStreamEvent) -> None:
+    """Emit *parsed* to the runtime event store when a source is wired."""
+    if runtime_source is None:
+        return
+    try:
+        from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+        if isinstance(runtime_source, ClaudeRuntimeSource):
+            runtime_source.emit(parsed)
+    except Exception:
+        logger.debug("Runtime event emission failed", exc_info=True)
+
+
+def _emit_runtime_lifecycle(
+    runtime_source: object | None,
+    event_type: str,
+    *,
+    payload: dict | None = None,
+    visibility: str = "internal",
+) -> None:
+    """Emit a lifecycle event through *runtime_source* when wired."""
+    if runtime_source is None:
+        return
+    try:
+        from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+        if isinstance(runtime_source, ClaudeRuntimeSource):
+            runtime_source.emit_lifecycle(
+                event_type,
+                payload=payload or {},
+                visibility=visibility,
+            )
+    except Exception:
+        logger.debug("Runtime lifecycle emission failed", exc_info=True)
+
+
+def _to_agent_stream_event(parsed: ClaudeStreamEvent) -> AgentStreamEvent | None:
+    """Convert a ``ClaudeStreamEvent`` to ``AgentStreamEvent`` for backward compat.
+
+    Returns ``None`` for pure-activity events that carry no visible text or
+    usage data — those should not produce user-facing stream output.
+    """
+    if parsed.agent_delta or parsed.agent_event_type == "error":
+        return AgentStreamEvent(
+            delta=parsed.agent_delta,
+            event_type=parsed.agent_event_type,
+        )
+    if parsed.agent_usage is not None:
+        return AgentStreamEvent(
+            delta="",
+            event_type="usage",
+            usage=parsed.agent_usage,
+        )
+    return None
 
 
 def _claude_stream_events_from_line(

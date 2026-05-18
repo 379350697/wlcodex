@@ -519,3 +519,655 @@ def test_record_claude_usage_event_never_raises(tmp_path: Path) -> None:
         output_text="test",
     )
     # Must not reach here if it raises
+
+
+# ============================================================================
+# New tests: hook-events capability, runtime source wiring, stream parser
+# ============================================================================
+
+
+def test_prompt_args_includes_hook_events_when_supported() -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    backend = ClaudeBackend(ClaudeConfig(enabled=True))
+    backend._hook_events_supported = True
+
+    args = backend._prompt_args("test", stream_json=True)
+    assert "--include-hook-events" in args
+    assert "--output-format" in args
+    assert "stream-json" in args
+    assert "--include-partial-messages" in args
+
+
+def test_prompt_args_excludes_hook_events_when_not_supported() -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    backend = ClaudeBackend(ClaudeConfig(enabled=True))
+    backend._hook_events_supported = False
+
+    args = backend._prompt_args("test", stream_json=True)
+    assert "--include-hook-events" not in args
+    assert "stream-json" in args
+
+
+def test_prompt_args_no_stream_json_no_hook_events() -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    backend = ClaudeBackend(ClaudeConfig(enabled=True))
+    backend._hook_events_supported = True
+
+    args = backend._prompt_args("test", stream_json=False)
+    assert "--include-hook-events" not in args
+    assert "--output-format" not in args
+
+
+def test_to_agent_stream_event_text() -> None:
+    from wlcodex.claude_backend import _to_agent_stream_event
+    from wlcodex.claude_stream_parser import ClaudeStreamEvent
+    from wlcodex.runtime_events import EventType
+
+    parsed = ClaudeStreamEvent(
+        runtime_event_type=EventType.MODEL_TEXT_DELTA,
+        runtime_payload={"text": "hello"},
+        agent_delta="hello",
+        agent_event_type="text",
+    )
+    agent_event = _to_agent_stream_event(parsed)
+    assert agent_event is not None
+    assert agent_event.delta == "hello"
+    assert agent_event.event_type == "text"
+
+
+def test_to_agent_stream_event_usage() -> None:
+    from wlcodex.claude_backend import _to_agent_stream_event
+    from wlcodex.claude_stream_parser import ClaudeStreamEvent
+    from wlcodex.runtime_events import EventType
+
+    parsed = ClaudeStreamEvent(
+        runtime_event_type=EventType.MODEL_USAGE_UPDATED,
+        runtime_payload={"input_tokens": 100},
+        agent_usage={"input_tokens": 100},
+    )
+    agent_event = _to_agent_stream_event(parsed)
+    assert agent_event is not None
+    assert agent_event.event_type == "usage"
+    assert agent_event.usage == {"input_tokens": 100}
+
+
+def test_to_agent_stream_event_activity_returns_none() -> None:
+    from wlcodex.claude_backend import _to_agent_stream_event
+    from wlcodex.claude_stream_parser import ClaudeStreamEvent
+    from wlcodex.runtime_events import EventType
+
+    parsed = ClaudeStreamEvent(
+        runtime_event_type=EventType.AGENT_RUN_ACTIVITY,
+        runtime_payload={},
+        agent_delta="",
+        agent_event_type="text",
+        agent_usage=None,
+    )
+    assert _to_agent_stream_event(parsed) is None
+
+
+def test_to_agent_stream_event_error() -> None:
+    from wlcodex.claude_backend import _to_agent_stream_event
+    from wlcodex.claude_stream_parser import ClaudeStreamEvent
+    from wlcodex.runtime_events import EventType
+
+    parsed = ClaudeStreamEvent(
+        runtime_event_type=EventType.AGENT_RUN_FAILED,
+        runtime_payload={"error": "boom"},
+        agent_delta="boom",
+        agent_event_type="error",
+    )
+    agent_event = _to_agent_stream_event(parsed)
+    assert agent_event is not None
+    assert agent_event.event_type == "error"
+
+
+def test_emit_runtime_noop_when_no_source() -> None:
+    from wlcodex.claude_backend import _emit_runtime
+    from wlcodex.claude_stream_parser import ClaudeStreamEvent
+    from wlcodex.runtime_events import EventType
+
+    parsed = ClaudeStreamEvent(
+        runtime_event_type=EventType.AGENT_RUN_ACTIVITY,
+        runtime_payload={},
+    )
+    _emit_runtime(None, parsed)
+
+
+def test_emit_runtime_appends_to_store(tmp_path: Path) -> None:
+    from wlcodex.claude_backend import _emit_runtime
+    from wlcodex.claude_stream_parser import ClaudeStreamEvent
+    from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    source = ClaudeRuntimeSource(
+        store=store,
+        correlation_id="corr-test",
+        agent_run_id=1,
+    )
+
+    parsed = ClaudeStreamEvent(
+        runtime_event_type=EventType.MODEL_TEXT_DELTA,
+        runtime_payload={"text": "hello"},
+    )
+    _emit_runtime(source, parsed)
+
+    events = store.list_by_correlation("corr-test")
+    assert len(events) == 1
+    assert events[0].event_type == EventType.MODEL_TEXT_DELTA
+    assert events[0].payload == {"text": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_streaming_with_runtime_source_emits_events(tmp_path: Path) -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'system', 'subtype': 'init'}), flush=True)\n"
+        "print(json.dumps({'type': 'stream_event', 'event': {'delta': "
+        "{'type': 'text_delta', 'text': 'Hello'}}}), flush=True)\n"
+        "print(json.dumps({'type': 'result', 'subtype': 'success', "
+        "'usage': {'input_tokens': 100, 'output_tokens': 50}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    source = ClaudeRuntimeSource(
+        store=store,
+        correlation_id="corr-stream",
+        agent_run_id=42,
+        conversation_id=1,
+    )
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            binary=str(fake_claude),
+            request_timeout_seconds=1.0,
+            stream_idle_timeout_seconds=1.0,
+        ),
+        runtime_source=source,
+    )
+    backend._hook_events_supported = False
+
+    events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="test",
+            workspace_path=str(tmp_path),
+        ))
+    ]
+
+    text_events = [e for e in events if e.event_type == "text"]
+    assert len(text_events) == 1
+    assert text_events[0].delta == "Hello"
+
+    stored = store.list_by_agent_run(42)
+    assert len(stored) >= 3
+    stored_types = [e.event_type for e in stored]
+    assert EventType.MODEL_TEXT_DELTA in stored_types
+    assert EventType.MODEL_USAGE_UPDATED in stored_types
+
+
+@pytest.mark.asyncio
+async def test_streaming_without_runtime_source_still_works(tmp_path: Path) -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'stream_event', 'event': {'delta': "
+        "{'type': 'text_delta', 'text': 'hello'}}}), flush=True)\n"
+        "print(json.dumps({'type': 'result', 'subtype': 'success'}), flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            binary=str(fake_claude),
+            request_timeout_seconds=1.0,
+            stream_idle_timeout_seconds=1.0,
+        ),
+    )
+    backend._hook_events_supported = False
+
+    events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="test",
+            workspace_path=str(tmp_path),
+        ))
+    ]
+
+    text_events = [e for e in events if e.event_type == "text"]
+    assert len(text_events) == 1
+    assert text_events[0].delta == "hello"
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_tool_use_as_activity(tmp_path: Path) -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'stream_event', 'event': "
+        "{'type': 'content_block_start', 'index': 0, 'content_block': "
+        "{'type': 'tool_use', 'id': 'toolu_1', 'name': 'Read', 'input': {}}}}), flush=True)\n"
+        "print(json.dumps({'type': 'result', 'subtype': 'success'}), flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    source = ClaudeRuntimeSource(
+        store=store,
+        correlation_id="corr-tool",
+        agent_run_id=1,
+    )
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            binary=str(fake_claude),
+            request_timeout_seconds=1.0,
+            stream_idle_timeout_seconds=1.0,
+        ),
+        runtime_source=source,
+    )
+    backend._hook_events_supported = False
+
+    events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="read file",
+            workspace_path=str(tmp_path),
+        ))
+    ]
+
+    text_events = [e for e in events if e.event_type == "text"]
+    assert len(text_events) == 0
+
+    stored = store.list_by_agent_run(1)
+    stored_types = [e.event_type for e in stored]
+    assert EventType.TOOL_CALL_STARTED in stored_types
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_api_retry_as_runtime_event(tmp_path: Path) -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'system', 'subtype': 'api_retry', "
+        "'message': 'retrying after 429'}), flush=True)\n"
+        "print(json.dumps({'type': 'result', 'subtype': 'success'}), flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    source = ClaudeRuntimeSource(
+        store=store,
+        correlation_id="corr-retry",
+        agent_run_id=1,
+    )
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            binary=str(fake_claude),
+            request_timeout_seconds=1.0,
+            stream_idle_timeout_seconds=1.0,
+        ),
+        runtime_source=source,
+    )
+    backend._hook_events_supported = False
+
+    _events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="test",
+            workspace_path=str(tmp_path),
+        ))
+    ]
+
+    stored = store.list_by_agent_run(1)
+    stored_types = [e.event_type for e in stored]
+    assert EventType.MODEL_API_RETRY in stored_types
+
+
+@pytest.mark.asyncio
+async def test_streaming_activity_events_do_not_pollute_text(tmp_path: Path) -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'system', 'subtype': 'init'}), flush=True)\n"
+        "print(json.dumps({'type': 'stream_event', 'event': "
+        "{'type': 'content_block_stop', 'index': 0}}), flush=True)\n"
+        "print(json.dumps({'type': 'result', 'subtype': 'success'}), flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            binary=str(fake_claude),
+            request_timeout_seconds=1.0,
+            stream_idle_timeout_seconds=1.0,
+        ),
+    )
+    backend._hook_events_supported = False
+
+    events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="test",
+            workspace_path=str(tmp_path),
+        ))
+    ]
+
+    text_events = [e for e in events if e.event_type == "text"]
+    assert len(text_events) == 0
+
+
+# ============================================================================
+# Lifecycle runtime event emission tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_agent_run_started(tmp_path: Path) -> None:
+    """agent.run.started emitted after process creation when runtime_source wired."""
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/bin/sh\necho 'ok'\n", encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    source = ClaudeRuntimeSource(
+        store=store, correlation_id="corr-life", agent_run_id=1,
+    )
+
+    backend = ClaudeBackend(
+        ClaudeConfig(enabled=True, binary=str(fake_claude),
+                     request_timeout_seconds=1.0, stream_idle_timeout_seconds=1.0),
+        runtime_source=source,
+    )
+    backend._hook_events_supported = False
+
+    _events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="test", workspace_path=str(tmp_path),
+        ))
+    ]
+
+    stored = store.list_by_agent_run(1)
+    stored_types = [e.event_type for e in stored]
+    assert EventType.AGENT_RUN_STARTED in stored_types
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_agent_run_completed_on_success(tmp_path: Path) -> None:
+    """agent.run.completed emitted after clean exit."""
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'result', 'subtype': 'success'}), flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    source = ClaudeRuntimeSource(
+        store=store, correlation_id="corr-life2", agent_run_id=1,
+    )
+
+    backend = ClaudeBackend(
+        ClaudeConfig(enabled=True, binary=str(fake_claude),
+                     request_timeout_seconds=1.0, stream_idle_timeout_seconds=1.0),
+        runtime_source=source,
+    )
+    backend._hook_events_supported = False
+
+    _events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="test", workspace_path=str(tmp_path),
+        ))
+    ]
+
+    stored = store.list_by_agent_run(1)
+    stored_types = [e.event_type for e in stored]
+    assert EventType.AGENT_RUN_STARTED in stored_types
+    assert EventType.AGENT_RUN_COMPLETED in stored_types
+    # started must come before completed in insertion order
+    started_idx = stored_types.index(EventType.AGENT_RUN_STARTED)
+    completed_idx = stored_types.index(EventType.AGENT_RUN_COMPLETED)
+    assert started_idx < completed_idx
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_agent_run_failed_on_non_zero_exit(tmp_path: Path) -> None:
+    """agent.run.failed emitted when Claude exits with non-zero status."""
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    source = ClaudeRuntimeSource(
+        store=store, correlation_id="corr-fail", agent_run_id=1,
+    )
+
+    backend = ClaudeBackend(
+        ClaudeConfig(enabled=True, binary=str(fake_claude),
+                     request_timeout_seconds=1.0, stream_idle_timeout_seconds=1.0),
+        runtime_source=source,
+    )
+    backend._hook_events_supported = False
+
+    _events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="test", workspace_path=str(tmp_path),
+        ))
+    ]
+
+    stored = store.list_by_agent_run(1)
+    stored_types = [e.event_type for e in stored]
+    assert EventType.AGENT_RUN_STARTED in stored_types
+    assert EventType.AGENT_RUN_FAILED in stored_types
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_watchdog_events_on_idle_timeout(tmp_path: Path) -> None:
+    """watchdog.idle_timeout + agent.run.timed_out on idle timeout."""
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\nsleep 0.3\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    source = ClaudeRuntimeSource(
+        store=store, correlation_id="corr-idle", agent_run_id=1,
+    )
+
+    backend = ClaudeBackend(
+        ClaudeConfig(enabled=True, binary=str(fake_claude),
+                     request_timeout_seconds=1.0, stream_idle_timeout_seconds=0.03),
+        runtime_source=source,
+    )
+    backend._hook_events_supported = False
+
+    _events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="test", workspace_path=str(tmp_path),
+        ))
+    ]
+
+    stored = store.list_by_agent_run(1)
+    stored_types = [e.event_type for e in stored]
+    assert EventType.WATCHDOG_IDLE_TIMEOUT in stored_types
+    assert EventType.AGENT_RUN_TIMED_OUT in stored_types
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_watchdog_events_on_hard_timeout(tmp_path: Path) -> None:
+    """watchdog.hard_timeout + agent.run.timed_out on hard timeout."""
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import time\n"
+        "print('start', flush=True)\n"
+        "time.sleep(0.3)\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    source = ClaudeRuntimeSource(
+        store=store, correlation_id="corr-hard", agent_run_id=1,
+    )
+
+    backend = ClaudeBackend(
+        ClaudeConfig(enabled=True, binary=str(fake_claude),
+                     request_timeout_seconds=0.05, stream_idle_timeout_seconds=0.1),
+        runtime_source=source,
+    )
+    backend._hook_events_supported = False
+
+    _events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="test", workspace_path=str(tmp_path),
+        ))
+    ]
+
+    stored = store.list_by_agent_run(1)
+    stored_types = [e.event_type for e in stored]
+    assert EventType.AGENT_RUN_STARTED in stored_types
+    assert EventType.WATCHDOG_HARD_TIMEOUT in stored_types
+    assert EventType.AGENT_RUN_TIMED_OUT in stored_types
+
+
+@pytest.mark.asyncio
+async def test_streaming_does_not_emit_lifecycle_without_runtime_source(
+    tmp_path: Path,
+) -> None:
+    """Without runtime_source, no lifecycle events but backward compat works."""
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.agent_backend import AgentRequest
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\necho 'ok'\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+
+    backend = ClaudeBackend(
+        ClaudeConfig(enabled=True, binary=str(fake_claude),
+                     request_timeout_seconds=1.0, stream_idle_timeout_seconds=1.0),
+    )
+    backend._hook_events_supported = False
+
+    events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(
+            prompt="test", workspace_path=str(tmp_path),
+        ))
+    ]
+
+    # Backward compat: only the raw line as text event
+    text_events = [e for e in events if e.event_type == "text"]
+    assert len(text_events) >= 1

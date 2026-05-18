@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from wlcodex.interaction.events import InteractionEvent
 from wlcodex.interaction.profiles import InteractionProfile
 from wlcodex.interaction.transport import TelegramTransport
 from wlcodex.streaming import StreamingRenderer
+
+if TYPE_CHECKING:
+    from wlcodex.interaction.runtime_renderer import RuntimeProgressManager
 
 
 @dataclass
@@ -21,10 +25,12 @@ class InteractionRenderer:
         transport: TelegramTransport,
         profile: InteractionProfile,
         min_interval_seconds: float = 1.0,
+        runtime_progress: "RuntimeProgressManager | None" = None,
     ) -> None:
         self._transport = transport
         self._profile = profile
         self._min_interval = min_interval_seconds
+        self._runtime_progress = runtime_progress
         self._sessions: dict[tuple[int, int], _StreamSession] = {}
         self._typing_tasks: dict[tuple[int, int], object] = {}
 
@@ -41,6 +47,16 @@ class InteractionRenderer:
                 return
             if event.event_type == "run_failed":
                 await self._handle_failed(event)
+                return
+            if event.event_type == "runtime_progress":
+                await self._handle_runtime_progress(event)
+                return
+            if event.event_type == "runtime_heartbeat":
+                await self._handle_runtime_heartbeat(event)
+                return
+            if event.event_type == "runtime_final":
+                await self._handle_runtime_final(event)
+                return
         except Exception:
             key = self._key(event)
             self._cancel_typing(key)
@@ -80,15 +96,22 @@ class InteractionRenderer:
         key = self._key(event)
         self._cancel_typing(key)
         session = self._sessions.get(key)
-        if session is None:
-            return
-        conversation_id = event.conversation_id or session.conversation_id
-        buttons = self._profile.completion_buttons(
-            conversation_id=conversation_id,
-            has_diff=bool(event.metadata.get("has_diff", False)),
-        )
-        await session.renderer.finish(buttons=buttons)
-        self._sessions.pop(key, None)
+        if session is not None:
+            conversation_id = event.conversation_id or session.conversation_id
+            buttons = self._profile.completion_buttons(
+                conversation_id=conversation_id,
+                has_diff=bool(event.metadata.get("has_diff", False)),
+            )
+            await session.renderer.finish(buttons=buttons)
+            self._sessions.pop(key, None)
+        if self._runtime_progress is not None:
+            state = event.metadata.get("runtime_state")
+            if state is not None:
+                await self._runtime_progress.finish(
+                    state,
+                    chat_id=event.chat_id,
+                    conversation_id=event.conversation_id or 0,
+                )
 
     async def _handle_failed(self, event: InteractionEvent) -> None:
         key = self._key(event)
@@ -97,10 +120,56 @@ class InteractionRenderer:
         text = self._profile.error_text(event.text or event.summary)
         if session is None:
             await self._transport.send(event.chat_id, text)
+        else:
+            await session.renderer.append("\n\n" + text)
+            await session.renderer.finish()
+            self._sessions.pop(key, None)
+        if self._runtime_progress is not None:
+            state = event.metadata.get("runtime_state")
+            if state is not None:
+                await self._runtime_progress.finish(
+                    state,
+                    chat_id=event.chat_id,
+                    conversation_id=event.conversation_id or 0,
+                )
+
+    async def _handle_runtime_progress(self, event: InteractionEvent) -> None:
+        if self._runtime_progress is None:
             return
-        await session.renderer.append("\n\n" + text)
-        await session.renderer.finish()
-        self._sessions.pop(key, None)
+        state = event.metadata.get("runtime_state")
+        if state is None:
+            return
+        await self._runtime_progress.update_progress(
+            state,
+            chat_id=event.chat_id,
+            conversation_id=event.conversation_id or 0,
+        )
+
+    async def _handle_runtime_heartbeat(self, event: InteractionEvent) -> None:
+        if self._runtime_progress is None:
+            return
+        state = event.metadata.get("runtime_state")
+        if state is None:
+            return
+        await self._runtime_progress.update_progress(
+            state,
+            chat_id=event.chat_id,
+            conversation_id=event.conversation_id or 0,
+        )
+
+    async def _handle_runtime_final(self, event: InteractionEvent) -> None:
+        if self._runtime_progress is None:
+            return
+        state = event.metadata.get("runtime_state")
+        if state is None:
+            return
+        buttons = event.buttons if event.buttons else None
+        await self._runtime_progress.finish(
+            state,
+            chat_id=event.chat_id,
+            conversation_id=event.conversation_id or 0,
+            buttons=buttons,
+        )
 
     def _cancel_typing(self, key: tuple[int, int]) -> None:
         task = self._typing_tasks.pop(key, None)

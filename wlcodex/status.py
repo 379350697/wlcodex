@@ -216,6 +216,88 @@ def _status_label(status: TaskStatus) -> str:
     return STATUS_LABELS.get(status, status.value)
 
 
+def _status_label_str(status: str) -> str:
+    mapping = {
+        "running": "运行中",
+        "completed": "已完成",
+        "failed": "已失败",
+        "cancelled": "已取消",
+        "idle": "空闲",
+    }
+    return mapping.get(status, status)
+
+
+def _phase_cn(phase: str) -> str:
+    mapping = {
+        "running_analysis": "Codex 分析",
+        "running_implementation": "Claude 实施",
+        "running_verification": "Codex 验收",
+        "retrying_implementation": "重新实施",
+    }
+    return mapping.get(phase, phase)
+
+
+def _event_label(event_type: str) -> str:
+    mapping: dict[str, str] = {
+        "run.requested": "运行请求",
+        "run.started": "运行开始",
+        "run.phase.changed": "阶段变更",
+        "run.completed": "运行完成",
+        "run.failed": "运行失败",
+        "run.cancelled": "运行取消",
+        "agent.run.queued": "Agent 排队",
+        "agent.run.started": "Agent 启动",
+        "agent.run.activity": "Agent 活动",
+        "agent.run.heartbeat": "Agent 心跳",
+        "agent.run.waiting_for_approval": "等待审批",
+        "agent.run.completed": "Agent 完成",
+        "agent.run.failed": "Agent 失败",
+        "agent.run.timed_out": "Agent 超时",
+        "agent.run.orphaned": "Agent 孤儿",
+        "tool.call.started": "工具调用",
+        "tool.call.completed": "工具调用完成",
+        "tool.call.failed": "工具调用失败",
+        "command.started": "命令开始",
+        "command.completed": "命令完成",
+        "command.failed": "命令失败",
+        "file.changed": "文件变更",
+        "diff.updated": "Diff 更新",
+        "approval.requested": "审批请求",
+        "approval.resolved": "审批完成",
+        "approval.expired": "审批过期",
+        "verification.started": "验收开始",
+        "verification.decision.recorded": "验收决策",
+        "verification.completed": "验收完成",
+        "verification.retry.requested": "重新验收",
+        "watchdog.idle_timeout": "空闲超时",
+        "watchdog.hard_timeout": "硬超时",
+        "system.started": "系统启动",
+        "system.recovery.started": "恢复开始",
+        "system.recovery.completed": "恢复完成",
+        "projection.rebuilt": "投影重建",
+        "model.usage.updated": "Token 更新",
+        "model.message.completed": "模型消息完成",
+        "model.text.delta": "模型文本",
+        "model.api.retry": "API 重试",
+        "user.message.received": "用户消息",
+        "telegram.message.sent": "Telegram 发送",
+        "telegram.message.failed": "Telegram 失败",
+    }
+    return mapping.get(event_type, event_type)
+
+
+def _duration_str(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}秒"
+    if seconds < 3600:
+        m = int(seconds // 60)
+        s = int(seconds % 60)
+        return f"{m}分{s}秒"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    return f"{h}时{m}分"
+
+
 # --- Conversation renderers ---
 
 MODE_LABELS = {
@@ -325,6 +407,77 @@ def render_session_list(sessions: Sequence[ConversationSession]) -> str:
             line += f" · 内部任务 #{s.active_codex_task_id}"
         lines.append(line)
     return "\n".join(lines)
+
+
+def render_runtime_status_lines(
+    *,
+    conversation_id: int | None = None,
+    active_agent: str = "",
+    active_agent_run_id: int | None = None,
+    phase: str = "",
+    status: str = "",
+    last_event_type: str = "",
+    last_event_id: int = 0,
+    idle_seconds: float = 0.0,
+    hard_elapsed_seconds: float = 0.0,
+    hard_timeout_seconds: int = 0,
+    token_input: int = 0,
+    token_output: int = 0,
+    total_events: int = 0,
+    agent_count: int = 0,
+    last_user_event: str = "",
+) -> list[str]:
+    """Produce status lines enriched with runtime event-sourced data.
+
+    Callers that have a RuntimeEventStore should compute the values via
+    runtime_diagnostics.build_runtime_status() and pass them here.
+    This function remains a pure formatter.
+    """
+    if conversation_id is None:
+        return ["暂无活跃对话。"]
+
+    if status == "idle":
+        return [f"当前对话 #{conversation_id} — 空闲中"]
+
+    lines = [f"对话 #{conversation_id} — {_status_label_str(status)}"]
+
+    if phase:
+        lines.append(f"阶段：{_phase_cn(phase)}")
+
+    if active_agent:
+        agent_line = f"活跃 Agent：{active_agent}"
+        if active_agent_run_id:
+            agent_line += f"（运行 #{active_agent_run_id}）"
+        lines.append(agent_line)
+
+    if last_event_type:
+        lines.append(
+            f"最近事件：{_event_label(last_event_type)}（#{last_event_id}）"
+        )
+
+    if idle_seconds > 0:
+        lines.append(f"空闲时钟：{_duration_str(idle_seconds)}")
+    if hard_elapsed_seconds > 0:
+        hard_str = f"硬时钟：{_duration_str(hard_elapsed_seconds)}"
+        if hard_timeout_seconds:
+            hard_str += f" / 上限 {_duration_str(hard_timeout_seconds)}"
+        lines.append(hard_str)
+
+    if token_input or token_output:
+        lines.append(
+            f"Token：{token_input:,} 输入 / {token_output:,} 输出"
+        )
+
+    if agent_count:
+        lines.append(f"Agent 运行记录：{agent_count}")
+
+    if total_events:
+        lines.append(f"事件总数：{total_events}")
+
+    if last_user_event:
+        lines.append(f"最近用户事件：{_event_label(last_user_event)}")
+
+    return lines
 
 
 def render_agent_result_summary(result: AgentRun) -> str:
