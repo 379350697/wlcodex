@@ -309,12 +309,15 @@ async def test_app_server_send_codex_analysis_prompt_uses_planning_overrides() -
     assert thread_params["sandbox"] == "read-only"
     assert "不要调用工具" in str(thread_params["developerInstructions"])
     assert thread_params["config"] == {
-        "model_reasoning_effort": "low",
+        "model": "gpt-5.5",
+        "model_reasoning_effort": "xhigh",
         "model_reasoning_summary": "none",
-        "model_verbosity": "low",
+        "model_verbosity": "high",
     }
+    assert thread_params["model"] == "gpt-5.5"
     assert turn_method == "turn/start"
-    assert turn_params["effort"] == "low"
+    assert turn_params["effort"] == "xhigh"
+    assert turn_params["model"] == "gpt-5.5"
     assert turn_params["approvalPolicy"] == "never"
     assert turn_params["sandboxPolicy"] == {
         "type": "readOnly",

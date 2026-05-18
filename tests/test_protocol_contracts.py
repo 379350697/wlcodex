@@ -44,14 +44,16 @@ def test_thread_start_supports_planning_overrides() -> None:
         "never",
         "read-only",
         developer_instructions="No tools.",
-        config={"model_reasoning_effort": "low"},
+        config={"model_reasoning_effort": "xhigh"},
+        model="gpt-5.5",
         personality="pragmatic",
     )
 
     assert params["approvalPolicy"] == "never"
     assert params["sandbox"] == "read-only"
     assert params["developerInstructions"] == "No tools."
-    assert params["config"] == {"model_reasoning_effort": "low"}
+    assert params["config"] == {"model_reasoning_effort": "xhigh"}
+    assert params["model"] == "gpt-5.5"
     assert params["personality"] == "pragmatic"
 
 
@@ -64,20 +66,22 @@ def test_turn_start_supports_planning_overrides() -> None:
     params = build_turn_start_params(
         "thread-1",
         "hello",
-        effort="low",
+        effort="xhigh",
         approval_policy="never",
         sandbox_policy={"type": "readOnly", "networkAccess": False},
         output_schema=output_schema,
+        model="gpt-5.5",
         summary="none",
         personality="pragmatic",
     )
 
     assert params["threadId"] == "thread-1"
     assert params["input"] == [{"type": "text", "text": "hello"}]
-    assert params["effort"] == "low"
+    assert params["effort"] == "xhigh"
     assert params["approvalPolicy"] == "never"
     assert params["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
     assert params["outputSchema"] == output_schema
+    assert params["model"] == "gpt-5.5"
     assert params["summary"] == "none"
     assert params["personality"] == "pragmatic"
 

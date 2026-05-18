@@ -13,9 +13,10 @@ from wlcodex.jsonrpc import JsonRpcClient
 logger = logging.getLogger(__name__)
 
 _PLANNING_THREAD_CONFIG: dict[str, object] = {
-    "model_reasoning_effort": "low",
+    "model": "gpt-5.5",
+    "model_reasoning_effort": "xhigh",
     "model_reasoning_summary": "none",
-    "model_verbosity": "low",
+    "model_verbosity": "high",
 }
 
 _READ_ONLY_SANDBOX_POLICY: dict[str, object] = {
@@ -62,9 +63,10 @@ def _planning_developer_instructions(interaction_mode: str) -> str:
 
 def _planning_turn_options(interaction_mode: str) -> dict[str, object]:
     options: dict[str, object] = {
-        "effort": "low",
+        "effort": "xhigh",
         "approval_policy": "never",
         "sandbox_policy": _READ_ONLY_SANDBOX_POLICY,
+        "model": "gpt-5.5",
         "summary": "none",
         "personality": "pragmatic",
         "service_tier": "fast",
@@ -91,6 +93,7 @@ def build_thread_start_params(
     developer_instructions: str | None = None,
     base_instructions: str | None = None,
     config: dict[str, object] | None = None,
+    model: str | None = None,
     personality: str | None = None,
     service_tier: str | None = None,
 ) -> dict[str, object]:
@@ -105,6 +108,8 @@ def build_thread_start_params(
         params["baseInstructions"] = base_instructions
     if config is not None:
         params["config"] = config
+    if model is not None:
+        params["model"] = model
     if personality is not None:
         params["personality"] = personality
     if service_tier is not None:
@@ -120,6 +125,7 @@ def build_turn_start_params(
     approval_policy: str | None = None,
     sandbox_policy: dict[str, object] | None = None,
     output_schema: dict[str, object] | None = None,
+    model: str | None = None,
     summary: str | None = None,
     personality: str | None = None,
     service_tier: str | None = None,
@@ -133,6 +139,8 @@ def build_turn_start_params(
         params["sandboxPolicy"] = sandbox_policy
     if output_schema is not None:
         params["outputSchema"] = output_schema
+    if model is not None:
+        params["model"] = model
     if summary is not None:
         params["summary"] = summary
     if personality is not None:
@@ -598,6 +606,7 @@ class AppServerCodexBackend:
                     interaction_mode
                 ),
                 config=_PLANNING_THREAD_CONFIG,
+                model="gpt-5.5",
                 personality="pragmatic",
                 service_tier="fast",
             ),
