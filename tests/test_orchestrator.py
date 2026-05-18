@@ -1,5 +1,7 @@
 """Tests for Chief Engineer orchestrator."""
 
+import subprocess
+
 import pytest
 from wlcodex.orchestrator import (
     ChiefEngineerOrchestrator,
@@ -233,6 +235,29 @@ class FakeCodexWithPromptModes:
         return self._responses.pop(0)
 
 
+def _init_git_workspace(path) -> None:
+    (path / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (path / "docs").mkdir()
+    (path / "docs" / "README.md").write_text("docs\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=WLCodex Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_uses_send_codex_prompt_interface() -> None:
     """Orchestrator must prefer send_codex_prompt over echo when available."""
@@ -262,6 +287,75 @@ async def test_orchestrator_marks_codex_analysis_and_verification_modes() -> Non
 
     assert result.status == "passed"
     assert codex.modes == ["analysis", "verification"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stops_if_codex_analysis_edits_code(tmp_path) -> None:
+    _init_git_workspace(tmp_path)
+
+    class MutatingCodex:
+        async def send_codex_prompt(
+            self,
+            workspace_path: str,
+            prompt: str,
+            *,
+            interaction_mode: str = "general",
+        ) -> str:
+            del prompt, interaction_mode
+            (tmp_path / "app.py").write_text("print('changed')\n", encoding="utf-8")
+            return "Root cause: app.py needs work."
+
+    codex = MutatingCodex()
+    claude = FakeClaudeWithSend()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    result = await orchestrator.run(
+        "修改 app.py",
+        {"workspace": str(tmp_path)},
+    )
+
+    assert result.status == "failed"
+    assert "Codex 总工程师轮修改了实现文件" in result.verification_summary
+    assert claude.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_allows_codex_analysis_artifact_docs(tmp_path) -> None:
+    _init_git_workspace(tmp_path)
+
+    class DocWritingCodex:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def send_codex_prompt(
+            self,
+            workspace_path: str,
+            prompt: str,
+            *,
+            interaction_mode: str = "general",
+        ) -> str:
+            del workspace_path, prompt, interaction_mode
+            self.calls += 1
+            if self.calls == 1:
+                (tmp_path / "docs" / "codex-plan.md").write_text(
+                    "# Plan\n",
+                    encoding="utf-8",
+                )
+                return "Root cause: implementation needed."
+            return "decision: pass\nsummary: verified"
+
+    codex = DocWritingCodex()
+    claude = FakeClaudeWithSend()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    result = await orchestrator.run(
+        "实现一个小功能",
+        {"workspace": str(tmp_path)},
+    )
+
+    assert result.status == "passed"
+    assert (tmp_path / "docs" / "codex-plan.md").exists()
+    assert len(claude.prompts) == 1
 
 
 @pytest.mark.asyncio

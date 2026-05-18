@@ -8,9 +8,11 @@ The orchestrator enforces compact context packets for every model call.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import inspect
 import json
 import logging
+from pathlib import Path
 import subprocess
 from typing import Any
 
@@ -22,6 +24,8 @@ from wlcodex.context_packets import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CODEX_ALLOWED_WRITE_PREFIXES = ("docs/", ".wlcodex/")
 
 
 def _accepts_keyword(func: object, name: str) -> bool:
@@ -135,6 +139,92 @@ def _collect_workspace_evidence(workspace_path: str) -> tuple[list[str], str, st
         test_results = "Unable to determine test changes. Manual verification required."
 
     return changed_files, diff_summary, test_results
+
+
+def _git_workspace_root(workspace_path: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", workspace_path, "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    root = result.stdout.strip()
+    return root or None
+
+
+def _git_changed_file_paths(workspace_path: str) -> set[str] | None:
+    paths: set[str] = set()
+    commands = (
+        ["ls-files", "-m", "-d", "-o", "--exclude-standard", "-z"],
+        ["diff", "--cached", "--name-only", "-z"],
+    )
+    for args in commands:
+        try:
+            result = subprocess.run(
+                ["git", "-C", workspace_path, *args],
+                capture_output=True,
+                timeout=15,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        paths.update(
+            part.decode("utf-8", errors="replace")
+            for part in result.stdout.split(b"\0")
+            if part
+        )
+    return paths
+
+
+def _file_signature(root: Path, relative_path: str) -> str:
+    path = root / relative_path
+    if not path.exists():
+        return "<missing>"
+    if path.is_dir():
+        return "<directory>"
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except Exception as exc:
+        return f"<unreadable:{type(exc).__name__}>"
+
+
+def _capture_workspace_snapshot(workspace_path: str) -> dict[str, str] | None:
+    root = _git_workspace_root(workspace_path)
+    if root is None:
+        return None
+    paths = _git_changed_file_paths(workspace_path)
+    if paths is None:
+        return None
+    root_path = Path(root)
+    return {path: _file_signature(root_path, path) for path in paths}
+
+
+def _is_codex_allowed_write_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return normalized.startswith(_CODEX_ALLOWED_WRITE_PREFIXES)
+
+
+def _codex_forbidden_workspace_changes(
+    before: dict[str, str] | None,
+    after: dict[str, str] | None,
+) -> list[str]:
+    if before is None or after is None:
+        return []
+    changed_paths = sorted(
+        path
+        for path in set(before) | set(after)
+        if before.get(path) != after.get(path)
+    )
+    return [
+        path for path in changed_paths
+        if not _is_codex_allowed_write_path(path)
+    ]
 
 
 @dataclass
@@ -363,25 +453,47 @@ class ChiefEngineerOrchestrator:
         *,
         interaction_mode: str = "general",
     ) -> str:
+        before_snapshot = (
+            _capture_workspace_snapshot(workspace)
+            if interaction_mode in ("analysis", "verification")
+            else None
+        )
         backend = self._codex
+        result: str
         # Prefer real send_codex_prompt interface
         if hasattr(backend, "send_codex_prompt"):
             send_codex_prompt = backend.send_codex_prompt
             if _accepts_keyword(send_codex_prompt, "interaction_mode"):
-                return await send_codex_prompt(
+                result = await send_codex_prompt(
                     workspace,
                     prompt,
                     interaction_mode=interaction_mode,
                 )
-            return await send_codex_prompt(workspace, prompt)
+            else:
+                result = await send_codex_prompt(workspace, prompt)
         # Legacy test compatibility (echo/fake_response ignore workspace)
-        if hasattr(backend, "echo"):
-            return backend.echo(prompt)
-        if hasattr(backend, "fake_response"):
-            return backend.fake_response(prompt)
-        raise NotImplementedError(
-            "Codex backend must implement send_codex_prompt(workspace, prompt) -> str"
+        elif hasattr(backend, "echo"):
+            result = backend.echo(prompt)
+        elif hasattr(backend, "fake_response"):
+            result = backend.fake_response(prompt)
+        else:
+            raise NotImplementedError(
+                "Codex backend must implement send_codex_prompt(workspace, prompt) -> str"
+            )
+
+        forbidden = _codex_forbidden_workspace_changes(
+            before_snapshot,
+            _capture_workspace_snapshot(workspace),
         )
+        if forbidden:
+            preview = ", ".join(forbidden[:8])
+            if len(forbidden) > 8:
+                preview = f"{preview}, +{len(forbidden) - 8} more"
+            raise RuntimeError(
+                "Codex 总工程师轮修改了实现文件，已停止闭环："
+                f"{preview}。请把这些代码/测试/配置改动交给 Claude 执行。"
+            )
+        return result
 
     async def _call_claude(self, prompt: str, workspace: str) -> str:
         backend = self._claude

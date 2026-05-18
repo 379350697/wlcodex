@@ -19,9 +19,10 @@ _PLANNING_THREAD_CONFIG: dict[str, object] = {
     "model_verbosity": "high",
 }
 
-_READ_ONLY_SANDBOX_POLICY: dict[str, object] = {
-    "type": "readOnly",
+_CHIEF_ENGINEER_SANDBOX_POLICY: dict[str, object] = {
+    "type": "workspaceWrite",
     "networkAccess": False,
+    "writableRoots": [],
 }
 
 _CODEX_ANALYSIS_OUTPUT_SCHEMA: dict[str, object] = {
@@ -49,23 +50,28 @@ _CODEX_ANALYSIS_OUTPUT_SCHEMA: dict[str, object] = {
 def _planning_developer_instructions(interaction_mode: str) -> str:
     if interaction_mode == "verification":
         return (
-            "你是 WLCodex 的 Codex 验收子流程。不要调用工具、不要读取文件、"
-            "不要运行命令、不要编辑文件。只根据用户目标、Codex 方案、Claude "
-            "完成摘要和已提供的 diff/test 摘要验收，并用 decision: pass/retry/"
-            "stop/need_user 格式输出简短中文结果。"
+            "你是 WLCodex 的 Codex 总工程师验收子流程。可以调用 skill、"
+            "GitNexus、只读检索和必要的验收/测试/部署/review 工具；可以生成或写入"
+            "设计、评审、部署、验收类文档。不要抢 Claude 的代码实现职责："
+            "不要修改业务代码、测试代码、依赖锁或配置来完成实现补丁；发现实现"
+            "问题时输出 retry/required_fix 交给 Claude 返工。验收结论必须使用 "
+            "decision: pass/retry/stop/need_user 格式。"
         )
     return (
-        "你是 WLCodex 的 Codex 分析子流程。不要调用工具、不要读取文件、"
-        "不要运行命令、不要编辑文件。只根据输入做需求分析，并输出交给 Claude "
-        "执行的结构化实现交接包。"
+        "你是 WLCodex 的 Codex 总工程师分析子流程。可以调用 skill、"
+        "GitNexus、只读上下文检索和必要的方案验证工具；可以生成或写入设计、"
+        "评审、部署、验收类文档。不要抢 Claude 的代码实现职责：不要修改业务"
+        "代码、测试代码、依赖锁或配置来完成实现补丁，不要运行由 Claude 实现"
+        "阶段负责的改代码/跑实现测试闭环。输出交给 Claude 执行的结构化实现"
+        "交接包。"
     )
 
 
 def _planning_turn_options(interaction_mode: str) -> dict[str, object]:
     options: dict[str, object] = {
         "effort": "xhigh",
-        "approval_policy": "never",
-        "sandbox_policy": _READ_ONLY_SANDBOX_POLICY,
+        "approval_policy": "on-request",
+        "sandbox_policy": _CHIEF_ENGINEER_SANDBOX_POLICY,
         "model": "gpt-5.5",
         "summary": "none",
         "personality": "pragmatic",
@@ -600,8 +606,8 @@ class AppServerCodexBackend:
             "thread/start",
             build_thread_start_params(
                 workspace_path,
-                "never",
-                "read-only",
+                "on-request",
+                "workspace-write",
                 developer_instructions=_planning_developer_instructions(
                     interaction_mode
                 ),

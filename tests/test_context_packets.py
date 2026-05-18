@@ -195,8 +195,10 @@ def test_build_codex_analysis_packet_is_analysis_only() -> None:
 
     rendered = packet.render()
 
-    assert "不要编辑文件" in rendered
-    assert "不要运行测试" in rendered
+    assert "不要直接完成 Claude 的实现补丁" in rendered
+    assert "可以调用 skill" in rendered
+    assert "docs/ 或 .wlcodex/" in rendered
+    assert "不要修改业务代码、测试代码、依赖锁或配置" in rendered
     assert "交给 Claude" in rendered
 
 

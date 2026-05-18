@@ -41,17 +41,17 @@ def test_thread_start_includes_policy_and_sandbox() -> None:
 def test_thread_start_supports_planning_overrides() -> None:
     params = build_thread_start_params(
         "/tmp/work",
-        "never",
-        "read-only",
-        developer_instructions="No tools.",
+        "on-request",
+        "workspace-write",
+        developer_instructions="Chief engineer boundaries.",
         config={"model_reasoning_effort": "xhigh"},
         model="gpt-5.5",
         personality="pragmatic",
     )
 
-    assert params["approvalPolicy"] == "never"
-    assert params["sandbox"] == "read-only"
-    assert params["developerInstructions"] == "No tools."
+    assert params["approvalPolicy"] == "on-request"
+    assert params["sandbox"] == "workspace-write"
+    assert params["developerInstructions"] == "Chief engineer boundaries."
     assert params["config"] == {"model_reasoning_effort": "xhigh"}
     assert params["model"] == "gpt-5.5"
     assert params["personality"] == "pragmatic"
@@ -67,8 +67,12 @@ def test_turn_start_supports_planning_overrides() -> None:
         "thread-1",
         "hello",
         effort="xhigh",
-        approval_policy="never",
-        sandbox_policy={"type": "readOnly", "networkAccess": False},
+        approval_policy="on-request",
+        sandbox_policy={
+            "type": "workspaceWrite",
+            "networkAccess": False,
+            "writableRoots": [],
+        },
         output_schema=output_schema,
         model="gpt-5.5",
         summary="none",
@@ -78,8 +82,12 @@ def test_turn_start_supports_planning_overrides() -> None:
     assert params["threadId"] == "thread-1"
     assert params["input"] == [{"type": "text", "text": "hello"}]
     assert params["effort"] == "xhigh"
-    assert params["approvalPolicy"] == "never"
-    assert params["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
+    assert params["approvalPolicy"] == "on-request"
+    assert params["sandboxPolicy"] == {
+        "type": "workspaceWrite",
+        "networkAccess": False,
+        "writableRoots": [],
+    }
     assert params["outputSchema"] == output_schema
     assert params["model"] == "gpt-5.5"
     assert params["summary"] == "none"

@@ -305,9 +305,10 @@ async def test_app_server_send_codex_analysis_prompt_uses_planning_overrides() -
     thread_method, thread_params = requests[0]
     turn_method, turn_params = requests[1]
     assert thread_method == "thread/start"
-    assert thread_params["approvalPolicy"] == "never"
-    assert thread_params["sandbox"] == "read-only"
-    assert "不要调用工具" in str(thread_params["developerInstructions"])
+    assert thread_params["approvalPolicy"] == "on-request"
+    assert thread_params["sandbox"] == "workspace-write"
+    assert "可以调用 skill" in str(thread_params["developerInstructions"])
+    assert "不要抢 Claude 的代码实现职责" in str(thread_params["developerInstructions"])
     assert thread_params["config"] == {
         "model": "gpt-5.5",
         "model_reasoning_effort": "xhigh",
@@ -318,10 +319,11 @@ async def test_app_server_send_codex_analysis_prompt_uses_planning_overrides() -
     assert turn_method == "turn/start"
     assert turn_params["effort"] == "xhigh"
     assert turn_params["model"] == "gpt-5.5"
-    assert turn_params["approvalPolicy"] == "never"
+    assert turn_params["approvalPolicy"] == "on-request"
     assert turn_params["sandboxPolicy"] == {
-        "type": "readOnly",
+        "type": "workspaceWrite",
         "networkAccess": False,
+        "writableRoots": [],
     }
     assert "outputSchema" in turn_params
 

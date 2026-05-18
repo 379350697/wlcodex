@@ -170,8 +170,10 @@ def build_codex_analysis_packet(
 ) -> CodexAnalysisPacket:
     bgt = budget or ContextBudget()
     analysis_only_constraints = [
-        "Codex 本轮只做需求分析和实现设计，不要编辑文件。",
-        "不要运行测试、格式化、构建、apply_patch 或任何实现命令。",
+        "Codex 本轮是总工程师分析/方案/交接，不要直接完成 Claude 的实现补丁。",
+        "可以调用 skill、GitNexus、只读上下文检索和必要的方案验证工具。",
+        "可以生成或写入 docs/ 或 .wlcodex/ 下的设计、评审、部署、验收类文档。",
+        "不要修改业务代码、测试代码、依赖锁或配置，不要进入改代码/跑实现测试闭环。",
         "把实现交给 Claude，输出交接包：目标、文件、步骤、验收标准和禁止事项。",
     ]
     return CodexAnalysisPacket(
@@ -183,9 +185,9 @@ def build_codex_analysis_packet(
         recent_user_constraints=analysis_only_constraints + (constraints or []),
         token_budget=bgt.codex_analysis_tokens,
         requested_output=(
-            "Analysis-only Claude handoff packet: root cause, files_to_touch, "
+            "Chief-engineer Claude handoff packet: root cause, files_to_touch, "
             "implementation_steps, acceptance_criteria, verification_plan, "
-            "prohibited_changes. Do not implement."
+            "prohibited_changes. Do not implement code changes yourself."
         ),
     )
 
