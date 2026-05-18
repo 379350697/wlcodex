@@ -28,7 +28,7 @@ class ClaudeConfig:
     startup_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 600.0
     permission_mode: str = "acceptEdits"
-    model: str = "deepseek4pro"
+    model: str = "deepseek-v4-pro"
     effort: str = "max"
 
 
@@ -191,7 +191,7 @@ class ClaudeBackend:
             normalize_claude_permission_mode(self.permission_mode),
         ]
         if self._config.model:
-            args.extend(["--model", self._config.model])
+            args.extend(["--model", normalize_claude_model_name(self._config.model)])
         if self._config.effort:
             args.extend(["--effort", self._config.effort])
         return args
@@ -212,6 +212,19 @@ class _ClaudeHealth:
 def _is_on_path(name: str) -> bool:
     import shutil
     return shutil.which(name) is not None
+
+
+def normalize_claude_model_name(model: str) -> str:
+    normalized = model.strip()
+    aliases = {
+        "deepseek4pro": "deepseek-v4-pro",
+        "deepseek-v4pro": "deepseek-v4-pro",
+        "deepseek4-pro": "deepseek-v4-pro",
+        "deepseek4flash": "deepseek-v4-flash",
+        "deepseek-v4flash": "deepseek-v4-flash",
+        "deepseek4-flash": "deepseek-v4-flash",
+    }
+    return aliases.get(normalized.lower(), normalized)
 
 
 def _looks_like_permission_request(text: str) -> bool:

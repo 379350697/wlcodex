@@ -57,7 +57,7 @@ def test_claude_config_defaults() -> None:
     assert config.startup_timeout_seconds == 15.0
     assert config.request_timeout_seconds == 600.0
     assert config.permission_mode == "acceptEdits"
-    assert config.model == "deepseek4pro"
+    assert config.model == "deepseek-v4-pro"
     assert config.effort == "max"
 
 
@@ -100,13 +100,13 @@ async def test_claude_send_passes_current_permission_mode(tmp_path: Path) -> Non
     assert "--permission-mode" in result.text
     assert "acceptEdits" in result.text
     assert "--model" in result.text
-    assert "deepseek4pro" in result.text
+    assert "deepseek-v4-pro" in result.text
     assert "--effort" in result.text
     assert "max" in result.text
 
 
 @pytest.mark.asyncio
-async def test_claude_send_passes_configured_model_and_effort(tmp_path: Path) -> None:
+async def test_claude_send_normalizes_deepseek4pro_alias_for_cli(tmp_path: Path) -> None:
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
     fake_claude.chmod(0o755)
@@ -127,7 +127,8 @@ async def test_claude_send_passes_configured_model_and_effort(tmp_path: Path) ->
 
     assert result.exit_code == 0
     assert "--model" in result.text
-    assert "deepseek4pro" in result.text
+    assert "deepseek-v4-pro" in result.text
+    assert "deepseek4pro" not in result.text
     assert "--effort" in result.text
     assert "max" in result.text
 

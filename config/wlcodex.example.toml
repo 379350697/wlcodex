@@ -75,7 +75,7 @@ binary = "claude"
 startup_timeout_seconds = 15.0
 request_timeout_seconds = 600.0
 # Keep Claude implementation runs on the strongest configured backend profile.
-model = "deepseek4pro"
+model = "deepseek-v4-pro"
 effort = "max"
 # User-facing switch: /claude_mode 允许编辑 / 自动模式 / 只规划 / 默认确认 / 不询问 / 跳过权限检查
 permission_mode = "acceptEdits"
