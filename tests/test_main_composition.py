@@ -126,7 +126,6 @@ def test_composition_builds_telegram_app(tmp_path: Path) -> None:
     assert "task" in registered
     assert "start" in registered
     assert "claude_mode" in registered
-    assert "recent" in registered
 
 
 def test_telegram_app_processes_callbacks_while_long_runs_are_active(tmp_path: Path) -> None:

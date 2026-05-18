@@ -1070,44 +1070,6 @@ class Ledger:
         ).fetchall()
         return [_conversation(row) for row in rows]
 
-    def list_recent_conversation_summaries(
-        self, chat_id: int, limit: int = 5
-    ) -> list[tuple[ConversationSession, AgentRun | None, OrchestrationRun | None]]:
-        """Return recent non-archived conversations with their latest agent run
-        and latest orchestration run attached.  Ordered by updated_at DESC."""
-        convos = self.list_conversations_by_chat(chat_id, limit=limit)
-        if not convos:
-            return []
-
-        convo_ids = [c.id for c in convos]
-        ph = ",".join("?" * len(convo_ids))
-
-        agent_rows = self._conn.execute(
-            f"""SELECT * FROM agent_runs WHERE id IN (
-                SELECT MAX(id) FROM agent_runs
-                WHERE conversation_id IN ({ph})
-                GROUP BY conversation_id
-            )""",
-            convo_ids,
-        ).fetchall()
-        agent_map: dict[int, AgentRun] = {
-            int(row["conversation_id"]): _agent_run(row) for row in agent_rows
-        }
-
-        orch_rows = self._conn.execute(
-            f"""SELECT * FROM orchestration_runs WHERE id IN (
-                SELECT MAX(id) FROM orchestration_runs
-                WHERE conversation_id IN ({ph})
-                GROUP BY conversation_id
-            )""",
-            convo_ids,
-        ).fetchall()
-        orch_map: dict[int, OrchestrationRun] = {
-            int(row["conversation_id"]): _orchestration_run(row) for row in orch_rows
-        }
-
-        return [(c, agent_map.get(c.id), orch_map.get(c.id)) for c in convos]
-
     def set_conversation_active_task(
         self, conversation_id: int, task_id: int
     ) -> None:
