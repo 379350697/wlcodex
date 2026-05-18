@@ -181,6 +181,7 @@ class CommandController:
         default_mode: str = "chief_engineer",
         default_workspace: str = "wlcodex",
         interaction_renderer: object | None = None,
+        orchestration_runner: object | None = None,
     ) -> None:
         self._service = task_service
         self._backend = backend
@@ -191,10 +192,15 @@ class CommandController:
         self._default_mode = default_mode
         self._default_workspace = default_workspace
         self._interaction_renderer = interaction_renderer
+        self._orchestration_runner = orchestration_runner
 
     def set_interaction_renderer(self, renderer: object) -> None:
         """Set the interaction renderer after construction (created after handlers)."""
         self._interaction_renderer = renderer
+
+    def set_orchestration_runner(self, runner: object | None) -> None:
+        """Set the background orchestration runner after runtime wiring."""
+        self._orchestration_runner = runner
 
     async def handle(
         self, text: str, telegram_context: dict[str, Any] | None = None
@@ -1062,6 +1068,38 @@ class CommandController:
         self._ledger.update_agent_run_status(codex_analysis_run.id, "running")
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+
+        if (
+            self._interaction_renderer is not None
+            and self._orchestration_runner is not None
+        ):
+            from wlcodex.interaction.events import InteractionEvent
+
+            chat_id = ctx.get("chat_id", 0) if ctx else 0
+            task = self._service.reserve_task(
+                active.workspace_alias,
+                command.prompt,
+                telegram_chat_id=chat_id,
+            )
+            self._ledger.set_conversation_active_task(active.id, task.id)
+            await self._interaction_renderer.handle(
+                InteractionEvent(
+                    event_type="run_started",
+                    chat_id=chat_id,
+                    task_id=task.id,
+                    conversation_id=active.id,
+                )
+            )
+            self._orchestration_runner.start_chief_engineer(
+                prompt=command.prompt,
+                conversation=active,
+                task_id=task.id,
+                orchestration_run_id=orch_run.id,
+                codex_analysis_run_id=codex_analysis_run.id,
+                chat_id=chat_id,
+                workspace_path=workspace_path,
+            )
+            return ControllerResponse("", already_rendered=True)
 
         # Streaming path: forward live progress to interaction renderer
         if self._interaction_renderer is not None:

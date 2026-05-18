@@ -25,7 +25,14 @@ diff_max_chars = 3500
 
 [backend]
 startup_timeout_seconds = 15
+# JSON-RPC request timeout for individual app-server calls.
 request_timeout_seconds = 60
+# Codex analysis/verification turn liveness.  Idle timeout is sliding and
+# refreshes on matching stream/status/tool/approval events; hard timeout is
+# the total cap for a planning or verification turn.
+codex_prompt_idle_timeout_seconds = 300
+codex_analysis_hard_timeout_seconds = 1200
+codex_verification_hard_timeout_seconds = 1200
 event_log_max_chars = 20000
 
 [approval]

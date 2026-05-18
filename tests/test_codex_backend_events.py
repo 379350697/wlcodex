@@ -362,6 +362,148 @@ async def test_app_server_send_codex_prompt_interrupts_and_fails_on_timeout() ->
 
 
 @pytest.mark.asyncio
+async def test_app_server_send_codex_analysis_prompt_refreshes_idle_timeout_on_activity() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.02,
+        codex_prompt_idle_timeout_seconds=0.03,
+        codex_analysis_hard_timeout_seconds=0.2,
+    )
+
+    async def create_prompt_thread(
+        _workspace_path: str, _interaction_mode: str
+    ) -> str:
+        return "target-thread"
+
+    async def start_prompt_turn(
+        _thread_id: str, _prompt: str, _interaction_mode: str
+    ) -> str:
+        async def emit_later() -> None:
+            await asyncio.sleep(0.02)
+            backend._emit(BackendEvent("agent_message_delta", {
+                "threadId": "target-thread",
+                "turnId": "target-turn",
+                "delta": "still ",
+            }))
+            await asyncio.sleep(0.02)
+            backend._emit(BackendEvent("agent_message_delta", {
+                "threadId": "target-thread",
+                "turnId": "target-turn",
+                "delta": "working",
+            }))
+            backend._emit(BackendEvent("turn_completed", {
+                "threadId": "target-thread",
+                "turnId": "target-turn",
+            }))
+
+        asyncio.create_task(emit_later())
+        return "target-turn"
+
+    backend._create_prompt_thread = create_prompt_thread
+    backend._start_prompt_turn = start_prompt_turn
+
+    result = await backend.send_codex_prompt(
+        "/tmp/demo",
+        "prompt",
+        interaction_mode="analysis",
+    )
+
+    assert result == "still working"
+    assert backend._event_subscribers == []
+
+
+@pytest.mark.asyncio
+async def test_app_server_send_codex_analysis_prompt_interrupts_on_idle_timeout() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.02,
+        codex_prompt_idle_timeout_seconds=0.02,
+        codex_analysis_hard_timeout_seconds=0.2,
+    )
+    interrupts: list[tuple[str, str]] = []
+
+    async def create_prompt_thread(
+        _workspace_path: str, _interaction_mode: str
+    ) -> str:
+        return "target-thread"
+
+    async def start_prompt_turn(
+        _thread_id: str, _prompt: str, _interaction_mode: str
+    ) -> str:
+        backend._emit(BackendEvent("agent_message_delta", {
+            "threadId": "target-thread",
+            "turnId": "target-turn",
+            "delta": "partial analysis",
+        }))
+        return "target-turn"
+
+    async def interrupt_turn(thread_id: str, turn_id: str) -> None:
+        interrupts.append((thread_id, turn_id))
+
+    backend._create_prompt_thread = create_prompt_thread
+    backend._start_prompt_turn = start_prompt_turn
+    backend.interrupt_turn = interrupt_turn
+
+    with pytest.raises(TimeoutError, match="idle"):
+        await backend.send_codex_prompt(
+            "/tmp/demo",
+            "prompt",
+            interaction_mode="analysis",
+        )
+
+    assert interrupts == [("target-thread", "target-turn")]
+    assert backend._event_subscribers == []
+
+
+@pytest.mark.asyncio
+async def test_app_server_send_codex_analysis_prompt_interrupts_on_hard_timeout() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.02,
+        codex_prompt_idle_timeout_seconds=0.05,
+        codex_analysis_hard_timeout_seconds=0.07,
+    )
+    interrupts: list[tuple[str, str]] = []
+
+    async def create_prompt_thread(
+        _workspace_path: str, _interaction_mode: str
+    ) -> str:
+        return "target-thread"
+
+    async def start_prompt_turn(
+        _thread_id: str, _prompt: str, _interaction_mode: str
+    ) -> str:
+        async def emit_activity() -> None:
+            for _ in range(10):
+                await asyncio.sleep(0.015)
+                backend._emit(BackendEvent("agent_message_delta", {
+                    "threadId": "target-thread",
+                    "turnId": "target-turn",
+                    "delta": ".",
+                }))
+
+        asyncio.create_task(emit_activity())
+        return "target-turn"
+
+    async def interrupt_turn(thread_id: str, turn_id: str) -> None:
+        interrupts.append((thread_id, turn_id))
+
+    backend._create_prompt_thread = create_prompt_thread
+    backend._start_prompt_turn = start_prompt_turn
+    backend.interrupt_turn = interrupt_turn
+
+    with pytest.raises(TimeoutError, match="hard"):
+        await backend.send_codex_prompt(
+            "/tmp/demo",
+            "prompt",
+            interaction_mode="analysis",
+        )
+
+    assert interrupts == [("target-thread", "target-turn")]
+    assert backend._event_subscribers == []
+
+
+@pytest.mark.asyncio
 async def test_app_server_send_codex_prompt_raises_on_failed_turn_status() -> None:
     backend = AppServerCodexBackend(
         endpoint="ws://127.0.0.1:17431",

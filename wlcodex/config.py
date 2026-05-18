@@ -46,6 +46,9 @@ class DisplayConfig:
 class BackendConfig:
     startup_timeout_seconds: float
     request_timeout_seconds: float
+    codex_prompt_idle_timeout_seconds: float
+    codex_analysis_hard_timeout_seconds: float
+    codex_verification_hard_timeout_seconds: float
     event_log_max_chars: int
 
 
@@ -215,6 +218,15 @@ def load_config(path: Path) -> AppConfig:
             ),
             request_timeout_seconds=float(
                 backend_raw.get("request_timeout_seconds", 60)
+            ),
+            codex_prompt_idle_timeout_seconds=float(
+                backend_raw.get("codex_prompt_idle_timeout_seconds", 300)
+            ),
+            codex_analysis_hard_timeout_seconds=float(
+                backend_raw.get("codex_analysis_hard_timeout_seconds", 1200)
+            ),
+            codex_verification_hard_timeout_seconds=float(
+                backend_raw.get("codex_verification_hard_timeout_seconds", 1200)
             ),
             event_log_max_chars=int(
                 backend_raw.get("event_log_max_chars", 20000)

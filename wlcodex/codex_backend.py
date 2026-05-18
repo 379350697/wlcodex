@@ -366,11 +366,19 @@ class AppServerCodexBackend:
         approval_policy: str = "on-request",
         sandbox: str = "workspace-write",
         request_timeout_seconds: float = 60.0,
+        codex_prompt_idle_timeout_seconds: float = 300.0,
+        codex_analysis_hard_timeout_seconds: float = 1200.0,
+        codex_verification_hard_timeout_seconds: float = 1200.0,
     ) -> None:
         self.endpoint = endpoint
         self.approval_policy = approval_policy
         self.sandbox = sandbox
         self._request_timeout_seconds = request_timeout_seconds
+        self._codex_prompt_idle_timeout_seconds = codex_prompt_idle_timeout_seconds
+        self._codex_analysis_hard_timeout_seconds = codex_analysis_hard_timeout_seconds
+        self._codex_verification_hard_timeout_seconds = (
+            codex_verification_hard_timeout_seconds
+        )
         self._client: JsonRpcClient | None = None
         # Durable queue for EventBridge plus ephemeral per-turn subscribers.
         # Prompt aggregation must not consume the EventBridge stream.
@@ -666,6 +674,41 @@ class AppServerCodexBackend:
             "turnId": turn_id,
         })
 
+    def _hard_timeout_seconds(self, interaction_mode: str) -> float:
+        if interaction_mode == "analysis":
+            return self._codex_analysis_hard_timeout_seconds
+        if interaction_mode == "verification":
+            return self._codex_verification_hard_timeout_seconds
+        return self._request_timeout_seconds
+
+    def _idle_timeout_seconds(self, interaction_mode: str) -> float | None:
+        if interaction_mode in ("analysis", "verification"):
+            return self._codex_prompt_idle_timeout_seconds
+        return None
+
+    def _timeout_message(
+        self,
+        turn_id: str,
+        *,
+        reason: str,
+        hard_timeout_seconds: float,
+        idle_timeout_seconds: float | None,
+    ) -> str:
+        if reason == "idle" and idle_timeout_seconds is not None:
+            return (
+                f"Codex turn {turn_id} was idle for "
+                f"{idle_timeout_seconds:g} seconds"
+            )
+        if reason == "hard" and idle_timeout_seconds is not None:
+            return (
+                f"Codex turn {turn_id} hit hard timeout after "
+                f"{hard_timeout_seconds:g} seconds"
+            )
+        return (
+            f"Codex turn {turn_id} did not complete within "
+            f"{hard_timeout_seconds:g} seconds"
+        )
+
     async def send_codex_prompt(
         self,
         workspace_path: str,
@@ -700,8 +743,17 @@ class AppServerCodexBackend:
             raise
 
         deltas: list[str] = []
-        deadline = asyncio.get_event_loop().time() + self._request_timeout_seconds
+        loop = asyncio.get_running_loop()
+        hard_timeout_seconds = self._hard_timeout_seconds(interaction_mode)
+        idle_timeout_seconds = self._idle_timeout_seconds(interaction_mode)
+        hard_deadline = loop.time() + hard_timeout_seconds
+        idle_deadline = (
+            loop.time() + idle_timeout_seconds
+            if idle_timeout_seconds is not None
+            else None
+        )
         turn_ended = False
+        timeout_reason = "request"
 
         def _event_turn_id(event: BackendEvent) -> str:
             turn = event.payload.get("turn")
@@ -735,15 +787,39 @@ class AppServerCodexBackend:
         turn_error: str | None = None
         try:
             while True:
-                remaining = deadline - asyncio.get_event_loop().time()
+                now = loop.time()
+                if now >= hard_deadline:
+                    timeout_reason = "hard"
+                    break
+                next_deadline = hard_deadline
+                if idle_deadline is not None:
+                    next_deadline = min(next_deadline, idle_deadline)
+                remaining = next_deadline - now
                 if remaining <= 0:
+                    timeout_reason = (
+                        "idle"
+                        if idle_deadline is not None
+                        and next_deadline == idle_deadline
+                        else "hard"
+                    )
                     break
                 try:
                     event = await asyncio.wait_for(prompt_events.get(), timeout=remaining)
                 except TimeoutError:
+                    now = loop.time()
+                    timeout_reason = (
+                        "hard"
+                        if now >= hard_deadline
+                        else "idle"
+                        if idle_deadline is not None and now >= idle_deadline
+                        else "request"
+                    )
                     break
                 if not _event_matches_turn(event):
                     continue
+
+                if idle_timeout_seconds is not None:
+                    idle_deadline = loop.time() + idle_timeout_seconds
 
                 if event.event_type == "agent_message_delta":
                     delta = event.payload.get("delta", "")
@@ -777,8 +853,12 @@ class AppServerCodexBackend:
                     exc,
                 )
             raise TimeoutError(
-                f"Codex turn {turn_id} did not complete within "
-                f"{self._request_timeout_seconds:g} seconds"
+                self._timeout_message(
+                    turn_id,
+                    reason=timeout_reason,
+                    hard_timeout_seconds=hard_timeout_seconds,
+                    idle_timeout_seconds=idle_timeout_seconds,
+                )
             )
 
         if not deltas:

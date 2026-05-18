@@ -22,6 +22,7 @@ from wlcodex.db import Ledger
 from wlcodex.event_bridge import EventBridge
 from wlcodex.inspection import TaskInspector
 from wlcodex.menu import build_bot_commands
+from wlcodex.orchestration_runner import OrchestrationRunner
 from wlcodex.recovery_notifications import notify_recovery_paused_tasks
 from wlcodex.task_service import TaskService
 from wlcodex.telegram_app import build_application
@@ -133,6 +134,15 @@ def main() -> None:
             approval_policy=config.codex.approval_policy,
             sandbox=config.codex.sandbox,
             request_timeout_seconds=config.backend.request_timeout_seconds,
+            codex_prompt_idle_timeout_seconds=(
+                config.backend.codex_prompt_idle_timeout_seconds
+            ),
+            codex_analysis_hard_timeout_seconds=(
+                config.backend.codex_analysis_hard_timeout_seconds
+            ),
+            codex_verification_hard_timeout_seconds=(
+                config.backend.codex_verification_hard_timeout_seconds
+            ),
         )
         backend.set_process_manager(process)
         logger.info(
@@ -257,6 +267,16 @@ def main() -> None:
     ):
         interaction_renderer = handlers.create_interaction_renderer()
     controller.set_interaction_renderer(interaction_renderer)
+    if interaction_renderer is not None and claude_backend is not None:
+        controller.set_orchestration_runner(
+            OrchestrationRunner(
+                task_service=task_service,
+                codex_backend=backend,
+                claude_backend=claude_backend,
+                ledger=ledger,
+                interaction_renderer=interaction_renderer,
+            )
+        )
     event_bridge = EventBridge(
         task_service=task_service,
         backend=backend,

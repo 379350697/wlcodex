@@ -44,6 +44,10 @@ path = "/tmp/wlcodex"
     assert config.orchestration.max_verify_rounds == 3
     assert config.streaming.edit_min_interval_seconds == 1.0
     assert config.menu.register_bot_commands is True
+    assert config.backend.request_timeout_seconds == 60
+    assert config.backend.codex_prompt_idle_timeout_seconds == 300
+    assert config.backend.codex_analysis_hard_timeout_seconds == 1200
+    assert config.backend.codex_verification_hard_timeout_seconds == 1200
 
 
 def test_load_config_reads_workspace_and_token_env(tmp_path: Path) -> None:
@@ -168,6 +172,57 @@ allow_write = true
     assert config.task.max_waiting_approval_seconds == 3600
     assert config.task.watchdog_interval_seconds == 60
     assert config.task.backend_dead_grace_seconds == 120
+
+
+def test_backend_config_reads_codex_liveness_overrides(tmp_path: Path) -> None:
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "TOKEN"
+allowed_user_ids = [123]
+private_chat_only = true
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[backend]
+startup_timeout_seconds = 11
+request_timeout_seconds = 7
+event_log_max_chars = 12345
+codex_prompt_idle_timeout_seconds = 45
+codex_analysis_hard_timeout_seconds = 600
+codex_verification_hard_timeout_seconds = 900
+
+[[workspaces]]
+alias = "demo"
+path = "/tmp/demo"
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.backend.startup_timeout_seconds == 11
+    assert config.backend.request_timeout_seconds == 7
+    assert config.backend.event_log_max_chars == 12345
+    assert config.backend.codex_prompt_idle_timeout_seconds == 45
+    assert config.backend.codex_analysis_hard_timeout_seconds == 600
+    assert config.backend.codex_verification_hard_timeout_seconds == 900
 
 
 def test_task_config_reads_overrides(tmp_path: Path) -> None:
