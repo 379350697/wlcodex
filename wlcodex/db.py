@@ -22,6 +22,7 @@ from wlcodex.models import (
     TaskEvent,
     TaskStatus,
     TouchedFile,
+    UsageEvent,
 )
 
 
@@ -239,6 +240,46 @@ class Ledger:
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                conversation_id INTEGER,
+                orchestration_run_id INTEGER,
+                agent_run_id INTEGER,
+                task_id INTEGER,
+                agent TEXT NOT NULL DEFAULT '',
+                role TEXT NOT NULL DEFAULT '',
+                phase TEXT NOT NULL DEFAULT '',
+                request_kind TEXT NOT NULL DEFAULT '',
+                request_index INTEGER NOT NULL DEFAULT 0,
+                model TEXT NOT NULL DEFAULT '',
+                external_thread_id TEXT,
+                external_turn_id TEXT,
+                external_session_id TEXT,
+                status TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'estimated',
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                workflow_overhead_input_tokens INTEGER NOT NULL DEFAULT 0,
+                workflow_overhead_output_tokens INTEGER NOT NULL DEFAULT 0,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_usage_events_conversation_id
+                ON usage_events(conversation_id, id);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_orchestration_run_id
+                ON usage_events(orchestration_run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_agent_run_id
+                ON usage_events(agent_run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_task_id
+                ON usage_events(task_id, id);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_agent
+                ON usage_events(agent, created_at);
             """
         )
 
@@ -1253,6 +1294,273 @@ class Ledger:
         return [_orchestration_decision(row) for row in rows]
 
 
+    # --- Usage events ---
+
+    def record_usage_event(
+        self,
+        *,
+        agent: str = "",
+        role: str = "",
+        phase: str = "",
+        request_kind: str = "",
+        request_index: int = 0,
+        model: str = "",
+        source: str = "estimated",
+        input_tokens: int = 0,
+        cached_input_tokens: int = 0,
+        output_tokens: int = 0,
+        reasoning_output_tokens: int = 0,
+        total_tokens: int = 0,
+        workflow_overhead_input_tokens: int = 0,
+        workflow_overhead_output_tokens: int = 0,
+        latency_ms: int = 0,
+        status: str = "",
+        conversation_id: int | None = None,
+        orchestration_run_id: int | None = None,
+        agent_run_id: int | None = None,
+        task_id: int | None = None,
+        external_thread_id: str | None = None,
+        external_turn_id: str | None = None,
+        external_session_id: str | None = None,
+        metadata_json: str = "{}",
+    ) -> UsageEvent:
+        # Use explicit total_tokens when provided (handles reasoning/cached overhead),
+        # otherwise compute from input+output for backwards compat.
+        _total = total_tokens if total_tokens > 0 else (input_tokens + output_tokens)
+        try:
+            json.loads(metadata_json)
+        except (json.JSONDecodeError, TypeError):
+            metadata_json = "{}"
+        cur = self._conn.execute(
+            """
+            INSERT INTO usage_events (
+                created_at, conversation_id, orchestration_run_id, agent_run_id,
+                task_id, agent, role, phase, request_kind, request_index, model,
+                external_thread_id, external_turn_id, external_session_id,
+                status, source, input_tokens, cached_input_tokens, output_tokens,
+                reasoning_output_tokens, total_tokens,
+                workflow_overhead_input_tokens, workflow_overhead_output_tokens,
+                latency_ms, metadata_json
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                _now(), conversation_id, orchestration_run_id, agent_run_id,
+                task_id, agent, role, phase, request_kind, request_index, model,
+                external_thread_id, external_turn_id, external_session_id,
+                status, source, input_tokens, cached_input_tokens, output_tokens,
+                reasoning_output_tokens, _total,
+                workflow_overhead_input_tokens, workflow_overhead_output_tokens,
+                latency_ms, metadata_json,
+            ),
+        )
+        self._conn.commit()
+        return self.get_usage_event(int(cur.lastrowid))
+
+    def get_usage_event(self, event_id: int) -> UsageEvent:
+        row = self._conn.execute(
+            "SELECT * FROM usage_events WHERE id = ?", (event_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown usage event id: {event_id}")
+        return _usage_event(row)
+
+    def list_usage_events(
+        self,
+        *,
+        conversation_id: int | None = None,
+        orchestration_run_id: int | None = None,
+        agent_run_id: int | None = None,
+        task_id: int | None = None,
+        agent: str | None = None,
+        limit: int = 200,
+    ) -> list[UsageEvent]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if conversation_id is not None:
+            clauses.append("conversation_id = ?")
+            params.append(conversation_id)
+        if orchestration_run_id is not None:
+            clauses.append("orchestration_run_id = ?")
+            params.append(orchestration_run_id)
+        if agent_run_id is not None:
+            clauses.append("agent_run_id = ?")
+            params.append(agent_run_id)
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        if agent is not None:
+            clauses.append("agent = ?")
+            params.append(agent)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = self._conn.execute(
+            f"SELECT * FROM usage_events {where} ORDER BY id ASC LIMIT ?",
+            params,
+        ).fetchall()
+        return [_usage_event(row) for row in rows]
+
+    def aggregate_usage(
+        self,
+        *,
+        conversation_id: int | None = None,
+        orchestration_run_id: int | None = None,
+        task_id: int | None = None,
+    ) -> dict:
+        """Return aggregated usage split by agent and by source.
+
+        Returns a dict with keys:
+          codex -> {requests, input_tokens, output_tokens, cached_input_tokens,
+                    reasoning_output_tokens, total_tokens, source_breakdown}
+          claude -> same shape
+          workflow -> same shape
+          totals -> {requests, input_tokens, output_tokens, total_tokens,
+                     workflow_overhead_input_tokens, workflow_overhead_output_tokens}
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if conversation_id is not None:
+            clauses.append("conversation_id = ?")
+            params.append(conversation_id)
+        if orchestration_run_id is not None:
+            clauses.append("orchestration_run_id = ?")
+            params.append(orchestration_run_id)
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        def _agent_agg(agent_filter: str) -> dict:
+            query = f"""
+                SELECT
+                    COUNT(*) as requests,
+                    COALESCE(SUM(input_tokens), 0) as input_tokens,
+                    COALESCE(SUM(output_tokens), 0) as output_tokens,
+                    COALESCE(SUM(cached_input_tokens), 0) as cached_input_tokens,
+                    COALESCE(SUM(reasoning_output_tokens), 0) as reasoning_output_tokens,
+                    COALESCE(SUM(total_tokens), 0) as total_tokens,
+                    COALESCE(SUM(workflow_overhead_input_tokens), 0) as wf_overhead_input,
+                    COALESCE(SUM(workflow_overhead_output_tokens), 0) as wf_overhead_output,
+                    source
+                FROM usage_events
+                {where} AND agent = ?
+                GROUP BY source
+                ORDER BY source
+            """
+            p = list(params) + [agent_filter]
+            rows = self._conn.execute(query, p).fetchall()
+            result: dict = {
+                "requests": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_input_tokens": 0,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 0,
+                "workflow_overhead_input_tokens": 0,
+                "workflow_overhead_output_tokens": 0,
+                "source_breakdown": {},
+            }
+            for row in rows:
+                source = str(row["source"] or "estimated")
+                r = int(row["requests"] or 0)
+                result["requests"] += r
+                result["input_tokens"] += int(row["input_tokens"] or 0)
+                result["output_tokens"] += int(row["output_tokens"] or 0)
+                result["cached_input_tokens"] += int(row["cached_input_tokens"] or 0)
+                result["reasoning_output_tokens"] += int(row["reasoning_output_tokens"] or 0)
+                result["total_tokens"] += int(row["total_tokens"] or 0)
+                result["workflow_overhead_input_tokens"] += int(row["wf_overhead_input"] or 0)
+                result["workflow_overhead_output_tokens"] += int(row["wf_overhead_output"] or 0)
+                result["source_breakdown"][source] = {
+                    "requests": r,
+                    "input_tokens": int(row["input_tokens"] or 0),
+                    "output_tokens": int(row["output_tokens"] or 0),
+                    "total_tokens": int(row["total_tokens"] or 0),
+                }
+            return result
+
+        codex = _agent_agg("codex")
+        claude = _agent_agg("claude")
+        workflow = _agent_agg("workflow")
+
+        total_requests = codex["requests"] + claude["requests"] + workflow["requests"]
+        total_input = codex["input_tokens"] + claude["input_tokens"] + workflow["input_tokens"]
+        total_output = codex["output_tokens"] + claude["output_tokens"] + workflow["output_tokens"]
+        total_tokens = codex["total_tokens"] + claude["total_tokens"] + workflow["total_tokens"]
+        total_wf_input = (
+            codex["workflow_overhead_input_tokens"]
+            + claude["workflow_overhead_input_tokens"]
+            + workflow["workflow_overhead_input_tokens"]
+        )
+        total_wf_output = (
+            codex["workflow_overhead_output_tokens"]
+            + claude["workflow_overhead_output_tokens"]
+            + workflow["workflow_overhead_output_tokens"]
+        )
+
+        return {
+            "codex": codex,
+            "claude": claude,
+            "workflow": workflow,
+            "totals": {
+                "requests": total_requests,
+                "input_tokens": total_input,
+                "output_tokens": total_output,
+                "total_tokens": total_tokens,
+                "workflow_overhead_input_tokens": total_wf_input,
+                "workflow_overhead_output_tokens": total_wf_output,
+            },
+        }
+
+    def render_usage_summary(
+        self,
+        *,
+        conversation_id: int | None = None,
+        orchestration_run_id: int | None = None,
+        task_id: int | None = None,
+    ) -> str:
+        """Render a human-readable usage summary string for status display."""
+        agg = self.aggregate_usage(
+            conversation_id=conversation_id,
+            orchestration_run_id=orchestration_run_id,
+            task_id=task_id,
+        )
+        lines: list[str] = ["Token 用量摘要：", ""]
+
+        for agent_key, label in [("codex", "Codex"), ("claude", "Claude"), ("workflow", "Workflow")]:
+            a = agg[agent_key]
+            if a["requests"] == 0:
+                continue
+            lines.append(f"{label}：{a['requests']} 请求, "
+                         f"输入 {a['input_tokens']:,}, "
+                         f"输出 {a['output_tokens']:,}, "
+                         f"总计 {a['total_tokens']:,}")
+            if a.get("cached_input_tokens"):
+                lines.append(f"  缓存命中：{a['cached_input_tokens']:,}")
+            if a.get("reasoning_output_tokens"):
+                lines.append(f"  推理输出：{a['reasoning_output_tokens']:,}")
+            if a.get("source_breakdown"):
+                sources = ", ".join(
+                    f"{s}: {info['requests']} 请求/{info['total_tokens']:,} tokens"
+                    for s, info in a["source_breakdown"].items()
+                )
+                lines.append(f"  来源：{sources}")
+
+        t = agg["totals"]
+        lines.append("")
+        lines.append(f"总计：{t['requests']} 请求, "
+                     f"输入 {t['input_tokens']:,}, "
+                     f"输出 {t['output_tokens']:,}, "
+                     f"总计 {t['total_tokens']:,}")
+        if t["workflow_overhead_input_tokens"] or t["workflow_overhead_output_tokens"]:
+            lines.append(f"Workflow overhead："
+                         f"输入 {t['workflow_overhead_input_tokens']:,}, "
+                         f"输出 {t['workflow_overhead_output_tokens']:,}")
+
+        return "\n".join(lines)
+
+
 # --- Row mappers ---
 
 def _task(row: sqlite3.Row) -> Task:
@@ -1394,4 +1702,35 @@ def _orchestration_decision(row: sqlite3.Row) -> OrchestrationDecision:
         reason=str(row["reason"] or ""),
         next_agent=str(row["next_agent"] or ""),
         created_at=_dt(str(row["created_at"])),
+    )
+
+
+def _usage_event(row: sqlite3.Row) -> UsageEvent:
+    return UsageEvent(
+        id=int(row["id"]),
+        created_at=_dt(str(row["created_at"])),
+        conversation_id=row["conversation_id"],
+        orchestration_run_id=row["orchestration_run_id"],
+        agent_run_id=row["agent_run_id"],
+        task_id=row["task_id"],
+        agent=str(row["agent"]),
+        role=str(row["role"]),
+        phase=str(row["phase"]),
+        request_kind=str(row["request_kind"]),
+        request_index=int(row["request_index"] or 0),
+        model=str(row["model"]),
+        external_thread_id=row["external_thread_id"],
+        external_turn_id=row["external_turn_id"],
+        external_session_id=row["external_session_id"],
+        status=str(row["status"]),
+        source=str(row["source"] or "estimated"),
+        input_tokens=int(row["input_tokens"] or 0),
+        cached_input_tokens=int(row["cached_input_tokens"] or 0),
+        output_tokens=int(row["output_tokens"] or 0),
+        reasoning_output_tokens=int(row["reasoning_output_tokens"] or 0),
+        total_tokens=int(row["total_tokens"] or 0),
+        workflow_overhead_input_tokens=int(row["workflow_overhead_input_tokens"] or 0),
+        workflow_overhead_output_tokens=int(row["workflow_overhead_output_tokens"] or 0),
+        latency_ms=int(row["latency_ms"] or 0),
+        metadata_json=str(row["metadata_json"] or "{}"),
     )

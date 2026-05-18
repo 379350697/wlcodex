@@ -388,3 +388,134 @@ async def test_claude_streaming_finishes_when_child_keeps_stdout_open(
 
     assert [event.delta for event in events] == ["implemented\n"]
     assert all(event.event_type == "text" for event in events)
+
+
+# --- Claude usage extraction and recording ---
+
+
+def test_extract_claude_usage_from_result_with_usage() -> None:
+    """Extract usage from a Claude stream-json result event."""
+    from wlcodex.claude_backend import extract_claude_usage_from_result
+
+    usage = extract_claude_usage_from_result({
+        "type": "result",
+        "subtype": "success",
+        "usage": {
+            "input_tokens": 2500,
+            "output_tokens": 1800,
+        },
+    })
+
+    assert usage is not None
+    assert usage["source"] == "exact"
+    assert usage["input_tokens"] == 2500
+    assert usage["output_tokens"] == 1800
+    assert usage["total_tokens"] == 4300
+
+
+def test_extract_claude_usage_from_result_with_cached_tokens() -> None:
+    """Extract usage with cache tokens from result."""
+    from wlcodex.claude_backend import extract_claude_usage_from_result
+
+    usage = extract_claude_usage_from_result({
+        "type": "result",
+        "subtype": "success",
+        "usage": {
+            "input_tokens": 1000,
+            "output_tokens": 500,
+            "cache_read_input_tokens": 3000,
+            "cache_creation_input_tokens": 200,
+        },
+    })
+
+    assert usage is not None
+    assert usage["cached_input_tokens"] == 3200  # 3000 + 200
+
+
+def test_extract_claude_usage_from_result_without_usage() -> None:
+    """Returns None when no usage field present."""
+    from wlcodex.claude_backend import extract_claude_usage_from_result
+
+    usage = extract_claude_usage_from_result({
+        "type": "result",
+        "subtype": "success",
+        "result": "all good",
+    })
+
+    assert usage is None
+
+
+def test_extract_claude_usage_from_result_skips_non_numeric_usage() -> None:
+    """Usage with non-dict fields returns None."""
+    from wlcodex.claude_backend import extract_claude_usage_from_result
+
+    usage = extract_claude_usage_from_result({
+        "type": "result",
+        "usage": "some string",
+    })
+
+    assert usage is None
+
+
+def test_record_claude_usage_event_exact(tmp_path: Path) -> None:
+    """Record exact Claude usage from parsed result."""
+    from wlcodex.claude_backend import record_claude_usage_event
+    from wlcodex.db import Ledger
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    record_claude_usage_event(
+        ledger,
+        prompt="Implement feature",
+        output_text="Done!",
+        usage={
+            "source": "exact",
+            "input_tokens": 2500,
+            "output_tokens": 1800,
+            "cached_input_tokens": 400,
+        },
+    )
+
+    events = ledger.list_usage_events(agent="claude")
+    assert len(events) == 1
+    ue = events[0]
+    assert ue.source == "exact"
+    assert ue.input_tokens == 2500
+    assert ue.output_tokens == 1800
+    assert ue.cached_input_tokens == 400
+
+
+def test_record_claude_usage_event_estimated(tmp_path: Path) -> None:
+    """Record estimated Claude usage via approx_tokens fallback."""
+    from wlcodex.claude_backend import record_claude_usage_event
+    from wlcodex.db import Ledger
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    record_claude_usage_event(
+        ledger,
+        prompt="A" * 400,      # approx_tokens: 100
+        output_text="B" * 800,  # approx_tokens: 200
+    )
+
+    events = ledger.list_usage_events(agent="claude")
+    assert len(events) == 1
+    ue = events[0]
+    assert ue.source == "estimated"
+    assert ue.input_tokens == 100   # 400 // 4
+    assert ue.output_tokens == 200  # 800 // 4
+
+
+def test_record_claude_usage_event_never_raises(tmp_path: Path) -> None:
+    """Recording failure must not raise."""
+    from wlcodex.claude_backend import record_claude_usage_event
+
+    # Passing None as ledger is invalid but must not raise
+    record_claude_usage_event(
+        None,
+        prompt="test",
+        output_text="test",
+    )
+    # Must not reach here if it raises

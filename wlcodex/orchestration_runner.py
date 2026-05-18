@@ -7,7 +7,8 @@ import subprocess
 from collections.abc import Callable
 from typing import Any
 
-from wlcodex.context_packets import ContextBudget, trim_to_budget
+from wlcodex.claude_backend import record_claude_usage_event
+from wlcodex.context_packets import ContextBudget, approx_tokens, trim_to_budget
 from wlcodex.interaction.events import InteractionEvent
 from wlcodex.models import ConversationSession, TaskStatus
 from wlcodex.orchestration_progress_text import render_user_progress_text
@@ -120,6 +121,35 @@ class OrchestrationRunner:
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
 
+    def _record_workflow_overhead(
+        self,
+        *,
+        phase: str,
+        overhead_input_tokens: int,
+        conversation_id: int,
+        orchestration_run_id: int,
+        task_id: int,
+        agent_run_id: int | None = None,
+        status: str = "completed",
+    ) -> None:
+        """Record a workflow overhead usage event. Never raises."""
+        try:
+            self._ledger.record_usage_event(
+                agent="workflow",
+                role="overhead",
+                phase=phase,
+                request_kind="overhead",
+                source="estimated",
+                workflow_overhead_input_tokens=overhead_input_tokens,
+                status=status,
+                conversation_id=conversation_id,
+                orchestration_run_id=orchestration_run_id,
+                agent_run_id=agent_run_id,
+                task_id=task_id,
+            )
+        except Exception:
+            pass
+
     async def _run_chief_engineer(
         self,
         *,
@@ -187,6 +217,14 @@ class OrchestrationRunner:
                             completion_summary=codex_analysis_text[:2000],
                         )
                         codex_analysis_status = "done"
+                        self._record_workflow_overhead(
+                            phase="codex_analysis",
+                            overhead_input_tokens=approx_tokens(codex_analysis_text),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            agent_run_id=codex_analysis_run_id,
+                            task_id=task_id,
+                        )
                     elif progress.phase == OrchestrationProgress.IMPL_COMPLETE:
                         claude_implementation_text = progress.full_text or progress.text
                         claude_run = self._ledger.create_agent_run(
@@ -203,6 +241,14 @@ class OrchestrationRunner:
                         self._ledger.set_conversation_active_claude_run(
                             conversation.id, claude_run.id
                         )
+                        self._record_workflow_overhead(
+                            phase="codex_to_claude_handoff",
+                            overhead_input_tokens=approx_tokens(claude_implementation_text),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            agent_run_id=claude_run.id,
+                            task_id=task_id,
+                        )
                     elif progress.phase == OrchestrationProgress.VERIFY_STARTED:
                         verify_round = progress.round_num or verify_round
                     elif progress.phase == OrchestrationProgress.VERIFY_COMPLETE:
@@ -218,6 +264,14 @@ class OrchestrationRunner:
                             verify_run.id,
                             "done",
                             completion_summary=verification_text[:2000],
+                        )
+                        self._record_workflow_overhead(
+                            phase="codex_verification",
+                            overhead_input_tokens=approx_tokens(verification_text),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            agent_run_id=verify_run.id,
+                            task_id=task_id,
                         )
                 elif progress.phase == OrchestrationProgress.FAILED:
                     terminal_sent = True

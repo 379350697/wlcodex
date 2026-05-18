@@ -331,3 +331,113 @@ async def test_orchestration_runner_humanizes_telegram_progress_without_raw_mode
     assert updated_run.last_codex_analysis == "RAW_CODEX_ANALYSIS_FULL"
     assert updated_run.last_claude_summary == "RAW_CLAUDE_IMPL_FULL"
     assert "RAW_VERIFY_RESULT_FULL" in updated_run.last_verification_result
+
+
+@pytest.mark.asyncio
+async def test_orchestration_runner_records_workflow_overhead_usage_events(
+    tmp_path: Path,
+) -> None:
+    """Chief-engineer run records workflow overhead usage events at phase transitions."""
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="Usage test",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "usage test", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "usage test")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: FakeStreamingOrchestrator(),
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="usage test",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+    )
+    await background_task
+
+    # Check workflow overhead events were recorded
+    workflow_events = ledger.list_usage_events(
+        orchestration_run_id=orch_run.id, agent="workflow"
+    )
+    phases = {e.phase for e in workflow_events}
+    assert "codex_analysis" in phases
+    assert "codex_to_claude_handoff" in phases
+    assert "codex_verification" in phases
+    assert len(workflow_events) == 3
+
+    for event in workflow_events:
+        assert event.agent == "workflow"
+        assert event.source == "estimated"
+        assert event.workflow_overhead_input_tokens > 0
+
+    # Orchestration-level aggregation should show workflow overhead
+    agg = ledger.aggregate_usage(orchestration_run_id=orch_run.id)
+    assert agg["workflow"]["requests"] == 3
+    assert agg["totals"]["workflow_overhead_input_tokens"] > 0
+
+
+@pytest.mark.asyncio
+async def test_orchestration_runner_legacy_compat_token_fields_preserved(
+    tmp_path: Path,
+) -> None:
+    """Existing tasks.token_input/token_output and agent_runs fields still work."""
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    conversation = ledger.create_conversation(
+        chat_id=100, user_id=200, title="Compat", mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "compat test", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "compat test")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: FakeStreamingOrchestrator(),
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="compat test",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+    )
+    await background_task
+
+    # Agent runs still exist with their token fields
+    runs = ledger.list_agent_runs(conversation.id)
+    assert len(runs) == 3  # codex analysis, claude impl, codex verify
+    for run in runs:
+        assert run.status == AgentRunStatus.DONE
+
+    # Orchestration run is properly recorded
+    orch = ledger.get_orchestration_run(orch_run.id)
+    assert orch.status == OrchestrationStatus.PASSED
+
+    # Conversation summary is updated
+    assert "验收通过" in ledger.get_conversation(conversation.id).conversation_summary

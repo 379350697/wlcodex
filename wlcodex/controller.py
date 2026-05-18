@@ -871,6 +871,7 @@ class CommandController:
 
             accumulated = ""
             had_error = False
+            claude_usage: dict | None = None
             try:
                 async for stream_event in self._claude.send_streaming(
                     AgentRequest(prompt=packet.render(), workspace_path=workspace_path)
@@ -879,6 +880,9 @@ class CommandController:
                         had_error = True
                         accumulated += stream_event.delta
                         break
+                    if stream_event.event_type == "usage" and stream_event.usage:
+                        claude_usage = stream_event.usage
+                        continue
                     accumulated += stream_event.delta
                     await self._interaction_renderer.handle(
                         InteractionEvent(
@@ -905,6 +909,17 @@ class CommandController:
                     completion_summary=str(exc)[:2000],
                 )
                 self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
+                from wlcodex.claude_backend import record_claude_usage_event
+                record_claude_usage_event(
+                    self._ledger,
+                    prompt=packet.render(),
+                    output_text=str(exc),
+                    conversation_id=active.id,
+                    agent_run_id=agent_run.id,
+                    task_id=task.id,
+                    usage=claude_usage,
+                    status="failed",
+                )
                 await self._interaction_renderer.handle(
                     InteractionEvent(
                         event_type="run_failed",
@@ -931,6 +946,17 @@ class CommandController:
                     completion_summary=accumulated[:2000],
                 )
                 self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
+                from wlcodex.claude_backend import record_claude_usage_event
+                record_claude_usage_event(
+                    self._ledger,
+                    prompt=packet.render(),
+                    output_text=accumulated,
+                    conversation_id=active.id,
+                    agent_run_id=agent_run.id,
+                    task_id=task.id,
+                    usage=claude_usage,
+                    status="failed",
+                )
                 await self._interaction_renderer.handle(
                     InteractionEvent(
                         event_type="run_failed",
@@ -956,6 +982,17 @@ class CommandController:
                 completion_summary=accumulated[:2000],
             )
             self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
+            from wlcodex.claude_backend import record_claude_usage_event
+            record_claude_usage_event(
+                self._ledger,
+                prompt=packet.render(),
+                output_text=accumulated,
+                conversation_id=active.id,
+                agent_run_id=agent_run.id,
+                task_id=task.id,
+                usage=claude_usage,
+                status="done",
+            )
 
             await self._interaction_renderer.handle(
                 InteractionEvent(
@@ -994,6 +1031,16 @@ class CommandController:
             completion_summary=result.text[:2000],
         )
         self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
+        from wlcodex.claude_backend import record_claude_usage_event
+        record_claude_usage_event(
+            self._ledger,
+            prompt=packet.render(),
+            output_text=result.text,
+            conversation_id=active.id,
+            agent_run_id=agent_run.id,
+            task_id=task.id,
+            status="done",
+        )
 
         buttons: list[list[dict[str, str]]] = [[
             {"text": "查看 diff", "callback_data": encode_conversation_callback(active.id, DIFF)},

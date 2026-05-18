@@ -32,6 +32,7 @@ class AgentResult:
 class AgentStreamEvent:
     delta: str = ""
     event_type: str = "text"
+    usage: dict | None = None  # optional usage info from result event
 
 
 class AgentBackend(Protocol):

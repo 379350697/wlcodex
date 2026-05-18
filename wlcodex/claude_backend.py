@@ -370,9 +370,17 @@ def _claude_stream_events_from_line(
                 )
             ], assistant_text
         result_text = str(payload.get("result") or "")
+        events: list[AgentStreamEvent] = []
         if result_text and not has_emitted_text:
-            return [AgentStreamEvent(delta=result_text, event_type="text")], assistant_text
-        return [], assistant_text
+            events.append(AgentStreamEvent(delta=result_text, event_type="text"))
+        # Extract usage info if present
+        usage = extract_claude_usage_from_result(payload)
+        if usage:
+            model = extract_claude_model_from_result(payload)
+            if model:
+                usage["model"] = model
+            events.append(AgentStreamEvent(delta="", event_type="usage", usage=usage))
+        return events, assistant_text
 
     if event_type in {"error", "api_error"}:
         text = str(payload.get("message") or payload.get("error") or payload)
@@ -512,3 +520,108 @@ def _close_subprocess_transport(proc: asyncio.subprocess.Process) -> None:
         transport.close()
     except Exception:
         logger.debug("Failed to close subprocess transport", exc_info=True)
+
+
+def record_claude_usage_event(
+    ledger: object,
+    *,
+    prompt: str,
+    output_text: str,
+    conversation_id: int | None = None,
+    orchestration_run_id: int | None = None,
+    agent_run_id: int | None = None,
+    task_id: int | None = None,
+    role: str = "implementation",
+    phase: str = "",
+    model: str = "",
+    usage: dict | None = None,
+    latency_ms: int = 0,
+    status: str = "completed",
+) -> None:
+    """Record a Claude usage event. Uses exact data from usage dict if available,
+    otherwise falls back to approx_tokens() estimation.
+
+    Does NOT raise — recording failure must not affect Claude running.
+    """
+    try:
+        from wlcodex.context_packets import approx_tokens
+
+        if usage and usage.get("source") == "exact":
+            source = "exact"
+            input_tokens = int(usage.get("input_tokens", 0))
+            output_tokens = int(usage.get("output_tokens", 0))
+            cached_input_tokens = int(usage.get("cached_input_tokens", 0))
+            total_tokens = int(usage.get("total_tokens", input_tokens + output_tokens))
+            reasoning_output_tokens = 0
+            if not model:
+                model = str(usage.get("model", ""))
+        else:
+            source = "estimated"
+            input_tokens = approx_tokens(prompt)
+            output_tokens = approx_tokens(output_text)
+            cached_input_tokens = 0
+            reasoning_output_tokens = 0
+            total_tokens = input_tokens + output_tokens
+
+        if input_tokens == 0 and output_tokens == 0:
+            return
+
+        metadata: dict = {}
+        if usage and usage.get("source") != "exact":
+            metadata["raw_usage"] = usage
+
+        ledger.record_usage_event(
+            agent="claude",
+            role=role,
+            phase=phase,
+            request_kind="send",
+            request_index=1,
+            model=model,
+            source=source,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            output_tokens=output_tokens,
+            reasoning_output_tokens=reasoning_output_tokens,
+            latency_ms=latency_ms,
+            status=status,
+            conversation_id=conversation_id,
+            orchestration_run_id=orchestration_run_id,
+            agent_run_id=agent_run_id,
+            task_id=task_id,
+        )
+    except Exception:
+        pass  # Recording failure must not affect Claude running
+
+
+def extract_claude_usage_from_result(payload: dict) -> dict | None:
+    """Extract Claude usage info from a stream-json result event.
+
+    Returns a dict with input_tokens, output_tokens, cached_input_tokens,
+    total_tokens if usage is present, or None.
+    """
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    result: dict = {}
+    for src_key, dst_key in [
+        ("input_tokens", "input_tokens"),
+        ("output_tokens", "output_tokens"),
+        ("cache_read_input_tokens", "cached_input_tokens"),
+        ("cache_creation_input_tokens", "cached_input_tokens"),
+    ]:
+        val = usage.get(src_key)
+        if isinstance(val, (int, float)):
+            result[dst_key] = result.get(dst_key, 0) + int(val)
+    if "input_tokens" in result and "output_tokens" in result:
+        result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
+        result["source"] = "exact"
+        return result
+    return None
+
+
+def extract_claude_model_from_result(payload: dict) -> str:
+    """Extract model name from a Claude stream-json result event."""
+    model = payload.get("model")
+    if isinstance(model, str):
+        return model
+    return ""

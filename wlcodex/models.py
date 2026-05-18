@@ -219,3 +219,34 @@ class OrchestrationDecision:
     reason: str
     next_agent: str
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class UsageEvent:
+    """Append-only usage ledger entry for a single model request or workflow event."""
+    id: int
+    created_at: datetime
+    conversation_id: int | None
+    orchestration_run_id: int | None
+    agent_run_id: int | None
+    task_id: int | None
+    agent: str          # codex / claude / workflow
+    role: str           # direct / analysis / implementation / verification
+    phase: str
+    request_kind: str
+    request_index: int
+    model: str
+    external_thread_id: str | None
+    external_turn_id: str | None
+    external_session_id: str | None
+    status: str
+    source: str         # exact / estimated / derived
+    input_tokens: int
+    cached_input_tokens: int
+    output_tokens: int
+    reasoning_output_tokens: int
+    total_tokens: int
+    workflow_overhead_input_tokens: int
+    workflow_overhead_output_tokens: int
+    latency_ms: int
+    metadata_json: str

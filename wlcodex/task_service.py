@@ -781,9 +781,23 @@ class TaskService:
             task = self._find_by_thread(thread_id)
             if task is None:
                 return
-            ti = int(payload.get("inputTokens", 0))
-            to = int(payload.get("outputTokens", 0))
-            self._ledger.set_token_usage(task.id, ti, to)
+            # Legacy backwards-compat: extract token counts from v2 nested or legacy flat
+            # Must be defensive against non-numeric values
+            try:
+                token_usage = payload.get("tokenUsage")
+                if isinstance(token_usage, dict) and isinstance(token_usage.get("last"), dict):
+                    last = token_usage["last"]
+                    ti = int(last.get("inputTokens", 0))
+                    to = int(last.get("outputTokens", 0))
+                else:
+                    ti = int(payload.get("inputTokens", 0))
+                    to = int(payload.get("outputTokens", 0))
+                self._ledger.set_token_usage(task.id, ti, to)
+            except (ValueError, TypeError):
+                pass  # Non-numeric token values — skip legacy update
+
+            # Record detailed usage event for long-term ledger
+            self._record_codex_usage_event(task, payload)
 
         elif etype == "command_output_delta":
             thread_id = str(payload.get("threadId", ""))
@@ -896,6 +910,120 @@ class TaskService:
 
     def is_orchestration_managed_task(self, task_id: int) -> bool:
         return self._ledger.task_has_running_orchestration(task_id)
+
+    def _record_codex_usage_event(self, task: Task, payload: dict[str, object]) -> None:
+        """Record a usage_event row from a Codex thread/tokenUsage/updated notification.
+
+        Supports both v2 protocol (tokenUsage.last) and legacy (inputTokens/outputTokens).
+        Does NOT raise on failure — recording failure must not affect Codex running.
+        """
+        try:
+            token_usage = payload.get("tokenUsage")
+            source = "exact"
+
+            if isinstance(token_usage, dict):
+                last = token_usage.get("last")
+                if isinstance(last, dict):
+                    input_tokens = int(last.get("inputTokens", 0))
+                    cached_input_tokens = int(last.get("cachedInputTokens", 0))
+                    output_tokens = int(last.get("outputTokens", 0))
+                    reasoning_output_tokens = int(last.get("reasoningOutputTokens", 0))
+                    total_tokens = int(last.get("totalTokens", input_tokens + output_tokens))
+                else:
+                    # No 'last' breakdown — use top-level
+                    input_tokens = int(payload.get("inputTokens", 0))
+                    cached_input_tokens = 0
+                    output_tokens = int(payload.get("outputTokens", 0))
+                    reasoning_output_tokens = 0
+                    total_tokens = input_tokens + output_tokens
+                    if input_tokens == 0 and output_tokens == 0:
+                        return  # no usable data
+                    source = "estimated"
+            else:
+                # Legacy flat payload: inputTokens / outputTokens
+                input_tokens = int(payload.get("inputTokens", 0))
+                cached_input_tokens = 0
+                output_tokens = int(payload.get("outputTokens", 0))
+                reasoning_output_tokens = 0
+                total_tokens = input_tokens + output_tokens
+                if input_tokens == 0 and output_tokens == 0:
+                    return
+                source = "estimated"
+
+            turn_id = str(payload.get("turnId", task.active_turn_id or ""))
+            thread_id = str(payload.get("threadId", task.codex_thread_id or ""))
+
+            # Find conversation and agent_run context from the task
+            conv_id: int | None = None
+            agent_run_id: int | None = None
+            orch_run_id: int | None = None
+            role = "direct"
+
+            try:
+                rows = self._ledger._conn.execute(
+                    "SELECT id FROM conversation_sessions WHERE active_codex_task_id = ? "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (task.id,),
+                ).fetchall()
+                if rows:
+                    conv_id = int(rows[0]["id"])
+
+                    # Determine role from orchestration runs
+                    orch_rows = self._ledger._conn.execute(
+                        "SELECT id FROM orchestration_runs WHERE conversation_id = ? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (conv_id,),
+                    ).fetchall()
+                    if orch_rows:
+                        orch_run_id = int(orch_rows[0]["id"])
+
+                    # Find matching agent run
+                    ar_rows = self._ledger._conn.execute(
+                        "SELECT id, role, agent FROM agent_runs "
+                        "WHERE conversation_id = ? AND (hidden_task_id = ? OR hidden_task_id IS NULL) "
+                        "ORDER BY id DESC LIMIT 1",
+                        (conv_id, task.id),
+                    ).fetchall()
+                    if ar_rows:
+                        agent_run_id = int(ar_rows[0]["id"])
+                        role = str(ar_rows[0]["role"]) or "direct"
+            except Exception:
+                pass  # Best effort — usage event is still valuable without links
+
+            # Derive model name from payload if available
+            model = ""
+            if isinstance(token_usage, dict):
+                mcw = token_usage.get("modelContextWindow")
+                if mcw is not None:
+                    model = f"context_window_{mcw}"
+
+            self._ledger.record_usage_event(
+                agent="codex",
+                role=role,
+                phase=task.last_phase or "",
+                request_kind="turn",
+                request_index=1,
+                model=model,
+                source=source,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                output_tokens=output_tokens,
+                reasoning_output_tokens=reasoning_output_tokens,
+                total_tokens=total_tokens,
+                status="completed",
+                conversation_id=conv_id,
+                orchestration_run_id=orch_run_id,
+                agent_run_id=agent_run_id,
+                task_id=task.id,
+                external_thread_id=thread_id or None,
+                external_turn_id=turn_id or None,
+                metadata_json=json.dumps(
+                    {"protocol_version": "v2" if isinstance(token_usage, dict) else "legacy"},
+                    ensure_ascii=False,
+                ),
+            )
+        except Exception:
+            pass  # Recording failure must not affect Codex running
 
     def _transition(self, task_id: int, new_status: TaskStatus) -> None:
         task = self._ledger.get_task(task_id)

@@ -263,3 +263,186 @@ def test_mark_backend_dead_records_failure_event(tmp_path: Path) -> None:
     assert "Backend unhealthy" in updated.last_error
     events = ledger.list_events(task.id)
     assert events[-1].event_type == "backend_dead"
+
+
+# --- Usage events ---
+
+
+def test_migration_creates_usage_events_table(tmp_path: Path) -> None:
+    """Migration must create usage_events table with all expected columns."""
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    columns = ledger._table_columns("usage_events")
+    expected = {
+        "id", "created_at", "conversation_id", "orchestration_run_id",
+        "agent_run_id", "task_id", "agent", "role", "phase", "request_kind",
+        "request_index", "model", "external_thread_id", "external_turn_id",
+        "external_session_id", "status", "source", "input_tokens",
+        "cached_input_tokens", "output_tokens", "reasoning_output_tokens",
+        "total_tokens", "workflow_overhead_input_tokens",
+        "workflow_overhead_output_tokens", "latency_ms", "metadata_json",
+    }
+    missing = expected - columns
+    assert not missing, f"missing columns: {missing}"
+
+
+def test_usage_event_record_and_retrieve(tmp_path: Path) -> None:
+    """Usage events can be inserted and retrieved."""
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    event = ledger.record_usage_event(
+        agent="codex",
+        role="analysis",
+        phase="orchestration_analysis",
+        request_kind="turn",
+        request_index=1,
+        model="gpt-5.5",
+        source="exact",
+        input_tokens=1500,
+        cached_input_tokens=200,
+        output_tokens=800,
+        reasoning_output_tokens=300,
+        status="completed",
+        conversation_id=None,
+        task_id=None,
+        external_thread_id="thread-abc",
+        external_turn_id="turn-1",
+        metadata_json='{"protocol":"v2"}',
+    )
+
+    assert event.id > 0
+    assert event.agent == "codex"
+    assert event.source == "exact"
+    assert event.input_tokens == 1500
+    assert event.cached_input_tokens == 200
+    assert event.output_tokens == 800
+    assert event.reasoning_output_tokens == 300
+    assert event.total_tokens == 2300  # 1500 + 800
+    assert event.metadata_json == '{"protocol":"v2"}'
+
+    retrieved = ledger.get_usage_event(event.id)
+    assert retrieved.agent == "codex"
+    assert retrieved.total_tokens == 2300
+
+
+def test_usage_event_list_by_filters(tmp_path: Path) -> None:
+    """Usage events can be filtered by conversation, task, agent."""
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    # Create a conversation for context
+    convo = ledger.create_conversation(
+        chat_id=111, user_id=1, title="test", mode="chief_engineer",
+        workspace_alias="demo",
+    )
+
+    ledger.record_usage_event(
+        agent="codex", role="analysis", input_tokens=100, output_tokens=50,
+        conversation_id=convo.id, task_id=1,
+    )
+    ledger.record_usage_event(
+        agent="claude", role="implementation", input_tokens=200, output_tokens=100,
+        conversation_id=convo.id, task_id=1,
+    )
+    ledger.record_usage_event(
+        agent="codex", role="verification", input_tokens=150, output_tokens=80,
+        conversation_id=convo.id, task_id=1,
+    )
+
+    by_conv = ledger.list_usage_events(conversation_id=convo.id)
+    assert len(by_conv) == 3
+
+    by_agent = ledger.list_usage_events(conversation_id=convo.id, agent="codex")
+    assert len(by_agent) == 2
+
+    by_task = ledger.list_usage_events(task_id=1)
+    assert len(by_task) == 3
+
+
+def test_aggregate_usage_splits_by_agent(tmp_path: Path) -> None:
+    """Aggregate returns usage split by agent with source breakdown."""
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    convo = ledger.create_conversation(
+        chat_id=222, user_id=1, title="agg", mode="chief_engineer",
+        workspace_alias="demo",
+    )
+
+    # Codex: 2 requests, one exact one estimated
+    ledger.record_usage_event(
+        agent="codex", role="analysis", input_tokens=100, output_tokens=50,
+        source="exact", conversation_id=convo.id,
+    )
+    ledger.record_usage_event(
+        agent="codex", role="verification", input_tokens=150, output_tokens=80,
+        source="exact", conversation_id=convo.id,
+    )
+
+    # Claude: 1 request, estimated
+    ledger.record_usage_event(
+        agent="claude", role="implementation", input_tokens=200, output_tokens=100,
+        source="estimated", conversation_id=convo.id,
+    )
+
+    # Workflow overhead
+    ledger.record_usage_event(
+        agent="workflow", role="overhead", phase="codex_analysis",
+        workflow_overhead_input_tokens=300, conversation_id=convo.id,
+    )
+
+    agg = ledger.aggregate_usage(conversation_id=convo.id)
+
+    assert agg["codex"]["requests"] == 2
+    assert agg["codex"]["input_tokens"] == 250
+    assert agg["codex"]["output_tokens"] == 130
+    assert agg["codex"]["total_tokens"] == 380
+
+    assert agg["claude"]["requests"] == 1
+    assert agg["claude"]["input_tokens"] == 200
+
+    assert agg["workflow"]["requests"] == 1
+    assert agg["workflow"]["workflow_overhead_input_tokens"] == 300
+
+    assert agg["totals"]["requests"] == 4
+    assert agg["totals"]["total_tokens"] == 680
+    assert agg["totals"]["workflow_overhead_input_tokens"] == 300
+
+
+def test_render_usage_summary_string(tmp_path: Path) -> None:
+    """Render usage summary produces readable output."""
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    convo = ledger.create_conversation(
+        chat_id=333, user_id=1, title="summary", mode="chief_engineer",
+        workspace_alias="demo",
+    )
+
+    ledger.record_usage_event(
+        agent="codex", role="analysis", input_tokens=1000, output_tokens=500,
+        source="exact", conversation_id=convo.id,
+    )
+    ledger.record_usage_event(
+        agent="claude", role="implementation", input_tokens=2000, output_tokens=800,
+        source="estimated", conversation_id=convo.id,
+    )
+
+    summary = ledger.render_usage_summary(conversation_id=convo.id)
+    assert "Token 用量摘要" in summary
+    assert "Codex" in summary
+    assert "Claude" in summary
+    assert "1,000" in summary
+    assert "2000" in summary or "2,000" in summary
+
+
+def test_usage_event_invalid_metadata_json_sanitized(tmp_path: Path) -> None:
+    """Invalid metadata_json is sanitized to '{}'."""
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    event = ledger.record_usage_event(
+        agent="codex", input_tokens=10, output_tokens=10,
+        metadata_json="not json",
+    )
+    assert event.metadata_json == "{}"

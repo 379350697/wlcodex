@@ -1,6 +1,7 @@
 """Backend event translation tests."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -579,3 +580,156 @@ async def test_app_server_legacy_patch_approval_emits_normalized_event() -> None
     assert event.payload["kind"] == "file_change"
     assert event.payload["responseSchema"] == "legacy_review_decision"
     assert "README.md" in str(event.payload["summary"])
+
+
+# --- Codex token usage event recording ---
+
+
+def test_task_service_records_usage_event_v2_token_usage(tmp_path: Path) -> None:
+    """TaskService records usage_event from v2 protocol tokenUsage.last notification."""
+    from wlcodex.db import Ledger
+    from wlcodex.config import WorkspaceConfig
+    from wlcodex.task_service import TaskService
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    ws = WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)
+    service = TaskService(ledger, [ws])
+
+    task = ledger.create_task(
+        workspace_alias="demo",
+        workspace_path=str(tmp_path),
+        title="Codex usage test",
+        codex_thread_id="thread-v2",
+        parent_task_id=None,
+    )
+    ledger.set_thread_id(task.id, "thread-v2")
+
+    # Simulate v2 tokenUsage/updated notification
+    event = BackendEvent("token_usage_updated", {
+        "threadId": "thread-v2",
+        "turnId": "turn-v2-1",
+        "tokenUsage": {
+            "last": {
+                "inputTokens": 2000,
+                "cachedInputTokens": 500,
+                "outputTokens": 1200,
+                "reasoningOutputTokens": 300,
+                "totalTokens": 3500,
+            },
+            "modelContextWindow": 200000,
+            "total": {
+                "inputTokens": 2000,
+                "cachedInputTokens": 500,
+                "outputTokens": 1200,
+                "reasoningOutputTokens": 300,
+                "totalTokens": 3500,
+            },
+        },
+    })
+
+    service.apply_backend_event(event)
+
+    # Verify legacy compatibility is maintained
+    updated = ledger.get_task(task.id)
+    assert updated.token_input == 2000
+    assert updated.token_output == 1200
+
+    # Verify usage_event was recorded
+    usage_events = ledger.list_usage_events(task_id=task.id)
+    assert len(usage_events) == 1
+    ue = usage_events[0]
+    assert ue.agent == "codex"
+    assert ue.source == "exact"
+    assert ue.input_tokens == 2000
+    assert ue.cached_input_tokens == 500
+    assert ue.output_tokens == 1200
+    assert ue.reasoning_output_tokens == 300
+    assert ue.total_tokens == 3500
+    assert ue.external_thread_id == "thread-v2"
+    assert ue.external_turn_id == "turn-v2-1"
+
+
+def test_task_service_records_usage_event_legacy_flat_payload(tmp_path: Path) -> None:
+    """TaskService records usage_event from legacy flat inputTokens/outputTokens."""
+    from wlcodex.db import Ledger
+    from wlcodex.config import WorkspaceConfig
+    from wlcodex.task_service import TaskService
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    ws = WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)
+    service = TaskService(ledger, [ws])
+
+    task = ledger.create_task(
+        workspace_alias="demo",
+        workspace_path=str(tmp_path),
+        title="Codex legacy test",
+        codex_thread_id="thread-legacy",
+        parent_task_id=None,
+    )
+    ledger.set_thread_id(task.id, "thread-legacy")
+
+    # Simulate legacy tokenUsage/updated notification
+    event = BackendEvent("token_usage_updated", {
+        "threadId": "thread-legacy",
+        "turnId": "turn-legacy-1",
+        "inputTokens": 1000,
+        "outputTokens": 500,
+    })
+
+    service.apply_backend_event(event)
+
+    updated = ledger.get_task(task.id)
+    assert updated.token_input == 1000
+    assert updated.token_output == 500
+
+    usage_events = ledger.list_usage_events(task_id=task.id)
+    assert len(usage_events) == 1
+    ue = usage_events[0]
+    assert ue.source == "estimated"
+    assert ue.input_tokens == 1000
+    assert ue.output_tokens == 500
+
+
+def test_task_service_token_usage_recording_failure_is_silent(tmp_path: Path) -> None:
+    """Token usage recording failure must not affect Codex running (no raise)."""
+    from wlcodex.db import Ledger
+    from wlcodex.config import WorkspaceConfig
+    from wlcodex.task_service import TaskService
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    ws = WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)
+    service = TaskService(ledger, [ws])
+
+    task = ledger.create_task(
+        workspace_alias="demo",
+        workspace_path=str(tmp_path),
+        title="Faulty recording test",
+        codex_thread_id="thread-noisy",
+        parent_task_id=None,
+    )
+    ledger.set_thread_id(task.id, "thread-noisy")
+
+    # Event with non-numeric values should still process gracefully
+    event = BackendEvent("token_usage_updated", {
+        "threadId": "thread-noisy",
+        "turnId": "turn-noisy",
+        "tokenUsage": {
+            "last": {
+                "inputTokens": "not-a-number",
+                "outputTokens": None,
+                "cachedInputTokens": None,
+                "reasoningOutputTokens": None,
+                "totalTokens": "also-not-number",
+            },
+        },
+    })
+
+    # Must not raise
+    service.apply_backend_event(event)
+
+    # Legacy fields should default to 0
+    updated = ledger.get_task(task.id)
+    assert updated.token_input == 0
