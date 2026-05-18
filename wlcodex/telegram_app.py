@@ -93,17 +93,20 @@ class WlCodexHandlers:
     def _guard(self, update: Update) -> bool:
         ok = ensure_authorized(update, self._config.telegram.allowed_user_ids)
         if ok and update.effective_user:
+            update_text = (
+                update.effective_message.text
+                if update.effective_message and update.effective_message.text
+                else ""
+            )
             self._ledger.record_telegram_update(
                 update_id=update.update_id,
                 user_id=update.effective_user.id,
                 chat_id=update.effective_chat.id if update.effective_chat else 0,
-                update_type=(
-                    update.effective_message.text
-                    if update.effective_message and update.effective_message.text
-                    else "callback"
-                ),
+                update_type=update_text or "callback",
                 allowed=True,
             )
+            if update_text.startswith("/"):
+                self._append_telegram_command_received_event(update, update_text)
         elif not ok and update.effective_user:
             self._ledger.record_telegram_update(
                 update_id=update.update_id,
@@ -113,6 +116,54 @@ class WlCodexHandlers:
                 allowed=False,
             )
         return ok
+
+    def _append_telegram_command_received_event(
+        self, update: Update, text: str
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        try:
+            from wlcodex.runtime_events import (
+                AggregateType,
+                EventSource,
+                EventType,
+                RuntimeEvent,
+                Visibility,
+                now_iso,
+            )
+
+            chat = update.effective_chat
+            user = update.effective_user
+            chat_id = chat.id if chat is not None else 0
+            active = self._ledger.get_active_conversation(chat_id)
+            conversation_id = active.id if active is not None else None
+            aggregate_type = (
+                AggregateType.CONVERSATION
+                if active is not None
+                else AggregateType.TELEGRAM_MESSAGE
+            )
+            aggregate_id = str(active.id if active is not None else update.update_id)
+            self._runtime_store.append(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.USER_MESSAGE_RECEIVED,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                correlation_id=f"user-command-{update.update_id}",
+                source=EventSource.TELEGRAM,
+                actor="user",
+                visibility=Visibility.USER,
+                payload={
+                    "chat_id": chat_id,
+                    "user_id": user.id if user is not None else None,
+                    "telegram_update_id": update.update_id,
+                    "command": text.split(maxsplit=1)[0][:100],
+                    "text_preview": text[:500],
+                },
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+            ))
+        except Exception:
+            logger.debug("Failed to append Telegram command event", exc_info=True)
 
     async def _store_status_message(
         self, task_id: int, chat_id: int, message_id: int

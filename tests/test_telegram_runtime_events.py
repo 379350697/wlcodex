@@ -229,3 +229,47 @@ async def test_health_delivery_timeout_is_eventized(tmp_path: Path) -> None:
     assert row is not None
     assert row["event_type"] == EventType.TELEGRAM_MESSAGE_FAILED
     assert "health ok" in row["payload_json"]
+
+
+@pytest.mark.asyncio
+async def test_command_update_receipt_causes_delivery_event(tmp_path: Path) -> None:
+    _install_telegram_stubs()
+    from wlcodex.runtime_events import EventType
+
+    class Controller:
+        async def handle(self, _text: str, _ctx: dict[str, object]) -> object:
+            return SimpleNamespace(text="health ok", buttons=[])
+
+    class Bot:
+        async def send_message(self, **_kwargs: object) -> object:
+            return SimpleNamespace(message_id=42)
+
+    handlers, ledger, store = _handlers(
+        tmp_path,
+        controller=Controller(),
+        bot=Bot(),
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="runtime",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    update = SimpleNamespace(
+        update_id=3,
+        effective_user=SimpleNamespace(id=456),
+        effective_chat=SimpleNamespace(id=123, type="private"),
+        effective_message=SimpleNamespace(text="/health"),
+    )
+
+    await handlers.health(update, SimpleNamespace())
+
+    events = store.list_by_conversation(conversation.id)
+    assert [event.event_type for event in events] == [
+        EventType.USER_MESSAGE_RECEIVED,
+        EventType.TELEGRAM_MESSAGE_SENT,
+    ]
+    assert events[0].payload["text_preview"] == "/health"
+    assert events[1].causation_id == events[0].id
+    assert events[1].correlation_id == events[0].correlation_id
