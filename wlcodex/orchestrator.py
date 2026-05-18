@@ -40,6 +40,85 @@ def _accepts_keyword(func: object, name: str) -> bool:
     )
 
 
+# Patterns that indicate Claude or Codex attempted direct Telegram delivery
+# or token access — these are violations of the platform isolation contract.
+_DIRECT_TELEGRAM_SEND_PATTERNS: tuple[str, ...] = (
+    "message_id=",
+    "message_id =",
+    "api.telegram.org",
+    "sendMessage",
+    "editMessageText",
+    "sendChatAction",
+    "editMessageReplyMarkup",
+    "telegram.message.sent",
+    "telegram bot sent",
+    "已发送 Telegram",
+    "已发送 telegram",
+    "Telegram 已发送",
+    "telegram 已发送",
+    "via Telegram",
+    "通过 Telegram",
+    "已通过 Telegram",
+    "curl.*telegram",
+    "http.*telegram.*bot",
+)
+
+_DIRECT_TOKEN_ACCESS_PATTERNS: tuple[str, ...] = (
+    "WLCODEX_TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "telegram.*bot_token",
+    "bot.*token.*telegram",
+    "os.environ.*TELEGRAM",
+    "os.getenv.*TELEGRAM",
+    "env.*TELEGRAM_BOT",
+)
+
+
+def _detect_claude_direct_delivery_drift(impl_text: str) -> list[str]:
+    """Return a list of drift descriptions found in Claude's implementation text.
+
+    Each item describes a specific violation (direct Telegram send claim or
+    token access attempt).  Empty list means no drift detected.
+    """
+    findings: list[str] = []
+    lowered = impl_text.lower()
+    for pattern in _DIRECT_TELEGRAM_SEND_PATTERNS:
+        if pattern.lower() in lowered:
+            findings.append(
+                f"Claude claimed direct Telegram delivery: matched '{pattern}'"
+            )
+            break  # one finding per category is enough
+    for pattern in _DIRECT_TOKEN_ACCESS_PATTERNS:
+        if pattern.lower() in lowered:
+            findings.append(
+                f"Claude attempted Telegram token access: matched '{pattern}'"
+            )
+            break
+    return findings
+
+
+def _detect_verification_delivery_drift(verify_text: str) -> list[str]:
+    """Return a list of drift descriptions found in Codex verification text.
+
+    Codex verification must not request tokens or attempt to send Telegram.
+    """
+    findings: list[str] = []
+    lowered = verify_text.lower()
+    for pattern in _DIRECT_TELEGRAM_SEND_PATTERNS:
+        if pattern.lower() in lowered:
+            findings.append(
+                f"Codex verification attempted direct delivery: matched '{pattern}'"
+            )
+            break
+    for pattern in _DIRECT_TOKEN_ACCESS_PATTERNS:
+        if pattern.lower() in lowered:
+            findings.append(
+                f"Codex verification attempted token access: matched '{pattern}'"
+            )
+            break
+    return findings
+
+
 def _analysis_says_no_implementation_needed(text: str) -> bool:
     """Return true when Codex analysis says the request is informational/no-op."""
     try:
@@ -318,6 +397,7 @@ class ChiefEngineerOrchestrator:
         self._claude = claude_backend
         self._max_verify_rounds = max_verify_rounds
         self._budget = budget or ContextBudget()
+        self._last_claude_drift_findings: list[str] = []
 
     async def run(
         self,
@@ -386,6 +466,17 @@ class ChiefEngineerOrchestrator:
 
             decision = VerificationDecision.parse(verify_result)
 
+            # Force retry if Claude drift found, regardless of Codex decision.
+            if decision.decision == "pass" and self._last_claude_drift_findings:
+                decision = VerificationDecision(
+                    decision="retry",
+                    summary=decision.summary,
+                    required_fix=(
+                        "Claude 实施文本中检测到直接 Telegram delivery / token access: "
+                        + "; ".join(self._last_claude_drift_findings)
+                    ),
+                )
+
             if decision.decision == "pass":
                 result.status = "passed"
                 return result
@@ -444,10 +535,22 @@ class ChiefEngineerOrchestrator:
         # Collect real workspace evidence — changed files, diff, test status
         changed_files, diff_summary, test_results = _collect_workspace_evidence(workspace)
 
+        # Detect Claude direct-delivery drift before building the packet.
+        claude_drift = _detect_claude_direct_delivery_drift(impl)
+        self._last_claude_drift_findings = claude_drift
+        claude_summary = impl
+        if claude_drift:
+            claude_summary = (
+                f"WARNING: Claude 实施文本中检测到直接 Telegram delivery "
+                f"/ token access 漂移:\n"
+                + "\n".join(f"  - {f}" for f in claude_drift)
+                + f"\n\n---原始 Claude 摘要---\n{impl[:2000]}"
+            )
+
         packet = build_codex_verification_packet(
             user_goal=goal,
             codex_plan_summary=analysis,
-            claude_completion_summary=impl,
+            claude_completion_summary=claude_summary,
             changed_files=changed_files,
             diff_summary=diff_summary,
             test_results=test_results,
@@ -744,6 +847,17 @@ class ChiefEngineerOrchestrator:
             )
 
             decision = VerificationDecision.parse(verify_result)
+
+            # Force retry if Claude drift found, regardless of Codex decision.
+            if decision.decision == "pass" and self._last_claude_drift_findings:
+                decision = VerificationDecision(
+                    decision="retry",
+                    summary=decision.summary,
+                    required_fix=(
+                        "Claude 实施文本中检测到直接 Telegram delivery / token access: "
+                        + "; ".join(self._last_claude_drift_findings)
+                    ),
+                )
 
             if decision.decision == "pass":
                 result.status = "passed"

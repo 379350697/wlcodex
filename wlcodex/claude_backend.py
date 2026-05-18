@@ -3,6 +3,10 @@
 Calls the Claude CLI binary with -p (--print) for non-interactive output.
 Sets cwd to the selected workspace, captures stdout/stderr, and returns
 exit status and summary. Avoids shell=True.
+
+All Claude subprocesses run with a sanitized environment: Telegram
+delivery secrets and direct-messaging credentials are stripped so
+Claude cannot bypass the platform controller for Telegram delivery.
 """
 
 from __future__ import annotations
@@ -24,6 +28,39 @@ from wlcodex.runtime_events import EventType
 from wlcodex.claude_stream_parser import ClaudeStreamEvent, parse_line
 
 logger = logging.getLogger(__name__)
+
+# Environment variable names (exact or prefix) stripped from Claude
+# subprocess environments.  Claude must never see Telegram delivery
+# credentials or any direct-messaging secrets.
+_CLAUDE_ENV_DENY_LIST: tuple[str, ...] = (
+    "WLCODEX_TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_API_TOKEN",
+    "TELEGRAM_API_ID",
+    "TELEGRAM_API_HASH",
+    "WLC_CHAT_ID",
+    "WLCODEX_CHAT_ID",
+)
+
+# Env var name substrings that trigger redaction.
+_CLAUDE_ENV_DENY_SUBSTRINGS: tuple[str, ...] = (
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_API_TOKEN",
+)
+
+
+def _sanitized_env() -> dict[str, str]:
+    """Return a copy of ``os.environ`` with Telegram delivery secrets removed."""
+    env = dict(os.environ)
+    for key in list(env.keys()):
+        if key in _CLAUDE_ENV_DENY_LIST:
+            del env[key]
+            continue
+        for sub in _CLAUDE_ENV_DENY_SUBSTRINGS:
+            if sub in key:
+                del env[key]
+                break
+    return env
 
 
 @dataclass
@@ -77,6 +114,7 @@ class ClaudeBackend:
                 self._config.binary,
                 *self._prompt_args(request.prompt),
                 cwd=request.workspace_path or None,
+                env=_sanitized_env(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
@@ -136,6 +174,7 @@ class ClaudeBackend:
                 self._config.binary,
                 *self._prompt_args(request.prompt, stream_json=True),
                 cwd=request.workspace_path or None,
+                env=_sanitized_env(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 limit=1024 * 1024 * 16,
@@ -427,6 +466,7 @@ class ClaudeBackend:
             proc = await asyncio.create_subprocess_exec(
                 self._config.binary,
                 "--help",
+                env=_sanitized_env(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

@@ -184,6 +184,13 @@ class RuntimeProjector:
         ):
             self._project_approval_event(event)
 
+        # --- Security / delivery isolation events ---
+        if etype in (
+            EventType.SECURITY_DELIVERY_BLOCKED,
+            EventType.SECURITY_TOKEN_ACCESS_ATTEMPTED,
+        ):
+            self._project_security_event(event)
+
         # --- Important events → task_events (compat summary) ---
         if etype in _TASK_EVENT_COMPAT_TYPES:
             self._project_task_event(event)
@@ -463,6 +470,27 @@ class RuntimeProjector:
         if orch_run_id is None:
             return False
 
+        if event.id:
+            # Check for security violations FIRST — even with a pass decision,
+            # the run cannot complete if delivery isolation was violated.
+            security_row = self._conn.execute(
+                """
+                SELECT 1 FROM runtime_events
+                WHERE orchestration_run_id = ?
+                  AND event_type IN (?, ?)
+                  AND id <= ?
+                LIMIT 1
+                """,
+                (
+                    orch_run_id,
+                    EventType.SECURITY_DELIVERY_BLOCKED,
+                    EventType.SECURITY_TOKEN_ACCESS_ATTEMPTED,
+                    event.id,
+                ),
+            ).fetchone()
+            if security_row is not None:
+                return False
+
         row = self._conn.execute(
             "SELECT last_verification_result FROM orchestration_runs WHERE id = ?",
             (orch_run_id,),
@@ -712,6 +740,36 @@ class RuntimeProjector:
         self._conn.commit()
 
     # ------------------------------------------------------------------
+    # Security / delivery isolation
+    # ------------------------------------------------------------------
+
+    def _project_security_event(self, event: RuntimeEvent) -> None:
+        """Record a security violation (token access / delivery attempt).
+
+        Flags the agent run so that verification cannot blindly pass a run
+        that included a security boundary violation.
+        """
+        agent_run_id = event.agent_run_id
+        if agent_run_id is None:
+            return
+        finding = str(event.payload.get("finding", ""))
+        self._conn.execute(
+            """
+            UPDATE agent_runs
+            SET completion_summary = COALESCE(completion_summary, '')
+                || ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                f"\n[SECURITY] {event.event_type}: {finding}",
+                _now(),
+                agent_run_id,
+            ),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
     # Failure handling
     # ------------------------------------------------------------------
 
@@ -767,6 +825,8 @@ _TASK_EVENT_COMPAT_TYPES: dict[str, str] = {
     EventType.FILE_CHANGED: "file_changed",
     EventType.TOOL_CALL_STARTED: "tool_call_started",
     EventType.TOOL_CALL_COMPLETED: "tool_call_completed",
+    EventType.SECURITY_DELIVERY_BLOCKED: "security_delivery_blocked",
+    EventType.SECURITY_TOKEN_ACCESS_ATTEMPTED: "security_token_access_attempted",
 }
 
 

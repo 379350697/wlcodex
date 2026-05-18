@@ -214,7 +214,15 @@ def build_claude_handoff_packet(
         "长时间测试/构建/命令不要用一个前台 Bash 卡住；使用 run_in_background 并用 BashOutput 查询进度。",
         "执行过程中给出可流式输出的简短进度，避免长时间静默。",
     ]
-    merged_constraints = claude_runtime_constraints + (constraints or [])
+    delivery_isolation_constraints = [
+        "你是实施工程师，不是平台 reply agent。绝对不要发送 Telegram 消息。",
+        "不要读取 WLCODEX_TELEGRAM_BOT_TOKEN 或任何 TELEGRAM_BOT_TOKEN 变量。",
+        "不要调用 Telegram Bot API：不要用 sendMessage、editMessageText、sendChatAction 等。",
+        "不要用 curl、httpie、requests、fetch 调用 api.telegram.org。",
+        "不要声称已发送 Telegram 或输出 message_id=xxx。你无法发 Telegram。",
+        "完成实施后只返回实施摘要给 orchestrator。最终回复由平台发送。",
+    ]
+    merged_constraints = claude_runtime_constraints + delivery_isolation_constraints + (constraints or [])
     return ClaudeHandoffPacket(
         mode="chief_engineer",
         workspace=workspace,
@@ -246,12 +254,24 @@ def build_codex_verification_packet(
     budget: ContextBudget | None = None,
 ) -> CodexVerificationPacket:
     bgt = budget or ContextBudget()
+    verification_constraints = [
+        "你是验收 agent，不是平台 reply agent。绝对不要发送 Telegram 消息。",
+        "不要读取 WLCODEX_TELEGRAM_BOT_TOKEN 或任何 token/env 变量。",
+        "不要调用 Telegram Bot API：sendMessage、editMessageText、curl api.telegram.org 等。",
+        "不要发出任何审批申请来获取 Telegram 发送权限。",
+        "验收职责只读：检查 diff、跑测试、git diff --check、GitNexus detect_changes。",
+        "验收结论只能是 decision: pass / retry / stop / need_user。",
+        "发现 Claude 声称已发送 Telegram、直接调了 Telegram API、或输出 message_id=xxx，"
+        "应判定为违规漂移并标记 retry 或 stop。",
+        "最终用户回复由平台 controller 在 verification pass 后发送。",
+    ]
     return CodexVerificationPacket(
         mode="chief_engineer",
         workspace=workspace,
         user_goal=user_goal,
         conversation_summary="",
         relevant_files=changed_files or [],
+        recent_user_constraints=verification_constraints,
         token_budget=bgt.claude_to_codex_tokens,
         original_goal=user_goal,
         codex_plan_summary=trim_to_budget(codex_plan_summary, bgt.conversation_summary_tokens),

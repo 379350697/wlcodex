@@ -20,6 +20,8 @@ from wlcodex.orchestrator import (
     ChiefEngineerOrchestrator,
     OrchestrationProgress,
     VerificationDecision,
+    _detect_claude_direct_delivery_drift,
+    _detect_verification_delivery_drift,
 )
 from wlcodex.runtime_events import (
     AggregateType,
@@ -712,6 +714,37 @@ class OrchestrationRunner:
                         )
                     elif progress.phase == OrchestrationProgress.IMPL_COMPLETE:
                         claude_implementation_text = progress.full_text or progress.text
+
+                        # Detect Claude direct-delivery drift and emit security events.
+                        claude_drift = _detect_claude_direct_delivery_drift(
+                            claude_implementation_text
+                        )
+                        claude_agent_run_id = claude_backend.agent_run_id
+                        for drift_finding in claude_drift:
+                            self._emit_event(RuntimeEvent(
+                                schema_version=1,
+                                event_type=(
+                                    EventType.SECURITY_TOKEN_ACCESS_ATTEMPTED
+                                    if "token" in drift_finding.lower()
+                                    else EventType.SECURITY_DELIVERY_BLOCKED
+                                ),
+                                aggregate_type=AggregateType.AGENT_RUN,
+                                aggregate_id=str(claude_agent_run_id or orchestration_run_id),
+                                correlation_id=cid,
+                                source=EventSource.ORCHESTRATOR,
+                                actor="orchestrator",
+                                visibility=Visibility.OPERATOR,
+                                payload={
+                                    "finding": drift_finding,
+                                    "agent": "claude",
+                                    "role": "implementation",
+                                },
+                                occurred_at=now_iso(),
+                                conversation_id=conversation.id,
+                                orchestration_run_id=orchestration_run_id,
+                                task_id=task_id,
+                            ))
+
                         # Use the wrapper's agent_run_id if available (already created
                         # before send_streaming), otherwise create one as fallback.
                         impl_run_id = claude_backend.agent_run_id
@@ -836,12 +869,41 @@ class OrchestrationRunner:
                     elif progress.phase == OrchestrationProgress.VERIFY_COMPLETE:
                         verify_round = progress.round_num or verify_round
                         verification_text = progress.full_text or progress.text
+                        # Detect Codex verification delivery drift.
+                        verify_drift = _detect_verification_delivery_drift(verification_text)
+                        for drift_finding in verify_drift:
+                            self._emit_event(RuntimeEvent(
+                                schema_version=1,
+                                event_type=(
+                                    EventType.SECURITY_TOKEN_ACCESS_ATTEMPTED
+                                    if "token" in drift_finding.lower()
+                                    else EventType.SECURITY_DELIVERY_BLOCKED
+                                ),
+                                aggregate_type=AggregateType.AGENT_RUN,
+                                aggregate_id=str(codex_verification_run_id or orchestration_run_id),
+                                correlation_id=cid,
+                                source=EventSource.ORCHESTRATOR,
+                                actor="codex",
+                                visibility=Visibility.OPERATOR,
+                                payload={
+                                    "finding": drift_finding,
+                                    "agent": "codex",
+                                    "role": "verification",
+                                },
+                                occurred_at=now_iso(),
+                                conversation_id=conversation.id,
+                                orchestration_run_id=orchestration_run_id,
+                                task_id=task_id,
+                            ))
                         # Parse the verification decision
                         try:
                             vd = VerificationDecision.parse(verification_text)
                             actual_decision = vd.decision
                         except Exception:
                             actual_decision = "need_user"
+                        # If Codex verification itself shows drift, force retry.
+                        if verify_drift and actual_decision == "pass":
+                            actual_decision = "retry"
                         # Emit verification.decision.recorded
                         self._emit_event(RuntimeEvent(
                             schema_version=1,

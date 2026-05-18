@@ -139,6 +139,10 @@ class EventType:
     PROJECTION_FAILED = "projection.failed"
     RUNTIME_CAPABILITY_MISSING = "runtime.capability.missing"
 
+    # Security / delivery isolation
+    SECURITY_DELIVERY_BLOCKED = "security.delivery.blocked"
+    SECURITY_TOKEN_ACCESS_ATTEMPTED = "security.token.access.attempted"
+
 
 # ---------------------------------------------------------------------------
 # Envelope
