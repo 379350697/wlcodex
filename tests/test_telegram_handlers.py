@@ -631,21 +631,28 @@ async def test_settings_callback_routes_claude_permission() -> None:
         def __init__(self) -> None:
             self.data = "settings:claude_permission:acceptEdits"
             self.answers: list[str] = []
-            self.edits: list[tuple[str, object]] = []
+            self.message = SimpleNamespace(message_id=10, text="settings")
 
         async def answer(self, text):
             self.answers.append(text)
 
-        async def edit_message_text(self, text, reply_markup=None):
-            self.edits.append((text, reply_markup))
+    class Bot:
+        def __init__(self) -> None:
+            self.edits: list[tuple[int, int, str, object]] = []
+
+        async def edit_message_text(
+            self, *, chat_id, message_id, text, reply_markup=None
+        ):
+            self.edits.append((chat_id, message_id, text, reply_markup))
 
     controller = Controller()
+    bot = Bot()
     handlers = WlCodexHandlers(
         config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
         controller=controller,
         ledger=SimpleNamespace(record_telegram_update=lambda *a, **kw: None),
         approval_service=None,
-        bot=SimpleNamespace(),
+        bot=bot,
     )
     query = Query()
     update = SimpleNamespace(
@@ -660,7 +667,8 @@ async def test_settings_callback_routes_claude_permission() -> None:
 
     assert controller.calls == [("/claude_mode acceptEdits", {"chat_id": 456, "user_id": 123})]
     assert query.answers == ["已切换"]
-    assert query.edits
+    assert bot.edits
+    assert bot.edits[0][:3] == (456, 10, "当前模式：允许编辑")
 
 
 @pytest.mark.asyncio

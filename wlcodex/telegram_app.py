@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 from telegram import Update
@@ -119,20 +120,44 @@ class WlCodexHandlers:
         self._ledger.set_status_message(task_id, chat_id, message_id)
 
     async def _reply_with_buttons(
-        self, update: Update, text: str, buttons: list[list[dict[str, str]]]
+        self,
+        update: Update,
+        text: str,
+        buttons: list[list[dict[str, str]]] | None = None,
     ) -> object:
-        """Reply with inline keyboard buttons if any."""
-        if buttons:
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            keyboard = [
-                [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
-                 for b in row]
-                for row in buttons
-            ]
-            return await update.effective_message.reply_text(
-                text, reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        return await update.effective_message.reply_text(text)
+        """Send a reply through the eventized Telegram delivery bridge."""
+        return await self._send_response(update, text, buttons)
+
+    async def _send_response(
+        self,
+        update: Update,
+        text: str,
+        buttons: list[list[dict[str, str]]] | None = None,
+    ) -> object:
+        message_id = await self.send_telegram(update.effective_chat.id, text, buttons)
+        return SimpleNamespace(message_id=message_id)
+
+    async def _edit_callback_message(
+        self,
+        update: Update,
+        query: object,
+        text: str,
+        buttons: list[list[dict[str, str]]] | None = None,
+    ) -> None:
+        chat = update.effective_chat
+        message = getattr(query, "message", None)
+        message_chat = getattr(message, "chat", None)
+        chat_id = (
+            chat.id
+            if chat is not None
+            else getattr(message, "chat_id", getattr(message_chat, "id", 0))
+        )
+        message_id = getattr(message, "message_id", None)
+        if chat_id and message_id is not None:
+            await self.edit_telegram(chat_id, int(message_id), text, buttons=buttons)
+            return
+        if chat_id:
+            await self.send_telegram(chat_id, text, buttons)
 
     # --- Typing and streaming ---
 
@@ -471,7 +496,10 @@ class WlCodexHandlers:
             getattr(self._config, "interaction", None), "profile", "legacy"
         )
         from wlcodex.status import render_conversation_help
-        await update.effective_message.reply_text(render_conversation_help(profile=profile_name))
+        await self.send_telegram(
+            update.effective_chat.id,
+            render_conversation_help(profile=profile_name),
+        )
 
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -480,7 +508,10 @@ class WlCodexHandlers:
             getattr(self._config, "interaction", None), "profile", "legacy"
         )
         from wlcodex.status import render_conversation_help
-        await update.effective_message.reply_text(render_conversation_help(profile=profile_name))
+        await self.send_telegram(
+            update.effective_chat.id,
+            render_conversation_help(profile=profile_name),
+        )
 
     async def task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -500,7 +531,7 @@ class WlCodexHandlers:
                 if "任务 #" in response.text or "Task #" in response.text:
                     import re
                     m = re.search(r"(?:任务|Task) #(\d+)", response.text)
-                    if m:
+                    if m and sent.message_id != SEND_FAILED:
                         task_id = int(m.group(1))
                         await self._store_status_message(
                             task_id, update.effective_chat.id, sent.message_id
@@ -514,13 +545,13 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
         response = await self._controller.handle("/status", _ctx(update))
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def continue_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -528,7 +559,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        sent = await update.effective_message.reply_text(response.text)
+        sent = await self._send_response(update, response.text)
         # Track status message for continue too
         await self._track_status_from_response(response.text, update.effective_chat.id, sent.message_id)
 
@@ -538,7 +569,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def tail(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -546,7 +577,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -554,7 +585,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def diff(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -562,7 +593,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def files(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -570,7 +601,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -578,7 +609,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def abort(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -586,7 +617,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def archive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -594,7 +625,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def fork(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -602,7 +633,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        sent = await update.effective_message.reply_text(response.text)
+        sent = await self._send_response(update, response.text)
         await self._track_status_from_response(response.text, update.effective_chat.id, sent.message_id)
 
     async def codex_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -611,13 +642,13 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
         response = await self._controller.handle("/health", _ctx(update))
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     # --- New conversation handlers ---
 
@@ -627,7 +658,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def codex_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -674,7 +705,7 @@ class WlCodexHandlers:
                 )
                 await self.send_telegram(chat_id, response.text)
         else:
-            await update.effective_message.reply_text(response.text)
+            await self.send_telegram(chat_id, response.text)
 
     async def auto_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -727,13 +758,13 @@ class WlCodexHandlers:
             )
         finally:
             typing_task.cancel()
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(chat_id, response.text)
 
     async def stop_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
         response = await self._controller.handle("/stop", _ctx(update))
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def switch_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -741,7 +772,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await update.effective_message.reply_text(response.text)
+        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def model_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -817,25 +848,8 @@ class WlCodexHandlers:
             except Exception:
                 pass
 
-        # ACK never sent or edit failed — send a fresh message.
-        if buttons:
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            keyboard = [
-                [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
-                 for b in row]
-                for row in buttons
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            try:
-                await self._bot.send_message(
-                    chat_id=chat_id, text=text, reply_markup=reply_markup,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to send result message: chat_id=%s exc=%s", chat_id, exc
-                )
-        else:
-            await self.send_telegram(chat_id, text)
+        # ACK never sent or edit failed — send a fresh eventized message.
+        await self.send_telegram(chat_id, text, buttons)
 
     # --- Callback routing ---
 
@@ -879,19 +893,9 @@ class WlCodexHandlers:
                 _ctx(update),
             )
             await query.answer("已切换")
-            if response.buttons:
-                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-                keyboard = [
-                    [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
-                     for b in row]
-                    for row in response.buttons
-                ]
-                await query.edit_message_text(
-                    response.text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-            else:
-                await query.edit_message_text(response.text)
+            await self._edit_callback_message(
+                update, query, response.text, response.buttons
+            )
         except Exception as exc:
             logger.exception("Settings callback error")
             await query.answer(f"错误：{exc}")
@@ -909,19 +913,9 @@ class WlCodexHandlers:
         try:
             response = await self._controller.handle_conversation_callback(callback)
             await query.answer("完成")
-            if response.buttons:
-                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-                keyboard = [
-                    [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
-                     for b in row]
-                    for row in response.buttons
-                ]
-                await query.edit_message_text(
-                    response.text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-            else:
-                await query.edit_message_text(response.text)
+            await self._edit_callback_message(
+                update, query, response.text, response.buttons
+            )
         except Exception as exc:
             logger.exception("Conversation callback error")
             await query.answer(f"错误：{exc}")
@@ -941,9 +935,11 @@ class WlCodexHandlers:
                 callback, self._controller._backend, self._ledger
             )
             await query.answer("完成")
-            await query.edit_message_text(
+            await self._edit_callback_message(
+                update,
+                query,
                 f"{query.message.text}\n\n处理结果：{msg}"
-                if query.message else msg
+                if query.message else msg,
             )
         except Exception as exc:
             logger.exception("Approval callback error")
@@ -962,19 +958,9 @@ class WlCodexHandlers:
         try:
             response = await self._controller.handle_waiting_callback(callback)
             await query.answer("完成")
-            if response.buttons:
-                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-                keyboard = [
-                    [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
-                     for b in row]
-                    for row in response.buttons
-                ]
-                await query.edit_message_text(
-                    response.text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-            else:
-                await query.edit_message_text(response.text)
+            await self._edit_callback_message(
+                update, query, response.text, response.buttons
+            )
         except Exception as exc:
             logger.exception("Waiting callback error")
             await query.answer(f"错误：{exc}")
@@ -992,19 +978,9 @@ class WlCodexHandlers:
         try:
             response = await self._controller.handle_worktree_done_callback(callback)
             await query.answer("完成")
-            if response.buttons:
-                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-                keyboard = [
-                    [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
-                     for b in row]
-                    for row in response.buttons
-                ]
-                await query.edit_message_text(
-                    response.text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-            else:
-                await query.edit_message_text(response.text)
+            await self._edit_callback_message(
+                update, query, response.text, response.buttons
+            )
         except Exception as exc:
             logger.exception("Worktree done callback error")
             await query.answer(f"错误：{exc}")
@@ -1017,6 +993,8 @@ class WlCodexHandlers:
     async def _track_status_from_response(
         self, text: str, chat_id: int, message_id: int
     ) -> None:
+        if message_id == SEND_FAILED:
+            return
         import re
         m = re.search(r"(?:任务|Task) #(\d+)", text)
         if m:

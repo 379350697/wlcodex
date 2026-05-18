@@ -4,6 +4,7 @@ import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
+import ast
 
 import pytest
 
@@ -52,7 +53,7 @@ def _install_telegram_stubs() -> None:
     sys.modules.setdefault("telegram.ext", ext)
 
 
-def _handlers(tmp_path: Path):
+def _handlers(tmp_path: Path, *, controller: object | None = None, bot: object | None = None):
     _install_telegram_stubs()
     from wlcodex.db import Ledger
     from wlcodex.runtime_event_store import RuntimeEventStore
@@ -68,10 +69,37 @@ def _handlers(tmp_path: Path):
             edit_min_interval_seconds=1.0,
         ),
     )
-    controller = SimpleNamespace()
+    controller = controller or SimpleNamespace()
     approval = SimpleNamespace()
-    bot = SimpleNamespace()
+    bot = bot or SimpleNamespace()
     return WlCodexHandlers(config, controller, ledger, approval, bot, store), ledger, store
+
+
+def test_handlers_do_not_bypass_eventized_delivery() -> None:
+    source = Path("wlcodex/telegram_app.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    violations: list[str] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or node.name != "WlCodexHandlers":
+            continue
+        for method in node.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for call in ast.walk(method):
+                if not isinstance(call, ast.Call):
+                    continue
+                func = call.func
+                if isinstance(func, ast.Attribute) and func.attr == "reply_text":
+                    violations.append(f"{method.name}:{call.lineno}:reply_text")
+                if (
+                    method.name != "edit_telegram"
+                    and isinstance(func, ast.Attribute)
+                    and func.attr == "edit_message_text"
+                ):
+                    violations.append(f"{method.name}:{call.lineno}:edit_message_text")
+
+    assert violations == []
 
 
 def test_telegram_delivery_uses_active_runtime_correlation(tmp_path: Path) -> None:
@@ -159,3 +187,45 @@ async def test_callback_router_appends_callback_received_event(tmp_path: Path) -
         and event.payload["callback_data"] == "unknown:value"
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_health_delivery_timeout_is_eventized(tmp_path: Path) -> None:
+    _install_telegram_stubs()
+    from telegram.error import TimedOut
+    from wlcodex.runtime_events import EventType
+
+    class Controller:
+        async def handle(self, _text: str, _ctx: dict[str, object]) -> object:
+            return SimpleNamespace(text="health ok", buttons=[])
+
+    class Bot:
+        async def send_message(self, **_kwargs: object) -> object:
+            raise TimedOut("network timeout")
+
+    class Message:
+        text = "/health"
+
+        async def reply_text(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("health must use send_telegram")
+
+    handlers, _ledger, store = _handlers(
+        tmp_path,
+        controller=Controller(),
+        bot=Bot(),
+    )
+    update = SimpleNamespace(
+        update_id=2,
+        effective_user=SimpleNamespace(id=456),
+        effective_chat=SimpleNamespace(id=123, type="private"),
+        effective_message=Message(),
+    )
+
+    await handlers.health(update, SimpleNamespace())
+
+    row = store._conn.execute(
+        "SELECT event_type, payload_json FROM runtime_events ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert row["event_type"] == EventType.TELEGRAM_MESSAGE_FAILED
+    assert "health ok" in row["payload_json"]
