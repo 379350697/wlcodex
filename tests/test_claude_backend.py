@@ -57,6 +57,8 @@ def test_claude_config_defaults() -> None:
     assert config.startup_timeout_seconds == 15.0
     assert config.request_timeout_seconds == 600.0
     assert config.permission_mode == "acceptEdits"
+    assert config.model == "deepseek4pro"
+    assert config.effort == "max"
 
 
 @pytest.mark.asyncio
@@ -97,6 +99,37 @@ async def test_claude_send_passes_current_permission_mode(tmp_path: Path) -> Non
     assert result.exit_code == 0
     assert "--permission-mode" in result.text
     assert "acceptEdits" in result.text
+    assert "--model" in result.text
+    assert "deepseek4pro" in result.text
+    assert "--effort" in result.text
+    assert "max" in result.text
+
+
+@pytest.mark.asyncio
+async def test_claude_send_passes_configured_model_and_effort(tmp_path: Path) -> None:
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            binary=str(fake_claude),
+            model="deepseek4pro",
+            effort="max",
+        )
+    )
+
+    result = await backend.send(AgentRequest(
+        prompt="hello",
+        workspace_path=str(tmp_path),
+    ))
+
+    assert result.exit_code == 0
+    assert "--model" in result.text
+    assert "deepseek4pro" in result.text
+    assert "--effort" in result.text
+    assert "max" in result.text
 
 
 @pytest.mark.asyncio

@@ -93,6 +93,8 @@ class ClaudeConfig:
     startup_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 600.0
     permission_mode: str = "acceptEdits"
+    model: str = "deepseek4pro"
+    effort: str = "max"
 
 
 @dataclass(frozen=True)
@@ -253,6 +255,8 @@ def load_config(path: Path) -> AppConfig:
             startup_timeout_seconds=float(claude_raw.get("startup_timeout_seconds", 15.0)),
             request_timeout_seconds=float(claude_raw.get("request_timeout_seconds", 600.0)),
             permission_mode=claude_permission_mode,
+            model=str(claude_raw.get("model", "deepseek4pro")),
+            effort=str(claude_raw.get("effort", "max")),
         ),
         context_budget=ContextBudgetConfig(
             codex_analysis_tokens=int(budget_raw.get("codex_analysis_tokens", 2500)),

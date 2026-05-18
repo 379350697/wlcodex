@@ -209,10 +209,14 @@ def main() -> None:
             startup_timeout_seconds=config.claude.startup_timeout_seconds,
             request_timeout_seconds=config.claude.request_timeout_seconds,
             permission_mode=claude_permission_mode,
+            model=config.claude.model,
+            effort=config.claude.effort,
         ), permission_state=claude_permission_state)
         logger.info(
-            "Claude backend enabled (binary: %s, permission: %s)",
+            "Claude backend enabled (binary: %s, model: %s, effort: %s, permission: %s)",
             config.claude.binary,
+            config.claude.model,
+            config.claude.effort,
             claude_permission_label(claude_permission_mode),
         )
     else:

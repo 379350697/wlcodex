@@ -38,6 +38,8 @@ path = "/tmp/wlcodex"
     assert config.conversation.default_mode == "chief_engineer"
     assert config.claude.enabled is False
     assert config.claude.permission_mode == "acceptEdits"
+    assert config.claude.model == "deepseek4pro"
+    assert config.claude.effort == "max"
     assert config.context_budget.codex_to_claude_tokens == 1500
     assert config.orchestration.max_verify_rounds == 3
     assert config.streaming.edit_min_interval_seconds == 1.0
@@ -333,6 +335,8 @@ diff_max_chars = 3500
 [claude]
 enabled = true
 binary = "claude"
+model = "deepseek4pro"
+effort = "max"
 permission_mode = "只规划"
 
 [[workspaces]]
@@ -346,3 +350,5 @@ allow_write = true
     config = load_config(config_path)
 
     assert config.claude.permission_mode == "plan"
+    assert config.claude.model == "deepseek4pro"
+    assert config.claude.effort == "max"

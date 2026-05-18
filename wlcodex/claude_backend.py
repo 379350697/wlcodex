@@ -28,6 +28,8 @@ class ClaudeConfig:
     startup_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 600.0
     permission_mode: str = "acceptEdits"
+    model: str = "deepseek4pro"
+    effort: str = "max"
 
 
 class ClaudeBackend:
@@ -182,12 +184,17 @@ class ClaudeBackend:
         return _ClaudeHealth(self._config.enabled, self._config.binary)
 
     def _prompt_args(self, prompt: str) -> list[str]:
-        return [
+        args = [
             "-p",
             prompt,
             "--permission-mode",
             normalize_claude_permission_mode(self.permission_mode),
         ]
+        if self._config.model:
+            args.extend(["--model", self._config.model])
+        if self._config.effort:
+            args.extend(["--effort", self._config.effort])
+        return args
 
 
 @dataclass
