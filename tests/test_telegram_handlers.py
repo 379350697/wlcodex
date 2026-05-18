@@ -68,7 +68,7 @@ allow_write = true
 
     required = {
         "start", "help", "task", "tasks", "status", "continue", "steer",
-        "tail", "events", "diff", "files", "pause", "abort", "archive",
+        "recent", "tail", "events", "diff", "files", "pause", "abort", "archive",
         "fork", "codex_sessions", "health",
     }
     missing = required - registered

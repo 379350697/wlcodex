@@ -135,6 +135,11 @@ class ModelCommand:
 
 
 @dataclass(frozen=True)
+class RecentCommand:
+    n: int = 5
+
+
+@dataclass(frozen=True)
 class VerifyCommand:
     prompt: str = ""
 
@@ -164,6 +169,7 @@ ParsedCommand = (
     | StopCurrentCommand
     | SwitchWorkspaceCommand
     | ModelCommand
+    | RecentCommand
     | VerifyCommand
 )
 
@@ -233,6 +239,17 @@ def parse_command(text: str) -> ParsedCommand:
     if stripped.startswith("/model "):
         model_name = stripped.split(maxsplit=1)[1].strip()
         return ModelCommand(model_name=model_name)
+
+    if stripped == "/recent":
+        return RecentCommand()
+    if stripped.startswith("/recent "):
+        arg = stripped.split(maxsplit=1)[1].strip()
+        if not arg.isdigit():
+            raise ParseError("用法：/recent 或 /recent <n>（n 为 1-20 的整数）")
+        n = int(arg)
+        if n < 1 or n > 20:
+            raise ParseError("n 的取值范围为 1-20")
+        return RecentCommand(n=n)
 
     if stripped == "/verify":
         return VerifyCommand()

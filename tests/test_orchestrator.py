@@ -156,6 +156,13 @@ def test_verification_decision_parse_retry() -> None:
     assert d.decision == "retry"
 
 
+def test_verification_decision_parse_retry_overrides_negative_chinese_pass_phrase() -> None:
+    d = VerificationDecision.parse(
+        "decision: retry\n\n本次实现不能验收通过。相关测试不是全绿。"
+    )
+    assert d.decision == "retry"
+
+
 def test_verification_decision_parse_stop() -> None:
     d = VerificationDecision.parse("decision: stop\n无法完成")
     assert d.decision == "stop"

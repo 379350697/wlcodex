@@ -278,20 +278,28 @@ class VerificationDecision:
         required_fix = ""
 
         text_lower = text.lower()
-        if "decision: pass" in text_lower or "验收通过" in text:
-            decision = "pass"
-        elif "decision: retry" in text_lower or "需要修改" in text:
+        if "decision: retry" in text_lower:
             decision = "retry"
-            # Extract the required fix
             if "required_fix:" in text_lower:
                 fix_idx = text_lower.find("required_fix:")
                 required_fix = text[fix_idx:].split("\n")[0]
-            elif "需要" in text:
+            else:
                 required_fix = text
-        elif "decision: stop" in text_lower or "无法完成" in text:
+        elif "decision: pass" in text_lower:
+            decision = "pass"
+        elif "decision: stop" in text_lower:
             decision = "stop"
-        elif "decision: need_user" in text_lower or "需要用户" in text:
+        elif "decision: need_user" in text_lower:
             decision = "need_user"
+        elif "需要修改" in text or "不能验收通过" in text:
+            decision = "retry"
+            required_fix = text
+        elif "无法完成" in text:
+            decision = "stop"
+        elif "需要用户" in text:
+            decision = "need_user"
+        elif "验收通过" in text:
+            decision = "pass"
 
         return cls(decision=decision, summary=summary, required_fix=required_fix)
 

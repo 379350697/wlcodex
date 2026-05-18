@@ -15,7 +15,7 @@ def test_all_primary_commands_in_order() -> None:
     names = [cmd[0] for cmd in commands]
     assert names == [
         "new", "codex", "claude", "auto", "stop",
-        "status", "sessions", "switch", "model", "claude_mode",
+        "status", "recent", "sessions", "switch", "model", "claude_mode",
         "diff", "files", "verify", "health", "help",
     ]
 
@@ -34,7 +34,9 @@ def test_natural_bot_commands_are_compact() -> None:
     commands = build_bot_commands(profile="natural")
     names = [cmd[0] for cmd in commands]
 
-    assert names == ["new", "stop", "status", "model", "claude_mode", "diff", "help"]
+    assert names == [
+        "new", "stop", "status", "recent", "model", "claude_mode", "diff", "help"
+    ]
 
 
 def test_legacy_bot_commands_keep_operator_routes() -> None:
@@ -54,6 +56,13 @@ def test_wlcodex_handlers_has_streaming_renderer_factory() -> None:
     from wlcodex.telegram_app import WlCodexHandlers
     assert hasattr(WlCodexHandlers, "create_streaming_renderer")
     assert callable(WlCodexHandlers.create_streaming_renderer)
+
+
+def test_wlcodex_handlers_has_recent_command() -> None:
+    from wlcodex.telegram_app import WlCodexHandlers
+
+    assert hasattr(WlCodexHandlers, "recent_cmd")
+    assert callable(WlCodexHandlers.recent_cmd)
 
 
 def test_wlcodex_handlers_has_typing_indicator() -> None:

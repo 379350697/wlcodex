@@ -182,6 +182,7 @@ def render_help() -> str:
   /status — 查看当前对话和任务
   /sessions — 查看会话列表
   /switch <工作区> — 切换工作区
+  /recent — 最近对话摘要
   /model — 切换或查看当前模型
   /claude_mode — 切换 Claude 权限模式
   /diff — 查看变更
@@ -272,7 +273,7 @@ def render_conversation_help(profile: str = "natural") -> str:
                 "",
                 "直接发消息就能继续当前对话。",
                 "/new 新对话",
-                "/status 看状态",
+                "/status 看状态 · /recent 最近对话",
                 "/diff 看变更",
                 "/model 模型 · /claude_mode Claude 权限",
                 "/help 帮助",
@@ -295,6 +296,7 @@ def render_conversation_help(profile: str = "natural") -> str:
   • /switch <workspace> — 切换工作区
   • /model — 切换或查看当前模型
   • /claude_mode — 切换 Claude 权限模式
+  • /recent — 最近对话摘要
   • /diff — 查看变更
   • /files — 相关文件
   • /health — 系统健康
@@ -336,3 +338,50 @@ def render_agent_result_summary(result: AgentRun) -> str:
     if result.token_input or result.token_output:
         parts.append(f"Token：{result.token_input} 输入 / {result.token_output} 输出")
     return "\n".join(parts)
+
+
+AGENT_LABELS: dict[str, str] = {
+    "codex": "Codex",
+    "claude": "Claude",
+}
+
+ORCH_STATUS_LABELS: dict[str, str] = {
+    "running": "运行中",
+    "passed": "已通过",
+    "failed": "已失败",
+    "needs_user": "等待用户",
+    "aborted": "已中止",
+}
+
+
+def render_recent_list(
+    summaries: list[tuple[ConversationSession, AgentRun | None, OrchestrationRun | None]],
+    limit: int = 5,
+) -> str:
+    """Render /recent output — summary only, no token/prompt/completion details."""
+    if not summaries:
+        return "暂无历史对话。发送消息或用 /new 开始新对话吧。"
+
+    lines = [f"最近 {len(summaries)} 条对话："]
+    for session, agent_run, orch_run in summaries:
+        mode_label = MODE_LABELS.get(session.mode, session.mode)
+        line = f"  #{session.id} [{mode_label}] {_trim(session.title, 60)} · {session.workspace_alias}"
+        lines.append(line)
+
+        # Latest agent run
+        if agent_run:
+            agent_label = AGENT_LABELS.get(agent_run.agent, agent_run.agent)
+            lines.append(f"    ↳ {agent_label} / {agent_run.role} / {agent_run.status}")
+        else:
+            lines.append("    ↳ 无运行记录")
+
+        # Latest orchestration run
+        if orch_run:
+            orch_status = ORCH_STATUS_LABELS.get(orch_run.status, orch_run.status)
+            lines.append(f"    ↳ 编排：{orch_status}")
+        else:
+            lines.append("    ↳ 编排：无记录")
+
+    lines.append("")
+    lines.append(f"显示最近 {len(summaries)} 条（最多 {limit} 条）。用 /recent <n> 查看更多。")
+    return "\n".join(lines)

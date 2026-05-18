@@ -57,6 +57,7 @@ from wlcodex.router import (
     NewConversationCommand,
     ParseError,
     PauseCommand,
+    RecentCommand,
     ShowTaskCommand,
     StartTaskCommand,
     SteerCommand,
@@ -70,6 +71,7 @@ from wlcodex.status import (
     MODE_LABELS,
     render_conversation_help,
     render_conversation_status,
+    render_recent_list,
     render_session_list,
 )
 from wlcodex.models import ConversationMode
@@ -418,6 +420,9 @@ class CommandController:
 
             elif isinstance(command, ModelCommand):
                 return await self.handle_model(command, telegram_context)
+
+            elif isinstance(command, RecentCommand):
+                return await self.handle_recent(command, telegram_context)
 
             elif isinstance(command, VerifyCommand):
                 return await self.handle_verify(command, telegram_context)
@@ -1801,6 +1806,18 @@ class CommandController:
             if current:
                 return ControllerResponse(f"当前偏好模型：{current}\n使用 /model <name> 切换。")
             return ControllerResponse("当前未设置偏好模型。使用 /model <name> 切换。")
+
+    async def handle_recent(
+        self, command: RecentCommand, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        summaries = self._ledger.list_recent_conversation_summaries(
+            chat_id, limit=command.n
+        )
+        return ControllerResponse(render_recent_list(summaries, limit=command.n))
 
     async def handle_worktree_done_callback(
         self, callback: WaitingCallback

@@ -336,6 +336,14 @@ class WlCodexHandlers:
         response = await self._controller.handle("/tasks", _ctx(update))
         await update.effective_message.reply_text(response.text)
 
+    async def recent_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        await update.effective_message.reply_text(response.text)
+
     async def continue_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
@@ -861,6 +869,7 @@ def build_application(
     application.add_handler(CommandHandler("task", handlers.task))
     application.add_handler(CommandHandler("tasks", handlers.tasks_list))
     application.add_handler(CommandHandler("status", handlers.status))
+    application.add_handler(CommandHandler("recent", handlers.recent_cmd))
     application.add_handler(CommandHandler("continue", handlers.continue_cmd))
     application.add_handler(CommandHandler("steer", handlers.steer))
     application.add_handler(CommandHandler("tail", handlers.tail))
