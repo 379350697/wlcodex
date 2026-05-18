@@ -287,13 +287,52 @@ def _map_approval_requested(
     src: CodexRuntimeSource, payload: dict
 ) -> list[RuntimeEvent]:
     approval_id = payload.get("codexRequestId", "")
+    summary = _build_approval_summary(payload)
     return [src._make(
         EventType.APPROVAL_REQUESTED,
-        payload,
+        {
+            **payload,
+            "summary": summary,
+        },
         aggregate_type=AggregateType.APPROVAL,
         aggregate_id=str(approval_id) if approval_id else None,
         visibility=Visibility.USER,
     )]
+
+
+def _build_approval_summary(payload: dict) -> str:
+    existing = str(payload.get("summary", ""))
+    if existing:
+        return existing
+    kind = str(payload.get("kind", ""))
+    command = payload.get("command", "")
+    if isinstance(command, list):
+        command = " ".join(str(p) for p in command)
+    command_str = str(command) if command else ""
+    reason = str(payload.get("reason", ""))
+    if kind == "command" or command_str:
+        summary = f"Run: {command_str}".strip() if command_str else "Run command"
+        if reason:
+            summary = f"{summary}\nReason: {reason}"
+        return summary
+    if kind == "file_change":
+        file_path = str(payload.get("filePath", payload.get("path", "")))
+        changed_files = payload.get("changedFiles", payload.get("fileChanges", ""))
+        if isinstance(changed_files, dict):
+            files = ", ".join(sorted(changed_files.keys())[:6])
+            summary = f"Apply patch: {files}" if files else "Apply patch"
+        elif isinstance(changed_files, list):
+            summary = f"Apply patch: {', '.join(str(f) for f in changed_files[:6])}"
+        elif file_path:
+            summary = f"Edit file: {file_path}"
+        else:
+            summary = "Apply patch"
+        if reason:
+            summary = f"{summary}\nReason: {reason}"
+        return summary
+    if kind == "permissions":
+        return str(payload.get("summary", "Permission request"))
+    return command_str or reason or str(payload.get("kind", "Approval required"))
 
 
 def _map_approval_resolved(

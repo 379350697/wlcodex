@@ -360,7 +360,68 @@ def test_approval_requested_preserves_original_payload() -> None:
         "responseSchema": "legacy_review_decision",
     }
     events = src.map_event(BackendEvent("approval_requested", payload))
-    assert events[0].payload == payload
+    # Summary is always present (constructed if missing); existing summary is kept.
+    assert events[0].payload["summary"] == "Apply patch: main.py"
+    assert events[0].payload["codexRequestId"] == "req-2"
+
+
+def test_approval_requested_constructs_summary_from_command() -> None:
+    """When no summary is in the backend payload, runtime event gets a constructed one."""
+    src = _source()
+    events = src.map_event(BackendEvent("approval_requested", {
+        "codexRequestId": "req-cmd",
+        "kind": "command",
+        "command": "pytest tests/ -q",
+    }))
+    assert len(events) == 1
+    assert events[0].payload["summary"] == "Run: pytest tests/ -q"
+    assert events[0].payload["command"] == "pytest tests/ -q"
+
+
+def test_approval_requested_constructs_summary_from_command_and_reason() -> None:
+    src = _source()
+    events = src.map_event(BackendEvent("approval_requested", {
+        "codexRequestId": "req-cmd-r",
+        "kind": "command",
+        "command": "rm -rf /tmp/cache",
+        "reason": "清理缓存文件",
+    }))
+    assert len(events) == 1
+    assert events[0].payload["summary"] == "Run: rm -rf /tmp/cache\nReason: 清理缓存文件"
+
+
+def test_approval_requested_constructs_summary_from_command_list() -> None:
+    src = _source()
+    events = src.map_event(BackendEvent("approval_requested", {
+        "codexRequestId": "req-cmd-list",
+        "kind": "command",
+        "command": ["git", "commit", "-m", "fix"],
+    }))
+    assert len(events) == 1
+    assert events[0].payload["summary"] == "Run: git commit -m fix"
+
+
+def test_approval_requested_constructs_summary_for_file_change() -> None:
+    src = _source()
+    events = src.map_event(BackendEvent("approval_requested", {
+        "codexRequestId": "req-file",
+        "kind": "file_change",
+        "filePath": "src/main.py",
+    }))
+    assert len(events) == 1
+    assert events[0].payload["summary"] == "Edit file: src/main.py"
+
+
+def test_approval_requested_fallback_summary_never_empty() -> None:
+    """Even without command/reason, summary must not be empty."""
+    src = _source()
+    events = src.map_event(BackendEvent("approval_requested", {
+        "codexRequestId": "req-empty",
+        "kind": "command",
+    }))
+    assert len(events) == 1
+    summary = str(events[0].payload.get("summary", ""))
+    assert summary, f"Expected non-empty summary, got {summary!r}"
 
 
 # ---------------------------------------------------------------------------

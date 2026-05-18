@@ -607,7 +607,13 @@ class RuntimeProjector:
 
         if etype == EventType.APPROVAL_REQUESTED:
             kind = str(payload.get("kind", "command"))
-            summary = str(payload.get("summary", ""))
+            summary = str(
+                payload.get("summary")
+                or payload.get("reason")
+                or payload.get("command")
+                or payload.get("kind")
+                or ""
+            )
             cmd = str(payload.get("command", payload.get("command_json", "{}")))
             self._conn.execute(
                 """

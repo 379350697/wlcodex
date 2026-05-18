@@ -398,7 +398,13 @@ class ChiefEngineerOrchestrator:
                 result.verification_summary = decision.summary
                 return result
             elif decision.decision == "retry":
-                # Update analysis with the feedback for next iteration
+                if round_num >= self._max_verify_rounds:
+                    result.status = "failed"
+                    result.verification_summary = (
+                        f"Max verification rounds ({self._max_verify_rounds}) reached. "
+                        f"Last verification: {decision.required_fix[:200]}"
+                    )
+                    return result
                 analysis = f"Previous verification failed: {decision.required_fix}\n\nOriginal analysis: {analysis}"
                 continue
 
@@ -775,6 +781,27 @@ class ChiefEngineerOrchestrator:
                 )
                 return
             elif decision.decision == "retry":
+                if round_num >= self._max_verify_rounds:
+                    result.status = "failed"
+                    result.verification_summary = (
+                        f"Max verification rounds ({self._max_verify_rounds}) reached. "
+                        f"Last verification: {decision.required_fix[:200]}"
+                    )
+                    yield OrchestrationProgress(
+                        phase=OrchestrationProgress.FAILED,
+                        text=f"已达最大验收轮次（{self._max_verify_rounds}），最终验收仍要求返工。",
+                        full_text=result.verification_summary,
+                        agent="codex",
+                        round_num=round_num,
+                    )
+                    yield OrchestrationProgress(
+                        phase=OrchestrationProgress.COMPLETE,
+                        text="",
+                        agent="codex",
+                        result_status="failed",
+                        round_num=round_num,
+                    )
+                    return
                 analysis = f"Previous verification failed: {decision.required_fix}\n\nOriginal analysis: {analysis}"
                 continue
 

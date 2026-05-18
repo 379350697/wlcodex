@@ -505,6 +505,59 @@ class TestApprovalProjection:
         ).fetchone()
         assert row["status"] == "expired"
 
+    def test_approval_summary_fallback_to_reason(self, tmp_path: Path):
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.APPROVAL_REQUESTED, AggregateType.APPROVAL,
+                            "appr-sum-1", task_id=10,
+                            payload={"codex_request_id": "req-sum-1",
+                                     "kind": "command",
+                                     "reason": "需要清理缓存"},
+                            event_id=1))
+        projector.apply(store.get_by_id(1))
+
+        row = ledger._conn.execute(
+            "SELECT * FROM approval_requests WHERE codex_request_id = ?",
+            ("req-sum-1",)
+        ).fetchone()
+        assert row is not None
+        assert row["summary"] == "需要清理缓存"
+
+    def test_approval_summary_fallback_to_command(self, tmp_path: Path):
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.APPROVAL_REQUESTED, AggregateType.APPROVAL,
+                            "appr-sum-2", task_id=11,
+                            payload={"codex_request_id": "req-sum-2",
+                                     "kind": "command",
+                                     "command": "pytest tests/"},
+                            event_id=1))
+        projector.apply(store.get_by_id(1))
+
+        row = ledger._conn.execute(
+            "SELECT * FROM approval_requests WHERE codex_request_id = ?",
+            ("req-sum-2",)
+        ).fetchone()
+        assert row is not None
+        assert row["summary"] == "pytest tests/"
+
+    def test_approval_summary_not_empty_when_no_fields(self, tmp_path: Path):
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.APPROVAL_REQUESTED, AggregateType.APPROVAL,
+                            "appr-sum-3", task_id=12,
+                            payload={"codex_request_id": "req-sum-3",
+                                     "kind": "permissions"},
+                            event_id=1))
+        projector.apply(store.get_by_id(1))
+
+        row = ledger._conn.execute(
+            "SELECT * FROM approval_requests WHERE codex_request_id = ?",
+            ("req-sum-3",)
+        ).fetchone()
+        assert row is not None
+        assert row["summary"], f"Expected non-empty summary, got {row['summary']!r}"
+
 
 # ---------------------------------------------------------------------------
 # Task events compat projection

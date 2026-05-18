@@ -208,6 +208,9 @@ def build_claude_handoff_packet(
     # Telegram transcript must NOT be included in the packet
     steps = implementation_steps or []
     claude_runtime_constraints = [
+        "你已经进入 Chief Engineer 工作流的实施阶段。Codex 已审批方案，不需再次请示计划审批。",
+        "立即落地实施所有代码修改：修改文件、创建测试、运行命令。不要输出计划或问是否批准此计划。",
+        "若实现遇到不可解决的障碍才输出阻塞原因，否则必须产生实际 diff/文件变更。",
         "长时间测试/构建/命令不要用一个前台 Bash 卡住；使用 run_in_background 并用 BashOutput 查询进度。",
         "执行过程中给出可流式输出的简短进度，避免长时间静默。",
     ]

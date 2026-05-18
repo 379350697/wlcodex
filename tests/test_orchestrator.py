@@ -78,7 +78,7 @@ async def test_orchestrator_stops_on_max_rounds() -> None:
     orchestrator = ChiefEngineerOrchestrator(fake_codex, fake_claude, max_verify_rounds=3)
     result = await orchestrator.run("修复登录 bug")
 
-    assert result.status == "needs_user"
+    assert result.status == "failed"
     assert "Max verification rounds" in result.verification_summary
 
 
@@ -737,3 +737,88 @@ async def test_run_streaming_fails_on_claude_error_delta() -> None:
     assert "binary missing" in failed_events[0].text
     assert OrchestrationProgress.VERIFY_STARTED not in phases
     assert len(codex.prompts) == 1  # analysis only; no verification after Claude error
+
+
+# ---------------------------------------------------------------------------
+# Max verify rounds retry → FAILED convergence (Bug 3 fix)
+# ---------------------------------------------------------------------------
+
+
+class PersistentRetryCodex:
+    """Fake Codex that always returns retry for verification."""
+
+    def __init__(self) -> None:
+        self.prompts: list[tuple[str, str]] = []
+        self.call_count = 0
+
+    async def send_codex_prompt(
+        self, workspace_path: str, prompt: str, **kwargs
+    ) -> str:
+        self.prompts.append((workspace_path, prompt))
+        self.call_count += 1
+        if self.call_count == 1:
+            return "Root cause: null check needed.\nfiles_to_touch: [auth.py]\nimplementation_steps: [add null check]"
+        # All verification calls: always retry
+        return "decision: retry\nsummary: Still missing tests.\nrequired_fix: Add edge case tests for null input."
+
+
+@pytest.mark.asyncio
+async def test_max_verify_rounds_with_persistent_retry_yields_failed() -> None:
+    """When max verify rounds reached and Codex still says retry, yield FAILED + COMPLETE(failed)."""
+    from wlcodex.orchestrator import OrchestrationProgress
+
+    codex = PersistentRetryCodex()
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=3)
+    events = []
+    async for progress in orchestrator.run_streaming("修复登录 bug"):
+        events.append(progress)
+
+    phases = [e.phase for e in events]
+    failed_events = [e for e in events if e.phase == OrchestrationProgress.FAILED]
+    complete_events = [e for e in events if e.phase == OrchestrationProgress.COMPLETE]
+
+    # Must have a FAILED event when max rounds reached
+    assert failed_events, f"Expected FAILED event, got phases: {phases}"
+    assert "最大验收轮次" in failed_events[0].text
+    # COMPLETE must carry result_status='failed'
+    assert complete_events
+    assert complete_events[-1].result_status == "failed"
+    # Must NOT end with passed
+    assert not any(e.result_status == "passed" for e in complete_events)
+
+
+@pytest.mark.asyncio
+async def test_max_verify_rounds_does_not_start_extra_implementation() -> None:
+    """After max verify rounds with retry, no additional Claude implementation should run."""
+    codex = PersistentRetryCodex()
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=2)
+    async for _ in orchestrator.run_streaming("修复登录 bug"):
+        pass
+
+    # Claude should be called exactly max_verify_rounds times (2), not more
+    assert len(claude.prompts) == 2
+
+
+# ---------------------------------------------------------------------------
+# Claude implementation must not plan-only (Bug 2 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_handoff_packet_includes_implementation_instruction() -> None:
+    """The Claude handoff packet must explicitly instruct immediate implementation."""
+    from wlcodex.context_packets import build_claude_handoff_packet
+
+    packet = build_claude_handoff_packet(
+        user_goal="修复登录 bug",
+        codex_analysis="Root cause: null check needed in auth.py",
+    )
+    rendered = packet.render()
+
+    # Must include the implementation-phase constraint
+    assert "实施阶段" in rendered or "implementation" in rendered.lower()
+    assert "立即" in rendered or "immediately" in rendered.lower() or "不要输出计划" in rendered
+    assert "diff" in rendered.lower() or "文件变更" in rendered or "实际" in rendered

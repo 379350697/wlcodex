@@ -539,17 +539,43 @@ class AppServerCodexBackend:
     # --- Server request handlers (approval) — held until resolve_approval ---
 
     async def _on_command_approval_request(self, params: dict, request_id: str) -> None:
+        command = params.get("command", "")
+        if isinstance(command, list):
+            command_text = " ".join(str(part) for part in command)
+        else:
+            command_text = str(command)
+        reason = params.get("reason")
+        summary = f"Run: {command_text}".strip() if command_text else "Run command"
+        if reason:
+            summary = f"{summary}\nReason: {reason}"
         self._emit(BackendEvent("approval_requested", {
             **{k: v for k, v in params.items()},
             "codexRequestId": request_id,
             "kind": "command",
+            "summary": summary,
+            "command": command_text,
         }))
 
     async def _on_file_change_approval_request(self, params: dict, request_id: str) -> None:
+        file_changes = params.get("fileChanges", params.get("changedFiles", {}))
+        if isinstance(file_changes, dict):
+            changed_files = sorted(file_changes.keys())
+        elif isinstance(file_changes, list):
+            changed_files = [str(f) for f in file_changes]
+        else:
+            changed_files = []
+        reason = params.get("reason")
+        files = ", ".join(str(path) for path in changed_files[:6])
+        if len(changed_files) > 6:
+            files = f"{files}, +{len(changed_files) - 6} more"
+        summary = f"Apply patch: {files}" if files else "Apply patch"
+        if reason:
+            summary = f"{summary}\nReason: {reason}"
         self._emit(BackendEvent("approval_requested", {
             **{k: v for k, v in params.items()},
             "codexRequestId": request_id,
             "kind": "file_change",
+            "summary": summary,
         }))
 
     async def _on_permissions_approval_request(self, params: dict, request_id: str) -> None:
