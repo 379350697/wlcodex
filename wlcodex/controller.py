@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import inspect
 import logging
 import subprocess
 import uuid
@@ -68,10 +67,12 @@ from wlcodex.router import (
     PauseCommand,
     ShowTaskCommand,
     StartTaskCommand,
+    StatusCommand,
     SteerCommand,
     StopCurrentCommand,
     SwitchWorkspaceCommand,
     TailCommand,
+    TraceCommand,
     VerifyCommand,
     parse_command,
 )
@@ -82,7 +83,6 @@ from wlcodex.status import (
     render_session_list,
 )
 from wlcodex.models import ConversationMode
-from wlcodex.orchestration_progress_text import render_user_progress_text
 from wlcodex.status import (
     render_task_card,
     render_task_list,
@@ -114,18 +114,6 @@ logger = logging.getLogger(__name__)
 HELP_TEXT = render_conversation_help()
 
 
-def _accepts_keyword(func: object, name: str) -> bool:
-    try:
-        signature = inspect.signature(func)
-    except (TypeError, ValueError):
-        return False
-    return any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        or parameter.name == name
-        for parameter in signature.parameters.values()
-    )
-
-
 def _is_lightweight_greeting(text: str) -> bool:
     normalized = text.strip().lower()
     normalized = normalized.strip(" \t\r\n.!?。！？~～")
@@ -145,38 +133,6 @@ class ControllerResponse:
     text: str
     buttons: list[list[dict[str, str]]] = field(default_factory=list)
     already_rendered: bool = False
-
-
-class _TaskBoundCodexBackend:
-    def __init__(self, backend: object, service: TaskService, task_id: int) -> None:
-        self._backend = backend
-        self._service = service
-        self._task_id = task_id
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._backend, name)
-
-    def _bind_thread(self, thread_id: str) -> None:
-        self._service.set_task_thread(self._task_id, thread_id)
-
-    async def send_codex_prompt(
-        self,
-        workspace_path: str,
-        prompt: str,
-        **kwargs: object,
-    ) -> str:
-        send_codex_prompt = getattr(self._backend, "send_codex_prompt")
-        supported_kwargs = {
-            key: value
-            for key, value in kwargs.items()
-            if _accepts_keyword(send_codex_prompt, key)
-        }
-        return await send_codex_prompt(
-            workspace_path,
-            prompt,
-            on_thread_created=self._bind_thread,
-            **supported_kwargs,
-        )
 
 
 class CommandController:
@@ -272,6 +228,51 @@ class CommandController:
                                 self._service.waiting_position(t.id),
                             )
                 return ControllerResponse(render_task_list(tasks, waiting_meta=wmeta or None))
+
+            elif isinstance(command, StatusCommand):
+                if self._ledger is not None and telegram_context:
+                    chat_id = telegram_context.get("chat_id", 0)
+                    active = self._ledger.get_active_conversation(chat_id)
+                    if active is not None and self._store is not None:
+                        from wlcodex.runtime_diagnostics import (
+                            build_runtime_status,
+                            format_status_display,
+                        )
+
+                        runtime_status = build_runtime_status(
+                            self._store,
+                            active.id,
+                        )
+                        return ControllerResponse(
+                            format_status_display(runtime_status)
+                        )
+                    if active is not None:
+                        runs = self._ledger.list_agent_runs(active.id, limit=1)
+                        latest_run = runs[0] if runs else None
+                        orch_runs = self._ledger.list_orchestration_runs(active.id, limit=1)
+                        orch_run = orch_runs[0] if orch_runs else None
+                        return ControllerResponse(
+                            render_conversation_status(
+                                active, latest_run=latest_run, orch_run=orch_run
+                            )
+                        )
+                tasks = self._service.list_tasks()
+                return ControllerResponse(render_task_list(tasks))
+
+            elif isinstance(command, TraceCommand):
+                if self._ledger is None or self._store is None:
+                    return ControllerResponse("运行时事件记录不可用。")
+                chat_id = telegram_context.get("chat_id", 0) if telegram_context else 0
+                active = self._ledger.get_active_conversation(chat_id)
+                if active is None:
+                    return ControllerResponse("暂无活跃对话。")
+                result = self._inspector.trace_runtime(
+                    self._store,
+                    active.id,
+                    limit=command.limit,
+                    visibility_filter="operator",
+                )
+                return ControllerResponse(f"{result.title}\n\n{result.body}")
 
             elif isinstance(command, ShowTaskCommand):
                 task = self._service.get_task(command.task_id)
@@ -696,6 +697,14 @@ class CommandController:
             telegram_chat_id=chat_id,
         )
         self._ledger.set_conversation_active_task(active.id, task.id)
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=active.id,
+            agent="codex",
+            role="analysis",
+            hidden_task_id=task.id,
+            prompt_packet_summary=packet.summary(),
+        )
+        self._ledger.update_agent_run_status(agent_run.id, "running")
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
         try:
@@ -704,18 +713,16 @@ class CommandController:
             await self._backend.start_turn(thread_id, packet.render())
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
+            self._ledger.update_agent_run_status(
+                agent_run.id,
+                "failed",
+                completion_summary=str(exc)[:2000],
+            )
             return ControllerResponse(classify_user_error(exc))
 
         self._ledger.update_conversation_summary(
             active.id,
             trim_to_budget(f"用户请求：{text[:200]}", budget.conversation_summary_tokens),
-        )
-        agent_run = self._ledger.create_agent_run(
-            conversation_id=active.id,
-            agent="codex",
-            role="analysis",
-            hidden_task_id=task.id,
-            prompt_packet_summary=packet.summary(),
         )
         self._ledger.set_conversation_active_task(active.id, task.id)
 
@@ -802,6 +809,14 @@ class CommandController:
             telegram_chat_id=chat_id,
         )
         self._ledger.set_conversation_active_task(active.id, task.id)
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=active.id,
+            agent="codex",
+            role="analysis",
+            hidden_task_id=task.id,
+            prompt_packet_summary=packet.summary(),
+        )
+        self._ledger.update_agent_run_status(agent_run.id, "running")
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
         try:
@@ -810,18 +825,16 @@ class CommandController:
             await self._backend.start_turn(thread_id, packet.render())
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
+            self._ledger.update_agent_run_status(
+                agent_run.id,
+                "failed",
+                completion_summary=str(exc)[:2000],
+            )
             return ControllerResponse(classify_user_error(exc))
 
         self._ledger.update_conversation_summary(
             active.id,
             trim_to_budget(f"用户请求：{command.prompt[:200]}", budget.conversation_summary_tokens),
-        )
-        agent_run = self._ledger.create_agent_run(
-            conversation_id=active.id,
-            agent="codex",
-            role="analysis",
-            hidden_task_id=task.id,
-            prompt_packet_summary=packet.summary(),
         )
         self._ledger.set_conversation_active_task(active.id, task.id)
 
@@ -860,235 +873,9 @@ class CommandController:
                 "Claude Code 未启用。请在配置中设置 claude.enabled = true 后重试。"
             )
 
-        chat_id = ctx.get("chat_id", 0) if ctx else 0
-        user_id = ctx.get("user_id", 0) if ctx else 0
-
-        active = self._ledger.get_active_conversation(chat_id)
-        if active is None:
-            title = default_title(command.prompt)
-            active = self._ledger.create_conversation(
-                chat_id=chat_id,
-                user_id=user_id,
-                title=title,
-                mode=ConversationMode.CLAUDE_DIRECT.value,
-                workspace_alias=self._default_workspace,
-            )
-
-        from wlcodex.agent_backend import AgentRequest
-        from wlcodex.context_packets import build_claude_handoff_packet
-
-        packet = build_claude_handoff_packet(
-            user_goal=command.prompt,
-            codex_analysis="",  # Direct mode, no Codex analysis
-            workspace=active.workspace_alias,
-        )
-        workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
-
-        # Create a hidden task for tracking (NOT set as active_codex_task_id)
-        task = self._service.reserve_task(
-            active.workspace_alias,
-            command.prompt,
-            telegram_chat_id=chat_id,
-        )
-
-        # Use streaming path when interaction renderer is available (natural profile)
-        if self._interaction_renderer is not None and hasattr(self._claude, "send_streaming"):
-            from wlcodex.interaction.events import InteractionEvent
-
-            await self._interaction_renderer.handle(
-                InteractionEvent(
-                    event_type="run_started",
-                    chat_id=chat_id,
-                    task_id=task.id,
-                    conversation_id=active.id,
-                )
-            )
-
-            accumulated = ""
-            had_error = False
-            claude_usage: dict | None = None
-            try:
-                async for stream_event in self._claude.send_streaming(
-                    AgentRequest(prompt=packet.render(), workspace_path=workspace_path)
-                ):
-                    if stream_event.event_type == "error":
-                        had_error = True
-                        accumulated += stream_event.delta
-                        break
-                    if stream_event.event_type == "usage" and stream_event.usage:
-                        claude_usage = stream_event.usage
-                        continue
-                    accumulated += stream_event.delta
-                    await self._interaction_renderer.handle(
-                        InteractionEvent(
-                            event_type="text_delta",
-                            chat_id=chat_id,
-                            task_id=task.id,
-                            conversation_id=active.id,
-                            text=stream_event.delta,
-                        )
-                    )
-            except Exception as exc:
-                logger.exception("Claude streaming failed")
-                self._service.fail_task(task.id, str(exc))
-                agent_run = self._ledger.create_agent_run(
-                    conversation_id=active.id,
-                    agent="claude",
-                    role="implementation",
-                    prompt_packet_summary=command.prompt[:120],
-                )
-                self._ledger.update_agent_run_status(
-                    agent_run.id,
-                    "failed",
-                    token_input=len(packet.render()) // 4,
-                    completion_summary=str(exc)[:2000],
-                )
-                self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
-                from wlcodex.claude_backend import record_claude_usage_event
-                record_claude_usage_event(
-                    self._ledger,
-                    prompt=packet.render(),
-                    output_text=str(exc),
-                    conversation_id=active.id,
-                    agent_run_id=agent_run.id,
-                    task_id=task.id,
-                    usage=claude_usage,
-                    status="failed",
-                )
-                await self._interaction_renderer.handle(
-                    InteractionEvent(
-                        event_type="run_failed",
-                        chat_id=chat_id,
-                        task_id=task.id,
-                        text=str(exc),
-                    )
-                )
-                return ControllerResponse("", already_rendered=True)
-
-            if had_error:
-                self._service.fail_task(task.id, accumulated[:500] or "Claude streaming returned error")
-                agent_run = self._ledger.create_agent_run(
-                    conversation_id=active.id,
-                    agent="claude",
-                    role="implementation",
-                    prompt_packet_summary=command.prompt[:120],
-                )
-                self._ledger.update_agent_run_status(
-                    agent_run.id,
-                    "failed",
-                    token_input=len(packet.render()) // 4,
-                    token_output=len(accumulated) // 4,
-                    completion_summary=accumulated[:2000],
-                )
-                self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
-                from wlcodex.claude_backend import record_claude_usage_event
-                record_claude_usage_event(
-                    self._ledger,
-                    prompt=packet.render(),
-                    output_text=accumulated,
-                    conversation_id=active.id,
-                    agent_run_id=agent_run.id,
-                    task_id=task.id,
-                    usage=claude_usage,
-                    status="failed",
-                )
-                await self._interaction_renderer.handle(
-                    InteractionEvent(
-                        event_type="run_failed",
-                        chat_id=chat_id,
-                        task_id=task.id,
-                        text=accumulated[:500] or "Claude 返回了错误。",
-                    )
-                )
-                return ControllerResponse("", already_rendered=True)
-
-            self._ledger.set_task_status(task.id, TaskStatus.DONE)
-            agent_run = self._ledger.create_agent_run(
-                conversation_id=active.id,
-                agent="claude",
-                role="implementation",
-                prompt_packet_summary=command.prompt[:120],
-            )
-            self._ledger.update_agent_run_status(
-                agent_run.id,
-                "done",
-                token_input=len(packet.render()) // 4,
-                token_output=len(accumulated) // 4,
-                completion_summary=accumulated[:2000],
-            )
-            self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
-            from wlcodex.claude_backend import record_claude_usage_event
-            record_claude_usage_event(
-                self._ledger,
-                prompt=packet.render(),
-                output_text=accumulated,
-                conversation_id=active.id,
-                agent_run_id=agent_run.id,
-                task_id=task.id,
-                usage=claude_usage,
-                status="done",
-            )
-
-            await self._interaction_renderer.handle(
-                InteractionEvent(
-                    event_type="run_completed",
-                    chat_id=chat_id,
-                    task_id=task.id,
-                    conversation_id=active.id,
-                    metadata={
-                        "has_diff": (
-                            _workspace_has_changes(workspace_path)
-                            or bool(task.changed_file_count)
-                        ),
-                    },
-                )
-            )
-            return ControllerResponse("", already_rendered=True)
-
-        # Legacy path: blocking send()
-        result = await self._claude.send(AgentRequest(
-            prompt=packet.render(),
-            workspace_path=workspace_path,
-        ))
-        self._ledger.set_task_status(task.id, TaskStatus.DONE)
-
-        agent_run = self._ledger.create_agent_run(
-            conversation_id=active.id,
-            agent="claude",
-            role="implementation",
-            prompt_packet_summary=command.prompt[:120],
-        )
-        self._ledger.update_agent_run_status(
-            agent_run.id,
-            "done",
-            token_input=result.token_input,
-            token_output=result.token_output,
-            completion_summary=result.text[:2000],
-        )
-        self._ledger.set_conversation_active_claude_run(active.id, agent_run.id)
-        from wlcodex.claude_backend import record_claude_usage_event
-        record_claude_usage_event(
-            self._ledger,
-            prompt=packet.render(),
-            output_text=result.text,
-            conversation_id=active.id,
-            agent_run_id=agent_run.id,
-            task_id=task.id,
-            status="done",
-        )
-
-        buttons: list[list[dict[str, str]]] = [[
-            {"text": "查看 diff", "callback_data": encode_conversation_callback(active.id, DIFF)},
-            {"text": "Codex 验收", "callback_data": encode_conversation_callback(active.id, VERIFY)},
-        ]]
-
-        return ControllerResponse(
-            f"Claude Code 已完成。\n\n"
-            f"对话：{active.title}\n"
-            f"工作区：{active.workspace_alias}\n"
-            f"Token：{result.token_input} 输入 / {result.token_output} 输出\n\n"
-            f"{_trim_result_text(result.text, 2000)}",
-            buttons=buttons,
+        return await self.handle_auto_mode(
+            AutoModeCommand(prompt=command.prompt),
+            ctx,
         )
 
     async def handle_auto_mode(
@@ -1150,9 +937,12 @@ class CommandController:
         enabled), uses the streaming orchestrator path so Claude deltas and
         phase transitions are visible in real time.
         """
-        from wlcodex.orchestrator import ChiefEngineerOrchestrator, OrchestrationProgress
-
         cid = correlation_id or self._new_correlation_id()
+
+        if self._orchestration_runner is None:
+            return ControllerResponse(
+                "总工程师编排器未初始化，无法保证 Codex 验收闭环。请检查 runtime composition。"
+            )
 
         # Create orchestration run record
         orch_run = self._ledger.create_orchestration_run(
@@ -1186,55 +976,16 @@ class CommandController:
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
 
-        if (
-            self._interaction_renderer is not None
-            and self._orchestration_runner is not None
-        ):
-            from wlcodex.interaction.events import InteractionEvent
+        from wlcodex.interaction.events import InteractionEvent
 
-            chat_id = ctx.get("chat_id", 0) if ctx else 0
-            task = self._service.reserve_task(
-                active.workspace_alias,
-                command.prompt,
-                telegram_chat_id=chat_id,
-            )
-            self._ledger.set_conversation_active_task(active.id, task.id)
-            await self._interaction_renderer.handle(
-                InteractionEvent(
-                    event_type="run_started",
-                    chat_id=chat_id,
-                    task_id=task.id,
-                    conversation_id=active.id,
-                )
-            )
-            self._orchestration_runner.start_chief_engineer(
-                prompt=command.prompt,
-                conversation=active,
-                task_id=task.id,
-                orchestration_run_id=orch_run.id,
-                codex_analysis_run_id=codex_analysis_run.id,
-                chat_id=chat_id,
-                workspace_path=workspace_path,
-                correlation_id=cid,
-            )
-            return ControllerResponse("", already_rendered=True)
-
-        # Streaming path: forward live progress to interaction renderer
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        task = self._service.reserve_task(
+            active.workspace_alias,
+            command.prompt,
+            telegram_chat_id=chat_id,
+        )
+        self._ledger.set_conversation_active_task(active.id, task.id)
         if self._interaction_renderer is not None:
-            from wlcodex.interaction.events import InteractionEvent
-
-            chat_id = ctx.get("chat_id", 0) if ctx else 0
-            task = self._service.reserve_task(
-                active.workspace_alias,
-                command.prompt,
-                telegram_chat_id=chat_id,
-            )
-            self._ledger.set_conversation_active_task(active.id, task.id)
-            orch = ChiefEngineerOrchestrator(
-                _TaskBoundCodexBackend(self._backend, self._service, task.id),
-                self._claude,
-            )
-
             await self._interaction_renderer.handle(
                 InteractionEvent(
                     event_type="run_started",
@@ -1243,364 +994,20 @@ class CommandController:
                     conversation_id=active.id,
                 )
             )
-
-            terminal_sent = False
-            orch_result_status = "running"
-            verify_round = 0
-            codex_analysis_text = ""
-            claude_implementation_text = ""
-            verification_text = ""
-            terminal_text = ""
-            codex_analysis_status = "running"
-            implementation_notice_sent = False
-            try:
-                async for progress in orch.run_streaming(
-                    command.prompt,
-                    conversation_context={"workspace": workspace_path},
-                ):
-                    if terminal_sent:
-                        continue
-                    if progress.phase == OrchestrationProgress.IMPL_DELTA and progress.text:
-                        claude_implementation_text += progress.text
-                        if not implementation_notice_sent:
-                            implementation_notice_sent = True
-                            await self._interaction_renderer.handle(
-                                InteractionEvent(
-                                    event_type="text_delta",
-                                    chat_id=chat_id,
-                                    task_id=task.id,
-                                    conversation_id=active.id,
-                                    text="\n\n" + render_user_progress_text(
-                                        progress.phase,
-                                        first_impl_delta=True,
-                                    ),
-                                )
-                            )
-                    elif progress.phase in (
-                        OrchestrationProgress.ANALYSIS_STARTED,
-                        OrchestrationProgress.ANALYSIS_COMPLETE,
-                        OrchestrationProgress.IMPL_COMPLETE,
-                        OrchestrationProgress.VERIFY_STARTED,
-                        OrchestrationProgress.VERIFY_COMPLETE,
-                    ):
-                        user_text = render_user_progress_text(progress.phase)
-                        if user_text:
-                            await self._interaction_renderer.handle(
-                                InteractionEvent(
-                                    event_type="text_delta",
-                                    chat_id=chat_id,
-                                    task_id=task.id,
-                                    conversation_id=active.id,
-                                    text="\n\n" + user_text,
-                                )
-                            )
-                        if progress.phase == OrchestrationProgress.ANALYSIS_COMPLETE:
-                            codex_analysis_text = progress.full_text or progress.text
-                            self._ledger.update_agent_run_status(
-                                codex_analysis_run.id,
-                                "done",
-                                completion_summary=codex_analysis_text[:2000],
-                            )
-                            codex_analysis_status = "done"
-                        elif progress.phase == OrchestrationProgress.IMPL_COMPLETE:
-                            claude_implementation_text = progress.full_text or progress.text
-                            claude_run = self._ledger.create_agent_run(
-                                conversation_id=active.id,
-                                agent="claude",
-                                role="implementation",
-                                prompt_packet_summary=command.prompt[:120],
-                            )
-                            self._ledger.update_agent_run_status(
-                                claude_run.id,
-                                "done",
-                                completion_summary=claude_implementation_text[:2000],
-                            )
-                            self._ledger.set_conversation_active_claude_run(
-                                active.id, claude_run.id
-                            )
-                        elif progress.phase == OrchestrationProgress.VERIFY_STARTED:
-                            verify_round = progress.round_num or verify_round
-                        elif progress.phase == OrchestrationProgress.VERIFY_COMPLETE:
-                            verify_round = progress.round_num or verify_round
-                            verification_text = progress.full_text or progress.text
-                            verify_run = self._ledger.create_agent_run(
-                                conversation_id=active.id,
-                                agent="codex",
-                                role="verification",
-                                prompt_packet_summary=verification_text[:120],
-                            )
-                            self._ledger.update_agent_run_status(
-                                verify_run.id,
-                                "done",
-                                completion_summary=verification_text[:2000],
-                            )
-                    elif progress.phase == OrchestrationProgress.FAILED:
-                        terminal_sent = True
-                        orch_result_status = "failed"
-                        verify_round = progress.round_num or verify_round
-                        terminal_text = progress.full_text or progress.text
-                        self._ledger.set_task_status(task.id, TaskStatus.FAILED)
-                        if progress.agent == "claude":
-                            claude_run = self._ledger.create_agent_run(
-                                conversation_id=active.id,
-                                agent="claude",
-                                role="implementation",
-                                prompt_packet_summary=command.prompt[:120],
-                            )
-                            self._ledger.update_agent_run_status(
-                                claude_run.id,
-                                "failed",
-                                completion_summary=terminal_text[:2000],
-                            )
-                            self._ledger.set_conversation_active_claude_run(
-                                active.id, claude_run.id
-                            )
-                        elif progress.agent == "codex" and not codex_analysis_text:
-                            self._ledger.update_agent_run_status(
-                                codex_analysis_run.id,
-                                "failed",
-                                completion_summary=terminal_text[:2000],
-                            )
-                            codex_analysis_status = "failed"
-                        await self._interaction_renderer.handle(
-                            InteractionEvent(
-                                event_type="run_failed",
-                                chat_id=chat_id,
-                                task_id=task.id,
-                                text=progress.text,
-                            )
-                        )
-                    elif progress.phase == OrchestrationProgress.COMPLETE:
-                        terminal_sent = True
-                        orch_result_status = getattr(progress, "result_status", "") or "passed"
-                        verify_round = progress.round_num or verify_round
-                        if progress.text or progress.full_text:
-                            terminal_text = progress.full_text or progress.text
-                        if orch_result_status == "passed":
-                            self._ledger.set_task_status(task.id, TaskStatus.DONE)
-                            await self._interaction_renderer.handle(
-                                InteractionEvent(
-                                    event_type="run_completed",
-                                    chat_id=chat_id,
-                                    task_id=task.id,
-                                    conversation_id=active.id,
-                                    metadata={
-                                        "has_diff": (
-                                            _workspace_has_changes(workspace_path)
-                                            or bool(task.changed_file_count)
-                                        ),
-                                    },
-                                )
-                            )
-                        elif orch_result_status == "needs_user":
-                            self._ledger.set_task_status(task.id, TaskStatus.FAILED)
-                            await self._interaction_renderer.handle(
-                                InteractionEvent(
-                                    event_type="run_failed",
-                                    chat_id=chat_id,
-                                    task_id=task.id,
-                                    text=progress.text or "需要用户输入以继续。",
-                                )
-                            )
-                        else:
-                            self._ledger.set_task_status(task.id, TaskStatus.FAILED)
-                            await self._interaction_renderer.handle(
-                                InteractionEvent(
-                                    event_type="run_failed",
-                                    chat_id=chat_id,
-                                    task_id=task.id,
-                                    text=progress.text or "编排未通过验收。",
-                                )
-                            )
-            except Exception as exc:
-                logger.exception("Chief engineer streaming orchestration failed")
-                self._ledger.set_task_status(task.id, TaskStatus.FAILED)
-                self._ledger.update_orchestration_run(
-                    orch_run.id,
-                    status="failed",
-                    current_step="error",
-                    last_verification_result=str(exc)[:500],
-                )
-                self._ledger.update_agent_run_status(
-                    codex_analysis_run.id,
-                    "failed",
-                    completion_summary=str(exc)[:2000],
-                )
-                return ControllerResponse("", already_rendered=True)
-
-            # Update ledger records
-            if not codex_analysis_text and orch_result_status == "failed":
-                codex_analysis_text = terminal_text
-            if verification_text:
-                decision = (
-                    "verify_passed"
-                    if orch_result_status == "passed"
-                    else "verify_failed_retry"
-                )
-                self._ledger.record_orchestration_decision(
-                    run_id=orch_run.id,
-                    decision=decision,
-                    reason=verification_text[:500],
-                    next_agent="" if orch_result_status == "passed" else "claude",
-                )
-            self._ledger.update_orchestration_run(
-                orch_run.id,
-                status=orch_result_status if orch_result_status != "running" else "failed",
-                verify_round=verify_round,
-                current_step="verify" if orch_result_status == "passed" else "retry",
-                last_codex_analysis=codex_analysis_text[:500],
-                last_claude_summary=claude_implementation_text[:500],
-                last_verification_result=(verification_text or terminal_text)[:500],
-            )
-            codex_run_status = codex_analysis_status
-            if codex_run_status == "running":
-                codex_run_status = "failed" if orch_result_status == "failed" else "done"
-            if codex_analysis_text or codex_run_status == "failed":
-                self._ledger.update_agent_run_status(
-                    codex_analysis_run.id,
-                    codex_run_status,
-                    completion_summary=codex_analysis_text[:2000],
-                )
-            status_labels = {
-                "passed": "验收通过",
-                "failed": "验证失败",
-                "needs_user": "需要用户输入",
-            }
-            label = status_labels.get(orch_result_status, orch_result_status)
-            self._ledger.update_conversation_summary(
-                active.id,
-                trim_to_budget(
-                    f"总工程师第{verify_round}轮: {label}",
-                    ContextBudget().conversation_summary_tokens,
-                ),
-            )
+        self._orchestration_runner.start_chief_engineer(
+            prompt=command.prompt,
+            conversation=active,
+            task_id=task.id,
+            orchestration_run_id=orch_run.id,
+            codex_analysis_run_id=codex_analysis_run.id,
+            chat_id=chat_id,
+            workspace_path=workspace_path,
+            correlation_id=cid,
+        )
+        if self._interaction_renderer is not None:
             return ControllerResponse("", already_rendered=True)
-
-        # Legacy path: blocking orchestration
-        orch = ChiefEngineerOrchestrator(self._backend, self._claude)
-        try:
-            result = await orch.run(
-                command.prompt,
-                conversation_context={"workspace": workspace_path},
-            )
-        except Exception as exc:
-            logger.exception("Chief engineer orchestration failed")
-            self._ledger.update_orchestration_run(
-                orch_run.id,
-                status="failed",
-                current_step="error",
-                last_verification_result=str(exc)[:500],
-            )
-            self._ledger.update_agent_run_status(
-                codex_analysis_run.id,
-                "failed",
-                completion_summary=str(exc)[:2000],
-            )
-            return ControllerResponse(
-                f"总工程师编排失败：{exc}\n\n"
-                f"对话：{active.title}\n"
-                f"错误已记录到运行日志。可用 /status 查看详情。"
-            )
-
-        # Update Codex analysis run with result
-        agent_run_status = "done" if result.status == "passed" else "failed"
-        self._ledger.update_agent_run_status(
-            codex_analysis_run.id,
-            agent_run_status,
-            completion_summary=result.codex_analysis[:2000] if result.codex_analysis else "",
-        )
-
-        # Create Claude implementation agent runs from steps
-        for step in result.steps:
-            if step.agent == "claude":
-                claude_run = self._ledger.create_agent_run(
-                    conversation_id=active.id,
-                    agent="claude",
-                    role="implementation",
-                    prompt_packet_summary=step.summary[:120],
-                )
-                self._ledger.update_agent_run_status(
-                    claude_run.id,
-                    "done",
-                    completion_summary=step.summary[:2000],
-                )
-                self._ledger.set_conversation_active_claude_run(active.id, claude_run.id)
-
-        # Create Codex verification agent run
-        if result.verification_summary:
-            verify_run = self._ledger.create_agent_run(
-                conversation_id=active.id,
-                agent="codex",
-                role="verification",
-                prompt_packet_summary=result.verification_summary[:120],
-            )
-            self._ledger.update_agent_run_status(
-                verify_run.id,
-                "done",
-                completion_summary=result.verification_summary[:2000],
-            )
-
-        # Record orchestration decisions
-        for step in result.steps:
-            if step.step.startswith("verify"):
-                decision = "verify_passed" if result.status == "passed" else "verify_failed_retry"
-                self._ledger.record_orchestration_decision(
-                    run_id=orch_run.id,
-                    decision=decision,
-                    reason=step.summary[:500],
-                    next_agent="claude" if result.status != "passed" else "",
-                )
-
-        # Update orchestration run
-        self._ledger.update_orchestration_run(
-            orch_run.id,
-            status=result.status,
-            verify_round=result.verify_round,
-            current_step="verify" if result.status == "passed" else "retry",
-            last_codex_analysis=result.codex_analysis[:500] if result.codex_analysis else "",
-            last_claude_summary=result.claude_implementation[:500] if result.claude_implementation else "",
-            last_verification_result=result.verification_summary[:500],
-        )
-
-        status_labels = {
-            "passed": "验收通过",
-            "failed": "验证失败",
-            "needs_user": "需要用户输入",
-        }
-        label = status_labels.get(result.status, result.status)
-
-        # Build comprehensive buttons for all outcomes
-        buttons: list[list[dict[str, str]]] = [[
-            {"text": "查看 diff", "callback_data": encode_conversation_callback(active.id, DIFF)},
-            {"text": "Codex 验收", "callback_data": encode_conversation_callback(active.id, VERIFY)},
-        ]]
-        if result.status == "failed":
-            buttons.append([
-                {"text": "继续修改", "callback_data": encode_conversation_callback(active.id, RETRY)},
-            ])
-        elif result.status == "needs_user":
-            buttons.append([
-                {"text": "继续修改", "callback_data": encode_conversation_callback(active.id, RETRY)},
-                {"text": "停止", "callback_data": encode_conversation_callback(active.id, CONTINUE)},
-            ])
-
-        self._ledger.update_conversation_summary(
-            active.id,
-            trim_to_budget(
-                f"总工程师第{result.verify_round}轮: {label}",
-                ContextBudget().conversation_summary_tokens,
-            ),
-        )
-
         return ControllerResponse(
-            f"总工程师编排完成 — {label}\n\n"
-            f"对话：{active.title}\n"
-            f"轮次：第 {result.verify_round} 轮\n"
-            f"步骤数：{len(result.steps)}\n"
-            f"Codex 分析：{_telegram_visible_model_summary(result.codex_analysis, 300)}\n"
-            f"Claude 实施：{_telegram_visible_model_summary(result.claude_implementation, 300)}\n"
-            f"验证结果：{_telegram_visible_model_summary(result.verification_summary, 300)}",
-            buttons=buttons,
+            "总工程师编排已开始。可用 /status 查看当前状态，/trace 查看事件轨迹。"
         )
 
     async def handle_verify(

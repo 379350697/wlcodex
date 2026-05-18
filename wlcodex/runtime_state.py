@@ -327,6 +327,12 @@ def _apply_orchestration_event(snap: RuntimeStateSnapshot, event: Any) -> None:
         orch.last_claude_summary = str(payload.get("claude_summary", orch.last_claude_summary))
 
     elif event.event_type == EventType.RUN_COMPLETED:
+        if orch.last_verification_result != "pass":
+            orch.status = "failed"
+            orch.completed_at = event.occurred_at
+            orch.failure_reason = "run_completed_without_verification_pass"
+            orch.current_phase = "failed"
+            return
         orch.status = "completed"
         orch.completed_at = event.occurred_at
         orch.current_phase = "completed"

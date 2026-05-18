@@ -821,12 +821,9 @@ async def test_legacy_profile_conversation_text_uses_ack() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_cmd_streaming_error_triggers_run_failed() -> None:
-    """When Claude send_streaming yields only error events, controller must
-    mark task as FAILED, not DONE."""
-    from wlcodex.telegram_app import WlCodexHandlers
-    from wlcodex.controller import ControllerResponse, CommandController
-    from wlcodex.agent_backend import AgentStreamEvent, AgentRequest
+async def test_claude_cmd_routes_to_runtime_runner_without_direct_streaming() -> None:
+    """The /claude entrypoint must not stream Claude output directly."""
+    from wlcodex.controller import CommandController
 
     received_events: list[object] = []
 
@@ -836,9 +833,18 @@ async def test_claude_cmd_streaming_error_triggers_run_failed() -> None:
 
     class ErrorClaude:
         enabled = True
+        direct_stream_called = False
 
         async def send_streaming(self, request):
-            yield AgentStreamEvent(delta="Claude binary not found", event_type="error")
+            self.direct_stream_called = True
+            raise AssertionError("/claude must not call Claude directly")
+
+    class FakeRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def start_chief_engineer(self, **kwargs):
+            self.calls.append(kwargs)
 
     class FakeTaskService:
         def reserve_task(self, *a, **kw):
@@ -864,6 +870,9 @@ async def test_claude_cmd_streaming_error_triggers_run_failed() -> None:
         def create_agent_run(self, **kw):
             return SimpleNamespace(id=10)
 
+        def create_orchestration_run(self, **kw):
+            return SimpleNamespace(id=20)
+
         def set_conversation_active_task(self, *a):
             pass
 
@@ -879,61 +888,49 @@ async def test_claude_cmd_streaming_error_triggers_run_failed() -> None:
         def update_conversation_summary(self, *a):
             pass
 
+    claude = ErrorClaude()
+    runner = FakeRunner()
     controller = CommandController(
         task_service=FakeTaskService(),
         backend=SimpleNamespace(),
         inspector=SimpleNamespace(),
         ledger=FakeLedger(),
-        claude_backend=ErrorClaude(),
+        claude_backend=claude,
         interaction_renderer=FakeRenderer(),
-    )
-
-    update = SimpleNamespace(
-        update_id=1,
-        effective_user=SimpleNamespace(id=123),
-        effective_chat=SimpleNamespace(id=456, type="private"),
-        effective_message=SimpleNamespace(text="/claude fix bug"),
+        orchestration_runner=runner,
     )
 
     response = await controller.handle("/claude fix bug", {"chat_id": 456, "user_id": 123})
     assert response.already_rendered
 
-    # Must have received run_started and run_failed (NOT run_completed)
+    assert runner.calls
+    assert runner.calls[0]["task_id"] == 99
+    assert runner.calls[0]["orchestration_run_id"] == 20
+    assert runner.calls[0]["codex_analysis_run_id"] == 10
+    assert not claude.direct_stream_called
     event_types = [e.event_type for e in received_events]
     assert "run_started" in event_types
-    assert "run_failed" in event_types
-    assert "run_completed" not in event_types
 
 
 @pytest.mark.asyncio
-async def test_claude_cmd_streaming_mixed_error_and_text_triggers_run_failed() -> None:
-    """When Claude send_streaming yields error then text, controller must
-    still mark as FAILED because error came first."""
-    from wlcodex.controller import ControllerResponse, CommandController
-    from wlcodex.agent_backend import AgentStreamEvent, AgentRequest
-
-    received_events: list[object] = []
-
-    class FakeRenderer:
-        async def handle(self, event):
-            received_events.append(event)
+async def test_claude_cmd_starts_runtime_runner_without_renderer() -> None:
+    """/claude must still use the runtime runner when Telegram rendering is static."""
+    from wlcodex.controller import CommandController
 
     class MixedClaude:
         enabled = True
+        direct_stream_called = False
 
         async def send_streaming(self, request):
-            yield AgentStreamEvent(delta="binary missing", event_type="error")
-            yield AgentStreamEvent(delta=" some text", event_type="text")
+            self.direct_stream_called = True
+            raise AssertionError("/claude must not call Claude directly")
 
     class FakeTaskService:
-        def reserve_task(self, *a, **kw):
-            return SimpleNamespace(id=99, changed_file_count=0)
-
-        def fail_task(self, task_id, error):
-            pass
-
         def get_workspace(self, alias):
             return SimpleNamespace(path="/tmp/test")
+
+        def reserve_task(self, *a, **kw):
+            return SimpleNamespace(id=99, changed_file_count=0)
 
     class FakeLedger:
         def get_active_conversation(self, chat_id):
@@ -949,34 +946,35 @@ async def test_claude_cmd_streaming_mixed_error_and_text_triggers_run_failed() -
         def create_agent_run(self, **kw):
             return SimpleNamespace(id=10)
 
-        def set_conversation_active_task(self, *a):
-            pass
-
-        def set_task_status(self, *a):
-            pass
-
-        def set_conversation_active_claude_run(self, *a):
-            pass
+        def create_orchestration_run(self, **kw):
+            return SimpleNamespace(id=20)
 
         def update_agent_run_status(self, *a, **kw):
             pass
 
-        def update_conversation_summary(self, *a):
+        def set_conversation_active_task(self, *a):
             pass
 
+    class FakeRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def start_chief_engineer(self, **kwargs):
+            self.calls.append(kwargs)
+
+    claude = MixedClaude()
+    runner = FakeRunner()
     controller = CommandController(
         task_service=FakeTaskService(),
         backend=SimpleNamespace(),
         inspector=SimpleNamespace(),
         ledger=FakeLedger(),
-        claude_backend=MixedClaude(),
-        interaction_renderer=FakeRenderer(),
+        claude_backend=claude,
+        orchestration_runner=runner,
     )
 
     response = await controller.handle("/claude fix bug", {"chat_id": 456, "user_id": 123})
-    assert response.already_rendered
-
-    event_types = [e.event_type for e in received_events]
-    assert "run_started" in event_types
-    assert "run_failed" in event_types
-    assert "run_completed" not in event_types
+    assert not response.already_rendered
+    assert "已开始" in response.text
+    assert runner.calls
+    assert not claude.direct_stream_called

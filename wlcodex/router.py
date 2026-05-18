@@ -54,6 +54,16 @@ class ListTasksCommand:
 
 
 @dataclass(frozen=True)
+class StatusCommand:
+    pass
+
+
+@dataclass(frozen=True)
+class TraceCommand:
+    limit: int = 20
+
+
+@dataclass(frozen=True)
 class TailCommand:
     task_id: int
 
@@ -148,6 +158,8 @@ ParsedCommand = (
     | ContinueCommand
     | SteerCommand
     | ListTasksCommand
+    | StatusCommand
+    | TraceCommand
     | TailCommand
     | EventsCommand
     | DiffCommand
@@ -178,8 +190,21 @@ def parse_command(text: str) -> ParsedCommand:
         return HelpCommand()
     if stripped == "/health":
         return HealthCommand()
-    if stripped == "/tasks" or stripped == "/status":
+    if stripped == "/tasks":
         return ListTasksCommand()
+    if stripped == "/status":
+        return StatusCommand()
+    if stripped == "/trace":
+        return TraceCommand()
+    if stripped.startswith("/trace "):
+        raw_limit = stripped.split(maxsplit=1)[1].strip()
+        if not raw_limit:
+            return TraceCommand()
+        try:
+            limit = int(raw_limit)
+        except ValueError as exc:
+            raise ParseError("用法：/trace [条数]") from exc
+        return TraceCommand(limit=max(1, min(limit, 100)))
     if stripped == "/codex-sessions" or stripped == "/sessions":
         return CodexSessionsCommand()
 

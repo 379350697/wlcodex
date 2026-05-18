@@ -1,5 +1,6 @@
 """Controller flow tests with fake backend."""
 
+import asyncio
 from pathlib import Path
 import subprocess
 
@@ -13,7 +14,51 @@ from wlcodex.claude_permissions import ClaudePermissionState
 from wlcodex.db import Ledger
 from wlcodex.inspection import TaskInspector
 from wlcodex.models import AgentRunStatus, OrchestrationStatus, TaskStatus
+from wlcodex.orchestration_runner import OrchestrationRunner
 from wlcodex.task_service import TaskService
+from wlcodex.runtime_event_store import RuntimeEventStore
+from wlcodex.runtime_events import (
+    AggregateType,
+    EventSource,
+    EventType,
+    RuntimeEvent,
+    Visibility,
+    now_iso,
+)
+
+
+def _attach_runtime_runner(
+    controller: CommandController,
+    *,
+    service: TaskService,
+    backend: object,
+    claude: object,
+    ledger: Ledger,
+    renderer: object | None = None,
+    store: RuntimeEventStore | None = None,
+) -> OrchestrationRunner:
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=claude,
+        ledger=ledger,
+        interaction_renderer=renderer,
+        runtime_event_store=store,
+    )
+    controller.set_orchestration_runner(runner)
+    return runner
+
+
+async def _drain_runtime_runner(controller: CommandController) -> None:
+    runner = controller._orchestration_runner
+    assert runner is not None
+    for _ in range(20):
+        tasks = list(getattr(runner, "_tasks", set()))
+        if not tasks:
+            return
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.sleep(0)
+    assert not getattr(runner, "_tasks", set())
 
 
 @pytest.fixture
@@ -229,6 +274,107 @@ async def test_claude_direct_reports_disabled(ctrl: CommandController) -> None:
 
 
 @pytest.mark.asyncio
+async def test_status_uses_runtime_events_when_available(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="Runtime",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_STARTED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id="1",
+        correlation_id="status-corr",
+        source=EventSource.ORCHESTRATOR,
+        actor="orchestrator",
+        visibility=Visibility.OPERATOR,
+        payload={"phase": "running_analysis"},
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+        orchestration_run_id=1,
+    ))
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.AGENT_RUN_STARTED,
+        aggregate_type=AggregateType.AGENT_RUN,
+        aggregate_id="10",
+        correlation_id="status-corr",
+        source=EventSource.CLAUDE,
+        actor="claude",
+        visibility=Visibility.OPERATOR,
+        payload={"agent": "claude", "role": "implementation"},
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+        orchestration_run_id=1,
+        agent_run_id=10,
+    ))
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", Path("/tmp/wlcodex"), True),
+    ))
+    controller = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        runtime_event_store=store,
+    )
+
+    response = await controller.handle("/status", {"chat_id": 100, "user_id": 200})
+
+    assert "活跃 Agent：claude" in response.text
+    assert "最近事件" in response.text
+
+
+@pytest.mark.asyncio
+async def test_trace_command_uses_runtime_inspector(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="Trace",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_STARTED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id="1",
+        correlation_id="trace-corr",
+        source=EventSource.ORCHESTRATOR,
+        actor="orchestrator",
+        visibility=Visibility.OPERATOR,
+        payload={"phase": "running_analysis"},
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+        orchestration_run_id=1,
+    ))
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", Path("/tmp/wlcodex"), True),
+    ))
+    controller = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        runtime_event_store=store,
+    )
+
+    response = await controller.handle("/trace", {"chat_id": 100, "user_id": 200})
+
+    assert "运行时事件记录" in response.text
+    assert "运行开始" in response.text
+
+
+@pytest.mark.asyncio
 async def test_auto_mode_reports_claude_needed(ctrl: CommandController) -> None:
     response = await ctrl.handle("/auto 修复登录 bug", {"chat_id": 1, "user_id": 2})
     assert "Claude" in response.text or "总工程师" in response.text
@@ -350,6 +496,10 @@ class FakeClaudeBackendForController:
             token_output=len(text) // 4,
         )
 
+    async def send_streaming(self, request):
+        result = await self.send(request)
+        yield AgentStreamEvent(delta=result.text, event_type="text")
+
     def interrupt(self, session_id=None):
         pass
 
@@ -449,7 +599,24 @@ def ctrl_with_claude(tmp_path: Path) -> CommandController:
     ))
     inspector = TaskInspector(ledger, tmp_path / "logs")
     claude = FakeClaudeBackendForController()
-    return CommandController(service, backend, inspector, ledger=ledger, claude_backend=claude)
+    store = RuntimeEventStore(ledger._conn)
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=claude,
+        runtime_event_store=store,
+    )
+    _attach_runtime_runner(
+        ctrl,
+        service=service,
+        backend=backend,
+        claude=claude,
+        ledger=ledger,
+        store=store,
+    )
+    return ctrl
 
 
 @pytest.mark.asyncio
@@ -468,34 +635,110 @@ async def test_plain_greeting_replies_without_agent_loop(
 
 
 @pytest.mark.asyncio
-async def test_claude_direct_uses_real_send_interface(ctrl_with_claude: CommandController) -> None:
-    """Claude direct mode must call backend.send(), not echo/fake_response."""
+async def test_claude_command_runs_chief_engineer_gate(ctrl_with_claude: CommandController) -> None:
+    """/claude must not bypass Codex analysis and verification."""
     response = await ctrl_with_claude.handle(
         "/claude 修改 auth.py 添加空值检查",
         {"chat_id": 100, "user_id": 200},
     )
+    assert "已开始" in response.text
+    await _drain_runtime_runner(ctrl_with_claude)
     claude = ctrl_with_claude._claude
     assert hasattr(claude, "calls")
     assert len(claude.calls) == 1
-    # The prompt must be a rendered packet, not raw command text
     assert "mode:" in claude.calls[0] or "user_goal:" in claude.calls[0]
-    assert "Claude Code 已完成" in response.text
+    assert len(ctrl_with_claude._backend.turns) >= 2  # Codex analysis + verification
 
 
 @pytest.mark.asyncio
-async def test_claude_direct_sets_active_claude_run_id(ctrl_with_claude: CommandController) -> None:
-    """Claude direct must write agent_run.id to active_claude_run_id, NOT active_codex_task_id."""
+async def test_claude_command_records_chief_engineer_runs(ctrl_with_claude: CommandController) -> None:
+    """/claude is routed through chief-engineer runs, including Claude agent_run."""
     await ctrl_with_claude.handle(
         "/claude 修改 README",
         {"chat_id": 100, "user_id": 200},
     )
+    await _drain_runtime_runner(ctrl_with_claude)
     active = ctrl_with_claude._ledger.get_active_conversation(100)
     assert active is not None
-    # active_claude_run_id must be set
     assert active.active_claude_run_id is not None
     assert active.active_claude_run_id > 0
-    # active_codex_task_id must NOT be polluted by Claude
-    assert active.active_codex_task_id is None
+    assert active.active_codex_task_id is not None
+
+
+@pytest.mark.asyncio
+async def test_chief_engineer_uses_runtime_runner_without_renderer(
+    tmp_path: Path,
+) -> None:
+    """Chief mode must not fall back to the legacy non-runtime orchestration path."""
+
+    class RunnerSpy:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def start_chief_engineer(self, **kwargs: object) -> object:
+            self.calls.append(kwargs)
+            return object()
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", tmp_path, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    claude = FakeClaudeBackendForController()
+    store = RuntimeEventStore(ledger._conn)
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=claude,
+        runtime_event_store=store,
+    )
+    runner = RunnerSpy()
+    ctrl.set_orchestration_runner(runner)
+
+    response = await ctrl.handle(
+        "/auto 修复 README",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert len(runner.calls) == 1
+    assert len(claude.calls) == 0
+    assert response.already_rendered is False
+    assert "已开始" in response.text
+
+
+@pytest.mark.asyncio
+async def test_chief_engineer_refuses_legacy_fallback_without_runtime_runner(
+    tmp_path: Path,
+) -> None:
+    """Chief mode must fail closed instead of running outside runtime_events."""
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", tmp_path, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    claude = FakeClaudeBackendForController()
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=claude,
+    )
+
+    response = await ctrl.handle(
+        "/auto 修复 README",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert "编排器未初始化" in response.text
+    assert len(backend.turns) == 0
+    assert len(claude.calls) == 0
 
 
 @pytest.mark.asyncio
@@ -505,6 +748,7 @@ async def test_conversation_text_uses_packet_render(ctrl_with_claude: CommandCon
         "帮我分析这个模块",
         {"chat_id": 100, "user_id": 200},
     )
+    await _drain_runtime_runner(ctrl_with_claude)
     # Check that start_turn was called with rendered packet, not raw text
     turns = ctrl_with_claude._backend.turns
     assert len(turns) > 0
@@ -537,7 +781,12 @@ async def test_auto_mode_runs_real_orchestration(ctrl_with_claude: CommandContro
         "/auto 修复登录 bug",
         {"chat_id": 100, "user_id": 200},
     )
-    assert "总工程师编排完成" in response.text
+    assert "已开始" in response.text
+    await _drain_runtime_runner(ctrl_with_claude)
+    active = ctrl_with_claude._ledger.get_active_conversation(100)
+    assert active is not None
+    orch_runs = ctrl_with_claude._ledger.list_orchestration_runs(active.id)
+    assert orch_runs[0].status == OrchestrationStatus.PASSED.value
 
 
 @pytest.mark.asyncio
@@ -549,11 +798,10 @@ async def test_auto_mode_hides_english_model_snippets(
         {"chat_id": 100, "user_id": 200},
     )
 
-    assert "总工程师编排完成" in response.text
+    assert "已开始" in response.text
     assert "Analysis complete" not in response.text
     assert "Fake Claude implementation result" not in response.text
     assert "confidence: high" not in response.text
-    assert "非中文内容" in response.text
 
 
 @pytest.mark.asyncio
@@ -575,6 +823,7 @@ async def test_streaming_auto_records_full_ledger_and_real_diff(tmp_path: Path) 
     inspector = TaskInspector(ledger, tmp_path / "logs")
     renderer = RecordingInteractionRenderer()
     claude = StreamingClaudeWritesTrackedFile(workspace)
+    store = RuntimeEventStore(ledger._conn)
     ctrl = CommandController(
         service,
         backend,
@@ -582,6 +831,16 @@ async def test_streaming_auto_records_full_ledger_and_real_diff(tmp_path: Path) 
         ledger=ledger,
         claude_backend=claude,
         interaction_renderer=renderer,
+        runtime_event_store=store,
+    )
+    _attach_runtime_runner(
+        ctrl,
+        service=service,
+        backend=backend,
+        claude=claude,
+        ledger=ledger,
+        renderer=renderer,
+        store=store,
     )
 
     response = await ctrl.handle(
@@ -590,6 +849,7 @@ async def test_streaming_auto_records_full_ledger_and_real_diff(tmp_path: Path) 
     )
 
     assert response.already_rendered
+    await _drain_runtime_runner(ctrl)
     active = ledger.get_active_conversation(100)
     assert active is not None
     assert active.active_claude_run_id is not None
@@ -631,6 +891,7 @@ async def test_streaming_auto_binds_all_hidden_codex_threads_to_task(tmp_path: P
     inspector = TaskInspector(ledger, tmp_path / "logs")
     renderer = RecordingInteractionRenderer()
     claude = StreamingClaudeWritesTrackedFile(workspace)
+    store = RuntimeEventStore(ledger._conn)
     ctrl = CommandController(
         service,
         backend,
@@ -638,6 +899,16 @@ async def test_streaming_auto_binds_all_hidden_codex_threads_to_task(tmp_path: P
         ledger=ledger,
         claude_backend=claude,
         interaction_renderer=renderer,
+        runtime_event_store=store,
+    )
+    _attach_runtime_runner(
+        ctrl,
+        service=service,
+        backend=backend,
+        claude=claude,
+        ledger=ledger,
+        renderer=renderer,
+        store=store,
     )
 
     response = await ctrl.handle(
@@ -646,6 +917,7 @@ async def test_streaming_auto_binds_all_hidden_codex_threads_to_task(tmp_path: P
     )
 
     assert response.already_rendered
+    await _drain_runtime_runner(ctrl)
     active = ledger.get_active_conversation(100)
     assert active is not None
     assert active.active_codex_task_id is not None
@@ -671,13 +943,25 @@ async def test_streaming_auto_fails_ledger_on_claude_stream_error(tmp_path: Path
     ))
     inspector = TaskInspector(ledger, tmp_path / "logs")
     renderer = RecordingInteractionRenderer()
+    claude = StreamingClaudeError()
+    store = RuntimeEventStore(ledger._conn)
     ctrl = CommandController(
         service,
         backend,
         inspector,
         ledger=ledger,
-        claude_backend=StreamingClaudeError(),
+        claude_backend=claude,
         interaction_renderer=renderer,
+        runtime_event_store=store,
+    )
+    _attach_runtime_runner(
+        ctrl,
+        service=service,
+        backend=backend,
+        claude=claude,
+        ledger=ledger,
+        renderer=renderer,
+        store=store,
     )
 
     response = await ctrl.handle(
@@ -686,6 +970,7 @@ async def test_streaming_auto_fails_ledger_on_claude_stream_error(tmp_path: Path
     )
 
     assert response.already_rendered
+    await _drain_runtime_runner(ctrl)
     active = ledger.get_active_conversation(100)
     assert active is not None
     orch_runs = ledger.list_orchestration_runs(active.id)
@@ -716,13 +1001,26 @@ async def test_claude_direct_streaming_error_marks_agent_run_failed(tmp_path: Pa
     ))
     inspector = TaskInspector(ledger, tmp_path / "logs")
     renderer = RecordingInteractionRenderer()
+    backend = FakeCodexBackend()
+    claude = StreamingClaudeError()
+    store = RuntimeEventStore(ledger._conn)
     ctrl = CommandController(
         service,
-        FakeCodexBackend(),
+        backend,
         inspector,
         ledger=ledger,
-        claude_backend=StreamingClaudeError(),
+        claude_backend=claude,
         interaction_renderer=renderer,
+        runtime_event_store=store,
+    )
+    _attach_runtime_runner(
+        ctrl,
+        service=service,
+        backend=backend,
+        claude=claude,
+        ledger=ledger,
+        renderer=renderer,
+        store=store,
     )
 
     response = await ctrl.handle(
@@ -731,26 +1029,28 @@ async def test_claude_direct_streaming_error_marks_agent_run_failed(tmp_path: Pa
     )
 
     assert response.already_rendered
+    await _drain_runtime_runner(ctrl)
     active = ledger.get_active_conversation(100)
     assert active is not None
     agent_runs = ledger.list_agent_runs(active.id)
     assert [(run.agent, run.role, run.status) for run in agent_runs] == [
+        ("codex", "analysis", AgentRunStatus.DONE.value),
         ("claude", "implementation", AgentRunStatus.FAILED.value),
     ]
 
 
 @pytest.mark.asyncio
-async def test_claude_completion_buttons_use_conv_protocol(ctrl_with_claude: CommandController) -> None:
-    """Claude completion buttons must use conv: protocol, not waiting:."""
+async def test_claude_command_does_not_emit_legacy_completion_buttons(
+    ctrl_with_claude: CommandController,
+) -> None:
+    """/claude should start the runtime runner, not return legacy completion buttons."""
     response = await ctrl_with_claude.handle(
         "/claude 修改 auth.py",
         {"chat_id": 100, "user_id": 200},
     )
-    assert len(response.buttons) > 0
-    for row in response.buttons:
-        for btn in row:
-            assert btn["callback_data"].startswith("conv:")
-            assert "waiting:" not in btn["callback_data"]
+    assert "已开始" in response.text
+    assert response.buttons == []
+    await _drain_runtime_runner(ctrl_with_claude)
 
 
 @pytest.mark.asyncio
@@ -760,6 +1060,7 @@ async def test_conversation_callback_diff_action(ctrl_with_claude: CommandContro
 
     # Setup a conversation first via /claude
     await ctrl_with_claude.handle("/claude 修改 auth.py", {"chat_id": 100, "user_id": 200})
+    await _drain_runtime_runner(ctrl_with_claude)
     active = ctrl_with_claude._ledger.get_active_conversation(100)
     assert active is not None
 
@@ -774,6 +1075,7 @@ async def test_conversation_callback_verify_action(ctrl_with_claude: CommandCont
     from wlcodex.conversation_callback import ConversationCallback, VERIFY
 
     await ctrl_with_claude.handle("/claude 修改 auth.py", {"chat_id": 100, "user_id": 200})
+    await _drain_runtime_runner(ctrl_with_claude)
     active = ctrl_with_claude._ledger.get_active_conversation(100)
 
     cb = ConversationCallback(conversation_id=active.id, action=VERIFY)
@@ -863,14 +1165,31 @@ async def test_orchestrator_exception_marks_runs_as_failed(tmp_path: Path) -> No
 
     claude = FakeClaudeBackendForController()
 
-    ctrl = CommandController(service, backend, inspector, ledger=ledger, claude_backend=claude)
+    store = RuntimeEventStore(ledger._conn)
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=claude,
+        runtime_event_store=store,
+    )
+    _attach_runtime_runner(
+        ctrl,
+        service=service,
+        backend=backend,
+        claude=claude,
+        ledger=ledger,
+        store=store,
+    )
 
     response = await ctrl.handle(
         "/auto 修复崩溃 bug",
         {"chat_id": 100, "user_id": 200},
     )
 
-    assert "失败" in response.text or "错误" in response.text
+    assert "已开始" in response.text
+    await _drain_runtime_runner(ctrl)
 
     # Verify orchestration run is marked as failed (not left running)
     active = ledger.get_active_conversation(100)

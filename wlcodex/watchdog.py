@@ -62,6 +62,7 @@ class TaskWatchdog:
                     timeout_type="hard",
                     threshold_seconds=threshold,
                     age_seconds=age,
+                    now=now,
                 )
                 changed += 1
         return changed
@@ -94,6 +95,7 @@ class TaskWatchdog:
         timeout_type: str,
         threshold_seconds: int,
         age_seconds: int,
+        now: datetime,
     ) -> None:
         """Emit a watchdog timeout event to the runtime store when available."""
         if self._runtime_store is None:
@@ -114,18 +116,49 @@ class TaskWatchdog:
             else EventType.WATCHDOG_IDLE_TIMEOUT
         )
         correlation_id = f"watchdog-{task_id}-{now_iso()}"
+        last_runtime = self._last_runtime_event_for_task(task_id)
+        agent_run_id = (
+            int(last_runtime["agent_run_id"])
+            if last_runtime is not None and last_runtime["agent_run_id"] is not None
+            else None
+        )
+        conversation_id = (
+            int(last_runtime["conversation_id"])
+            if last_runtime is not None and last_runtime["conversation_id"] is not None
+            else self._conversation_id
+        )
+        last_event_id = int(last_runtime["id"]) if last_runtime is not None else 0
+        last_event_type = (
+            str(last_runtime["event_type"]) if last_runtime is not None else ""
+        )
+        elapsed_idle = age_seconds
+        if last_runtime is not None:
+            try:
+                last_dt = datetime.fromisoformat(str(last_runtime["occurred_at"]))
+                elapsed_idle = int((now - last_dt).total_seconds())
+            except (TypeError, ValueError):
+                elapsed_idle = age_seconds
+        elapsed_hard = self._elapsed_hard_seconds(agent_run_id, fallback=age_seconds, now=now)
+        healthy, _summary = backend_health(self._backend)
+        subprocess_status = "healthy" if healthy else "unhealthy"
 
         event = RuntimeEvent(
             schema_version=1,
             event_type=event_type,
             aggregate_type=AggregateType.AGENT_RUN,
-            aggregate_id=str(task_id),
+            aggregate_id=str(agent_run_id or task_id),
             correlation_id=correlation_id,
             source=EventSource.WATCHDOG,
             actor="watchdog",
             visibility=Visibility.OPERATOR,
             payload={
                 "task_id": task_id,
+                "agent_run_id": agent_run_id,
+                "last_event_id": last_event_id,
+                "last_event_type": last_event_type,
+                "elapsed_hard_seconds": elapsed_hard,
+                "elapsed_idle_seconds": max(0, elapsed_idle),
+                "subprocess_status": subprocess_status,
                 "timeout_type": timeout_type,
                 "threshold_seconds": threshold_seconds,
                 "age_seconds": age_seconds,
@@ -133,9 +166,76 @@ class TaskWatchdog:
             },
             occurred_at=now_iso(),
             task_id=task_id,
-            conversation_id=self._conversation_id,
+            conversation_id=conversation_id,
+            agent_run_id=agent_run_id,
         )
-        self._runtime_store.append(event)
+        stored_timeout = self._runtime_store.append(event)
+        if agent_run_id is not None:
+            self._runtime_store.append(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.AGENT_RUN_TIMED_OUT,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id=str(agent_run_id),
+                correlation_id=correlation_id,
+                source=EventSource.WATCHDOG,
+                actor="watchdog",
+                visibility=Visibility.OPERATOR,
+                payload={
+                    "agent_run_id": agent_run_id,
+                    "reason": f"{timeout_type}_timeout",
+                    "threshold_seconds": threshold_seconds,
+                    "last_event_id": last_event_id,
+                    "last_event_type": last_event_type,
+                    "elapsed_hard_seconds": elapsed_hard,
+                    "elapsed_idle_seconds": max(0, elapsed_idle),
+                    "subprocess_status": subprocess_status,
+                },
+                occurred_at=now_iso(),
+                task_id=task_id,
+                conversation_id=conversation_id,
+                agent_run_id=agent_run_id,
+                causation_id=stored_timeout.id,
+            ))
+
+    def _last_runtime_event_for_task(self, task_id: int) -> Any:
+        if self._runtime_store is None:
+            return None
+        return self._runtime_store._conn.execute(
+            """
+            SELECT * FROM runtime_events
+            WHERE task_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+
+    def _elapsed_hard_seconds(
+        self,
+        agent_run_id: int | None,
+        *,
+        fallback: int,
+        now: datetime,
+    ) -> int:
+        if self._runtime_store is None or agent_run_id is None:
+            return fallback
+        row = self._runtime_store._conn.execute(
+            """
+            SELECT occurred_at FROM runtime_events
+            WHERE agent_run_id = ?
+              AND event_type = 'agent.run.started'
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (agent_run_id,),
+        ).fetchone()
+        if row is None:
+            return fallback
+        try:
+            started = datetime.fromisoformat(str(row["occurred_at"]))
+            return max(0, int((now - started).total_seconds()))
+        except (TypeError, ValueError):
+            return fallback
 
     def _threshold_for(self, status: TaskStatus) -> int | None:
         if status == TaskStatus.RUNNING:
@@ -145,4 +245,3 @@ class TaskWatchdog:
         if status == TaskStatus.WAITING_APPROVAL:
             return self._config.max_waiting_approval_seconds
         return None
-

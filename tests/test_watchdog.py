@@ -2,8 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+from wlcodex.db import Ledger
 from wlcodex.models import Task, TaskStatus
+from wlcodex.runtime_event_store import RuntimeEventStore
+from wlcodex.runtime_events import (
+    AggregateType,
+    EventSource,
+    EventType,
+    RuntimeEvent,
+    Visibility,
+    now_iso,
+)
 from wlcodex.watchdog import TaskLivenessConfig, TaskWatchdog
 
 
@@ -88,6 +99,49 @@ def test_watchdog_marks_stale_running_task_timeout() -> None:
     assert ledger.timeouts[0][0] == 1
     assert ledger.timeouts[0][1] == TaskStatus.RUNNING
     assert ledger.timeouts[0][3] == 7200
+
+
+def test_watchdog_timeout_event_explains_runtime_clock(tmp_path: Path) -> None:
+    db = Ledger.open(tmp_path / "db.sqlite3")
+    db.migrate()
+    store = RuntimeEventStore(db._conn)
+    started = store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.AGENT_RUN_STARTED,
+        aggregate_type=AggregateType.AGENT_RUN,
+        aggregate_id="10",
+        correlation_id="watchdog-corr",
+        source=EventSource.CLAUDE,
+        actor="claude",
+        visibility=Visibility.OPERATOR,
+        payload={"agent": "claude", "role": "implementation"},
+        occurred_at=now_iso(),
+        conversation_id=1,
+        agent_run_id=10,
+        task_id=1,
+    ))
+    ledger = LedgerSpy([_task(1, TaskStatus.RUNNING, 8000)])
+    watchdog = TaskWatchdog(
+        ledger=ledger,
+        backend=Backend(Health(True)),
+        config=TaskLivenessConfig(
+            max_running_seconds=7200,
+            max_queued_seconds=1800,
+            max_waiting_approval_seconds=3600,
+            backend_dead_grace_seconds=120,
+        ),
+        runtime_store=store,
+    )
+
+    watchdog.scan_once()
+
+    events = store.list_recent_for_conversation(1, limit=10)
+    timeout = [e for e in events if e.event_type == EventType.WATCHDOG_HARD_TIMEOUT][0]
+    assert timeout.agent_run_id == 10
+    assert timeout.payload["last_event_id"] == started.id
+    assert timeout.payload["last_event_type"] == EventType.AGENT_RUN_STARTED
+    assert timeout.payload["elapsed_hard_seconds"] >= 0
+    assert timeout.payload["subprocess_status"] == "healthy"
 
 
 def test_watchdog_waits_for_backend_dead_grace() -> None:

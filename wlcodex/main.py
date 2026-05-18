@@ -25,6 +25,7 @@ from wlcodex.menu import build_bot_commands
 from wlcodex.orchestration_runner import OrchestrationRunner
 from wlcodex.recovery_notifications import notify_recovery_paused_tasks
 from wlcodex.runtime_diagnostics import (
+    append_startup_recovery_events,
     append_recovery_events,
     find_non_terminal_agent_runs,
 )
@@ -108,20 +109,22 @@ def main() -> None:
     # Runtime event store — append-only source of truth
     runtime_store = RuntimeEventStore(ledger._conn)
 
-    # Recovery: pause any active tasks from previous run
-    paused_ids = ledger.mark_active_tasks_recovery_paused()
-    if paused_ids:
-        logger.info(
-            "Recovery: paused %d active task(s): %s", len(paused_ids), paused_ids
-        )
+    # Runtime projector — updates compatibility tables from runtime events
+    runtime_projector = RuntimeProjector(ledger._conn, store=runtime_store)
+    runtime_store.add_projector(runtime_projector.apply)
 
-    # Recovery: mark hanging conversation runs as failed
-    orch_marked, agent_marked = ledger.mark_hanging_conversation_runs_recovery()
-    if orch_marked or agent_marked:
-        logger.info(
-            "Recovery: marked %d hanging orchestration run(s) and %d agent run(s) as failed",
-            orch_marked, agent_marked,
-        )
+    paused_ids: list[int] = []
+    try:
+        recovery = append_startup_recovery_events(runtime_store, ledger)
+        if any(recovery.values()):
+            logger.info(
+                "Runtime recovery: tasks=%s orchestration_runs=%s agent_runs=%s",
+                recovery["task_ids"],
+                recovery["orchestration_run_ids"],
+                recovery["agent_run_ids"],
+            )
+    except Exception as exc:
+        logger.warning("Runtime startup recovery failed (non-fatal): %s", exc)
 
     # Runtime recovery: find and mark orphaned agent runs
     try:
@@ -137,9 +140,6 @@ def main() -> None:
             )
     except Exception as exc:
         logger.warning("Runtime recovery scan failed (non-fatal): %s", exc)
-
-    # Runtime projector — updates compatibility tables from runtime events
-    runtime_projector = RuntimeProjector(ledger._conn, store=runtime_store)
 
     config.storage.task_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -271,7 +271,14 @@ def main() -> None:
     )
 
     # Telegram app
-    app, handlers = build_application(config, token, controller, ledger, approval_service)
+    app, handlers = build_application(
+        config,
+        token,
+        controller,
+        ledger,
+        approval_service,
+        runtime_event_store=runtime_store,
+    )
 
     if handlers is None:
         logger.warning("Running in skeleton mode (no controller/ledger).")
@@ -285,7 +292,12 @@ def main() -> None:
         max_waiting_approval_seconds=config.task.max_waiting_approval_seconds,
         backend_dead_grace_seconds=config.task.backend_dead_grace_seconds,
     )
-    task_watchdog = TaskWatchdog(ledger, backend, liveness_config)
+    task_watchdog = TaskWatchdog(
+        ledger,
+        backend,
+        liveness_config,
+        runtime_store=runtime_store,
+    )
     # Only wire interaction streaming when profile is natural AND streaming enabled.
     # Legacy/cockpit profiles and streaming_enabled=false must not receive
     # streaming deltas in Telegram.
@@ -315,7 +327,7 @@ def main() -> None:
         )
         interaction_renderer._runtime_progress = runtime_progress
     controller.set_interaction_renderer(interaction_renderer)
-    if interaction_renderer is not None and claude_backend is not None:
+    if claude_backend is not None:
         controller.set_orchestration_runner(
             OrchestrationRunner(
                 task_service=task_service,
@@ -336,6 +348,7 @@ def main() -> None:
         task_watchdog=task_watchdog,
         watchdog_interval_seconds=config.task.watchdog_interval_seconds,
         interaction_renderer=interaction_renderer,
+        runtime_event_store=runtime_store,
     )
 
     loop = asyncio.new_event_loop()

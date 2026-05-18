@@ -55,6 +55,24 @@ def _current_status(
     return str(row[0]) if row else None
 
 
+def _is_approved_decision(decision: object) -> bool:
+    if isinstance(decision, dict):
+        return bool(decision)
+    normalized = str(decision).strip().lower()
+    return normalized in {"approve", "approved", "accept", "accepted", "acceptforsession"}
+
+
+def _payload_int(payload: dict[str, object], *keys: str) -> int:
+    for key in keys:
+        if key not in payload:
+            continue
+        try:
+            return int(payload.get(key, 0))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Projector
 # ---------------------------------------------------------------------------
@@ -152,6 +170,7 @@ class RuntimeProjector:
             EventType.RUN_CANCEL_REQUESTED,
         ):
             self._project_orchestration_event(event)
+            self._project_task_status_event(event)
 
         # --- Usage → usage_events ---
         if etype == EventType.MODEL_USAGE_UPDATED:
@@ -175,6 +194,53 @@ class RuntimeProjector:
             EventType.VERIFICATION_RETRY_REQUESTED,
         ):
             self._project_verification_event(event)
+
+    def _project_task_status_event(self, event: RuntimeEvent) -> None:
+        task_id = event.task_id
+        if task_id is None or not _row_exists(self._conn, "tasks", task_id):
+            return
+
+        status: str | None = None
+        phase = ""
+        summary = ""
+        error = ""
+        if event.event_type in (EventType.RUN_STARTED, EventType.RUN_PHASE_CHANGED):
+            status = "running"
+            phase = str(event.payload.get("phase", ""))
+            summary = phase
+        elif event.event_type == EventType.RUN_COMPLETED:
+            if self._has_pass_verification(event):
+                status = "done"
+                phase = "completed"
+                summary = "runtime run completed"
+            else:
+                status = "failed"
+                phase = "failed"
+                error = "run_completed_without_verification_pass"
+        elif event.event_type == EventType.RUN_FAILED:
+            status = "failed"
+            phase = "failed"
+            error = str(event.payload.get("reason", "runtime run failed"))
+        elif event.event_type == EventType.RUN_CANCELLED:
+            status = "aborted"
+            phase = "cancelled"
+            summary = "runtime run cancelled"
+
+        if status is None:
+            return
+        self._conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?,
+                last_phase = COALESCE(NULLIF(?, ''), last_phase),
+                last_summary = COALESCE(NULLIF(?, ''), last_summary),
+                last_error = COALESCE(NULLIF(?, ''), last_error),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (status, phase, summary, error, _now(), task_id),
+        )
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Agent projection
@@ -354,6 +420,20 @@ class RuntimeProjector:
 
         elif etype == EventType.RUN_COMPLETED:
             self._upsert_orchestration_run(event)
+            if not self._has_pass_verification(event):
+                self._conn.execute(
+                    """
+                    UPDATE orchestration_runs
+                    SET status = 'failed',
+                        current_step = 'failed',
+                        last_verification_result = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    ("run_completed_without_verification_pass", _now(), orch_run_id),
+                )
+                self._conn.commit()
+                return
             self._conn.execute(
                 "UPDATE orchestration_runs SET status = 'passed', current_step = 'completed', updated_at = ? WHERE id = ?",
                 (_now(), orch_run_id),
@@ -377,6 +457,35 @@ class RuntimeProjector:
             self._upsert_orchestration_run(event)
 
         self._conn.commit()
+
+    def _has_pass_verification(self, event: RuntimeEvent) -> bool:
+        orch_run_id = event.orchestration_run_id
+        if orch_run_id is None:
+            return False
+
+        row = self._conn.execute(
+            "SELECT last_verification_result FROM orchestration_runs WHERE id = ?",
+            (orch_run_id,),
+        ).fetchone()
+        if row is not None and str(row["last_verification_result"]) == "pass":
+            return True
+
+        if event.id:
+            row = self._conn.execute(
+                """
+                SELECT 1 FROM runtime_events
+                WHERE orchestration_run_id = ?
+                  AND event_type = ?
+                  AND json_extract(payload_json, '$.decision') = 'pass'
+                  AND id <= ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (orch_run_id, EventType.VERIFICATION_DECISION_RECORDED, event.id),
+            ).fetchone()
+            return row is not None
+
+        return False
 
     def _upsert_orchestration_run(self, event: RuntimeEvent) -> None:
         orch_run_id = event.orchestration_run_id
@@ -420,12 +529,16 @@ class RuntimeProjector:
         else:
             metadata_json = "{}"
 
-        input_tokens = int(payload.get("input_tokens", 0))
-        output_tokens = int(payload.get("output_tokens", 0))
-        cached = int(payload.get("cached_input_tokens", 0))
-        reasoning = int(payload.get("reasoning_output_tokens", 0))
-        total = int(payload.get("total_tokens", input_tokens + output_tokens))
-        latency = int(payload.get("latency_ms", 0))
+        input_tokens = _payload_int(payload, "input_tokens", "inputTokens")
+        output_tokens = _payload_int(payload, "output_tokens", "outputTokens")
+        cached = _payload_int(payload, "cached_input_tokens", "cachedInputTokens")
+        reasoning = _payload_int(
+            payload, "reasoning_output_tokens", "reasoningOutputTokens"
+        )
+        total = _payload_int(payload, "total_tokens", "totalTokens")
+        if total == 0:
+            total = input_tokens + output_tokens
+        latency = _payload_int(payload, "latency_ms", "latencyMs")
 
         self._conn.execute(
             """
@@ -516,9 +629,9 @@ class RuntimeProjector:
             )
 
         elif etype == EventType.APPROVAL_RESOLVED:
-            decision = str(payload.get("decision", ""))
+            decision = payload.get("decision", "")
             resolver = str(payload.get("resolver", ""))
-            status = "approved" if decision == "approve" else "denied"
+            status = "approved" if _is_approved_decision(decision) else "denied"
             self._conn.execute(
                 """
                 UPDATE approval_requests

@@ -78,12 +78,14 @@ class WlCodexHandlers:
         ledger: Ledger,
         approval_service: object,
         bot: object,
+        runtime_event_store: object | None = None,
     ) -> None:
         self._config = config
         self._controller = controller
         self._ledger = ledger
         self._approval = approval_service
         self._bot = bot
+        self._runtime_store = runtime_event_store
 
     # --- Auth guard ---
 
@@ -201,11 +203,23 @@ class WlCodexHandlers:
             msg = await self._bot.send_message(
                 chat_id=chat_id, text=text, reply_markup=reply_markup
             )
+            self._append_telegram_delivery_event(
+                "telegram.message.sent",
+                chat_id=chat_id,
+                text=text,
+                message_id=msg.message_id,
+            )
             return msg.message_id
         except (TimedOut, NetworkError) as exc:
             logger.warning(
                 "Telegram send timed out: chat_id=%s text_len=%d exc=%s",
                 chat_id, len(text), exc,
+            )
+            self._append_telegram_delivery_event(
+                "telegram.message.failed",
+                chat_id=chat_id,
+                text=text,
+                error=str(exc),
             )
             return SEND_FAILED
         except TelegramError as exc:
@@ -214,7 +228,19 @@ class WlCodexHandlers:
                     "Telegram send network error: chat_id=%s text_len=%d exc=%s",
                     chat_id, len(text), exc,
                 )
+                self._append_telegram_delivery_event(
+                    "telegram.message.failed",
+                    chat_id=chat_id,
+                    text=text,
+                    error=str(exc),
+                )
                 return SEND_FAILED
+            self._append_telegram_delivery_event(
+                "telegram.message.failed",
+                chat_id=chat_id,
+                text=text,
+                error=str(exc),
+            )
             raise
 
     async def edit_telegram(
@@ -242,6 +268,12 @@ class WlCodexHandlers:
                 chat_id=chat_id, message_id=message_id, text=text,
                 reply_markup=reply_markup,
             )
+            self._append_telegram_delivery_event(
+                "telegram.message.edited",
+                chat_id=chat_id,
+                text=text,
+                message_id=message_id,
+            )
         except Exception as exc:
             if _is_message_not_modified_error(exc):
                 try:
@@ -249,6 +281,12 @@ class WlCodexHandlers:
                         chat_id=chat_id, message_id=message_id,
                         text=text + "​",
                         reply_markup=reply_markup,
+                    )
+                    self._append_telegram_delivery_event(
+                        "telegram.message.edited",
+                        chat_id=chat_id,
+                        text=text,
+                        message_id=message_id,
                     )
                 except Exception:
                     pass
@@ -259,6 +297,13 @@ class WlCodexHandlers:
                     "Telegram edit network error: chat_id=%s msg_id=%s exc=%s",
                     chat_id, message_id, exc,
                 )
+                self._append_telegram_delivery_event(
+                    "telegram.message.failed",
+                    chat_id=chat_id,
+                    text=text,
+                    message_id=message_id,
+                    error=str(exc),
+                )
                 return
 
             logger.debug("Failed to edit message %d, sending new one", message_id)
@@ -266,15 +311,156 @@ class WlCodexHandlers:
                 new_msg = await self._bot.send_message(
                     chat_id=chat_id, text=text, reply_markup=reply_markup,
                 )
+                self._append_telegram_delivery_event(
+                    "telegram.message.sent",
+                    chat_id=chat_id,
+                    text=text,
+                    message_id=new_msg.message_id,
+                    payload_extra={"fallback_for_message_id": message_id},
+                )
             except Exception as send_exc:
                 logger.warning(
                     "Telegram edit fallback send failed: chat_id=%s exc=%s",
                     chat_id, send_exc,
                 )
+                self._append_telegram_delivery_event(
+                    "telegram.message.failed",
+                    chat_id=chat_id,
+                    text=text,
+                    message_id=message_id,
+                    error=str(send_exc),
+                )
                 return
             for task in self._ledger.list_tasks(limit=50, include_archived=True):
                 if task.telegram_status_message_id == message_id:
                     self._ledger.set_status_message(task.id, chat_id, new_msg.message_id)
+
+    def _append_telegram_delivery_event(
+        self,
+        event_type: str,
+        *,
+        chat_id: int,
+        text: str,
+        message_id: int | None = None,
+        error: str = "",
+        payload_extra: dict[str, object] | None = None,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        try:
+            from wlcodex.runtime_events import (
+                AggregateType,
+                EventSource,
+                EventType,
+                RuntimeEvent,
+                Visibility,
+                now_iso,
+            )
+
+            active = self._ledger.get_active_conversation(chat_id)
+            conversation_id = active.id if active is not None else None
+            aggregate_id = str(message_id or f"{chat_id}-{now_iso()}")
+            correlation_id, causation_id = self._active_runtime_context(
+                conversation_id,
+                fallback=f"telegram-{aggregate_id}",
+            )
+            payload: dict[str, object] = {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text_preview": text[:500],
+                "text_length": len(text),
+            }
+            if error:
+                payload["error"] = error[:1000]
+            if payload_extra:
+                payload.update(payload_extra)
+            self._runtime_store.append(RuntimeEvent(
+                schema_version=1,
+                event_type=event_type,
+                aggregate_type=AggregateType.TELEGRAM_MESSAGE,
+                aggregate_id=aggregate_id,
+                correlation_id=correlation_id,
+                source=EventSource.TELEGRAM,
+                actor="telegram_bot",
+                visibility=Visibility.OPERATOR,
+                payload=payload,
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+                causation_id=causation_id,
+            ))
+        except Exception:
+            logger.debug("Failed to append Telegram delivery event", exc_info=True)
+
+    def _active_runtime_context(
+        self,
+        conversation_id: int | None,
+        *,
+        fallback: str,
+    ) -> tuple[str, int | None]:
+        if self._runtime_store is None or conversation_id is None:
+            return fallback, None
+        row = self._runtime_store._conn.execute(
+            """
+            SELECT id, correlation_id FROM runtime_events
+            WHERE conversation_id = ?
+              AND correlation_id NOT LIKE 'telegram-%'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            return fallback, None
+        return str(row["correlation_id"]), int(row["id"])
+
+    def _append_telegram_callback_event(self, update: Update, data: str) -> None:
+        if self._runtime_store is None:
+            return
+        try:
+            from wlcodex.runtime_events import (
+                AggregateType,
+                EventSource,
+                EventType,
+                RuntimeEvent,
+                Visibility,
+                now_iso,
+            )
+
+            chat = update.effective_chat
+            user = update.effective_user
+            query = update.callback_query
+            chat_id = chat.id if chat is not None else 0
+            active = self._ledger.get_active_conversation(chat_id)
+            conversation_id = active.id if active is not None else None
+            callback_id = str(getattr(query, "id", "") or f"{chat_id}-{now_iso()}")
+            message = getattr(query, "message", None)
+            message_id = getattr(message, "message_id", None)
+            correlation_id, causation_id = self._active_runtime_context(
+                conversation_id,
+                fallback=f"telegram-callback-{callback_id}",
+            )
+            self._runtime_store.append(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.TELEGRAM_CALLBACK_RECEIVED,
+                aggregate_type=AggregateType.TELEGRAM_MESSAGE,
+                aggregate_id=callback_id,
+                correlation_id=correlation_id,
+                source=EventSource.TELEGRAM,
+                actor="user",
+                visibility=Visibility.OPERATOR,
+                payload={
+                    "chat_id": chat_id,
+                    "user_id": user.id if user is not None else None,
+                    "callback_id": callback_id,
+                    "callback_data": data[:500],
+                    "message_id": message_id,
+                },
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+                causation_id=causation_id,
+            ))
+        except Exception:
+            logger.debug("Failed to append Telegram callback event", exc_info=True)
 
     # --- Handlers ---
 
@@ -333,7 +519,7 @@ class WlCodexHandlers:
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
-        response = await self._controller.handle("/tasks", _ctx(update))
+        response = await self._controller.handle("/status", _ctx(update))
         await update.effective_message.reply_text(response.text)
 
     async def continue_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -664,6 +850,7 @@ class WlCodexHandlers:
             return
 
         data = query.data or ""
+        self._append_telegram_callback_event(update, data)
 
         if data.startswith("approval:"):
             await self._approval_callback_impl(update, query, data)
@@ -845,12 +1032,14 @@ def build_application(
     controller: CommandController | None = None,
     ledger: Ledger | None = None,
     approval_service: object = None,
+    runtime_event_store: object | None = None,
 ) -> tuple[Application, WlCodexHandlers | None]:
     application = Application.builder().token(token).concurrent_updates(8).build()
 
     if controller is not None and ledger is not None:
         handlers = WlCodexHandlers(
-            config, controller, ledger, approval_service, application.bot
+            config, controller, ledger, approval_service, application.bot,
+            runtime_event_store=runtime_event_store,
         )
     else:
         application.add_handler(CommandHandler("start", _skeleton_start))
@@ -861,6 +1050,7 @@ def build_application(
     application.add_handler(CommandHandler("task", handlers.task))
     application.add_handler(CommandHandler("tasks", handlers.tasks_list))
     application.add_handler(CommandHandler("status", handlers.status))
+    application.add_handler(CommandHandler("trace", handlers.task))
     application.add_handler(CommandHandler("continue", handlers.continue_cmd))
     application.add_handler(CommandHandler("steer", handlers.steer))
     application.add_handler(CommandHandler("tail", handlers.tail))

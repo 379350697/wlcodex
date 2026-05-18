@@ -13,6 +13,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 from wlcodex.codex_backend import BackendEvent
+from wlcodex.codex_runtime_source import CodexRuntimeSource
 from wlcodex.db import Ledger
 from wlcodex.models import TaskStatus
 from wlcodex.status import render_approval_card, render_task_card
@@ -48,6 +49,7 @@ class EventBridge:
         task_watchdog: object | None = None,
         watchdog_interval_seconds: int = TASK_WATCHDOG_INTERVAL_SECONDS,
         interaction_renderer: object | None = None,
+        runtime_event_store: object | None = None,
     ) -> None:
         self._service = task_service
         self._backend = backend
@@ -58,7 +60,9 @@ class EventBridge:
         self._task_watchdog = task_watchdog
         self._watchdog_interval = watchdog_interval_seconds
         self._interaction_renderer = interaction_renderer
+        self._runtime_store = runtime_event_store
         self._status_card_fingerprints: dict[int, tuple[str, str]] = {}
+        self._runtime_causation_by_agent_run: dict[int, int] = {}
         self._running = False
 
     async def run(self) -> None:
@@ -132,6 +136,9 @@ class EventBridge:
             logger.exception("Failed to apply backend event: %s", event.event_type)
             return
 
+        task = self._task_for_runtime_event(event, thread_id, task_before)
+        self._append_runtime_events(event, task)
+
         # Forward agent message deltas to interaction renderer (before status-card skip)
         if event.event_type == "agent_message_delta":
             await self._forward_agent_delta(event)
@@ -155,6 +162,95 @@ class EventBridge:
                 await drain_workspace(
                     self._service, self._backend, task_after.workspace_alias
                 )
+
+    def _task_for_runtime_event(
+        self,
+        event: BackendEvent,
+        thread_id: str,
+        task_before: object | None,
+    ) -> object | None:
+        if thread_id:
+            return self._service._find_by_thread(thread_id)
+        codex_request_id = str(event.payload.get("codexRequestId", ""))
+        if codex_request_id:
+            approval = self._ledger.get_approval_by_codex_id(codex_request_id)
+            if approval is not None:
+                try:
+                    return self._ledger.get_task(approval.task_id)
+                except KeyError:
+                    return None
+        return task_before
+
+    def _append_runtime_events(self, event: BackendEvent, task: object | None) -> None:
+        """Append Codex backend events to runtime_events for non-orchestrated tasks."""
+        if self._runtime_store is None or task is None:
+            return
+        task_id = getattr(task, "id", None)
+        if task_id is None:
+            return
+        if self._service.is_orchestration_managed_task(int(task_id)):
+            return
+        context = self._runtime_context_for_task(int(task_id))
+        if context is None:
+            return
+        source = CodexRuntimeSource(
+            correlation_id=context["correlation_id"],
+            agent_run_id=context["agent_run_id"],
+            conversation_id=context["conversation_id"],
+            orchestration_run_id=context["orchestration_run_id"],
+            task_id=int(task_id),
+        )
+        last_id = self._runtime_causation_by_agent_run.get(context["agent_run_id"])
+        for runtime_event in source.map_event(event, causation_id=last_id):
+            stored = self._runtime_store.append(runtime_event)
+            self._runtime_causation_by_agent_run[context["agent_run_id"]] = stored.id
+
+    def _runtime_context_for_task(self, task_id: int) -> dict[str, int | str] | None:
+        row = self._ledger._conn.execute(
+            """
+            SELECT c.id AS conversation_id,
+                   ar.id AS agent_run_id,
+                   ar.role AS role,
+                   o.id AS orchestration_run_id
+            FROM conversation_sessions AS c
+            LEFT JOIN agent_runs AS ar
+              ON ar.conversation_id = c.id
+             AND ar.agent = 'codex'
+             AND (ar.hidden_task_id = ? OR ar.hidden_task_id IS NULL)
+            LEFT JOIN orchestration_runs AS o
+              ON o.conversation_id = c.id
+             AND o.status = 'running'
+            WHERE c.active_codex_task_id = ?
+            ORDER BY ar.id DESC, o.id DESC
+            LIMIT 1
+            """,
+            (task_id, task_id),
+        ).fetchone()
+        if row is None or row["agent_run_id"] is None:
+            return None
+        correlation_id = f"codex-task-{task_id}"
+        last_event = self._runtime_store._conn.execute(
+            """
+            SELECT correlation_id FROM runtime_events
+            WHERE task_id = ?
+              AND correlation_id NOT LIKE 'telegram-%'
+              AND correlation_id NOT LIKE 'watchdog-%'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if last_event is not None:
+            correlation_id = str(last_event["correlation_id"])
+        return {
+            "conversation_id": int(row["conversation_id"]),
+            "agent_run_id": int(row["agent_run_id"]),
+            "orchestration_run_id": (
+                int(row["orchestration_run_id"])
+                if row["orchestration_run_id"] is not None else None
+            ),
+            "correlation_id": correlation_id,
+        }
 
     async def _on_approval_requested(self, event: BackendEvent) -> None:
         payload = event.payload

@@ -10,6 +10,7 @@ from typing import Any
 
 from wlcodex.agent_backend import AgentRequest, AgentStreamEvent
 from wlcodex.claude_backend import record_claude_usage_event
+from wlcodex.codex_runtime_source import CodexRuntimeSource
 from wlcodex.context_packets import ContextBudget, approx_tokens, trim_to_budget
 from wlcodex.interaction.events import InteractionEvent
 from wlcodex.interaction.runtime_renderer import RuntimeRunState
@@ -46,16 +47,45 @@ def _accepts_keyword(func: object, name: str) -> bool:
 
 
 class _TaskBoundCodexBackend:
-    def __init__(self, backend: object, service: TaskService, task_id: int) -> None:
+    def __init__(
+        self,
+        backend: object,
+        service: TaskService,
+        task_id: int,
+        *,
+        store: object | None = None,
+        correlation_id: str = "",
+        conversation_id: int | None = None,
+        orchestration_run_id: int | None = None,
+    ) -> None:
         self._backend = backend
         self._service = service
         self._task_id = task_id
+        self._store = store
+        self._correlation_id = correlation_id
+        self._conversation_id = conversation_id
+        self._orchestration_run_id = orchestration_run_id
+        self._runtime_source: CodexRuntimeSource | None = None
+        self._last_runtime_event_id: int | None = None
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._backend, name)
 
     def _bind_thread(self, thread_id: str) -> None:
         self._service.set_task_thread(self._task_id, thread_id)
+
+    def set_runtime_context(self, *, agent_run_id: int, role: str) -> None:
+        if self._store is None or not self._correlation_id:
+            self._runtime_source = None
+            return
+        self._runtime_source = CodexRuntimeSource(
+            correlation_id=self._correlation_id,
+            agent_run_id=agent_run_id,
+            conversation_id=self._conversation_id,
+            orchestration_run_id=self._orchestration_run_id,
+            task_id=self._task_id,
+        )
+        self._runtime_role = role
 
     async def send_codex_prompt(
         self,
@@ -69,12 +99,35 @@ class _TaskBoundCodexBackend:
             for key, value in kwargs.items()
             if _accepts_keyword(send_codex_prompt, key)
         }
-        return await send_codex_prompt(
-            workspace_path,
-            prompt,
-            on_thread_created=self._bind_thread,
-            **supported_kwargs,
-        )
+        previous_callback = getattr(self._backend, "_runtime_event_callback", None)
+        runtime_wired = False
+        if self._runtime_source is not None and hasattr(
+            self._backend, "set_runtime_event_callback"
+        ):
+            def _runtime_callback(event: object) -> None:
+                if previous_callback is not None:
+                    previous_callback(event)
+                source = self._runtime_source
+                if source is None or self._store is None:
+                    return
+                for runtime_event in source.map_event(
+                    event, causation_id=self._last_runtime_event_id,
+                ):
+                    stored = self._store.append(runtime_event)
+                    self._last_runtime_event_id = stored.id
+
+            self._backend.set_runtime_event_callback(_runtime_callback)
+            runtime_wired = True
+        try:
+            return await send_codex_prompt(
+                workspace_path,
+                prompt,
+                on_thread_created=self._bind_thread,
+                **supported_kwargs,
+            )
+        finally:
+            if runtime_wired:
+                self._backend.set_runtime_event_callback(previous_callback)
 
 
 class _ClaudeRuntimeWrapper:
@@ -119,6 +172,38 @@ class _ClaudeRuntimeWrapper:
     def activity_events(self) -> list[RuntimeEvent]:
         return list(self._events)
 
+    def _configure_backend_runtime_source(self, agent_run_id: int) -> object | None:
+        if self._store is None:
+            return None
+        try:
+            from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+        except Exception:
+            return None
+        source = ClaudeRuntimeSource(
+            self._store,
+            correlation_id=self._correlation_id,
+            agent_run_id=agent_run_id,
+            conversation_id=self._conversation_id,
+            orchestration_run_id=self._orchestration_run_id,
+            task_id=self._task_id,
+        )
+        setter = getattr(self._backend, "set_runtime_source", None)
+        if callable(setter):
+            setter(source)
+            return source
+        if hasattr(self._backend, "_runtime_source"):
+            setattr(self._backend, "_runtime_source", source)
+            return source
+        return None
+
+    def _restore_backend_runtime_source(self, previous: object | None) -> None:
+        setter = getattr(self._backend, "set_runtime_source", None)
+        if callable(setter):
+            setter(previous)
+            return
+        if hasattr(self._backend, "_runtime_source"):
+            setattr(self._backend, "_runtime_source", previous)
+
     async def send_streaming(self, request: AgentRequest):
         """Create agent_run, emit started, then forward deltas with activity events."""
         # Create agent_run BEFORE launching Claude subprocess
@@ -160,6 +245,9 @@ class _ClaudeRuntimeWrapper:
             self._store.append(started_event)
             self._events.append(started_event)
 
+        previous_runtime_source = getattr(self._backend, "_runtime_source", None)
+        runtime_source = self._configure_backend_runtime_source(agent_run.id)
+
         error_text = ""
         had_error = False
         backend_exception = False
@@ -195,6 +283,9 @@ class _ClaudeRuntimeWrapper:
             had_error = True
             error_text = str(exc)
             backend_exception = True
+        finally:
+            if runtime_source is not None:
+                self._restore_backend_runtime_source(previous_runtime_source)
 
         # Emit agent.run.completed or agent.run.failed
         if self._store is not None and agent_run:
@@ -379,7 +470,19 @@ class OrchestrationRunner:
         correlation_id: str = "",
     ) -> None:
         cid = correlation_id or str(uuid.uuid4())
-        codex = _TaskBoundCodexBackend(self._codex, self._service, task_id)
+        codex = _TaskBoundCodexBackend(
+            self._codex,
+            self._service,
+            task_id,
+            store=self._store,
+            correlation_id=cid,
+            conversation_id=conversation.id,
+            orchestration_run_id=orchestration_run_id,
+        )
+        codex.set_runtime_context(
+            agent_run_id=codex_analysis_run_id,
+            role="analysis",
+        )
 
         # Wrap Claude backend so runtime events are emitted before/after
         # every send_streaming call and during every delta.
@@ -421,6 +524,7 @@ class OrchestrationRunner:
         terminal_text = ""
         codex_analysis_status = "running"
         implementation_notice_sent = False
+        codex_verification_run_id: int | None = None
 
         try:
             async for progress in orch.run_streaming(
@@ -523,6 +627,10 @@ class OrchestrationRunner:
                         conversation_id=conversation.id,
                     )
                     if progress.phase == OrchestrationProgress.ANALYSIS_STARTED:
+                        codex.set_runtime_context(
+                            agent_run_id=codex_analysis_run_id,
+                            role="analysis",
+                        )
                         self._emit_event(RuntimeEvent(
                             schema_version=1,
                             event_type=EventType.RUN_PHASE_CHANGED,
@@ -645,6 +753,23 @@ class OrchestrationRunner:
                             )
                     elif progress.phase == OrchestrationProgress.VERIFY_STARTED:
                         verify_round = progress.round_num or verify_round
+                        verify_run = self._ledger.create_agent_run(
+                            conversation_id=conversation.id,
+                            agent="codex",
+                            role="verification",
+                            prompt_packet_summary=(
+                                claude_implementation_text or prompt
+                            )[:120],
+                        )
+                        codex_verification_run_id = verify_run.id
+                        self._ledger.update_agent_run_status(
+                            verify_run.id,
+                            "running",
+                        )
+                        codex.set_runtime_context(
+                            agent_run_id=verify_run.id,
+                            role="verification",
+                        )
                         # Emit run.phase.changed to running_verification
                         self._emit_event(RuntimeEvent(
                             schema_version=1,
@@ -675,6 +800,22 @@ class OrchestrationRunner:
                             occurred_at=now_iso(),
                             conversation_id=conversation.id,
                             orchestration_run_id=orchestration_run_id,
+                            task_id=task_id,
+                        ))
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.AGENT_RUN_STARTED,
+                            aggregate_type=AggregateType.AGENT_RUN,
+                            aggregate_id=str(verify_run.id),
+                            correlation_id=cid,
+                            source=EventSource.CODEX,
+                            actor="codex",
+                            visibility=Visibility.OPERATOR,
+                            payload={"agent": "codex", "role": "verification"},
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            agent_run_id=verify_run.id,
                             task_id=task_id,
                         ))
                         if self._interaction_renderer is not None:
@@ -734,18 +875,43 @@ class OrchestrationRunner:
                                 orchestration_run_id=orchestration_run_id,
                                 task_id=task_id,
                             ))
-                        # Create verification agent run (backward compat)
-                        verify_run = self._ledger.create_agent_run(
-                            conversation_id=conversation.id,
-                            agent="codex",
-                            role="verification",
-                            prompt_packet_summary=verification_text[:120],
-                        )
+                        if codex_verification_run_id is None:
+                            verify_run = self._ledger.create_agent_run(
+                                conversation_id=conversation.id,
+                                agent="codex",
+                                role="verification",
+                                prompt_packet_summary=verification_text[:120],
+                            )
+                            codex_verification_run_id = verify_run.id
+                        else:
+                            verify_run = self._ledger.get_agent_run(
+                                codex_verification_run_id
+                            )
                         self._ledger.update_agent_run_status(
                             verify_run.id,
                             "done",
                             completion_summary=verification_text[:2000],
                         )
+                        self._emit_event(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.AGENT_RUN_COMPLETED,
+                            aggregate_type=AggregateType.AGENT_RUN,
+                            aggregate_id=str(verify_run.id),
+                            correlation_id=cid,
+                            source=EventSource.CODEX,
+                            actor="codex",
+                            visibility=Visibility.OPERATOR,
+                            payload={
+                                "agent": "codex",
+                                "role": "verification",
+                                "completion_summary": verification_text[:2000],
+                            },
+                            occurred_at=now_iso(),
+                            conversation_id=conversation.id,
+                            orchestration_run_id=orchestration_run_id,
+                            agent_run_id=verify_run.id,
+                            task_id=task_id,
+                        ))
                         self._record_workflow_overhead(
                             phase="codex_verification",
                             overhead_input_tokens=approx_tokens(verification_text),

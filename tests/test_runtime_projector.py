@@ -257,12 +257,37 @@ class TestOrchestrationRunProjection:
         assert row["current_step"] == "running_implementation"
         assert row["last_codex_analysis"] == "needs auth fix"
 
-        store.append(_event(EventType.RUN_COMPLETED, AggregateType.ORCHESTRATION_RUN,
-                            "orch-1", orchestration_run_id=1, event_id=4))
+        store.append(_event(EventType.VERIFICATION_DECISION_RECORDED,
+                            AggregateType.ORCHESTRATION_RUN,
+                            "orch-1", orchestration_run_id=1,
+                            payload={"decision": "pass"},
+                            event_id=4))
         projector.apply(store.get_by_id(4))
+
+        store.append(_event(EventType.RUN_COMPLETED, AggregateType.ORCHESTRATION_RUN,
+                            "orch-1", orchestration_run_id=1, event_id=5))
+        projector.apply(store.get_by_id(5))
 
         row = _row(ledger._conn, "orchestration_runs", 1)
         assert row["status"] == "passed"
+
+    def test_run_completed_without_pass_verification_is_flagged_failed(
+        self, tmp_path: Path
+    ):
+        """run.completed must not mark a projection passed without Codex pass."""
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.RUN_STARTED, AggregateType.ORCHESTRATION_RUN,
+                            "orch-gate", orchestration_run_id=40, event_id=1))
+        projector.apply(store.get_by_id(1))
+
+        store.append(_event(EventType.RUN_COMPLETED, AggregateType.ORCHESTRATION_RUN,
+                            "orch-gate", orchestration_run_id=40, event_id=2))
+        projector.apply(store.get_by_id(2))
+
+        row = _row(ledger._conn, "orchestration_runs", 40)
+        assert row["status"] == "failed"
+        assert row["last_verification_result"] == "run_completed_without_verification_pass"
 
     def test_orchestration_failed(self, tmp_path: Path):
         ledger, store, projector = _setup(tmp_path)
@@ -414,6 +439,28 @@ class TestApprovalProjection:
 
         row = ledger._conn.execute(
             "SELECT * FROM approval_requests WHERE codex_request_id = ?", ("req-2",)
+        ).fetchone()
+        assert row["status"] == "approved"
+
+    def test_approval_accept_decisions_project_as_approved(self, tmp_path: Path):
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.APPROVAL_REQUESTED, AggregateType.APPROVAL,
+                            "appr-accept", task_id=2,
+                            payload={"codex_request_id": "req-accept", "kind": "command"},
+                            event_id=1))
+        projector.apply(store.get_by_id(1))
+
+        store.append(_event(EventType.APPROVAL_RESOLVED, AggregateType.APPROVAL,
+                            "appr-accept", task_id=2,
+                            payload={"codex_request_id": "req-accept",
+                                     "decision": "acceptForSession", "resolver": "user"},
+                            event_id=2))
+        projector.apply(store.get_by_id(2))
+
+        row = ledger._conn.execute(
+            "SELECT * FROM approval_requests WHERE codex_request_id = ?",
+            ("req-accept",),
         ).fetchone()
         assert row["status"] == "approved"
 

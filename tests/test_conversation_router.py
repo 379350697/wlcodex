@@ -11,6 +11,8 @@ from wlcodex.router import (
     SwitchWorkspaceCommand,
     ModelCommand,
     VerifyCommand,
+    StatusCommand,
+    TraceCommand,
     StartTaskCommand,
     parse_command,
 )
@@ -83,6 +85,11 @@ def test_parse_verify_command() -> None:
     cmd2 = parse_command("/verify 确认这个修改")
     assert isinstance(cmd2, VerifyCommand)
     assert cmd2.prompt == "确认这个修改"
+
+
+def test_parse_status_and_trace_commands() -> None:
+    assert isinstance(parse_command("/status"), StatusCommand)
+    assert isinstance(parse_command("/trace"), TraceCommand)
 
 
 def test_unknown_command_raises() -> None:

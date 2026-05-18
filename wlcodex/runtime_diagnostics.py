@@ -709,6 +709,181 @@ def append_recovery_events(
     return persisted
 
 
+def append_startup_recovery_events(
+    store: "RuntimeEventStore",
+    ledger: object,
+) -> dict[str, list[int]]:
+    """Append startup recovery events for legacy non-terminal projections.
+
+    This replaces silent startup mutation of compatibility tables.  The
+    RuntimeProjector registered on the store turns these events back into
+    updates to tasks, orchestration_runs, and agent_runs.
+    """
+    conn = ledger._conn
+    ts = now_iso()
+    correlation_id = f"recovery-{ts}"
+    task_rows = conn.execute(
+        """
+        SELECT id, status FROM tasks
+        WHERE status IN ('running', 'queued', 'waiting_approval')
+        """
+    ).fetchall()
+    orch_rows = conn.execute(
+        "SELECT id, conversation_id FROM orchestration_runs WHERE status = 'running'"
+    ).fetchall()
+    agent_rows = conn.execute(
+        """
+        SELECT id, conversation_id, hidden_task_id FROM agent_runs
+        WHERE status = 'running'
+        """
+    ).fetchall()
+
+    task_ids = [int(row["id"]) for row in task_rows]
+    orch_ids = [int(row["id"]) for row in orch_rows]
+    agent_ids = [int(row["id"]) for row in agent_rows]
+
+    started = store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.SYSTEM_STARTED,
+        aggregate_type=AggregateType.SYSTEM,
+        aggregate_id="system",
+        correlation_id=correlation_id,
+        source=EventSource.SYSTEM,
+        actor="system",
+        visibility=Visibility.OPERATOR,
+        payload={"started_at": ts},
+        occurred_at=ts,
+    ))
+    recovery_started = store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.SYSTEM_RECOVERY_STARTED,
+        aggregate_type=AggregateType.SYSTEM,
+        aggregate_id="system",
+        correlation_id=correlation_id,
+        source=EventSource.SYSTEM,
+        actor="system",
+        visibility=Visibility.OPERATOR,
+        payload={
+            "task_ids": task_ids,
+            "orchestration_run_ids": orch_ids,
+            "agent_run_ids": agent_ids,
+        },
+        occurred_at=ts,
+        causation_id=started.id,
+    ))
+
+    last_id = recovery_started.id
+    for row in task_rows:
+        ev = store.append(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.RUN_FAILED,
+            aggregate_type=AggregateType.SYSTEM,
+            aggregate_id=f"task-{row['id']}",
+            correlation_id=correlation_id,
+            source=EventSource.SYSTEM,
+            actor="system",
+            visibility=Visibility.OPERATOR,
+            payload={
+                "reason": "service_restart_orphaned_task",
+                "previous_status": str(row["status"]),
+                "last_active_agent": "unknown",
+            },
+            occurred_at=ts,
+            task_id=int(row["id"]),
+            causation_id=last_id,
+        ))
+        last_id = ev.id
+
+    for row in orch_rows:
+        ev = store.append(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.RUN_FAILED,
+            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+            aggregate_id=str(row["id"]),
+            correlation_id=correlation_id,
+            source=EventSource.SYSTEM,
+            actor="system",
+            visibility=Visibility.OPERATOR,
+            payload={
+                "reason": "service_restart_orphaned_run",
+                "last_active_agent": "unknown",
+            },
+            occurred_at=ts,
+            conversation_id=int(row["conversation_id"]),
+            orchestration_run_id=int(row["id"]),
+            causation_id=last_id,
+        ))
+        last_id = ev.id
+
+    for row in agent_rows:
+        ev = store.append(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ORPHANED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id=str(row["id"]),
+            correlation_id=correlation_id,
+            source=EventSource.SYSTEM,
+            actor="system",
+            visibility=Visibility.OPERATOR,
+            payload={
+                "reason": "service_restart_orphaned_run",
+                "agent_run_id": int(row["id"]),
+            },
+            occurred_at=ts,
+            conversation_id=int(row["conversation_id"]),
+            agent_run_id=int(row["id"]),
+            task_id=(
+                int(row["hidden_task_id"])
+                if row["hidden_task_id"] is not None else None
+            ),
+            causation_id=last_id,
+        ))
+        last_id = ev.id
+
+    rebuilt = store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.PROJECTION_REBUILT,
+        aggregate_type=AggregateType.SYSTEM,
+        aggregate_id="system",
+        correlation_id=correlation_id,
+        source=EventSource.PROJECTOR,
+        actor="runtime_projector",
+        visibility=Visibility.OPERATOR,
+        payload={
+            "strategy": "live_projector_registered",
+            "events_replayed": 0,
+            "rebuilt_at": ts,
+        },
+        occurred_at=ts,
+        causation_id=last_id,
+    ))
+    last_id = rebuilt.id
+
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.SYSTEM_RECOVERY_COMPLETED,
+        aggregate_type=AggregateType.SYSTEM,
+        aggregate_id="system",
+        correlation_id=correlation_id,
+        source=EventSource.SYSTEM,
+        actor="system",
+        visibility=Visibility.OPERATOR,
+        payload={
+            "task_count": len(task_ids),
+            "orchestration_run_count": len(orch_ids),
+            "agent_run_count": len(agent_ids),
+            "completed_at": ts,
+        },
+        occurred_at=ts,
+        causation_id=last_id,
+    ))
+    return {
+        "task_ids": task_ids,
+        "orchestration_run_ids": orch_ids,
+        "agent_run_ids": agent_ids,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

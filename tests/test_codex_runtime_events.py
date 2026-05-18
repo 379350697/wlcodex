@@ -263,13 +263,13 @@ def test_token_usage_v2_protocol() -> None:
     e = events[0]
     assert e.event_type == EventType.MODEL_USAGE_UPDATED
     p = e.payload
-    assert p["inputTokens"] == 2000
-    assert p["cachedInputTokens"] == 500
-    assert p["outputTokens"] == 1200
-    assert p["reasoningOutputTokens"] == 300
-    assert p["totalTokens"] == 3500
-    assert p["modelContextWindow"] == 200000
-    assert p["total"] == {"inputTokens": 4000, "outputTokens": 2400}
+    assert p["input_tokens"] == 2000
+    assert p["cached_input_tokens"] == 500
+    assert p["output_tokens"] == 1200
+    assert p["reasoning_output_tokens"] == 300
+    assert p["total_tokens"] == 3500
+    assert p["model_context_window"] == 200000
+    assert p["total"] == {"input_tokens": 4000, "output_tokens": 2400}
 
 
 def test_token_usage_legacy_flat_format() -> None:
@@ -282,8 +282,8 @@ def test_token_usage_legacy_flat_format() -> None:
     }))
     assert len(events) == 1
     p = events[0].payload
-    assert p["inputTokens"] == 1000
-    assert p["outputTokens"] == 500
+    assert p["input_tokens"] == 1000
+    assert p["output_tokens"] == 500
 
 
 def test_token_usage_empty_payload_yields_empty() -> None:
@@ -303,9 +303,9 @@ def test_token_usage_non_numeric_values_are_skipped() -> None:
     }))
     assert len(events) == 1
     p = events[0].payload
-    assert "inputTokens" not in p
-    assert "outputTokens" not in p
-    assert p["cachedInputTokens"] == 100
+    assert "input_tokens" not in p
+    assert "output_tokens" not in p
+    assert p["cached_input_tokens"] == 100
 
 
 # ---------------------------------------------------------------------------

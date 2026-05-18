@@ -32,6 +32,149 @@ class EnabledClaude:
         yield AgentStreamEvent(delta="implemented", event_type="text")
 
 
+class RuntimeAwareClaude:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.sources: list[object | None] = []
+        self.current_source: object | None = None
+
+    def set_runtime_source(self, source: object | None) -> None:
+        self.current_source = source
+        self.sources.append(source)
+
+    async def send_streaming(self, _request: object):
+        from wlcodex.claude_stream_parser import ClaudeStreamEvent
+        from wlcodex.runtime_events import EventType
+
+        assert self.current_source is not None
+        self.current_source.emit(ClaudeStreamEvent(
+            runtime_event_type=EventType.TOOL_CALL_STARTED,
+            runtime_payload={"tool_name": "Bash", "tool_id": "tool-1"},
+        ))
+        self.current_source.emit(ClaudeStreamEvent(
+            runtime_event_type=EventType.MODEL_USAGE_UPDATED,
+            runtime_payload={"input_tokens": 12, "output_tokens": 4},
+            agent_usage={"input_tokens": 12, "output_tokens": 4},
+        ))
+        yield AgentStreamEvent(delta="implemented", event_type="text")
+
+
+class RuntimeSourceAwareOrchestrator:
+    def __init__(self, _codex: object, claude: object) -> None:
+        self._claude = claude
+
+    async def run_streaming(
+        self,
+        _prompt: str,
+        conversation_context: dict[str, Any] | None = None,
+    ):
+        from wlcodex.agent_backend import AgentRequest
+
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_STARTED,
+            text="analysis start",
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_COMPLETE,
+            text="analysis",
+            full_text="analysis",
+            agent="codex",
+        )
+        async for stream_event in self._claude.send_streaming(
+            AgentRequest(prompt="impl", workspace_path=str(conversation_context["workspace"]))
+        ):
+            yield OrchestrationProgress(
+                phase=OrchestrationProgress.IMPL_DELTA,
+                text=stream_event.delta,
+                agent="claude",
+                round_num=1,
+            )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.IMPL_COMPLETE,
+            text="implemented",
+            full_text="implemented",
+            agent="claude",
+            round_num=1,
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.VERIFY_STARTED,
+            text="verify",
+            agent="codex",
+            round_num=1,
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.VERIFY_COMPLETE,
+            text="decision: pass",
+            full_text="decision: pass\nsummary: ok",
+            agent="codex",
+            round_num=1,
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.COMPLETE,
+            text="done",
+            full_text="decision: pass\nsummary: ok",
+            agent="codex",
+            result_status="passed",
+            round_num=1,
+        )
+
+
+class RuntimeAwareCodexBackend(FakeCodexBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self._runtime_event_callback = None
+
+    def set_runtime_event_callback(self, callback):
+        self._runtime_event_callback = callback
+
+    async def send_codex_prompt(self, workspace_path, prompt, **kwargs):
+        from wlcodex.codex_backend import BackendEvent
+
+        assert self._runtime_event_callback is not None
+        self._runtime_event_callback(BackendEvent("token_usage_updated", {
+            "inputTokens": 21,
+            "outputTokens": 7,
+        }))
+        return "decision: pass\nsummary: codex ok"
+
+
+class RuntimeSourceAwareCodexOrchestrator:
+    def __init__(self, codex: object, _claude: object) -> None:
+        self._codex = codex
+
+    async def run_streaming(
+        self,
+        _prompt: str,
+        conversation_context: dict[str, Any] | None = None,
+    ):
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_STARTED,
+            text="analysis start",
+            agent="codex",
+        )
+        analysis = await self._codex.send_codex_prompt(
+            str(conversation_context["workspace"]),
+            "analysis prompt",
+            interaction_mode="analysis",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_COMPLETE,
+            text=analysis,
+            full_text=analysis,
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.COMPLETE,
+            text="done",
+            full_text=analysis,
+            agent="codex",
+            result_status="passed",
+            round_num=0,
+        )
+
+
 class NeverFinishingRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -832,3 +975,105 @@ async def test_telegram_deterministic_progress_no_raw_model_text(
     # Final event is run_completed
     terminal = renderer.events[-1]
     assert terminal.event_type == "run_completed"
+
+
+@pytest.mark.asyncio
+async def test_runner_wires_claude_runtime_source_into_live_backend(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=100, user_id=200, title="Claude runtime", mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "runtime source", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "runtime source")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+    claude = RuntimeAwareClaude()
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=claude,
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=RuntimeSourceAwareOrchestrator,
+        runtime_event_store=store,
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="runtime source",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+        correlation_id="test-claude-runtime",
+    )
+    await background_task
+
+    events = store.list_by_correlation("test-claude-runtime")
+    event_types = [e.event_type for e in events]
+    assert EventType.TOOL_CALL_STARTED in event_types
+    assert EventType.MODEL_USAGE_UPDATED in event_types
+    usage = [e for e in events if e.event_type == EventType.MODEL_USAGE_UPDATED][0]
+    assert usage.actor == "claude"
+    assert usage.agent_run_id is not None
+    assert usage.payload["input_tokens"] == 12
+
+
+@pytest.mark.asyncio
+async def test_runner_wires_codex_runtime_source_for_analysis_turn(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger, service, _backend, renderer, workspace = _build_runtime(tmp_path)
+    store = RuntimeEventStore(ledger._conn)
+    backend = RuntimeAwareCodexBackend()
+    conversation = ledger.create_conversation(
+        chat_id=100, user_id=200, title="Codex runtime", mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "codex runtime", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "codex runtime")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=RuntimeSourceAwareCodexOrchestrator,
+        runtime_event_store=store,
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="codex runtime",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+        correlation_id="test-codex-runtime",
+    )
+    await background_task
+
+    events = store.list_by_correlation("test-codex-runtime")
+    usage_events = [e for e in events if e.event_type == EventType.MODEL_USAGE_UPDATED]
+    assert usage_events
+    assert usage_events[0].actor == "codex"
+    assert usage_events[0].agent_run_id == codex_run.id
+    assert usage_events[0].payload["input_tokens"] == 21

@@ -17,6 +17,7 @@ from wlcodex.router import (
     ParseError,
     ShowTaskCommand,
     StartTaskCommand,
+    StatusCommand,
     SteerCommand,
     TailCommand,
     parse_command,
@@ -34,7 +35,7 @@ def test_parse_health_command() -> None:
 
 def test_parse_tasks_command() -> None:
     assert isinstance(parse_command("/tasks"), ListTasksCommand)
-    assert isinstance(parse_command("/status"), ListTasksCommand)
+    assert isinstance(parse_command("/status"), StatusCommand)
 
 
 def test_parse_codex_sessions() -> None:

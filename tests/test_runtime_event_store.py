@@ -78,6 +78,18 @@ def test_append_does_not_require_task_event(tmp_path: Path) -> None:
     assert saved.id > 0
 
 
+def test_append_notifies_registered_projector_after_commit(tmp_path: Path) -> None:
+    """RuntimeEventStore.append is the live projection boundary."""
+    store = _store(tmp_path)
+    seen: list[RuntimeEvent] = []
+
+    store.add_projector(seen.append)
+    saved = store.append(_make_event(payload={"n": 1}))
+
+    assert seen == [saved]
+    assert seen[0].id > 0
+
+
 # ---------------------------------------------------------------------------
 # Query by correlation_id
 # ---------------------------------------------------------------------------

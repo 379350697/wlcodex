@@ -678,3 +678,138 @@ async def test_runtime_events_dont_interfere_with_approval_cards(tmp_path: Path)
         "turn_completed",
         {"threadId": "thread-1", "status": "completed"},
     ))
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_maps_codex_backend_events_to_runtime_events(
+    tmp_path: Path,
+) -> None:
+    """Codex direct/EventBridge events must enter the runtime event ledger."""
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run runtime probe",
+        codex_thread_id="thread-runtime",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="runtime",
+        mode="codex_direct",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        "analysis",
+        hidden_task_id=task.id,
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=_send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+        runtime_event_store=store,
+    )
+
+    await bridge.process_event(BackendEvent(
+        "token_usage_updated",
+        {
+            "threadId": "thread-runtime",
+            "turnId": "turn-runtime",
+            "tokenUsage": {
+                "last": {"inputTokens": 7, "outputTokens": 3},
+            },
+        },
+    ))
+
+    events = store.list_by_agent_run(agent_run.id)
+    assert [event.event_type for event in events] == [EventType.MODEL_USAGE_UPDATED]
+    assert events[0].correlation_id == f"codex-task-{task.id}"
+    assert events[0].conversation_id == conversation.id
+    assert events[0].task_id == task.id
+    assert events[0].payload["input_tokens"] == 7
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_maps_approval_resolved_without_thread_id(
+    tmp_path: Path,
+) -> None:
+    """Backend approval_resolved events only carry codexRequestId and still need runtime context."""
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run approval probe",
+        codex_thread_id="thread-approval",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="approval",
+        mode="codex_direct",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        "analysis",
+        hidden_task_id=task.id,
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=_send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+        runtime_event_store=store,
+    )
+
+    await bridge.process_event(BackendEvent(
+        "approval_requested",
+        {
+            "threadId": "thread-approval",
+            "codexRequestId": "approval-1",
+            "kind": "command",
+            "summary": "run tests",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "approval_resolved",
+        {
+            "codexRequestId": "approval-1",
+            "response": {"decision": "accept"},
+        },
+    ))
+
+    event_types = [event.event_type for event in store.list_by_agent_run(agent_run.id)]
+    assert EventType.APPROVAL_REQUESTED in event_types
+    assert EventType.APPROVAL_RESOLVED in event_types

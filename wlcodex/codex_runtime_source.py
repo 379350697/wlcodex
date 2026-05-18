@@ -226,7 +226,7 @@ def _map_token_usage(
             usage_payload["total"] = _safe_int_fields(total)
         ctx = usage.get("modelContextWindow")
         if ctx is not None:
-            usage_payload["modelContextWindow"] = ctx
+            usage_payload["model_context_window"] = ctx
     else:
         # Legacy flat format — only the known numeric fields
         usage_payload.update(_safe_int_fields(payload))
@@ -349,13 +349,20 @@ def _safe_int_fields(d: dict, keys: list[str] | None = None) -> dict[str, int]:
     if keys is None:
         keys = ["inputTokens", "outputTokens", "cachedInputTokens",
                 "reasoningOutputTokens", "totalTokens"]
+    snake_names = {
+        "inputTokens": "input_tokens",
+        "outputTokens": "output_tokens",
+        "cachedInputTokens": "cached_input_tokens",
+        "reasoningOutputTokens": "reasoning_output_tokens",
+        "totalTokens": "total_tokens",
+    }
     result: dict[str, int] = {}
     for key in keys:
         val = d.get(key)
         if val is None:
             continue
         try:
-            result[key] = int(val)
+            result[snake_names.get(key, key)] = int(val)
         except (TypeError, ValueError):
             pass
     return result

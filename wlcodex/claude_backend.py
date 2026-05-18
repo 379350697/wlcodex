@@ -61,6 +61,10 @@ class ClaudeBackend:
     def permission_mode(self) -> str:
         return self._permission_state.get()
 
+    def set_runtime_source(self, runtime_source: object | None) -> None:
+        """Set per-run runtime event source used by streaming calls."""
+        self._runtime_source = runtime_source
+
     def set_permission_mode(self, mode: str) -> str:
         return self._permission_state.set(mode)
 
@@ -216,6 +220,7 @@ class ClaudeBackend:
 
                     if wait_task is not None and wait_task in done:
                         process_exited = True
+                        wait_task = None
 
                     if reader_task is not None and reader_task in done:
                         line = reader_task.result()

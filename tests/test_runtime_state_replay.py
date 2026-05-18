@@ -249,6 +249,20 @@ class TestOrchestrationLifecycle:
         assert orch.current_phase == "completed"
         assert orch.last_verification_result == "pass"
 
+    def test_run_completed_without_pass_verification_is_abnormal(self):
+        events = [
+            _event(EventType.RUN_STARTED, AggregateType.ORCHESTRATION_RUN, "orch-gate",
+                   orchestration_run_id=9, event_id=1),
+            _event(EventType.RUN_COMPLETED, AggregateType.ORCHESTRATION_RUN, "orch-gate",
+                   orchestration_run_id=9, event_id=2),
+        ]
+        snap = replay_events(events)
+
+        orch = snap.orchestration("orch-gate")
+        assert orch is not None
+        assert orch.status == "failed"
+        assert orch.failure_reason == "run_completed_without_verification_pass"
+
     def test_fail_flow(self):
         events = [
             _event(EventType.RUN_STARTED, AggregateType.ORCHESTRATION_RUN, "orch-2",
@@ -330,12 +344,17 @@ class TestOrchestrationTerminalProtection:
         events = [
             _event(EventType.RUN_STARTED, AggregateType.ORCHESTRATION_RUN, "orch-t",
                    orchestration_run_id=100, event_id=1),
+            _event(EventType.VERIFICATION_DECISION_RECORDED,
+                   AggregateType.ORCHESTRATION_RUN, "orch-t",
+                   orchestration_run_id=100,
+                   payload={"decision": "pass"},
+                   event_id=2),
             _event(EventType.RUN_COMPLETED, AggregateType.ORCHESTRATION_RUN, "orch-t",
-                   orchestration_run_id=100, event_id=2),
+                   orchestration_run_id=100, event_id=3),
             _event(EventType.RUN_PHASE_CHANGED, AggregateType.ORCHESTRATION_RUN, "orch-t",
                    orchestration_run_id=100,
                    payload={"phase": "running_analysis"},
-                   event_id=3),
+                   event_id=4),
         ]
         snap = replay_events(events)
 
@@ -536,8 +555,13 @@ class TestEdgeCases:
                    event_id=6),
             _event(EventType.AGENT_RUN_COMPLETED, AggregateType.AGENT_RUN, "codex-2",
                    agent_run_id=3, event_id=7),
+            _event(EventType.VERIFICATION_DECISION_RECORDED,
+                   AggregateType.ORCHESTRATION_RUN, "orch-m",
+                   orchestration_run_id=1,
+                   payload={"decision": "pass"},
+                   event_id=8),
             _event(EventType.RUN_COMPLETED, AggregateType.ORCHESTRATION_RUN, "orch-m",
-                   orchestration_run_id=1, event_id=8),
+                   orchestration_run_id=1, event_id=9),
         ]
         snap = replay_events(events)
 

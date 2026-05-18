@@ -13,6 +13,7 @@ from wlcodex.runtime_diagnostics import (
     RuntimeTrace,
     TimeoutExplanation,
     append_recovery_events,
+    append_startup_recovery_events,
     build_recovery_events,
     build_runtime_status,
     build_runtime_trace,
@@ -61,6 +62,20 @@ def _store(tmp_path: Path) -> RuntimeEventStore:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
     return RuntimeEventStore(ledger._conn)
+
+
+def test_startup_recovery_appends_projection_rebuilt_event(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+
+    append_startup_recovery_events(store, ledger)
+
+    all_rows = ledger._conn.execute(
+        "SELECT event_type FROM runtime_events ORDER BY id ASC"
+    ).fetchall()
+    event_types = [str(row["event_type"]) for row in all_rows]
+    assert EventType.PROJECTION_REBUILT in event_types
 
 
 # ---------------------------------------------------------------------------

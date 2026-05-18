@@ -8,14 +8,18 @@ time before data reaches SQLite.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import replace
+from collections.abc import Callable
 
 from wlcodex.runtime_events import (
     MAX_PAYLOAD_STRING_LENGTH,
     RuntimeEvent,
     redact_payload,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeEventStore:
@@ -28,6 +32,16 @@ class RuntimeEventStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
         self._conn.row_factory = sqlite3.Row
+        self._projectors: list[Callable[[RuntimeEvent], None]] = []
+
+    def add_projector(self, projector: Callable[[RuntimeEvent], None]) -> None:
+        """Register a post-append projector callback.
+
+        Projectors are called after the event commit with the persisted event
+        id.  Their failures are isolated so append-only storage remains the
+        source of truth even when a compatibility projection has a bug.
+        """
+        self._projectors.append(projector)
 
     # ------------------------------------------------------------------
     # Append
@@ -74,7 +88,16 @@ class RuntimeEventStore:
         )
         event_id = int(cur.lastrowid)
         self._conn.commit()
-        return replace(event, payload=safe_payload, id=event_id)
+        stored = replace(event, payload=safe_payload, id=event_id)
+        self._notify_projectors(stored)
+        return stored
+
+    def _notify_projectors(self, event: RuntimeEvent) -> None:
+        for projector in list(self._projectors):
+            try:
+                projector(event)
+            except Exception:
+                logger.debug("Runtime projector callback failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Single lookup
