@@ -73,6 +73,7 @@ from wlcodex.status import (
     render_session_list,
 )
 from wlcodex.models import ConversationMode
+from wlcodex.orchestration_progress_text import render_user_progress_text
 from wlcodex.status import (
     render_task_card,
     render_task_list,
@@ -1134,6 +1135,7 @@ class CommandController:
             verification_text = ""
             terminal_text = ""
             codex_analysis_status = "running"
+            implementation_notice_sent = False
             try:
                 async for progress in orch.run_streaming(
                     command.prompt,
@@ -1143,15 +1145,20 @@ class CommandController:
                         continue
                     if progress.phase == OrchestrationProgress.IMPL_DELTA and progress.text:
                         claude_implementation_text += progress.text
-                        await self._interaction_renderer.handle(
-                            InteractionEvent(
-                                event_type="text_delta",
-                                chat_id=chat_id,
-                                task_id=task.id,
-                                conversation_id=active.id,
-                                text=progress.text,
+                        if not implementation_notice_sent:
+                            implementation_notice_sent = True
+                            await self._interaction_renderer.handle(
+                                InteractionEvent(
+                                    event_type="text_delta",
+                                    chat_id=chat_id,
+                                    task_id=task.id,
+                                    conversation_id=active.id,
+                                    text="\n\n" + render_user_progress_text(
+                                        progress.phase,
+                                        first_impl_delta=True,
+                                    ),
+                                )
                             )
-                        )
                     elif progress.phase in (
                         OrchestrationProgress.ANALYSIS_STARTED,
                         OrchestrationProgress.ANALYSIS_COMPLETE,
@@ -1159,14 +1166,15 @@ class CommandController:
                         OrchestrationProgress.VERIFY_STARTED,
                         OrchestrationProgress.VERIFY_COMPLETE,
                     ):
-                        if progress.text:
+                        user_text = render_user_progress_text(progress.phase)
+                        if user_text:
                             await self._interaction_renderer.handle(
                                 InteractionEvent(
                                     event_type="text_delta",
                                     chat_id=chat_id,
                                     task_id=task.id,
                                     conversation_id=active.id,
-                                    text="\n\n" + progress.text,
+                                    text="\n\n" + user_text,
                                 )
                             )
                         if progress.phase == OrchestrationProgress.ANALYSIS_COMPLETE:

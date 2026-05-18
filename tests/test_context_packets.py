@@ -126,6 +126,18 @@ def test_codex_to_claude_packet_excludes_full_transcript() -> None:
     assert "修改 auth.py" in rendered
 
 
+def test_claude_handoff_packet_tells_claude_to_background_long_commands() -> None:
+    packet = build_claude_handoff_packet(
+        user_goal="跑完整验收",
+        codex_analysis="需要执行较长测试。",
+    )
+
+    rendered = packet.render()
+
+    assert "run_in_background" in rendered
+    assert "BashOutput" in rendered
+
+
 def test_packet_within_budget() -> None:
     budget = ContextBudget(codex_to_claude_tokens=100)
     packet = ClaudeHandoffPacket(

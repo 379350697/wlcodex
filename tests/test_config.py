@@ -41,6 +41,7 @@ path = "/tmp/wlcodex"
     assert config.claude.model == "deepseek-v4-pro"
     assert config.claude.effort == "max"
     assert config.claude.request_timeout_seconds == 3600
+    assert config.claude.stream_idle_timeout_seconds == 600
     assert config.context_budget.codex_to_claude_tokens == 1500
     assert config.orchestration.max_verify_rounds == 3
     assert config.streaming.edit_min_interval_seconds == 1.0
@@ -394,6 +395,7 @@ binary = "claude"
 model = "deepseek4pro"
 effort = "max"
 permission_mode = "只规划"
+stream_idle_timeout_seconds = 42
 
 [[workspaces]]
 alias = "demo"
@@ -408,3 +410,4 @@ allow_write = true
     assert config.claude.permission_mode == "plan"
     assert config.claude.model == "deepseek4pro"
     assert config.claude.effort == "max"
+    assert config.claude.stream_idle_timeout_seconds == 42

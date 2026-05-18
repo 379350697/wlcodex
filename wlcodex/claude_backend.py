@@ -8,6 +8,7 @@ exit status and summary. Avoids shell=True.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -29,6 +30,7 @@ class ClaudeConfig:
     binary: str = "claude"
     startup_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 3600.0
+    stream_idle_timeout_seconds: float = 600.0
     stream_drain_grace_seconds: float = 0.1
     permission_mode: str = "acceptEdits"
     model: str = "deepseek-v4-pro"
@@ -120,10 +122,11 @@ class ClaudeBackend:
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._config.binary,
-                *self._prompt_args(request.prompt),
+                *self._prompt_args(request.prompt, stream_json=True),
                 cwd=request.workspace_path or None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                limit=1024 * 1024 * 16,
                 start_new_session=True,
             )
 
@@ -132,69 +135,126 @@ class ClaudeBackend:
                 return
 
             accumulated: list[str] = []
+            assistant_text = ""
             reader_task: asyncio.Task[bytes] | None = None
             wait_task: asyncio.Task[int] | None = None
+            timeout_reason = ""
             try:
-                async with asyncio.timeout(self._config.request_timeout_seconds):
-                    reader_task = asyncio.create_task(proc.stdout.readline())
-                    wait_task = asyncio.create_task(proc.wait())
-                    process_exited = False
-                    stdout_eof = False
+                loop = asyncio.get_running_loop()
+                started_at = loop.time()
+                last_activity_at = started_at
+                hard_timeout = self._config.request_timeout_seconds
+                idle_timeout = self._config.stream_idle_timeout_seconds
+                reader_task = asyncio.create_task(proc.stdout.readline())
+                wait_task = asyncio.create_task(proc.wait())
+                process_exited = False
+                stdout_eof = False
 
-                    while True:
-                        if _process_has_exited(proc):
-                            process_exited = True
+                while True:
+                    now = loop.time()
+                    if hard_timeout > 0 and now - started_at >= hard_timeout:
+                        timeout_reason = "hard"
+                        break
+                    if idle_timeout > 0 and now - last_activity_at >= idle_timeout:
+                        timeout_reason = "idle"
+                        break
 
-                        done: set[asyncio.Task[object]] = set()
-                        wait_items: set[asyncio.Task[object]] = set()
-                        if reader_task is not None and reader_task.done():
-                            done.add(reader_task)
-                        elif reader_task is not None:
-                            wait_items.add(reader_task)
-                        if wait_task is not None and wait_task.done():
-                            done.add(wait_task)
-                        elif wait_task is not None:
-                            wait_items.add(wait_task)
+                    if _process_has_exited(proc):
+                        process_exited = True
 
-                        if not done and not wait_items:
-                            break
+                    done: set[asyncio.Task[object]] = set()
+                    wait_items: set[asyncio.Task[object]] = set()
+                    if reader_task is not None and reader_task.done():
+                        done.add(reader_task)
+                    elif reader_task is not None:
+                        wait_items.add(reader_task)
+                    if wait_task is not None and wait_task.done():
+                        done.add(wait_task)
+                    elif wait_task is not None:
+                        wait_items.add(wait_task)
 
-                        if not done:
-                            done, _pending = await asyncio.wait(
-                                wait_items,
-                                timeout=self._config.stream_drain_grace_seconds,
-                                return_when=asyncio.FIRST_COMPLETED,
+                    if not done and not wait_items:
+                        break
+
+                    if not done:
+                        wait_timeout = self._config.stream_drain_grace_seconds
+                        if hard_timeout > 0:
+                            wait_timeout = min(
+                                wait_timeout,
+                                max(0.0, hard_timeout - (now - started_at)),
                             )
-                            if not done:
-                                if process_exited or _process_has_exited(proc):
-                                    await _kill_process_group(proc)
-                                    break
-                                continue
+                        if idle_timeout > 0:
+                            wait_timeout = min(
+                                wait_timeout,
+                                max(0.0, idle_timeout - (now - last_activity_at)),
+                            )
+                        done, _pending = await asyncio.wait(
+                            wait_items,
+                            timeout=wait_timeout,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if not done:
+                            if process_exited or _process_has_exited(proc):
+                                await _kill_process_group(proc)
+                                break
+                            continue
 
-                        if wait_task is not None and wait_task in done:
-                            process_exited = True
+                    if wait_task is not None and wait_task in done:
+                        process_exited = True
 
-                        if reader_task is not None and reader_task in done:
-                            line = reader_task.result()
-                            if not line:
-                                stdout_eof = True
-                                reader_task = None
-                            else:
-                                decoded = line.decode("utf-8", errors="replace")
-                                accumulated.append(decoded)
-                                current_text = "".join(accumulated)
-                                if _looks_like_permission_request(current_text):
-                                    await _kill_process(proc)
-                                    yield AgentStreamEvent(
-                                        delta=_permission_error_message(current_text),
-                                        event_type="error",
-                                    )
-                                    return
-                                yield AgentStreamEvent(delta=decoded, event_type="text")
+                    if reader_task is not None and reader_task in done:
+                        line = reader_task.result()
+                        if not line:
+                            stdout_eof = True
+                            reader_task = None
+                        else:
+                            last_activity_at = loop.time()
+                            decoded = line.decode("utf-8", errors="replace")
+                            events, assistant_text = _claude_stream_events_from_line(
+                                decoded,
+                                assistant_text,
+                                bool(accumulated),
+                            )
+                            if not events:
                                 reader_task = asyncio.create_task(proc.stdout.readline())
+                                continue
+                            for event in events:
+                                if event.event_type == "text":
+                                    accumulated.append(event.delta)
+                                    current_text = "".join(accumulated)
+                                    if _looks_like_permission_request(current_text):
+                                        await _kill_process(proc)
+                                        yield AgentStreamEvent(
+                                            delta=_permission_error_message(current_text),
+                                            event_type="error",
+                                        )
+                                        return
+                                yield event
+                            reader_task = asyncio.create_task(proc.stdout.readline())
 
-                        if process_exited and stdout_eof:
-                            break
+                    if process_exited and stdout_eof:
+                        break
+
+                if timeout_reason:
+                    await _kill_process(proc)
+                    if timeout_reason == "idle":
+                        yield AgentStreamEvent(
+                            delta=(
+                                "Claude Code 运行超时："
+                                f"超过 {self._config.stream_idle_timeout_seconds:g} "
+                                "秒没有新的输出。"
+                            ),
+                            event_type="error",
+                        )
+                    else:
+                        yield AgentStreamEvent(
+                            delta=(
+                                "Claude Code 运行超时："
+                                f"超过 {self._config.request_timeout_seconds:g} 秒未完成。"
+                            ),
+                            event_type="error",
+                        )
+                    return
             except TimeoutError:
                 await _kill_process(proc)
                 yield AgentStreamEvent(
@@ -242,7 +302,7 @@ class ClaudeBackend:
     def health(self) -> object:
         return _ClaudeHealth(self._config.enabled, self._config.binary)
 
-    def _prompt_args(self, prompt: str) -> list[str]:
+    def _prompt_args(self, prompt: str, *, stream_json: bool = False) -> list[str]:
         args = [
             "-p",
             prompt,
@@ -253,7 +313,105 @@ class ClaudeBackend:
             args.extend(["--model", normalize_claude_model_name(self._config.model)])
         if self._config.effort:
             args.extend(["--effort", self._config.effort])
+        if stream_json:
+            args.extend([
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+            ])
         return args
+
+
+def _claude_stream_events_from_line(
+    line: str,
+    assistant_text: str,
+    has_emitted_text: bool,
+) -> tuple[list[AgentStreamEvent], str]:
+    stripped = line.strip()
+    if not stripped:
+        return [], assistant_text
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return [AgentStreamEvent(delta=line, event_type="text")], assistant_text
+    if not isinstance(payload, dict):
+        return [], assistant_text
+
+    event_type = str(payload.get("type") or "")
+    if event_type == "stream_event":
+        text = _extract_stream_delta_text(payload)
+        if not text:
+            return [], assistant_text
+        return [AgentStreamEvent(delta=text, event_type="text")], assistant_text + text
+
+    if event_type == "assistant":
+        current_text = _extract_assistant_text(payload)
+        if not current_text:
+            return [], assistant_text
+        if current_text.startswith(assistant_text):
+            delta = current_text[len(assistant_text):]
+            assistant_text = current_text
+        else:
+            delta = current_text
+            assistant_text += delta
+        if not delta:
+            return [], assistant_text
+        return [AgentStreamEvent(delta=delta, event_type="text")], assistant_text
+
+    if event_type == "result":
+        subtype = str(payload.get("subtype") or "")
+        error_text = str(payload.get("error") or payload.get("message") or "")
+        if subtype and subtype not in {"success", "done"}:
+            return [
+                AgentStreamEvent(
+                    delta=error_text or f"Claude Code result status: {subtype}",
+                    event_type="error",
+                )
+            ], assistant_text
+        result_text = str(payload.get("result") or "")
+        if result_text and not has_emitted_text:
+            return [AgentStreamEvent(delta=result_text, event_type="text")], assistant_text
+        return [], assistant_text
+
+    if event_type in {"error", "api_error"}:
+        text = str(payload.get("message") or payload.get("error") or payload)
+        return [AgentStreamEvent(delta=text, event_type="error")], assistant_text
+
+    return [], assistant_text
+
+
+def _extract_stream_delta_text(payload: dict[str, object]) -> str:
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        return ""
+    delta = event.get("delta")
+    if not isinstance(delta, dict):
+        return ""
+    if delta.get("type") != "text_delta":
+        return ""
+    text = delta.get("text")
+    return text if isinstance(text, str) else ""
+
+
+def _extract_assistant_text(payload: dict[str, object]) -> str:
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
 
 
 @dataclass
@@ -290,14 +448,12 @@ def _looks_like_permission_request(text: str) -> bool:
     lowered = text.lower()
     markers = (
         "需要你的批准",
-        "等待你确认",
-        "需要确认",
-        "权限确认",
+        "需要批准",
+        "需要权限",
         "requires approval",
         "need your approval",
         "permission required",
         "waiting for approval",
-        "waiting for confirmation",
     )
     return any(marker in lowered for marker in markers)
 

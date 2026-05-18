@@ -173,6 +173,59 @@ class FakeStreamingOrchestrator:
         )
 
 
+class RawVerboseStreamingOrchestrator:
+    async def run_streaming(
+        self,
+        _prompt: str,
+        conversation_context: dict[str, Any] | None = None,
+    ):
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_STARTED,
+            text="RAW_CODEX_ANALYSIS_STARTED",
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_COMPLETE,
+            text="RAW_CODEX_ANALYSIS",
+            full_text="RAW_CODEX_ANALYSIS_FULL",
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.IMPL_DELTA,
+            text="RAW_CLAUDE_DELTA",
+            agent="claude",
+            round_num=1,
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.IMPL_COMPLETE,
+            text="RAW_CLAUDE_IMPL",
+            full_text="RAW_CLAUDE_IMPL_FULL",
+            agent="claude",
+            round_num=1,
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.VERIFY_STARTED,
+            text="RAW_VERIFY_STARTED",
+            agent="codex",
+            round_num=1,
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.VERIFY_COMPLETE,
+            text="RAW_VERIFY_RESULT",
+            full_text="decision: pass\nsummary: RAW_VERIFY_RESULT_FULL",
+            agent="codex",
+            round_num=1,
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.COMPLETE,
+            text="RAW_COMPLETE_TEXT",
+            full_text="decision: pass\nsummary: RAW_COMPLETE_FULL",
+            agent="codex",
+            result_status="passed",
+            round_num=1,
+        )
+
+
 @pytest.mark.asyncio
 async def test_orchestration_runner_records_passed_background_result(
     tmp_path: Path,
@@ -227,3 +280,54 @@ async def test_orchestration_runner_records_passed_background_result(
     ]
     assert any(event.event_type == "text_delta" for event in renderer.events)
     assert renderer.events[-1].event_type == "run_completed"
+
+
+@pytest.mark.asyncio
+async def test_orchestration_runner_humanizes_telegram_progress_without_raw_model_text(
+    tmp_path: Path,
+) -> None:
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="新对话",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "实现功能", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "实现功能")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: RawVerboseStreamingOrchestrator(),
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="实现功能",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+    )
+    await background_task
+
+    visible_text = "\n".join(
+        event.text for event in renderer.events if event.event_type == "text_delta"
+    )
+    assert "RAW_" not in visible_text
+    assert "交给 Claude" in visible_text
+    assert "验收" in visible_text
+
+    updated_run = ledger.get_orchestration_run(orch_run.id)
+    assert updated_run.last_codex_analysis == "RAW_CODEX_ANALYSIS_FULL"
+    assert updated_run.last_claude_summary == "RAW_CLAUDE_IMPL_FULL"
+    assert "RAW_VERIFY_RESULT_FULL" in updated_run.last_verification_result

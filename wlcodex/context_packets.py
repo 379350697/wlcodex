@@ -207,20 +207,25 @@ def build_claude_handoff_packet(
     bgt = budget or ContextBudget()
     # Telegram transcript must NOT be included in the packet
     steps = implementation_steps or []
+    claude_runtime_constraints = [
+        "长时间测试/构建/命令不要用一个前台 Bash 卡住；使用 run_in_background 并用 BashOutput 查询进度。",
+        "执行过程中给出可流式输出的简短进度，避免长时间静默。",
+    ]
+    merged_constraints = claude_runtime_constraints + (constraints or [])
     return ClaudeHandoffPacket(
         mode="chief_engineer",
         workspace=workspace,
         user_goal=user_goal,
         conversation_summary="",
         relevant_files=files_to_touch or [],
-        recent_user_constraints=constraints or [],
+        recent_user_constraints=merged_constraints,
         acceptance_criteria=acceptance_criteria or [],
         token_budget=bgt.codex_to_claude_tokens,
         handoff_from_codex=ClaudeHandoffPacket.HandoffFromCodex(
             objective=user_goal,
             files_to_touch=files_to_touch or [],
             steps=steps,
-            constraints=constraints or [],
+            constraints=merged_constraints,
             acceptance_criteria=acceptance_criteria or [],
             prohibited_changes=prohibited_changes or [],
         ),

@@ -10,6 +10,7 @@ from typing import Any
 from wlcodex.context_packets import ContextBudget, trim_to_budget
 from wlcodex.interaction.events import InteractionEvent
 from wlcodex.models import ConversationSession, TaskStatus
+from wlcodex.orchestration_progress_text import render_user_progress_text
 from wlcodex.orchestrator import ChiefEngineerOrchestrator, OrchestrationProgress
 from wlcodex.task_service import TaskService
 
@@ -141,6 +142,7 @@ class OrchestrationRunner:
         verification_text = ""
         terminal_text = ""
         codex_analysis_status = "running"
+        implementation_notice_sent = False
 
         try:
             async for progress in orch.run_streaming(
@@ -153,9 +155,17 @@ class OrchestrationRunner:
                 if progress.phase == OrchestrationProgress.IMPL_DELTA:
                     if progress.text:
                         claude_implementation_text += progress.text
-                        await self._emit_text_delta(
-                            chat_id, task_id, conversation.id, progress.text
-                        )
+                        if not implementation_notice_sent:
+                            implementation_notice_sent = True
+                            await self._emit_text_delta(
+                                chat_id,
+                                task_id,
+                                conversation.id,
+                                "\n\n" + render_user_progress_text(
+                                    progress.phase,
+                                    first_impl_delta=True,
+                                ),
+                            )
                 elif progress.phase in (
                     OrchestrationProgress.ANALYSIS_STARTED,
                     OrchestrationProgress.ANALYSIS_COMPLETE,
@@ -338,12 +348,14 @@ class OrchestrationRunner:
         conversation_id: int,
     ) -> None:
         if progress.text:
-            await self._emit_text_delta(
-                chat_id,
-                task_id,
-                conversation_id,
-                "\n\n" + progress.text,
-            )
+            text = render_user_progress_text(progress.phase)
+            if text:
+                await self._emit_text_delta(
+                    chat_id,
+                    task_id,
+                    conversation_id,
+                    "\n\n" + text,
+                )
 
     async def _emit_text_delta(
         self,

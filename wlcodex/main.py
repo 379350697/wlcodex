@@ -218,6 +218,7 @@ def main() -> None:
             binary=config.claude.binary,
             startup_timeout_seconds=config.claude.startup_timeout_seconds,
             request_timeout_seconds=config.claude.request_timeout_seconds,
+            stream_idle_timeout_seconds=config.claude.stream_idle_timeout_seconds,
             permission_mode=claude_permission_mode,
             model=config.claude.model,
             effort=config.claude.effort,
