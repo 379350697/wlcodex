@@ -873,6 +873,18 @@ def _event_summary(event: RuntimeEvent) -> str:
         return f"Approval resolved: {payload.get('decision', '?')}"
     if etype == EventType.RUN_PHASE_CHANGED:
         return f"Phase → {payload.get('phase', '?')}"
+    if etype == EventType.CONVERSATION_MODE_SWITCHED:
+        return f"Mode {payload.get('from_mode', '?')} → {payload.get('to_mode', '?')} (agent: {payload.get('active_agent', '?')})"
+    if etype == EventType.SURFACE_CURSOR_ADVANCED:
+        return f"Cursor {payload.get('surface', '?')} → {payload.get('position', '?')}"
+    if etype == EventType.TERMINAL_SESSION_ATTACHED:
+        return f"Terminal {payload.get('agent', '?')} attached ({payload.get('strategy', '?')})"
+    if etype == EventType.TERMINAL_SESSION_DETACHED:
+        return f"Terminal {payload.get('agent', '?')} detached ({payload.get('status', '?')})"
+    if etype == EventType.TERMINAL_SESSION_ABORTED:
+        return f"Terminal {payload.get('agent', '?')} aborted"
+    if etype == EventType.PRODUCT_PENDING_CONTEXT_RECORDED:
+        return f"Pending context: {payload.get('text_preview', '?')[:80]}"
     return etype
 
 
