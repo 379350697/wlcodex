@@ -123,6 +123,29 @@ Primary conversation UX:
 | `/verify` | Ask Codex to verify the latest implementation evidence |
 | `/stop` | Stop the current active conversation task |
 
+### Dual Surface Modes
+
+WLCodex supports two independent surfaces over the same conversation:
+**Product mode** (default) and **Terminal mode** (raw remote control).
+
+| Command | Description |
+|---------|-------------|
+| `/product` | Switch to product mode (phone-friendly event UX) |
+| `/terminal` | Switch to terminal mode (default agent: claude) |
+| `/terminal claude` | Switch to terminal mode with Claude agent |
+| `/terminal codex` | Switch to terminal mode with Codex agent |
+| `/terminal detach` | Stop terminal push, keep session alive |
+| `/mode` | Show current surface mode |
+
+- **Product mode** is the default. It renders structured event cards for a
+  phone-friendly experience.
+- **Terminal mode** is a raw control surface that may produce large output.
+  It is disabled by default (`terminal.enabled = false`) until live smoke passes.
+- Mode switches do not create new conversations. The conversation ID stays
+  the same across `/product` and `/terminal`.
+- Terminal detach stops Telegram output delivery but does not abort the
+  underlying agent session.
+
 Legacy task commands remain available for diagnostics and low-level app-server
 acceptance:
 

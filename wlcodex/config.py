@@ -16,7 +16,8 @@ class ConfigError(ValueError):
 class TelegramConfig:
     bot_token_env: str
     allowed_user_ids: frozenset[int]
-    private_chat_only: bool
+    private_chat_only: bool = True
+    default_surface_mode: str = "product"
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,14 @@ class MenuConfig:
 
 
 @dataclass(frozen=True)
+class TerminalSurfaceConfig:
+    enabled: bool = False
+    default_agent: str = "claude"
+    max_frame_chars: int = 3500
+    redaction_enabled: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     telegram: TelegramConfig
     codex: CodexConfig
@@ -145,6 +154,7 @@ class AppConfig:
     streaming: StreamingConfig = StreamingConfig()
     interaction: InteractionConfig = InteractionConfig()
     menu: MenuConfig = MenuConfig()
+    terminal: TerminalSurfaceConfig = TerminalSurfaceConfig()
 
     def workspace_by_alias(self, alias: str) -> WorkspaceConfig:
         for workspace in self.workspaces:
@@ -176,6 +186,7 @@ def load_config(path: Path) -> AppConfig:
     streaming_raw = data.get("streaming", {})
     interaction_raw = data.get("interaction", {})
     menu_raw = data.get("menu", {})
+    terminal_raw = data.get("terminal", {})
     try:
         claude_permission_mode = normalize_claude_permission_mode(
             str(claude_raw.get("permission_mode", "acceptEdits"))
@@ -188,6 +199,7 @@ def load_config(path: Path) -> AppConfig:
             bot_token_env=str(telegram["bot_token_env"]),
             allowed_user_ids=frozenset(int(value) for value in telegram["allowed_user_ids"]),
             private_chat_only=bool(telegram.get("private_chat_only", True)),
+            default_surface_mode=str(telegram.get("default_surface_mode", "product")),
         ),
         codex=CodexConfig(
             binary=str(codex.get("binary", "codex")),
@@ -287,6 +299,12 @@ def load_config(path: Path) -> AppConfig:
         interaction=_interaction_config(interaction_raw),
         menu=MenuConfig(
             register_bot_commands=bool(menu_raw.get("register_bot_commands", True)),
+        ),
+        terminal=TerminalSurfaceConfig(
+            enabled=bool(terminal_raw.get("enabled", False)),
+            default_agent=str(terminal_raw.get("default_agent", "claude")),
+            max_frame_chars=int(terminal_raw.get("max_frame_chars", 3500)),
+            redaction_enabled=bool(terminal_raw.get("redaction_enabled", True)),
         ),
     )
 

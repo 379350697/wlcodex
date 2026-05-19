@@ -170,6 +170,14 @@ def render_health_card(
 def render_help() -> str:
     return """WLCodex — 总工程师驾驶舱
 
+双面模式：
+  /product — 切到手机端产品模式
+  /terminal — 切到远程终端模式
+  /terminal claude — 接入 Claude 终端
+  /terminal codex — 接入 Codex 终端
+  /terminal detach — 停止终端推送但保留会话
+  /mode — 查看当前模式
+
 对话模式 — 直接发消息开始：
   • 默认交给总工程师（Codex 分析 + 验收）
   • /codex <提示> — 直接和 Codex 对话
@@ -353,6 +361,7 @@ def render_conversation_help(profile: str = "natural") -> str:
                 "WLCodex",
                 "",
                 "直接发消息就能继续当前对话。",
+                "/product 手机端模式 · /terminal 远程终端",
                 "/new 新对话",
                 "/status 看状态",
                 "/diff 看变更",
@@ -361,6 +370,14 @@ def render_conversation_help(profile: str = "natural") -> str:
             ]
         )
     return """WLCodex — 你的总工程师驾驶舱
+
+双面模式：
+  • /product — 切到手机端产品模式
+  • /terminal — 切到远程终端模式
+  • /terminal claude — 接入 Claude 终端
+  • /terminal codex — 接入 Codex 终端
+  • /terminal detach — 停止终端推送但保留会话
+  • /mode — 查看当前模式
 
 对话模式：
   • 直接发消息 — 默认交给 Codex 分析

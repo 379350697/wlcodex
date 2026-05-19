@@ -5,6 +5,25 @@ import pytest
 from wlcodex.config import ConfigError, load_config
 
 
+def test_default_surface_mode_is_product() -> None:
+    """TelegramConfig defaults to product surface mode."""
+    from wlcodex.config import TelegramConfig
+    config = TelegramConfig(
+        bot_token_env="T", allowed_user_ids=frozenset({123})
+    )
+    assert config.default_surface_mode == "product"
+
+
+def test_terminal_surface_config_defaults() -> None:
+    """TerminalSurfaceConfig defaults: disabled, claude agent, 3500 chars, redaction on."""
+    from wlcodex.config import TerminalSurfaceConfig
+    config = TerminalSurfaceConfig()
+    assert config.enabled is False
+    assert config.default_agent == "claude"
+    assert config.max_frame_chars == 3500
+    assert config.redaction_enabled is True
+
+
 def test_conversation_config_defaults(tmp_path: Path) -> None:
     config_path = tmp_path / "wlcodex.toml"
     config_path.write_text(
@@ -411,3 +430,94 @@ allow_write = true
     assert config.claude.model == "deepseek4pro"
     assert config.claude.effort == "max"
     assert config.claude.stream_idle_timeout_seconds == 42
+
+
+def test_terminal_surface_config_overrides(tmp_path: Path) -> None:
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+private_chat_only = true
+default_surface_mode = "product"
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[terminal]
+enabled = true
+default_agent = "codex"
+max_frame_chars = 5000
+redaction_enabled = false
+
+[[workspaces]]
+alias = "demo"
+path = "/tmp/demo"
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.terminal.enabled is True
+    assert config.terminal.default_agent == "codex"
+    assert config.terminal.max_frame_chars == 5000
+    assert config.terminal.redaction_enabled is False
+    assert config.telegram.default_surface_mode == "product"
+
+
+def test_terminal_surface_config_defaults_when_missing(tmp_path: Path) -> None:
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+private_chat_only = true
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "demo"
+path = "/tmp/demo"
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.terminal.enabled is False
+    assert config.terminal.default_agent == "claude"
+    assert config.terminal.max_frame_chars == 3500
+    assert config.terminal.redaction_enabled is True
+    assert config.telegram.default_surface_mode == "product"
