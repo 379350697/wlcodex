@@ -73,6 +73,47 @@ _DIRECT_TOKEN_ACCESS_PATTERNS: tuple[str, ...] = (
     "env.*TELEGRAM_BOT",
 )
 
+_NEGATED_DELIVERY_REFERENCE_MARKERS: tuple[str, ...] = (
+    "未发现",
+    "没有",
+    "不会",
+    "不要",
+    "不能",
+    "无法",
+    "禁止",
+    "not ",
+    "no ",
+    "never",
+    "without",
+    "did not",
+    "does not",
+    "do not",
+    "must not",
+    "should not",
+    "will not",
+    "won't",
+)
+
+
+def _has_non_negated_pattern(text: str, pattern: str) -> bool:
+    """Return true when *pattern* appears outside a negated/audit context."""
+    pattern_lower = pattern.lower()
+    for line in text.splitlines() or [text]:
+        lowered = line.lower()
+        search_from = 0
+        while True:
+            idx = lowered.find(pattern_lower, search_from)
+            if idx < 0:
+                break
+            window = lowered[max(0, idx - 90): idx + len(pattern_lower) + 90]
+            if not any(
+                marker.lower() in window
+                for marker in _NEGATED_DELIVERY_REFERENCE_MARKERS
+            ):
+                return True
+            search_from = idx + len(pattern_lower)
+    return False
+
 
 def _detect_claude_direct_delivery_drift(impl_text: str) -> list[str]:
     """Return a list of drift descriptions found in Claude's implementation text.
@@ -105,13 +146,13 @@ def _detect_verification_delivery_drift(verify_text: str) -> list[str]:
     findings: list[str] = []
     lowered = verify_text.lower()
     for pattern in _DIRECT_TELEGRAM_SEND_PATTERNS:
-        if pattern.lower() in lowered:
+        if pattern.lower() in lowered and _has_non_negated_pattern(verify_text, pattern):
             findings.append(
                 f"Codex verification attempted direct delivery: matched '{pattern}'"
             )
             break
     for pattern in _DIRECT_TOKEN_ACCESS_PATTERNS:
-        if pattern.lower() in lowered:
+        if pattern.lower() in lowered and _has_non_negated_pattern(verify_text, pattern):
             findings.append(
                 f"Codex verification attempted token access: matched '{pattern}'"
             )
@@ -473,6 +514,18 @@ class ChiefEngineerOrchestrator:
                 return result
 
             decision = VerificationDecision.parse(verify_result)
+            verification_drift = _detect_verification_delivery_drift(verify_result)
+
+            # Codex verification must not bypass platform delivery either.
+            if decision.decision == "pass" and verification_drift:
+                decision = VerificationDecision(
+                    decision="retry",
+                    summary=decision.summary,
+                    required_fix=(
+                        "Codex 验收文本中检测到直接 Telegram delivery / token access: "
+                        + "; ".join(verification_drift)
+                    ),
+                )
 
             # Force retry if Claude drift found, regardless of Codex decision.
             if decision.decision == "pass" and self._last_claude_drift_findings:
@@ -858,6 +911,18 @@ class ChiefEngineerOrchestrator:
             )
 
             decision = VerificationDecision.parse(verify_result)
+            verification_drift = _detect_verification_delivery_drift(verify_result)
+
+            # Codex verification must not bypass platform delivery either.
+            if decision.decision == "pass" and verification_drift:
+                decision = VerificationDecision(
+                    decision="retry",
+                    summary=decision.summary,
+                    required_fix=(
+                        "Codex 验收文本中检测到直接 Telegram delivery / token access: "
+                        + "; ".join(verification_drift)
+                    ),
+                )
 
             # Force retry if Claude drift found, regardless of Codex decision.
             if decision.decision == "pass" and self._last_claude_drift_findings:

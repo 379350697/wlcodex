@@ -466,6 +466,43 @@ class TestRuntimeProgressManager:
         assert fake.edits >= 1
         assert len(fake.sent) > sent_before  # fallback send
 
+    @pytest.mark.asyncio
+    async def test_outbox_placeholder_message_id_is_not_edited(self) -> None:
+        """Outbox queued sends return -1, which is not a real editable message id."""
+
+        class OutboxLikeTransport:
+            def __init__(self) -> None:
+                self.sent: list[tuple[int, str, object]] = []
+                self.edits = 0
+
+            async def send(self, chat_id, text, buttons=None):
+                self.sent.append((chat_id, text, buttons))
+                return -1
+
+            async def edit(self, chat_id, message_id, text, buttons=None):
+                self.edits += 1
+                raise AssertionError("placeholder message id must not be edited")
+
+            async def typing(self, chat_id):
+                return None
+
+        fake = OutboxLikeTransport()
+        mgr = RuntimeProgressManager(
+            TelegramTransport(fake.send, fake.edit, fake.typing),
+            verbosity=1,
+            min_edit_interval=0.0,
+        )
+
+        await mgr.update_progress(
+            _state(phase="running_implementation"), chat_id=123,
+        )
+        await mgr.update_progress(
+            _state(phase="running_verification", active_agent="codex"), chat_id=123,
+        )
+
+        assert fake.edits == 0
+        assert len(fake.sent) == 2
+
 
 # ===================================================================
 # InteractionRenderer with runtime events

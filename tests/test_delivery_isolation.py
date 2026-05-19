@@ -139,6 +139,27 @@ def test_detect_claude_drift_clean_implementation() -> None:
     assert findings == []
 
 
+def test_detect_verification_drift_ignores_negative_message_id_audit() -> None:
+    from wlcodex.orchestrator import _detect_verification_delivery_drift
+
+    verify_text = (
+        "未发现 Claude 声称已发送 Telegram、直接调用 Telegram API、"
+        "或输出 message_id=xxx。"
+    )
+
+    assert _detect_verification_delivery_drift(verify_text) == []
+
+
+def test_detect_verification_drift_flags_positive_delivery_claim() -> None:
+    from wlcodex.orchestrator import _detect_verification_delivery_drift
+
+    verify_text = "我已经直接发送 Telegram，并拿到了 message_id=302。"
+
+    findings = _detect_verification_delivery_drift(verify_text)
+    assert len(findings) > 0
+    assert "message_id=" in findings[0].lower()
+
+
 def test_detect_verification_drift_token_request() -> None:
     from wlcodex.orchestrator import _detect_verification_delivery_drift
 

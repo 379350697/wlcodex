@@ -38,7 +38,9 @@ class StreamingRenderer:
         self._chat_id = chat_id
         self._buffer = [initial_text] if initial_text else []
         if initial_text:
-            self._message_id = await self._send(chat_id, initial_text)
+            self._message_id = _editable_message_id(
+                await self._send(chat_id, initial_text)
+            )
 
     async def append(self, text: str) -> None:
         self._buffer.append(text)
@@ -66,7 +68,9 @@ class StreamingRenderer:
                 return
             except Exception:
                 pass
-        self._message_id = await self._send(self._chat_id, text)
+        self._message_id = _editable_message_id(
+            await self._send(self._chat_id, text)
+        )
         self._last_edit_time = self._clock.time()
 
 
@@ -77,3 +81,9 @@ def _fit_text(text: str, max_length: int) -> str:
     if max_length <= len(marker):
         return text[:max_length]
     return text[: max_length - len(marker)] + marker
+
+
+def _editable_message_id(message_id: int | None) -> int | None:
+    if isinstance(message_id, int) and message_id > 0:
+        return message_id
+    return None

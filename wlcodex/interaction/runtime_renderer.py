@@ -249,7 +249,7 @@ class RuntimeProgressManager:
                 slot.message_id = None
 
         msg_id = await self._transport.send(slot.chat_id, text)
-        slot.message_id = msg_id
+        slot.message_id = _editable_message_id(msg_id)
         slot.last_edit_time = now
         slot.last_state_hash = state_hash
         slot.last_heartbeat_time = now
@@ -285,7 +285,7 @@ class RuntimeProgressManager:
                 slot.message_id = None
 
         msg_id = await self._transport.send(slot.chat_id, final_text, buttons=buttons)
-        slot.message_id = msg_id
+        slot.message_id = _editable_message_id(msg_id)
         slot.is_finished = True
 
     async def show_approval(
@@ -307,6 +307,12 @@ class RuntimeProgressManager:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _editable_message_id(message_id: int | None) -> int | None:
+    if isinstance(message_id, int) and message_id > 0:
+        return message_id
+    return None
 
 
 def _time_ago(iso_timestamp: str | None) -> str:

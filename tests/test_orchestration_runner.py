@@ -175,6 +175,53 @@ class RuntimeSourceAwareCodexOrchestrator:
         )
 
 
+class MismatchedVerificationCompleteOrchestrator:
+    async def run_streaming(
+        self,
+        _prompt: str,
+        conversation_context: dict[str, Any] | None = None,
+    ):
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_STARTED,
+            text="analysis start",
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_COMPLETE,
+            text="analysis",
+            full_text="analysis",
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.IMPL_COMPLETE,
+            text="impl",
+            full_text="impl",
+            agent="claude",
+            round_num=1,
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.VERIFY_STARTED,
+            text="verify",
+            agent="codex",
+            round_num=1,
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.VERIFY_COMPLETE,
+            text="decision: retry",
+            full_text="decision: retry\nrequired_fix: more work",
+            agent="codex",
+            round_num=1,
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.COMPLETE,
+            text="done",
+            full_text="decision: pass\nsummary: inconsistent",
+            agent="codex",
+            result_status="passed",
+            round_num=1,
+        )
+
+
 class NeverFinishingRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -857,6 +904,60 @@ async def test_verification_retry_not_marked_as_completed(
 
     # Orchestration run should be marked as passed
     assert ledger.get_orchestration_run(orch_run.id).status == OrchestrationStatus.PASSED
+
+
+@pytest.mark.asyncio
+async def test_runner_blocks_run_completed_after_recorded_retry_decision(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=100, user_id=200, title="Mismatch", mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "mismatch test", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "mismatch test")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=(
+            lambda _codex, _claude: MismatchedVerificationCompleteOrchestrator()
+        ),
+        runtime_event_store=store,
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="mismatch test",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+        correlation_id="test-cid-mismatch",
+    )
+    await background_task
+
+    events = store.list_by_correlation("test-cid-mismatch")
+    event_types = [e.event_type for e in events]
+
+    assert EventType.VERIFICATION_DECISION_RECORDED in event_types
+    assert EventType.VERIFICATION_RETRY_REQUESTED in event_types
+    assert EventType.RUN_COMPLETED not in event_types
+    assert EventType.RUN_FAILED in event_types
+    assert ledger.get_task(task.id).status == TaskStatus.FAILED
+    assert ledger.get_orchestration_run(orch_run.id).status == OrchestrationStatus.FAILED
 
 
 @pytest.mark.asyncio

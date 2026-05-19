@@ -550,6 +550,7 @@ class OrchestrationRunner:
         codex_analysis_status = "running"
         implementation_notice_sent = False
         codex_verification_run_id: int | None = None
+        last_verification_decision = ""
 
         try:
             async for progress in orch.run_streaming(
@@ -964,6 +965,7 @@ class OrchestrationRunner:
                         # If Codex verification itself shows drift, force retry.
                         if verify_drift and actual_decision == "pass":
                             actual_decision = "retry"
+                        last_verification_decision = actual_decision
                         # Emit verification.decision.recorded
                         self._emit_event(RuntimeEvent(
                             schema_version=1,
@@ -1137,6 +1139,45 @@ class OrchestrationRunner:
                     if progress.text or progress.full_text:
                         terminal_text = progress.full_text or progress.text
                     if orch_result_status == "passed":
+                        if last_verification_decision and last_verification_decision != "pass":
+                            reason = (
+                                "refusing run.completed after verification decision "
+                                f"{last_verification_decision}"
+                            )
+                            orch_result_status = "failed"
+                            terminal_text = reason
+                            self._ledger.set_task_status(task_id, TaskStatus.FAILED)
+                            self._ledger.update_orchestration_run(
+                                orchestration_run_id,
+                                status="failed",
+                                current_step="failed",
+                                last_verification_result=reason,
+                            )
+                            self._emit_event(RuntimeEvent(
+                                schema_version=1,
+                                event_type=EventType.RUN_FAILED,
+                                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                                aggregate_id=str(orchestration_run_id),
+                                correlation_id=cid,
+                                source=EventSource.ORCHESTRATOR,
+                                actor="orchestrator",
+                                visibility=Visibility.USER,
+                                payload={
+                                    "reason": reason,
+                                    "verify_round": verify_round,
+                                    "verification_decision": last_verification_decision,
+                                },
+                                occurred_at=now_iso(),
+                                conversation_id=conversation.id,
+                                orchestration_run_id=orchestration_run_id,
+                                task_id=task_id,
+                            ))
+                            await self._emit_failed(
+                                chat_id,
+                                task_id,
+                                reason,
+                            )
+                            continue
                         self._ledger.set_task_status(task_id, TaskStatus.DONE)
                         # Emit verification.completed + run.completed
                         self._emit_event(RuntimeEvent(
