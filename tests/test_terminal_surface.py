@@ -365,3 +365,155 @@ def test_route_terminal_command_is_dataclass():
     assert cmd.kind == TerminalCommandKind.SELECT_AGENT
     assert cmd.agent == "codex"
     assert cmd.mode is None
+
+
+# ── Task 6: Claude Terminal Adapter ────────────────────────────────────────
+
+class FakeClaudeBackend:
+    def __init__(self):
+        self.received: list[tuple[str, str]] = []
+
+    async def send_terminal_input(self, session_id: str, text: str) -> None:
+        self.received.append((session_id, text))
+
+
+@pytest.mark.asyncio
+async def test_claude_terminal_adapter_delegates_input():
+    from wlcodex.surfaces.terminal.claude_remote import ClaudeTerminalAdapter
+
+    backend = FakeClaudeBackend()
+    adapter = ClaudeTerminalAdapter(backend)
+
+    await adapter.send_input_by_session_id("claude_1", "next")
+
+    assert backend.received == [("claude_1", "next")]
+
+
+@pytest.mark.asyncio
+async def test_claude_terminal_adapter_has_send_input_method_for_manager():
+    from wlcodex.surfaces.terminal.claude_remote import ClaudeTerminalAdapter
+
+    backend = FakeClaudeBackend()
+    adapter = ClaudeTerminalAdapter(backend)
+
+    ref = TerminalSessionRef(
+        conversation_id=42,
+        agent="claude",
+        strategy="stream_json",
+        external_session_id="claude_1",
+        status="attached",
+    )
+    await adapter.send_input(ref, "ls -la")
+
+    assert backend.received == [("claude_1", "ls -la")]
+
+
+@pytest.mark.asyncio
+async def test_claude_terminal_adapter_supports_multiple_inputs():
+    from wlcodex.surfaces.terminal.claude_remote import ClaudeTerminalAdapter
+
+    backend = FakeClaudeBackend()
+    adapter = ClaudeTerminalAdapter(backend)
+
+    await adapter.send_input_by_session_id("sess_a", "first")
+    await adapter.send_input_by_session_id("sess_a", "second")
+    await adapter.send_input_by_session_id("sess_a", "third")
+
+    assert len(backend.received) == 3
+    assert backend.received[0] == ("sess_a", "first")
+    assert backend.received[2] == ("sess_a", "third")
+
+
+# ── Task 6: Codex Terminal Adapter ─────────────────────────────────────────
+
+class FakeCodexBackend:
+    def __init__(self):
+        self.received: list[tuple[str, str]] = []
+
+    async def steer_thread(self, thread_id: str, text: str) -> None:
+        self.received.append((thread_id, text))
+
+
+@pytest.mark.asyncio
+async def test_codex_terminal_adapter_delegates_input():
+    from wlcodex.surfaces.terminal.codex_terminal import CodexTerminalAdapter
+
+    backend = FakeCodexBackend()
+    adapter = CodexTerminalAdapter(backend)
+
+    await adapter.send_input_by_thread_id("thr_1", "inspect diff")
+
+    assert backend.received == [("thr_1", "inspect diff")]
+
+
+@pytest.mark.asyncio
+async def test_codex_terminal_adapter_has_send_input_method_for_manager():
+    from wlcodex.surfaces.terminal.codex_terminal import CodexTerminalAdapter
+
+    backend = FakeCodexBackend()
+    adapter = CodexTerminalAdapter(backend)
+
+    ref = TerminalSessionRef(
+        conversation_id=42,
+        agent="codex",
+        strategy="app_server",
+        external_session_id="thr_1",
+        status="attached",
+    )
+    await adapter.send_input(ref, "continue")
+
+    assert backend.received == [("thr_1", "continue")]
+
+
+@pytest.mark.asyncio
+async def test_codex_terminal_adapter_supports_multiple_inputs():
+    from wlcodex.surfaces.terminal.codex_terminal import CodexTerminalAdapter
+
+    backend = FakeCodexBackend()
+    adapter = CodexTerminalAdapter(backend)
+
+    await adapter.send_input_by_thread_id("thr_x", "step 1")
+    await adapter.send_input_by_thread_id("thr_x", "step 2")
+
+    assert len(backend.received) == 2
+    assert backend.received == [("thr_x", "step 1"), ("thr_x", "step 2")]
+
+
+# ── Task 6: Manager + Adapter Integration ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_manager_integrates_with_claude_terminal_adapter():
+    from wlcodex.surfaces.terminal.claude_remote import ClaudeTerminalAdapter
+
+    backend = FakeClaudeBackend()
+    adapter = ClaudeTerminalAdapter(backend)
+    manager = TerminalSessionManager(adapters={"claude": adapter})
+
+    ref = manager.attach(
+        conversation_id=42,
+        agent="claude",
+        strategy="stream_json",
+        external_session_id="cl_session",
+    )
+    await manager.send_input(ref, "pytest -q")
+
+    assert backend.received == [("cl_session", "pytest -q")]
+
+
+@pytest.mark.asyncio
+async def test_manager_integrates_with_codex_terminal_adapter():
+    from wlcodex.surfaces.terminal.codex_terminal import CodexTerminalAdapter
+
+    backend = FakeCodexBackend()
+    adapter = CodexTerminalAdapter(backend)
+    manager = TerminalSessionManager(adapters={"codex": adapter})
+
+    ref = manager.attach(
+        conversation_id=42,
+        agent="codex",
+        strategy="app_server",
+        external_session_id="codex_thread",
+    )
+    await manager.send_input(ref, "show diff")
+
+    assert backend.received == [("codex_thread", "show diff")]
