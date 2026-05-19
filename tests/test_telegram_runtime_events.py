@@ -168,7 +168,7 @@ async def test_callback_router_appends_callback_received_event(tmp_path: Path) -
         id = "cb-1"
         message = SimpleNamespace(message_id=44, text="button")
 
-        async def answer(self, _text: str) -> None:
+        async def answer(self, text: str = "", **kwargs: object) -> None:
             return None
 
     update = SimpleNamespace(

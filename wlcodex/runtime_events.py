@@ -159,6 +159,7 @@ class EventType:
     WORKSPACE_BUSY_USER_CHOICE_REQUESTED = "workspace.busy.user_choice.requested"
     WORKSPACE_BUSY_USER_CHOICE_RECORDED = "workspace.busy.user_choice.recorded"
     RUN_QUEUED = "run.queued"
+    RUN_QUEUED_CONSUMED = "run.queued.consumed"
 
     # Approval supersession
     APPROVAL_SUPERSEDED = "approval.superseded"

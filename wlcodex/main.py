@@ -446,6 +446,7 @@ def main() -> None:
         watchdog_interval_seconds=config.task.watchdog_interval_seconds,
         interaction_renderer=interaction_renderer,
         runtime_event_store=runtime_store,
+        on_workspace_freed=controller.process_queued_runs,
     )
 
     loop = asyncio.new_event_loop()

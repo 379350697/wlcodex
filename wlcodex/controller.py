@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
 import logging
 import subprocess
 import uuid
@@ -1844,6 +1845,135 @@ class CommandController:
             return ControllerResponse("已取消。")
 
         return ControllerResponse("未知的操作。")
+
+    async def process_queued_runs(self, workspace_alias: str) -> None:
+        """Consume unconsumed ``run.queued`` events when workspace is free.
+
+        Called by EventBridge after drain_workspace detects the workspace
+        is no longer blocked.  Finds queued runs that haven't been started
+        yet and launches them through the chief-engineer loop.
+        """
+        if self._store is None or self._ledger is None:
+            return
+
+        # Check if workspace is actually free.
+        blocker = self._service.blocker_for_workspace(workspace_alias)
+        if blocker is not None:
+            return
+
+        # Find unconsumed run.queued events: those without a later
+        # run.started or run.queued.consumed for the same conversation.
+        rows = self._store._conn.execute(
+            """
+            SELECT q.id AS queued_id, q.payload_json, q.conversation_id, q.correlation_id
+            FROM runtime_events q
+            WHERE q.event_type = 'run.queued'
+              AND NOT EXISTS (
+                SELECT 1 FROM runtime_events c
+                WHERE c.conversation_id = q.conversation_id
+                  AND c.id > q.id
+                  AND c.event_type IN ('run.queued.consumed', 'run.started')
+              )
+            ORDER BY q.id ASC
+            LIMIT 1
+            """
+        ).fetchall()
+
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except Exception:
+                payload = {}
+            conversation_id = int(row["conversation_id"]) if row["conversation_id"] else 0
+            goal = str(payload.get("goal", "") or payload.get("text_preview", ""))
+            if not goal or not conversation_id:
+                continue
+
+            # Emit consumed marker first to prevent double-processing.
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.RUN_QUEUED_CONSUMED,
+                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                aggregate_id=f"queued-{conversation_id}",
+                correlation_id=self._new_correlation_id(),
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.OPERATOR,
+                payload={
+                    "conversation_id": conversation_id,
+                    "workspace_alias": workspace_alias,
+                    "goal_preview": goal[:200],
+                },
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+            ))
+
+            # Get the conversation and start the chief-engineer loop.
+            try:
+                conv = self._ledger.get_conversation(conversation_id)
+            except KeyError:
+                logger.warning("Queued conversation %d not found", conversation_id)
+                continue
+
+            # Check if orchestrator is available.
+            if self._orchestration_runner is None:
+                logger.warning(
+                    "run.queued consumer: orchestrator not available for conv %d",
+                    conversation_id,
+                )
+                continue
+
+            from wlcodex.router import AutoModeCommand
+            cmd = AutoModeCommand(prompt=goal)
+            from wlcodex.models import ConversationMode
+            cid = self._new_correlation_id()
+
+            orch_run = self._ledger.create_orchestration_run(
+                conversation_id=conv.id, goal=goal,
+            )
+            codex_analysis_run = self._ledger.create_agent_run(
+                conversation_id=conv.id, agent="codex", role="analysis",
+            )
+            self._ledger.update_agent_run_status(codex_analysis_run.id, "running")
+
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.RUN_REQUESTED,
+                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                aggregate_id=str(orch_run.id),
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.OPERATOR,
+                payload={"goal": goal, "from": "run_queued_consumer"},
+                occurred_at=now_iso(),
+                conversation_id=conv.id,
+                orchestration_run_id=orch_run.id,
+            ))
+
+            workspace_path = str(
+                self._service.get_workspace(conv.workspace_alias).path
+            )
+            task = self._service.reserve_task(
+                conv.workspace_alias, goal,
+                telegram_chat_id=conv.chat_id,
+            )
+            self._ledger.set_conversation_active_task(conv.id, task.id)
+
+            logger.info(
+                "run.queued consumer: starting chief-engineer for conv %d, goal=%s",
+                conversation_id, goal[:80],
+            )
+            self._orchestration_runner.start_chief_engineer(
+                prompt=goal,
+                conversation=conv,
+                task_id=task.id,
+                orchestration_run_id=orch_run.id,
+                codex_analysis_run_id=codex_analysis_run.id,
+                chat_id=conv.chat_id,
+                workspace_path=workspace_path,
+                correlation_id=cid,
+            )
 
     # --- Individual waiting action handlers ---
 

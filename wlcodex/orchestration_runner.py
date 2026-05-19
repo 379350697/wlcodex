@@ -830,6 +830,7 @@ class OrchestrationRunner:
                         # Mid-implementation follow-ups are stored as
                         # conversation.pending_context.recorded events and
                         # must be reviewed by Codex at this phase boundary.
+                        had_pending_for_verify = False
                         if self._store is not None:
                             try:
                                 pending = self._store._conn.execute(
@@ -856,6 +857,7 @@ class OrchestrationRunner:
                                         orch.set_pending_user_context(
                                             "; ".join(pending_texts)
                                         )
+                                        had_pending_for_verify = True
                             except Exception:
                                 logger.debug(
                                     "Failed to re-query pending context for verification",
@@ -978,6 +980,26 @@ class OrchestrationRunner:
                             orchestration_run_id=orchestration_run_id,
                             task_id=task_id,
                         ))
+                        # Emit pending_context.reviewed if Codex reviewed pending context
+                        if had_pending_for_verify:
+                            self._emit_event(RuntimeEvent(
+                                schema_version=1,
+                                event_type=EventType.CONVERSATION_PENDING_CONTEXT_REVIEWED,
+                                aggregate_type=AggregateType.CONVERSATION,
+                                aggregate_id=str(conversation.id),
+                                correlation_id=cid,
+                                source=EventSource.CODEX,
+                                actor="codex",
+                                visibility=Visibility.OPERATOR,
+                                payload={"reviewed_at_phase": "verification",
+                                         "verify_round": verify_round,
+                                         "conversation_id": conversation.id},
+                                occurred_at=now_iso(),
+                                conversation_id=conversation.id,
+                                orchestration_run_id=orchestration_run_id,
+                                task_id=task_id,
+                            ))
+
                         # Emit verification.retry.requested NOT verification.completed for retry
                         if actual_decision == "retry":
                             self._emit_event(RuntimeEvent(

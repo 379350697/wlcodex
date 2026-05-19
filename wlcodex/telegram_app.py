@@ -190,6 +190,63 @@ class WlCodexHandlers:
         message_id = await self.send_telegram(update.effective_chat.id, text, buttons)
         return SimpleNamespace(message_id=message_id)
 
+    # --- Callback answer/edit safety wrappers ---
+
+    async def _safe_callback_answer(
+        self, query: object, text: str, *, correlation_id: str = ""
+    ) -> None:
+        """Answer a callback query — failure is recorded, never raised.
+
+        Callback answer failures must NEVER affect approval resolution or
+        business logic. They are recorded as telegram.callback.answer.failed.
+        """
+        if self._outbox is not None:
+            async def _answer(text: str) -> None:
+                await query.answer(text=text)
+            self._outbox.enqueue_answer_callback(
+                text,
+                answer_fn=_answer,
+                correlation_id=correlation_id or "outbox-callback-answer",
+            )
+            return
+        # Direct path: answer and record failure if it happens.
+        try:
+            await query.answer(text=text)
+        except Exception as exc:
+            logger.warning("Callback answer failed: %s", exc)
+            from wlcodex.runtime_events import EventType
+            self._append_telegram_delivery_event(
+                EventType.TELEGRAM_CALLBACK_ANSWER_FAILED,
+                chat_id=0,
+                text=text,
+                error=str(exc),
+            )
+
+    async def _safe_callback_edit(
+        self,
+        update: Update,
+        query: object,
+        text: str,
+        buttons: list[list[dict[str, str]]] | None = None,
+    ) -> None:
+        """Edit the callback message — failure is recorded, never raised.
+
+        Callback edit failures must NEVER affect approval resolution.
+        Failed edits append telegram.callback.edit.failed and do not
+        prevent the business logic from completing.
+        """
+        try:
+            await self._edit_callback_message(update, query, text, buttons)
+        except Exception as exc:
+            logger.warning("Callback edit failed: %s", exc)
+            from wlcodex.runtime_events import EventType
+            self._append_telegram_delivery_event(
+                EventType.TELEGRAM_CALLBACK_EDIT_FAILED,
+                chat_id=update.effective_chat.id if update.effective_chat else 0,
+                text=text,
+                error=str(exc),
+            )
+
     async def _edit_callback_message(
         self,
         update: Update,
@@ -267,7 +324,8 @@ class WlCodexHandlers:
         """Send a message via the bot, routed through the outbox when available.
 
         Returns message_id, or SEND_FAILED (-1) on transient network errors.
-        When the outbox is active, this returns -1 and the real send is queued.
+        When the outbox is active, delivery events are recorded exclusively by
+        the outbox; the raw send fn raises on failure so the outbox can retry.
         """
         if self._outbox is not None:
             self._outbox.enqueue_send(
@@ -277,12 +335,37 @@ class WlCodexHandlers:
                 correlation_id="outbox-send",
             )
             return SEND_FAILED
-        return await self._raw_send_message(chat_id, text, buttons)
+
+        # Direct path (no outbox): call raw API and record delivery events.
+        try:
+            msg_id = await self._raw_send_message(chat_id, text, buttons)
+            self._append_telegram_delivery_event(
+                "telegram.message.sent",
+                chat_id=chat_id, text=text, message_id=msg_id,
+            )
+            return msg_id
+        except Exception as exc:
+            if _is_telegram_network_error(exc):
+                self._append_telegram_delivery_event(
+                    "telegram.message.failed",
+                    chat_id=chat_id, text=text, error=str(exc),
+                )
+                return SEND_FAILED
+            self._append_telegram_delivery_event(
+                "telegram.message.failed",
+                chat_id=chat_id, text=text, error=str(exc),
+            )
+            raise
 
     async def _raw_send_message(
         self, chat_id: int, text: str, buttons: list[list[dict[str, str]]] | None = None
     ) -> int:
-        """Direct Bot API send (used by outbox as its _send_fn)."""
+        """Direct Bot API send — raises on any error (no event recording).
+
+        Used by the outbox as its send_fn. The outbox catches exceptions,
+        retries, and records all delivery events. This function is a pure
+        Telegram API call.
+        """
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         reply_markup = None
@@ -294,49 +377,10 @@ class WlCodexHandlers:
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-        try:
-            msg = await self._bot.send_message(
-                chat_id=chat_id, text=text, reply_markup=reply_markup
-            )
-            self._append_telegram_delivery_event(
-                "telegram.message.sent",
-                chat_id=chat_id,
-                text=text,
-                message_id=msg.message_id,
-            )
-            return msg.message_id
-        except (TimedOut, NetworkError) as exc:
-            logger.warning(
-                "Telegram send timed out: chat_id=%s text_len=%d exc=%s",
-                chat_id, len(text), exc,
-            )
-            self._append_telegram_delivery_event(
-                "telegram.message.failed",
-                chat_id=chat_id,
-                text=text,
-                error=str(exc),
-            )
-            return SEND_FAILED
-        except TelegramError as exc:
-            if _is_telegram_network_error(exc):
-                logger.warning(
-                    "Telegram send network error: chat_id=%s text_len=%d exc=%s",
-                    chat_id, len(text), exc,
-                )
-                self._append_telegram_delivery_event(
-                    "telegram.message.failed",
-                    chat_id=chat_id,
-                    text=text,
-                    error=str(exc),
-                )
-                return SEND_FAILED
-            self._append_telegram_delivery_event(
-                "telegram.message.failed",
-                chat_id=chat_id,
-                text=text,
-                error=str(exc),
-            )
-            raise
+        msg = await self._bot.send_message(
+            chat_id=chat_id, text=text, reply_markup=reply_markup
+        )
+        return msg.message_id
 
     async def edit_telegram(
         self, chat_id: int, message_id: int, text: str,
@@ -344,8 +388,8 @@ class WlCodexHandlers:
     ) -> None:
         """Edit an existing message, routed through the outbox when available.
 
-        Network errors are caught and logged; they do NOT fall back to
-        send_message (which would likely also fail on the same network).
+        When the outbox is active, delivery events are recorded exclusively by
+        the outbox; the raw edit fn raises on failure so the outbox can retry.
         """
         if self._outbox is not None:
             self._outbox.enqueue_edit(
@@ -354,13 +398,65 @@ class WlCodexHandlers:
                 correlation_id="outbox-edit",
             )
             return
-        await self._raw_edit_message(chat_id, message_id, text, buttons)
+
+        # Direct path (no outbox): call raw API and record delivery events.
+        try:
+            await self._raw_edit_message(chat_id, message_id, text, buttons)
+            self._append_telegram_delivery_event(
+                "telegram.message.edited",
+                chat_id=chat_id, text=text, message_id=message_id,
+            )
+        except Exception as exc:
+            if _is_message_not_modified_error(exc):
+                self._append_telegram_delivery_event(
+                    "telegram.edit.skipped_no_change",
+                    chat_id=chat_id, text=text, message_id=message_id,
+                )
+                return
+            if _is_telegram_network_error(exc):
+                self._append_telegram_delivery_event(
+                    "telegram.message.failed",
+                    chat_id=chat_id, text=text, message_id=message_id,
+                    error=str(exc),
+                )
+                return
+            # Non-retryable error → try fallback send
+            logger.debug("Failed to edit message %d, sending new one", message_id)
+            await self._fallback_send_on_edit_failure(
+                chat_id, message_id, text, buttons,
+            )
 
     async def _raw_edit_message(
         self, chat_id: int, message_id: int, text: str,
         buttons: list[list[dict[str, str]]] | None = None,
     ) -> None:
-        """Direct Bot API edit (used by outbox as its _edit_fn)."""
+        """Direct Bot API edit — raises on any error (no event recording).
+
+        Used by the outbox as its edit_fn. The outbox catches exceptions,
+        retries, and records all delivery events.  Note: "message is not
+        modified" is also raised so the outbox can handle it.
+        """
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        reply_markup = None
+        if buttons:
+            keyboard = [
+                [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
+                 for b in row]
+                for row in buttons
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await self._bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id, text=text,
+            reply_markup=reply_markup,
+        )
+
+    async def _fallback_send_on_edit_failure(
+        self, chat_id: int, message_id: int, text: str,
+        buttons: list[list[dict[str, str]]] | None = None,
+    ) -> None:
+        """Send a new message when edit fails with non-retryable error."""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         reply_markup = None
@@ -373,69 +469,28 @@ class WlCodexHandlers:
             reply_markup = InlineKeyboardMarkup(keyboard)
 
         try:
-            await self._bot.edit_message_text(
-                chat_id=chat_id, message_id=message_id, text=text,
-                reply_markup=reply_markup,
+            new_msg = await self._bot.send_message(
+                chat_id=chat_id, text=text, reply_markup=reply_markup,
             )
             self._append_telegram_delivery_event(
-                "telegram.message.edited",
-                chat_id=chat_id,
-                text=text,
-                message_id=message_id,
+                "telegram.message.sent",
+                chat_id=chat_id, text=text, message_id=new_msg.message_id,
+                payload_extra={"fallback_for_message_id": message_id},
             )
-        except Exception as exc:
-            if _is_message_not_modified_error(exc):
-                # Do NOT add zero-width char hack — outbox records skip event.
-                self._append_telegram_delivery_event(
-                    "telegram.edit.skipped_no_change",
-                    chat_id=chat_id,
-                    text=text,
-                    message_id=message_id,
-                )
-                return
-
-            if _is_telegram_network_error(exc):
-                logger.warning(
-                    "Telegram edit network error: chat_id=%s msg_id=%s exc=%s",
-                    chat_id, message_id, exc,
-                )
-                self._append_telegram_delivery_event(
-                    "telegram.message.failed",
-                    chat_id=chat_id,
-                    text=text,
-                    message_id=message_id,
-                    error=str(exc),
-                )
-                return
-
-            logger.debug("Failed to edit message %d, sending new one", message_id)
-            try:
-                new_msg = await self._bot.send_message(
-                    chat_id=chat_id, text=text, reply_markup=reply_markup,
-                )
-                self._append_telegram_delivery_event(
-                    "telegram.message.sent",
-                    chat_id=chat_id,
-                    text=text,
-                    message_id=new_msg.message_id,
-                    payload_extra={"fallback_for_message_id": message_id},
-                )
-            except Exception as send_exc:
-                logger.warning(
-                    "Telegram edit fallback send failed: chat_id=%s exc=%s",
-                    chat_id, send_exc,
-                )
-                self._append_telegram_delivery_event(
-                    "telegram.message.failed",
-                    chat_id=chat_id,
-                    text=text,
-                    message_id=message_id,
-                    error=str(send_exc),
-                )
-                return
-            for task in self._ledger.list_tasks(limit=50, include_archived=True):
-                if task.telegram_status_message_id == message_id:
-                    self._ledger.set_status_message(task.id, chat_id, new_msg.message_id)
+        except Exception as send_exc:
+            logger.warning(
+                "Telegram edit fallback send failed: chat_id=%s exc=%s",
+                chat_id, send_exc,
+            )
+            self._append_telegram_delivery_event(
+                "telegram.message.failed",
+                chat_id=chat_id, text=text, message_id=message_id,
+                error=str(send_exc),
+            )
+            return
+        for task in self._ledger.list_tasks(limit=50, include_archived=True):
+            if task.telegram_status_message_id == message_id:
+                self._ledger.set_status_message(task.id, chat_id, new_msg.message_id)
 
     def _append_telegram_delivery_event(
         self,
@@ -937,7 +992,7 @@ class WlCodexHandlers:
             return
 
         if not self._guard(update):
-            await query.answer("未授权。")
+            await self._safe_callback_answer(query, "未授权。")
             return
 
         data = query.data or ""
@@ -956,14 +1011,14 @@ class WlCodexHandlers:
         elif data.startswith("busy_"):
             await self._workspace_busy_callback_impl(update, query, data)
         else:
-            await query.answer("未知回调类型。")
+            await self._safe_callback_answer(query, "未知回调类型。")
 
     async def _settings_callback_impl(
         self, update: Update, query: object, data: str
     ) -> None:
         parts = data.split(":", 2)
         if len(parts) != 3 or parts[1] != "claude_permission":
-            await query.answer("无效的设置回调数据。")
+            await self._safe_callback_answer(query, "无效的设置回调数据。")
             return
 
         try:
@@ -971,13 +1026,13 @@ class WlCodexHandlers:
                 f"/claude_mode {parts[2]}",
                 _ctx(update),
             )
-            await query.answer("已切换")
-            await self._edit_callback_message(
+            await self._safe_callback_answer(query, "已切换")
+            await self._safe_callback_edit(
                 update, query, response.text, response.buttons
             )
         except Exception as exc:
             logger.exception("Settings callback error")
-            await query.answer(f"错误：{exc}")
+            await self._safe_callback_answer(query, f"错误：{exc}")
 
     async def _conversation_callback_impl(
         self, update: Update, query: object, data: str
@@ -986,18 +1041,18 @@ class WlCodexHandlers:
 
         callback = decode_conversation_callback(data)
         if callback is None:
-            await query.answer("无效的对话回调数据。")
+            await self._safe_callback_answer(query, "无效的对话回调数据。")
             return
 
         try:
             response = await self._controller.handle_conversation_callback(callback)
-            await query.answer("完成")
-            await self._edit_callback_message(
+            await self._safe_callback_answer(query, "完成")
+            await self._safe_callback_edit(
                 update, query, response.text, response.buttons
             )
         except Exception as exc:
             logger.exception("Conversation callback error")
-            await query.answer(f"错误：{exc}")
+            await self._safe_callback_answer(query, f"错误：{exc}")
 
     async def _workspace_busy_callback_impl(
         self, update: Update, query: object, data: str
@@ -1006,7 +1061,7 @@ class WlCodexHandlers:
 
         decoded = decode_busy_callback(data)
         if decoded is None:
-            await query.answer("无效的工作区忙回调数据。")
+            await self._safe_callback_answer(query, "无效的工作区忙回调数据。")
             return
 
         action, conversation_id = decoded
@@ -1014,13 +1069,13 @@ class WlCodexHandlers:
             response = await self._controller.handle_workspace_busy_callback(
                 action, conversation_id
             )
-            await query.answer("完成")
-            await self._edit_callback_message(
+            await self._safe_callback_answer(query, "完成")
+            await self._safe_callback_edit(
                 update, query, response.text, response.buttons
             )
         except Exception as exc:
             logger.exception("Workspace busy callback error")
-            await query.answer(f"错误：{exc}")
+            await self._safe_callback_answer(query, f"错误：{exc}")
 
     async def _poller_error_handler(
         self, update: object, context: object
@@ -1065,7 +1120,7 @@ class WlCodexHandlers:
 
         callback = decode_approval_callback(data)
         if callback is None:
-            await query.answer("无效的审批回调数据。")
+            await self._safe_callback_answer(query, "无效的审批回调数据。")
             return
 
         # Check if this approval has been superseded by new user context.
@@ -1133,7 +1188,7 @@ class WlCodexHandlers:
                                              "conversation_id": conversation_id},
                                     occurred_at=now_iso(),
                                 ))
-                                await query.answer("该审批已被新的用户上下文取代，请使用新的审批按钮。")
+                                await self._safe_callback_answer(query, "该审批已被新的用户上下文取代，请使用新的审批按钮。")
                                 return
             except Exception:
                 logger.debug("Supersession check failed (non-fatal)", exc_info=True)
@@ -1142,8 +1197,10 @@ class WlCodexHandlers:
             msg = await self._approval.resolve_callback(
                 callback, self._controller._backend, self._ledger
             )
-            await query.answer("完成")
-            await self._edit_callback_message(
+            # Approval decision is a protocol fact — answer/edit failures
+            # must be recorded but MUST NOT undo the decision.
+            await self._safe_callback_answer(query, "完成")
+            await self._safe_callback_edit(
                 update,
                 query,
                 f"{query.message.text}\n\n处理结果：{msg}"
@@ -1151,7 +1208,7 @@ class WlCodexHandlers:
             )
         except Exception as exc:
             logger.exception("Approval callback error")
-            await query.answer(f"错误：{exc}")
+            await self._safe_callback_answer(query, f"错误：{exc}")
 
     async def _waiting_callback_impl(
         self, update: Update, query: object, data: str
@@ -1160,18 +1217,18 @@ class WlCodexHandlers:
 
         callback = decode_waiting_callback(data)
         if callback is None:
-            await query.answer("无效的等待回调数据。")
+            await self._safe_callback_answer(query, "无效的等待回调数据。")
             return
 
         try:
             response = await self._controller.handle_waiting_callback(callback)
-            await query.answer("完成")
-            await self._edit_callback_message(
+            await self._safe_callback_answer(query, "完成")
+            await self._safe_callback_edit(
                 update, query, response.text, response.buttons
             )
         except Exception as exc:
             logger.exception("Waiting callback error")
-            await query.answer(f"错误：{exc}")
+            await self._safe_callback_answer(query, f"错误：{exc}")
 
     async def _worktree_done_callback_impl(
         self, update: Update, query: object, data: str
@@ -1180,18 +1237,18 @@ class WlCodexHandlers:
 
         callback = decode_worktree_done_callback(data)
         if callback is None:
-            await query.answer("无效的 worktree 回调数据。")
+            await self._safe_callback_answer(query, "无效的 worktree 回调数据。")
             return
 
         try:
             response = await self._controller.handle_worktree_done_callback(callback)
-            await query.answer("完成")
-            await self._edit_callback_message(
+            await self._safe_callback_answer(query, "完成")
+            await self._safe_callback_edit(
                 update, query, response.text, response.buttons
             )
         except Exception as exc:
             logger.exception("Worktree done callback error")
-            await query.answer(f"错误：{exc}")
+            await self._safe_callback_answer(query, f"错误：{exc}")
 
     # --- Legacy approval callback (kept for backward compat) ---
 
@@ -1221,6 +1278,8 @@ def build_application(
     runtime_event_store: object | None = None,
     outbox: object | None = None,
 ) -> tuple[Application, WlCodexHandlers | None]:
+    # Bot API HTTP timeouts.
+    # Long-polling HTTP timeouts (getUpdates).
     application = (
         Application.builder()
         .token(token)
@@ -1229,6 +1288,10 @@ def build_application(
         .read_timeout(30.0)
         .write_timeout(30.0)
         .pool_timeout(5.0)
+        .get_updates_connect_timeout(30.0)
+        .get_updates_read_timeout(60.0)
+        .get_updates_write_timeout(30.0)
+        .get_updates_pool_timeout(5.0)
         .build()
     )
 

@@ -50,6 +50,7 @@ class EventBridge:
         watchdog_interval_seconds: int = TASK_WATCHDOG_INTERVAL_SECONDS,
         interaction_renderer: object | None = None,
         runtime_event_store: object | None = None,
+        on_workspace_freed: Callable[[str], Coroutine[Any, Any, None]] | None = None,
     ) -> None:
         self._service = task_service
         self._backend = backend
@@ -61,6 +62,7 @@ class EventBridge:
         self._watchdog_interval = watchdog_interval_seconds
         self._interaction_renderer = interaction_renderer
         self._runtime_store = runtime_event_store
+        self._on_workspace_freed = on_workspace_freed
         self._status_card_fingerprints: dict[int, tuple[str, str]] = {}
         self._runtime_causation_by_agent_run: dict[int, int] = {}
         self._running = False
@@ -113,6 +115,8 @@ class EventBridge:
                 if changed > 0:
                     for ws_alias in list(self._service._workspaces):
                         await drain_workspace(self._service, self._backend, ws_alias)
+                        if self._on_workspace_freed is not None:
+                            await self._on_workspace_freed(ws_alias)
             except Exception:
                 logger.exception("Task watchdog scan failed")
 
@@ -162,6 +166,8 @@ class EventBridge:
                 await drain_workspace(
                     self._service, self._backend, task_after.workspace_alias
                 )
+                if self._on_workspace_freed is not None:
+                    await self._on_workspace_freed(task_after.workspace_alias)
 
     def _task_for_runtime_event(
         self,
