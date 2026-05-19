@@ -38,47 +38,138 @@ from wlcodex.watchdog import TaskLivenessConfig, TaskWatchdog
 logger = logging.getLogger(__name__)
 
 # Startup retry configuration for Telegram Bot API initialization.
-_INITIALIZE_MAX_RETRIES = 3
-_INITIALIZE_BACKOFF_BASE = 1.5  # seconds, exponential: 1.5, 2.25, 3.375
+# Infinite bootstrap retry per spec — never give up on initialization.
+_INITIALIZE_MAX_RETRIES = None  # infinite
+_INITIALIZE_BACKOFF_BASE = 1.5  # seconds, exponential
+_INITIALIZE_BACKOFF_CAP = 120.0  # cap delay at 2 minutes
 
 
 async def _initialize_app_with_retry(
     app: object,
-    max_retries: int = _INITIALIZE_MAX_RETRIES,
+    max_retries: int | None = _INITIALIZE_MAX_RETRIES,
     backoff_base: float = _INITIALIZE_BACKOFF_BASE,
+    backoff_cap: float = _INITIALIZE_BACKOFF_CAP,
+    runtime_store: object | None = None,
 ) -> bool:
     """Call app.initialize() with retry/backoff for transient network errors.
 
-    Returns True on success, False if all retries are exhausted.
+    When *max_retries* is None, retries forever (infinite bootstrap retry).
+    Returns True on success. Only returns False on non-network permanent errors.
     Does NOT leak the bot token in log messages.
     """
     import asyncio as _asyncio
     from telegram.error import NetworkError, TimedOut
 
-    for attempt in range(1, max_retries + 1):
+    from wlcodex.runtime_events import (
+        AggregateType, EventSource, EventType, RuntimeEvent, Visibility, now_iso,
+    )
+
+    attempt = 0
+    while True:
+        attempt += 1
         try:
+            if runtime_store is not None:
+                try:
+                    runtime_store.append(RuntimeEvent(
+                        schema_version=1,
+                        event_type=EventType.TELEGRAM_POLLER_BOOTSTRAP_STARTED,
+                        aggregate_type=AggregateType.SYSTEM,
+                        aggregate_id="telegram-poller",
+                        correlation_id=f"bootstrap-{attempt}",
+                        source=EventSource.SYSTEM,
+                        actor="system",
+                        visibility=Visibility.OPERATOR,
+                        payload={"attempt": attempt},
+                        occurred_at=now_iso(),
+                    ))
+                except Exception:
+                    pass
             await app.initialize()
+            if runtime_store is not None:
+                try:
+                    runtime_store.append(RuntimeEvent(
+                        schema_version=1,
+                        event_type=EventType.TELEGRAM_POLLER_BOOTSTRAP_SUCCEEDED,
+                        aggregate_type=AggregateType.SYSTEM,
+                        aggregate_id="telegram-poller",
+                        correlation_id=f"bootstrap-{attempt}",
+                        source=EventSource.SYSTEM,
+                        actor="system",
+                        visibility=Visibility.OPERATOR,
+                        payload={"attempt": attempt},
+                        occurred_at=now_iso(),
+                    ))
+                except Exception:
+                    pass
             return True
         except (TimedOut, NetworkError) as exc:
-            if attempt < max_retries:
-                delay = backoff_base ** attempt
-                logger.warning(
-                    "Telegram initialize attempt %d/%d timed out, retrying in %.1fs",
-                    attempt, max_retries, delay,
-                )
-                await _asyncio.sleep(delay)
-            else:
+            exhausted = max_retries is not None and attempt >= max_retries
+            if exhausted:
                 logger.error(
                     "Telegram initialize failed after %d attempts: %s",
                     max_retries, exc,
                 )
+                if runtime_store is not None:
+                    try:
+                        runtime_store.append(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.TELEGRAM_POLLER_BOOTSTRAP_FAILED,
+                            aggregate_type=AggregateType.SYSTEM,
+                            aggregate_id="telegram-poller",
+                            correlation_id=f"bootstrap-{attempt}",
+                            source=EventSource.SYSTEM,
+                            actor="system",
+                            visibility=Visibility.OPERATOR,
+                            payload={"attempt": attempt, "error": str(exc)},
+                            occurred_at=now_iso(),
+                        ))
+                    except Exception:
+                        pass
+                return False
+            delay = min(backoff_base ** attempt, backoff_cap)
+            logger.warning(
+                "Telegram initialize attempt %d timed out, retrying in %.1fs",
+                attempt, delay,
+            )
+            if runtime_store is not None:
+                try:
+                    runtime_store.append(RuntimeEvent(
+                        schema_version=1,
+                        event_type=EventType.TELEGRAM_POLLER_BOOTSTRAP_RETRYING,
+                        aggregate_type=AggregateType.SYSTEM,
+                        aggregate_id="telegram-poller",
+                        correlation_id=f"bootstrap-{attempt}",
+                        source=EventSource.SYSTEM,
+                        actor="system",
+                        visibility=Visibility.OPERATOR,
+                        payload={"attempt": attempt, "delay_seconds": round(delay, 2),
+                                 "error": str(exc)},
+                        occurred_at=now_iso(),
+                    ))
+                except Exception:
+                    pass
+            await _asyncio.sleep(delay)
         except Exception as exc:
             # Non-network errors are likely permanent (bad token, etc.) —
             # don't retry.
             logger.error("Telegram initialize failed with non-network error: %s", exc)
+            if runtime_store is not None:
+                try:
+                    runtime_store.append(RuntimeEvent(
+                        schema_version=1,
+                        event_type=EventType.TELEGRAM_POLLER_BOOTSTRAP_FAILED,
+                        aggregate_type=AggregateType.SYSTEM,
+                        aggregate_id="telegram-poller",
+                        correlation_id=f"bootstrap-{attempt}",
+                        source=EventSource.SYSTEM,
+                        actor="system",
+                        visibility=Visibility.OPERATOR,
+                        payload={"attempt": attempt, "error": f"{type(exc).__name__}: {exc}"},
+                        occurred_at=now_iso(),
+                    ))
+                except Exception:
+                    pass
             return False
-
-    return False
 
 
 def main() -> None:
@@ -112,6 +203,10 @@ def main() -> None:
     # Runtime projector — updates compatibility tables from runtime events
     runtime_projector = RuntimeProjector(ledger._conn, store=runtime_store)
     runtime_store.add_projector(runtime_projector.apply)
+
+    # Telegram delivery outbox — isolates network failures from orchestration
+    from wlcodex.telegram_outbox import TelegramOutbox
+    telegram_outbox = TelegramOutbox(store=runtime_store)
 
     paused_ids: list[int] = []
     try:
@@ -278,6 +373,7 @@ def main() -> None:
         ledger,
         approval_service,
         runtime_event_store=runtime_store,
+        outbox=telegram_outbox,
     )
 
     if handlers is None:
@@ -319,6 +415,7 @@ def main() -> None:
                 handlers.send_telegram,
                 handlers.edit_telegram,
                 _noop_typing,
+                outbox=telegram_outbox,
             ),
             verbosity=1,
             min_edit_interval=float(
@@ -356,17 +453,28 @@ def main() -> None:
 
     async def _run() -> None:
         pump_task = asyncio.create_task(event_bridge.run(), name="event-pump")
+        # Outbox delivery task — processes queued Telegram sends/edits with retry.
+        async def _process_outbox() -> None:
+            while True:
+                try:
+                    await telegram_outbox.process_all()
+                except Exception:
+                    logger.debug("Outbox process error", exc_info=True)
+                await asyncio.sleep(0.5)
+        outbox_task = asyncio.create_task(_process_outbox(), name="outbox-processor")
         app_initialized = False
         app_started = False
         updater_started = False
         logger.info("WLCodex starting. Polling Telegram...")
         try:
-            # Initialize with retry for transient Telegram network errors.
-            initialized = await _initialize_app_with_retry(app)
+            # Initialize with infinite bootstrap retry for Telegram network errors.
+            initialized = await _initialize_app_with_retry(
+                app, runtime_store=runtime_store,
+            )
             if not initialized:
                 logger.critical(
-                    "Cannot connect to Telegram Bot API after retries. "
-                    "Check network and bot token. Exiting to avoid restart loop."
+                    "Cannot connect to Telegram Bot API — permanent error. "
+                    "Check bot token. Exiting."
                 )
                 return
             app_initialized = True
@@ -410,6 +518,12 @@ def main() -> None:
             pump_task.cancel()
             try:
                 await pump_task
+            except asyncio.CancelledError:
+                pass
+            # 2b. Stop outbox processor
+            outbox_task.cancel()
+            try:
+                await outbox_task
             except asyncio.CancelledError:
                 pass
             # 3. Close WebSocket and cancel pending JSON-RPC requests

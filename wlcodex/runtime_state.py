@@ -28,6 +28,22 @@ _APPROVAL_TERMINAL_STATES = frozenset({
     "resolved", "expired", "cancelled",
 })
 
+_CONVERSATION_TERMINAL_STATES = frozenset({
+    "passed", "failed", "aborted", "done",
+})
+
+# Orchestration phase -> conversation state
+_ORCH_PHASE_TO_CONVERSATION_STATE: dict[str, str] = {
+    "queued": "new",
+    "running_analysis": "analysis",
+    "running_implementation": "implementation",
+    "running_verification": "verification",
+    "retrying_implementation": "implementation",
+    "completed": "passed",
+    "failed": "failed",
+    "cancelled": "aborted",
+}
+
 # ---------------------------------------------------------------------------
 # Agent phase mapping:  event_type -> agent status
 # ---------------------------------------------------------------------------
@@ -160,12 +176,38 @@ class RuntimeApprovalState:
 
 
 @dataclass
+class RuntimeConversationState:
+    """Current state of one conversation reconstructed from events."""
+
+    aggregate_id: str
+    conversation_id: int | None = None
+    chat_id: int = 0
+    state: str = "new"
+    title: str = ""
+    mode: str = ""
+    workspace_alias: str = ""
+    active_task_id: int | None = None
+    pending_context: list[dict] = field(default_factory=list)
+    last_event_id: int = 0
+    last_event_type: str = ""
+    last_event_at: str = ""
+    started_at: str = ""
+    closed_at: str = ""
+    has_pass_verification: bool = False
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.state in _CONVERSATION_TERMINAL_STATES
+
+
+@dataclass
 class RuntimeStateSnapshot:
     """Complete runtime state at a point in the event stream."""
 
     agents: dict[str, RuntimeAgentState] = field(default_factory=dict)
     orchestrations: dict[str, RuntimeOrchestrationState] = field(default_factory=dict)
     approvals: dict[str, RuntimeApprovalState] = field(default_factory=dict)
+    conversations: dict[str, RuntimeConversationState] = field(default_factory=dict)
     token_totals: dict[str, dict[str, int]] = field(default_factory=dict)
     last_event_id: int = 0
     last_event_at: str = ""
@@ -178,6 +220,16 @@ class RuntimeStateSnapshot:
 
     def approval(self, aggregate_id: str) -> RuntimeApprovalState | None:
         return self.approvals.get(aggregate_id)
+
+    def conversation(self, aggregate_id: str) -> RuntimeConversationState | None:
+        return self.conversations.get(aggregate_id)
+
+    def active_conversation_for_chat(self, chat_id: int) -> RuntimeConversationState | None:
+        """Return the active non-terminal conversation for a chat, or None."""
+        for conv in self.conversations.values():
+            if conv.chat_id == chat_id and not conv.is_terminal:
+                return conv
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +321,25 @@ def _apply_event(snap: RuntimeStateSnapshot, event: Any) -> None:
         _apply_verification_event(snap, event)
 
     # --- Projection events ---
+    # --- Conversation events ---
+    elif etype in (
+        EventType.CONVERSATION_STARTED,
+        EventType.CONVERSATION_ACTIVATED,
+        EventType.CONVERSATION_STATE_CHANGED,
+        EventType.CONVERSATION_CLOSED,
+        EventType.USER_CONTEXT_APPENDED,
+        EventType.CONVERSATION_PENDING_CONTEXT_RECORDED,
+        EventType.CONVERSATION_PENDING_CONTEXT_REVIEWED,
+    ):
+        _apply_conversation_event(snap, event)
+
+    # --- Approval supersession ---
+    elif etype == EventType.APPROVAL_SUPERSEDED:
+        _apply_approval_superseded(snap, event)
+
+    elif etype == EventType.APPROVAL_STALE_BUTTON_IGNORED:
+        pass  # informational diagnostic
+
     elif etype == EventType.PROJECTION_REBUILT:
         pass  # informational only for replay
 
@@ -325,6 +396,15 @@ def _apply_orchestration_event(snap: RuntimeStateSnapshot, event: Any) -> None:
         orch.verify_round = int(payload.get("verify_round", orch.verify_round))
         orch.last_codex_analysis = str(payload.get("codex_analysis", orch.last_codex_analysis))
         orch.last_claude_summary = str(payload.get("claude_summary", orch.last_claude_summary))
+        # Propagate phase change to conversation state.
+        conv_state = _ORCH_PHASE_TO_CONVERSATION_STATE.get(phase)
+        if conv_state and event.conversation_id is not None:
+            for conv in snap.conversations.values():
+                if conv.conversation_id == event.conversation_id and not conv.is_terminal:
+                    conv.state = conv_state
+                    conv.last_event_id = event.id
+                    conv.last_event_at = event.occurred_at
+                    break
 
     elif event.event_type == EventType.RUN_COMPLETED:
         if orch.last_verification_result != "pass":
@@ -332,20 +412,24 @@ def _apply_orchestration_event(snap: RuntimeStateSnapshot, event: Any) -> None:
             orch.completed_at = event.occurred_at
             orch.failure_reason = "run_completed_without_verification_pass"
             orch.current_phase = "failed"
+            _propagate_conversation_state(snap, event, "failed")
             return
         orch.status = "completed"
         orch.completed_at = event.occurred_at
         orch.current_phase = "completed"
+        _propagate_conversation_state(snap, event, "passed")
 
     elif event.event_type == EventType.RUN_FAILED:
         orch.status = "failed"
         orch.completed_at = event.occurred_at
         orch.failure_reason = str(payload.get("reason", ""))
         orch.last_active_agent = str(payload.get("last_active_agent", orch.last_active_agent))
+        _propagate_conversation_state(snap, event, "failed")
 
     elif event.event_type == EventType.RUN_CANCELLED:
         orch.status = "cancelled"
         orch.completed_at = event.occurred_at
+        _propagate_conversation_state(snap, event, "aborted")
 
     elif event.event_type == EventType.RUN_CANCEL_REQUESTED:
         # Does not change status — only run.cancelled does.
@@ -546,3 +630,112 @@ def _apply_verification_event(snap: RuntimeStateSnapshot, event: Any) -> None:
                 elif event.event_type == EventType.VERIFICATION_RETRY_REQUESTED:
                     orch.verify_round = int(payload.get("verify_round", orch.verify_round))
                 break
+
+    # Also update conversation's pass verification flag.
+    if event.event_type == EventType.VERIFICATION_DECISION_RECORDED:
+        conv_id = event.conversation_id
+        if conv_id is not None:
+            for conv in snap.conversations.values():
+                if conv.conversation_id == conv_id:
+                    if str(payload.get("decision", "")) == "pass":
+                        conv.has_pass_verification = True
+                    break
+
+
+def _propagate_conversation_state(
+    snap: RuntimeStateSnapshot, event: Any, state: str
+) -> None:
+    """Propagate a terminal or phase state to the linked conversation."""
+    if event.conversation_id is None:
+        return
+    for conv in snap.conversations.values():
+        if conv.conversation_id == event.conversation_id and not conv.is_terminal:
+            conv.state = state
+            conv.last_event_id = event.id
+            conv.last_event_at = event.occurred_at
+            break
+
+
+# ---------------------------------------------------------------------------
+# Conversation reducer
+# ---------------------------------------------------------------------------
+
+
+def _apply_conversation_event(snap: RuntimeStateSnapshot, event: Any) -> None:
+    agg_id = event.aggregate_id
+    conv = snap.conversations.get(agg_id)
+
+    if conv is None:
+        conv = RuntimeConversationState(aggregate_id=agg_id)
+        snap.conversations[agg_id] = conv
+
+    # Terminal state protection.
+    if conv.is_terminal and event.event_type not in (
+        EventType.CONVERSATION_CLOSED,
+        EventType.CONVERSATION_STATE_CHANGED,
+    ):
+        return
+
+    conv.last_event_id = event.id
+    conv.last_event_type = event.event_type
+    conv.last_event_at = event.occurred_at
+    conv.conversation_id = event.conversation_id or conv.conversation_id
+
+    payload = event.payload
+
+    if event.event_type == EventType.CONVERSATION_STARTED:
+        conv.state = "new"
+        conv.chat_id = int(payload.get("chat_id", conv.chat_id))
+        conv.title = str(payload.get("title", conv.title))
+        conv.mode = str(payload.get("mode", conv.mode))
+        conv.workspace_alias = str(payload.get("workspace_alias", conv.workspace_alias))
+        if not conv.started_at:
+            conv.started_at = event.occurred_at
+
+    elif event.event_type == EventType.CONVERSATION_ACTIVATED:
+        conv.state = str(payload.get("state", conv.state))
+
+    elif event.event_type == EventType.CONVERSATION_STATE_CHANGED:
+        new_state = str(payload.get("to", ""))
+        if new_state:
+            conv.state = new_state
+        # Phase-based state also reflected from run.phase.changed
+        phase = str(payload.get("phase", ""))
+        mapped = _ORCH_PHASE_TO_CONVERSATION_STATE.get(phase)
+        if mapped:
+            conv.state = mapped
+
+    elif event.event_type == EventType.CONVERSATION_CLOSED:
+        conv.state = str(payload.get("reason", conv.state))
+        conv.closed_at = event.occurred_at
+
+    elif event.event_type == EventType.USER_CONTEXT_APPENDED:
+        conv.pending_context.append({
+            "telegram_message_id": payload.get("telegram_message_id", 0),
+            "text_preview": str(payload.get("text_preview", "")),
+            "delivery_policy": str(payload.get("delivery_policy", "")),
+            "appended_at": event.occurred_at,
+        })
+
+    elif event.event_type == EventType.CONVERSATION_PENDING_CONTEXT_RECORDED:
+        conv.pending_context.append({
+            "telegram_message_id": payload.get("telegram_message_id", 0),
+            "text_preview": str(payload.get("text_preview", "")),
+            "delivery_policy": "codex_phase_boundary_review",
+            "recorded_at": event.occurred_at,
+        })
+
+    elif event.event_type == EventType.CONVERSATION_PENDING_CONTEXT_REVIEWED:
+        conv.pending_context = [
+            item for item in conv.pending_context
+            if item.get("telegram_message_id") != payload.get("telegram_message_id")
+        ]
+
+
+def _apply_approval_superseded(snap: RuntimeStateSnapshot, event: Any) -> None:
+    """Mark all pending approvals as superseded for the conversation."""
+    conv_id = event.conversation_id
+    for approval in snap.approvals.values():
+        if approval.conversation_id == conv_id and not approval.is_terminal:
+            approval.status = "cancelled"
+            approval.error = "superseded_by_user_context"

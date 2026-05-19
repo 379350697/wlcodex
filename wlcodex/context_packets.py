@@ -252,6 +252,8 @@ def build_codex_verification_packet(
     diff_summary: str = "",
     workspace: str = "wlcodex",
     budget: ContextBudget | None = None,
+    *,
+    pending_user_context: str = "",
 ) -> CodexVerificationPacket:
     bgt = budget or ContextBudget()
     verification_constraints = [
@@ -265,11 +267,18 @@ def build_codex_verification_packet(
         "应判定为违规漂移并标记 retry 或 stop。",
         "最终用户回复由平台 controller 在 verification pass 后发送。",
     ]
+    # Inject pending user context so Codex can consider mid-implementation follow-ups.
+    conversation_context = ""
+    if pending_user_context:
+        conversation_context = (
+            f"[用户在实施/验收阶段补充了以下上下文，请在验证时纳入考量]\n"
+            f"{pending_user_context[:500]}"
+        )
     return CodexVerificationPacket(
         mode="chief_engineer",
         workspace=workspace,
         user_goal=user_goal,
-        conversation_summary="",
+        conversation_summary=trim_to_budget(conversation_context, bgt.conversation_summary_tokens),
         relevant_files=changed_files or [],
         recent_user_constraints=verification_constraints,
         token_budget=bgt.claude_to_codex_tokens,

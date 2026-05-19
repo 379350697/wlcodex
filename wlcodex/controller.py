@@ -13,6 +13,17 @@ from wlcodex.health_snapshot import build_health_snapshot
 from wlcodex.interaction.errors import classify_user_error
 from wlcodex.inspection import TaskInspector
 from wlcodex.models import TaskStatus
+from wlcodex.conversation_state_machine import (
+    RouteDecision,
+    classify_intent,
+    route_message,
+    MID_RUN_ACKNOWLEDGEMENT,
+    build_workspace_busy_buttons,
+    decode_busy_callback,
+    BUSY_APPEND,
+    BUSY_QUEUE,
+    BUSY_CANCEL,
+)
 from wlcodex.conversation import default_title, mode_from_command
 from wlcodex.conversation_callback import (
     CONTINUE,
@@ -621,12 +632,12 @@ class CommandController:
     async def handle_conversation_text(
         self, text: str, telegram_context: dict[str, Any] | None = None
     ) -> ControllerResponse:
-        """Handle plain text as conversation message. Never injects status/log
-        into model prompts.
+        """Route plain text through the conversation state machine.
 
-        Chief-engineer mode (default): full Codex→Claude→Codex closed loop.
-        Codex-direct mode: Codex analysis only, no implementation.
-        When Claude is disabled, chief_engineer falls back to Codex-only.
+        Diagnostic commands → read-only handler.
+        Normal text → either creates new conversation or appends to active one
+        based on conversation state.
+        Never injects status/log into model prompts.
         """
         if self._ledger is None:
             return ControllerResponse("系统未完全初始化。请检查配置。")
@@ -634,44 +645,175 @@ class CommandController:
         chat_id = telegram_context.get("chat_id", 0) if telegram_context else 0
         user_id = telegram_context.get("user_id", 0) if telegram_context else 0
 
-        active = self._ledger.get_active_conversation(chat_id)
-        if active is None:
-            title = default_title(text)
-            active = self._ledger.create_conversation(
-                chat_id=chat_id,
-                user_id=user_id,
-                title=title,
-                mode=self._default_mode,
-                workspace_alias=self._default_workspace,
-            )
-
+        # --- Lightweight greeting: fast path ---
         if _is_lightweight_greeting(text):
+            active = self._ledger.get_active_conversation(chat_id)
+            if active is None:
+                active = self._ledger.create_conversation(
+                    chat_id=chat_id, user_id=user_id,
+                    title=default_title(text),
+                    mode=self._default_mode,
+                    workspace_alias=self._default_workspace,
+                )
             self._ledger.update_conversation_summary(
                 active.id,
                 trim_to_budget("用户打招呼，等待具体任务。", ContextBudget().conversation_summary_tokens),
             )
             return ControllerResponse("你好！直接说需要我看什么就行。")
 
-        # Emit user.message.received
+        # --- Route diagnostic commands to the existing command parser ---
+        intent = classify_intent(text)
+        if intent == "diagnostic":
+            try:
+                return await self.handle(text, telegram_context)
+            except Exception:
+                return ControllerResponse("命令处理出错，请重试。")
+
+        # --- Get active conversation and its runtime state ---
+        active = self._ledger.get_active_conversation(chat_id)
+        conv_state: str | None = None
+        if active is not None and self._store is not None:
+            conv_state = self._store.get_conversation_runtime_state(active.id)
+
+        # --- Check workspace busy for new-conversation triggers ---
+        workspace_busy = False
+        blocking_task_id: int | None = None
+        blocking_run_id: int | None = None
+        if intent == "new_trigger" or active is None or conv_state in (None, "passed", "failed", "aborted", "done"):
+            blocker = self._service.blocker_for_workspace(self._default_workspace)
+            if blocker is not None:
+                workspace_busy = True
+                blocking_task_id = blocker.id
+
+        # --- Route ---
+        decision = route_message(
+            text,
+            active_conversation_id=active.id if active else None,
+            active_conversation_state=conv_state,
+            chat_id=chat_id,
+            workspace_busy=workspace_busy,
+            blocking_task_id=blocking_task_id,
+            blocking_run_id=blocking_run_id,
+        )
+
+        # --- Emit routing events ---
         cid = self._new_correlation_id()
+        if active is None and decision.route == "new_conversation":
+            # Create conversation first so we have an id for events
+            title = default_title(text)
+            active = self._ledger.create_conversation(
+                chat_id=chat_id, user_id=user_id,
+                title=title, mode=self._default_mode,
+                workspace_alias=self._default_workspace,
+            )
+            # Emit conversation.started
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.CONVERSATION_STARTED,
+                aggregate_type=AggregateType.CONVERSATION,
+                aggregate_id=str(active.id),
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.OPERATOR,
+                payload={"chat_id": chat_id, "title": title,
+                         "mode": self._default_mode,
+                         "workspace_alias": self._default_workspace},
+                occurred_at=now_iso(),
+                conversation_id=active.id,
+            ))
+
+        # Always emit user.message.received
+        conv_id = active.id if active else 0
         self._emit_event(RuntimeEvent(
             schema_version=1,
             event_type=EventType.USER_MESSAGE_RECEIVED,
             aggregate_type=AggregateType.CONVERSATION,
-            aggregate_id=str(active.id),
+            aggregate_id=str(conv_id),
             correlation_id=cid,
             source=EventSource.TELEGRAM,
             actor="user",
             visibility=Visibility.USER,
-            payload={"text_preview": text[:200]},
+            payload={"text_preview": text[:200], "chat_id": chat_id},
+            occurred_at=now_iso(),
+            conversation_id=conv_id if conv_id else None,
+        ))
+
+        # --- Handle route ---
+        if decision.route == "workspace_busy":
+            return await self._handle_workspace_busy(
+                decision, active, blocking_task_id, blocking_run_id, cid,
+                original_text=text,
+            )
+
+        if decision.route == "append_active_conversation":
+            return await self._handle_append_to_conversation(
+                decision, text, active, telegram_context, cid
+            )
+
+        # --- new_conversation (default) ---
+        # If active conversation is terminal, archive it first.
+        if active is not None and conv_state in ("passed", "failed", "aborted", "done"):
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.CONVERSATION_CLOSED,
+                aggregate_type=AggregateType.CONVERSATION,
+                aggregate_id=str(active.id),
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.OPERATOR,
+                payload={"reason": conv_state, "next_conversation": True},
+                occurred_at=now_iso(),
+                conversation_id=active.id,
+            ))
+            self._ledger.archive_conversation(active.id)
+            title = default_title(text)
+            active = self._ledger.create_conversation(
+                chat_id=chat_id, user_id=user_id,
+                title=title, mode=self._default_mode,
+                workspace_alias=self._default_workspace,
+            )
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.CONVERSATION_STARTED,
+                aggregate_type=AggregateType.CONVERSATION,
+                aggregate_id=str(active.id),
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.OPERATOR,
+                payload={"chat_id": chat_id, "title": title,
+                         "mode": self._default_mode,
+                         "workspace_alias": self._default_workspace},
+                occurred_at=now_iso(),
+                conversation_id=active.id,
+            ))
+
+        # Emit conversation.message.routed
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.CONVERSATION_MESSAGE_ROUTED,
+            aggregate_type=AggregateType.CONVERSATION,
+            aggregate_id=str(active.id),
+            correlation_id=cid,
+            source=EventSource.CONTROLLER,
+            actor="controller",
+            visibility=Visibility.OPERATOR,
+            payload={
+                "chat_id": chat_id,
+                "route": decision.route,
+                "reason": decision.reason,
+                "conversation_state": conv_state,
+                "conversation_id": active.id,
+            },
             occurred_at=now_iso(),
             conversation_id=active.id,
         ))
 
-        # --- Chief-engineer mode with Claude enabled: full closed loop ---
+        # --- Chief-engineer mode: full closed loop ---
         claude_ready = self._claude is not None and getattr(self._claude, "enabled", False)
         if active.mode == ConversationMode.CHIEF_ENGINEER.value and claude_ready:
-            # Build an AutoModeCommand-equivalent and run the full orchestrator
             from wlcodex.router import AutoModeCommand
             cmd = AutoModeCommand(prompt=text)
             return await self._handle_chief_engineer_impl(
@@ -679,6 +821,19 @@ class CommandController:
             )
 
         # --- Codex-direct or Claude-disabled: Codex analysis only ---
+        return await self._handle_codex_analysis_only(
+            text, active, telegram_context, cid
+        )
+
+    async def _handle_codex_analysis_only(
+        self,
+        text: str,
+        active: object,
+        ctx: dict[str, Any] | None,
+        correlation_id: str,
+    ) -> ControllerResponse:
+        """Codex-direct or Claude-disabled: Codex analysis only."""
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
         budget = ContextBudget()
         packet = build_codex_analysis_packet(
             user_goal=text,
@@ -689,23 +844,15 @@ class CommandController:
             workspace=active.workspace_alias,
             budget=budget,
         )
-
-        # Reserve a hidden task through TaskService
         task = self._service.reserve_task(
-            active.workspace_alias,
-            text,
-            telegram_chat_id=chat_id,
+            active.workspace_alias, text, telegram_chat_id=chat_id,
         )
         self._ledger.set_conversation_active_task(active.id, task.id)
         agent_run = self._ledger.create_agent_run(
-            conversation_id=active.id,
-            agent="codex",
-            role="analysis",
-            hidden_task_id=task.id,
-            prompt_packet_summary=packet.summary(),
+            conversation_id=active.id, agent="codex", role="analysis",
+            hidden_task_id=task.id, prompt_packet_summary=packet.summary(),
         )
         self._ledger.update_agent_run_status(agent_run.id, "running")
-
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
         try:
             thread_id = await self._backend.create_thread(workspace_path)
@@ -714,25 +861,265 @@ class CommandController:
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
             self._ledger.update_agent_run_status(
-                agent_run.id,
-                "failed",
-                completion_summary=str(exc)[:2000],
+                agent_run.id, "failed", completion_summary=str(exc)[:2000],
             )
             return ControllerResponse(classify_user_error(exc))
-
         self._ledger.update_conversation_summary(
             active.id,
             trim_to_budget(f"用户请求：{text[:200]}", budget.conversation_summary_tokens),
         )
         self._ledger.set_conversation_active_task(active.id, task.id)
-
-        # Inline buttons for next actions
         buttons: list[list[dict[str, str]]] = [[
             {"text": "查看状态", "callback_data": encode_conversation_callback(active.id, CONTINUE)},
         ]]
-
         return ControllerResponse(
             "我先看一下。完成后会把结论发在这里。",
+            buttons=buttons,
+        )
+
+    async def _handle_append_to_conversation(
+        self,
+        decision: RouteDecision,
+        text: str,
+        active: object,
+        ctx: dict[str, Any] | None,
+        correlation_id: str,
+    ) -> ControllerResponse:
+        """Append user context to active non-terminal conversation."""
+        # Emit conversation.message.routed
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.CONVERSATION_MESSAGE_ROUTED,
+            aggregate_type=AggregateType.CONVERSATION,
+            aggregate_id=str(active.id),
+            correlation_id=correlation_id,
+            source=EventSource.CONTROLLER,
+            actor="controller",
+            visibility=Visibility.OPERATOR,
+            payload={
+                "chat_id": ctx.get("chat_id", 0) if ctx else 0,
+                "route": decision.route,
+                "reason": decision.reason,
+                "conversation_state": decision.conversation_state,
+                "conversation_id": active.id,
+            },
+            occurred_at=now_iso(),
+            conversation_id=active.id,
+        ))
+
+        # Approval supersession: cancel pending approvals
+        if decision.requires_approval_supersession:
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.APPROVAL_SUPERSEDED,
+                aggregate_type=AggregateType.APPROVAL,
+                aggregate_id=f"approval-conv-{active.id}",
+                correlation_id=correlation_id,
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.OPERATOR,
+                payload={"reason": "user_context_appended",
+                         "conversation_id": active.id},
+                occurred_at=now_iso(),
+                conversation_id=active.id,
+            ))
+
+        # Emit user.context.appended
+        delivery_policy = decision.delivery_policy or "codex_immediate_review"
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_CONTEXT_APPENDED,
+            aggregate_type=AggregateType.CONVERSATION,
+            aggregate_id=str(active.id),
+            correlation_id=correlation_id,
+            source=EventSource.CONTROLLER,
+            actor="user",
+            visibility=Visibility.USER,
+            payload={
+                "chat_id": ctx.get("chat_id", 0) if ctx else 0,
+                "text_preview": text[:200],
+                "conversation_state_at_append": decision.conversation_state,
+                "delivery_policy": delivery_policy,
+            },
+            occurred_at=now_iso(),
+            conversation_id=active.id,
+        ))
+
+        # --- Implementation / verification: record pending context ---
+        if delivery_policy == "codex_phase_boundary_review":
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.CONVERSATION_PENDING_CONTEXT_RECORDED,
+                aggregate_type=AggregateType.CONVERSATION,
+                aggregate_id=str(active.id),
+                correlation_id=correlation_id,
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.OPERATOR,
+                payload={
+                    "text_preview": text[:200],
+                    "conversation_state": decision.conversation_state,
+                },
+                occurred_at=now_iso(),
+                conversation_id=active.id,
+            ))
+            # Update conversation summary with pending context note
+            self._ledger.update_conversation_summary(
+                active.id,
+                trim_to_budget(
+                    f"{active.conversation_summary}\n[待审核追加] {text[:200]}",
+                    500,
+                ),
+            )
+            return ControllerResponse(MID_RUN_ACKNOWLEDGEMENT)
+
+        # --- Analysis / waiting_approval / needs_user: immediate Codex review ---
+        # Cancel the active orchestration run (if any) before re-analysis.
+        await self._cancel_active_runs_for_conversation(active.id, correlation_id)
+
+        # Update conversation summary with appended context.
+        self._ledger.update_conversation_summary(
+            active.id,
+            trim_to_budget(
+                f"{active.conversation_summary}\n[用户补充] {text[:200]}",
+                500,
+            ),
+        )
+        # Start fresh chief-engineer loop with updated context.
+        claude_ready = self._claude is not None and getattr(self._claude, "enabled", False)
+        if active.mode == ConversationMode.CHIEF_ENGINEER.value and claude_ready:
+            from wlcodex.router import AutoModeCommand
+            cmd = AutoModeCommand(prompt=text)
+            return await self._handle_chief_engineer_impl(
+                cmd, active, ctx, correlation_id=correlation_id,
+            )
+        return await self._handle_codex_analysis_only(
+            text, active, ctx, correlation_id,
+        )
+
+    async def _cancel_active_runs_for_conversation(
+        self, conversation_id: int, correlation_id: str,
+    ) -> None:
+        """Cancel all active orchestration/agent runs for a conversation.
+
+        Emits run.cancelled events so the re-analyze path doesn't hit
+        WorkspaceBusy from the previous run.
+        """
+        try:
+            orch_runs = self._ledger.list_orchestration_runs(conversation_id, limit=10)
+            for orch_run in orch_runs:
+                if orch_run.status not in ("passed", "failed", "aborted"):
+                    self._emit_event(RuntimeEvent(
+                        schema_version=1,
+                        event_type=EventType.RUN_CANCEL_REQUESTED,
+                        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                        aggregate_id=str(orch_run.id),
+                        correlation_id=correlation_id,
+                        source=EventSource.CONTROLLER,
+                        actor="controller",
+                        visibility=Visibility.OPERATOR,
+                        payload={"reason": "user_context_appended_reanalysis",
+                                 "conversation_id": conversation_id},
+                        occurred_at=now_iso(),
+                        conversation_id=conversation_id,
+                        orchestration_run_id=orch_run.id,
+                    ))
+                    self._emit_event(RuntimeEvent(
+                        schema_version=1,
+                        event_type=EventType.RUN_CANCELLED,
+                        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                        aggregate_id=str(orch_run.id),
+                        correlation_id=correlation_id,
+                        source=EventSource.CONTROLLER,
+                        actor="controller",
+                        visibility=Visibility.OPERATOR,
+                        payload={"reason": "user_context_appended_reanalysis",
+                                 "conversation_id": conversation_id},
+                        occurred_at=now_iso(),
+                        conversation_id=conversation_id,
+                        orchestration_run_id=orch_run.id,
+                    ))
+                    # Abort the underlying task
+                    task_id = getattr(orch_run, "task_id", None)
+                    if task_id is None:
+                        # Find task by conversation
+                        conv = self._ledger.get_conversation(conversation_id)
+                        task_id = conv.active_codex_task_id
+                    if task_id is not None:
+                        try:
+                            self._service.abort_task(task_id)
+                        except Exception:
+                            pass
+        except Exception:
+            logger.debug("Failed to cancel active runs for reanalysis", exc_info=True)
+
+    async def _handle_workspace_busy(
+        self,
+        decision: RouteDecision,
+        active: object | None,
+        blocking_task_id: int | None,
+        blocking_run_id: int | None,
+        correlation_id: str,
+        *,
+        original_text: str = "",
+    ) -> ControllerResponse:
+        """Handle workspace busy: emit events and return user choice buttons."""
+        conv_id = active.id if active else 0
+
+        # Store the original message text so callbacks can carry it.
+        if original_text and self._ledger is not None and conv_id:
+            self._ledger.update_conversation_summary(
+                conv_id,
+                trim_to_budget(
+                    f"[工作区忙待处理] {original_text[:300]}",
+                    500,
+                ),
+            )
+
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.WORKSPACE_BUSY_DETECTED,
+            aggregate_type=AggregateType.SYSTEM,
+            aggregate_id=f"workspace-{self._default_workspace}",
+            correlation_id=correlation_id,
+            source=EventSource.CONTROLLER,
+            actor="controller",
+            visibility=Visibility.OPERATOR,
+            payload={
+                "blocking_task_id": blocking_task_id,
+                "blocking_conversation_id": conv_id,
+                "blocking_run_id": blocking_run_id,
+                "blocking_state": decision.conversation_state,
+                "requested_route": decision.route,
+                "original_text_preview": original_text[:200],
+            },
+            occurred_at=now_iso(),
+            conversation_id=conv_id if conv_id else None,
+        ))
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_REQUESTED,
+            aggregate_type=AggregateType.SYSTEM,
+            aggregate_id=f"workspace-{self._default_workspace}",
+            correlation_id=correlation_id,
+            source=EventSource.CONTROLLER,
+            actor="controller",
+            visibility=Visibility.USER,
+            payload={
+                "blocking_task_id": blocking_task_id,
+                "choices": ["append", "queue", "cancel"],
+                "original_text_preview": original_text[:200],
+            },
+            occurred_at=now_iso(),
+            conversation_id=conv_id if conv_id else None,
+        ))
+        buttons = build_workspace_busy_buttons(conv_id)
+        task_ref = f"#{blocking_task_id}" if blocking_task_id else "当前"
+        return ControllerResponse(
+            f"工作区正忙\n"
+            f"当前任务：{task_ref}\n"
+            f"状态：{decision.conversation_state or '未知'}\n\n"
+            f"请选择：",
             buttons=buttons,
         )
 
@@ -1347,6 +1734,116 @@ class CommandController:
             )
         else:
             return ControllerResponse(f"未知的对话操作：{callback.action}")
+
+    async def handle_workspace_busy_callback(
+        self, action: str, conversation_id: int
+    ) -> ControllerResponse:
+        """Handle workspace busy inline button callbacks."""
+        cid = self._new_correlation_id()
+
+        try:
+            convo = self._ledger.get_conversation(conversation_id)
+        except KeyError:
+            return ControllerResponse("对话不存在或已被删除。")
+
+        # Retrieve original message text from conversation summary
+        original_text = ""
+        try:
+            summary = getattr(convo, "conversation_summary", "")
+            marker = "[工作区忙待处理] "
+            if marker in summary:
+                original_text = summary.split(marker, 1)[1][:500]
+        except Exception:
+            pass
+
+        if action == BUSY_APPEND:
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
+                aggregate_type=AggregateType.SYSTEM,
+                aggregate_id=f"workspace-{self._default_workspace}",
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="user",
+                visibility=Visibility.OPERATOR,
+                payload={"decision": "append_to_current",
+                         "conversation_id": conversation_id,
+                         "original_text_preview": original_text[:200]},
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+            ))
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.USER_CONTEXT_APPENDED,
+                aggregate_type=AggregateType.CONVERSATION,
+                aggregate_id=str(conversation_id),
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="user",
+                visibility=Visibility.USER,
+                payload={
+                    "conversation_id": conversation_id,
+                    "text_preview": original_text[:200],
+                    "conversation_state_at_append": "implementation",
+                    "delivery_policy": "codex_phase_boundary_review",
+                },
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+            ))
+            return ControllerResponse("已追加到当前任务。当前阶段结束后由 Codex 判断处理。")
+
+        elif action == BUSY_QUEUE:
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
+                aggregate_type=AggregateType.SYSTEM,
+                aggregate_id=f"workspace-{self._default_workspace}",
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="user",
+                visibility=Visibility.OPERATOR,
+                payload={"decision": "queue_new_task",
+                         "conversation_id": conversation_id,
+                         "original_text_preview": original_text[:200]},
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+            ))
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.RUN_QUEUED,
+                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                aggregate_id=f"queued-{conversation_id}",
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="user",
+                visibility=Visibility.OPERATOR,
+                payload={
+                    "goal": original_text[:500],
+                    "conversation_id": conversation_id,
+                },
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+            ))
+            return ControllerResponse("新任务已排队，当前工作区空闲后自动启动。")
+
+        elif action == BUSY_CANCEL:
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
+                aggregate_type=AggregateType.SYSTEM,
+                aggregate_id=f"workspace-{self._default_workspace}",
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="user",
+                visibility=Visibility.OPERATOR,
+                payload={"decision": "cancel",
+                         "conversation_id": conversation_id},
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+            ))
+            return ControllerResponse("已取消。")
+
+        return ControllerResponse("未知的操作。")
 
     # --- Individual waiting action handlers ---
 

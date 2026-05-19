@@ -193,6 +193,71 @@ class RuntimeEventStore:
         events.reverse()
         return events
 
+    def get_conversation_runtime_state(self, conversation_id: int) -> str | None:
+        """Return the current conversation state derived from runtime events.
+
+        Looks at the latest state-affecting events (phase changes,
+        completions, state changes) for this conversation.  Returns
+        ``None`` when no conversation-starting event has been recorded.
+        """
+        conversation_state_events = (
+            "conversation.started",
+            "conversation.state.changed",
+            "conversation.closed",
+            "run.phase.changed",
+            "run.completed",
+            "run.failed",
+            "run.cancelled",
+            "verification.decision.recorded",
+        )
+        placeholders = ",".join("?" for _ in conversation_state_events)
+        rows = self._conn.execute(
+            f"""
+            SELECT event_type, payload_json, id
+            FROM runtime_events
+            WHERE conversation_id = ?
+              AND event_type IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            (conversation_id, *conversation_state_events),
+        ).fetchall()
+
+        # Replay state from events (pure reducer).
+        from wlcodex.runtime_state import _ORCH_PHASE_TO_CONVERSATION_STATE
+        state: str | None = None
+        has_pass = False
+
+        for row in rows:
+            etype = str(row["event_type"])
+            payload = json.loads(row["payload_json"])
+
+            if etype == "conversation.started":
+                state = "new"
+            elif etype == "conversation.state.changed":
+                new_state = payload.get("to", "")
+                if new_state:
+                    state = new_state
+                phase = payload.get("phase", "")
+                mapped = _ORCH_PHASE_TO_CONVERSATION_STATE.get(phase)
+                if mapped:
+                    state = mapped
+            elif etype == "run.phase.changed":
+                phase = payload.get("phase", "")
+                mapped = _ORCH_PHASE_TO_CONVERSATION_STATE.get(phase)
+                if mapped:
+                    state = mapped
+            elif etype == "run.completed":
+                state = "passed" if has_pass else "failed"
+            elif etype == "run.failed":
+                state = "failed"
+            elif etype == "run.cancelled":
+                state = "aborted"
+            elif etype == "verification.decision.recorded":
+                if payload.get("decision") == "pass":
+                    has_pass = True
+
+        return state
+
 
 # ------------------------------------------------------------------
 # Row mapper

@@ -93,7 +93,7 @@ def test_handlers_do_not_bypass_eventized_delivery() -> None:
                 if isinstance(func, ast.Attribute) and func.attr == "reply_text":
                     violations.append(f"{method.name}:{call.lineno}:reply_text")
                 if (
-                    method.name != "edit_telegram"
+                    method.name not in ("edit_telegram", "_raw_edit_message")
                     and isinstance(func, ast.Attribute)
                     and func.attr == "edit_message_text"
                 ):

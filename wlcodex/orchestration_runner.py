@@ -499,6 +499,29 @@ class OrchestrationRunner:
             prompt_packet_summary=prompt[:120],
         )
         orch = self._orchestrator_factory(codex, claude_backend)
+        # Inject pending user context from mid-implementation/verification follow-ups.
+        if self._store is not None:
+            try:
+                pending = self._store._conn.execute(
+                    """
+                    SELECT payload_json FROM runtime_events
+                    WHERE conversation_id = ?
+                      AND event_type = 'conversation.pending_context.recorded'
+                    ORDER BY id ASC
+                    """,
+                    (conversation.id,),
+                ).fetchall()
+                if pending:
+                    pending_texts = []
+                    for row in pending:
+                        payload = __import__("json").loads(str(row["payload_json"]))
+                        preview = payload.get("text_preview", "")
+                        if preview:
+                            pending_texts.append(preview)
+                    if pending_texts and hasattr(orch, "set_pending_user_context"):
+                        orch.set_pending_user_context("; ".join(pending_texts))
+            except Exception:
+                logger.debug("Failed to query pending context for verification", exc_info=True)
 
         # Emit run.started
         self._emit_event(RuntimeEvent(
@@ -803,6 +826,41 @@ class OrchestrationRunner:
                             agent_run_id=verify_run.id,
                             role="verification",
                         )
+                        # Re-query pending user context before verification.
+                        # Mid-implementation follow-ups are stored as
+                        # conversation.pending_context.recorded events and
+                        # must be reviewed by Codex at this phase boundary.
+                        if self._store is not None:
+                            try:
+                                pending = self._store._conn.execute(
+                                    """
+                                    SELECT payload_json FROM runtime_events
+                                    WHERE conversation_id = ?
+                                      AND event_type = 'conversation.pending_context.recorded'
+                                    ORDER BY id ASC
+                                    """,
+                                    (conversation.id,),
+                                ).fetchall()
+                                if pending:
+                                    pending_texts = []
+                                    for row in pending:
+                                        payload = __import__("json").loads(
+                                            str(row["payload_json"])
+                                        )
+                                        preview = payload.get("text_preview", "")
+                                        if preview:
+                                            pending_texts.append(preview)
+                                    if pending_texts and hasattr(
+                                        orch, "set_pending_user_context"
+                                    ):
+                                        orch.set_pending_user_context(
+                                            "; ".join(pending_texts)
+                                        )
+                            except Exception:
+                                logger.debug(
+                                    "Failed to re-query pending context for verification",
+                                    exc_info=True,
+                                )
                         # Emit run.phase.changed to running_verification
                         self._emit_event(RuntimeEvent(
                             schema_version=1,

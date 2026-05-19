@@ -392,12 +392,19 @@ class ChiefEngineerOrchestrator:
         claude_backend: object,
         max_verify_rounds: int = 3,
         budget: ContextBudget | None = None,
+        *,
+        pending_user_context: str = "",
     ) -> None:
         self._codex = codex_backend
         self._claude = claude_backend
         self._max_verify_rounds = max_verify_rounds
         self._budget = budget or ContextBudget()
         self._last_claude_drift_findings: list[str] = []
+        self._pending_user_context = pending_user_context
+
+    def set_pending_user_context(self, context: str) -> None:
+        """Set pending user context for the next verification round."""
+        self._pending_user_context = context
 
     async def run(
         self,
@@ -452,7 +459,8 @@ class ChiefEngineerOrchestrator:
             # Codex verification
             try:
                 verify_result = await self._verify_with_codex(
-                    user_goal, analysis, impl, workspace
+                    user_goal, analysis, impl, workspace,
+                    pending_user_context=self._pending_user_context,
                 )
                 result.verification_summary = verify_result
                 result.steps.append(OrchestrationStepResult(
@@ -530,7 +538,8 @@ class ChiefEngineerOrchestrator:
         return await self._call_claude(packet.render(), workspace)
 
     async def _verify_with_codex(
-        self, goal: str, analysis: str, impl: str, workspace: str
+        self, goal: str, analysis: str, impl: str, workspace: str,
+        *, pending_user_context: str = "",
     ) -> str:
         # Collect real workspace evidence — changed files, diff, test status
         changed_files, diff_summary, test_results = _collect_workspace_evidence(workspace)
@@ -556,6 +565,7 @@ class ChiefEngineerOrchestrator:
             test_results=test_results,
             workspace=workspace,
             budget=self._budget,
+            pending_user_context=pending_user_context,
         )
         return await self._call_codex(
             packet.render(),
@@ -812,7 +822,8 @@ class ChiefEngineerOrchestrator:
             )
             try:
                 verify_result = await self._verify_with_codex(
-                    user_goal, analysis, impl_accumulated, workspace
+                    user_goal, analysis, impl_accumulated, workspace,
+                    pending_user_context=self._pending_user_context,
                 )
                 result.verification_summary = verify_result
                 result.steps.append(OrchestrationStepResult(

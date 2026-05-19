@@ -143,6 +143,45 @@ class EventType:
     SECURITY_DELIVERY_BLOCKED = "security.delivery.blocked"
     SECURITY_TOKEN_ACCESS_ATTEMPTED = "security.token.access.attempted"
 
+    # Conversation routing
+    CONVERSATION_STARTED = "conversation.started"
+    CONVERSATION_ACTIVATED = "conversation.activated"
+    CONVERSATION_STATE_CHANGED = "conversation.state.changed"
+    CONVERSATION_CLOSED = "conversation.closed"
+    CONVERSATION_INTENT_CLASSIFIED = "conversation.intent.classified"
+    CONVERSATION_MESSAGE_ROUTED = "conversation.message.routed"
+    USER_CONTEXT_APPENDED = "user.context.appended"
+    CONVERSATION_PENDING_CONTEXT_RECORDED = "conversation.pending_context.recorded"
+    CONVERSATION_PENDING_CONTEXT_REVIEWED = "conversation.pending_context.reviewed"
+
+    # Workspace busy
+    WORKSPACE_BUSY_DETECTED = "workspace.busy.detected"
+    WORKSPACE_BUSY_USER_CHOICE_REQUESTED = "workspace.busy.user_choice.requested"
+    WORKSPACE_BUSY_USER_CHOICE_RECORDED = "workspace.busy.user_choice.recorded"
+    RUN_QUEUED = "run.queued"
+
+    # Approval supersession
+    APPROVAL_SUPERSEDED = "approval.superseded"
+    APPROVAL_STALE_BUTTON_IGNORED = "approval.stale_button.ignored"
+
+    # Telegram delivery outbox
+    TELEGRAM_DELIVERY_ENQUEUED = "telegram.delivery.enqueued"
+    TELEGRAM_DELIVERY_STARTED = "telegram.delivery.started"
+    TELEGRAM_EDIT_SKIPPED_NO_CHANGE = "telegram.edit.skipped_no_change"
+    TELEGRAM_OUTBOX_RETRY_SCHEDULED = "telegram.outbox.retry_scheduled"
+    TELEGRAM_OUTBOX_GAVE_UP = "telegram.outbox.gave_up"
+    TELEGRAM_CALLBACK_ANSWER_FAILED = "telegram.callback.answer.failed"
+    TELEGRAM_CALLBACK_EDIT_FAILED = "telegram.callback.edit.failed"
+
+    # Telegram polling resilience
+    TELEGRAM_POLLER_BOOTSTRAP_STARTED = "telegram.poller.bootstrap.started"
+    TELEGRAM_POLLER_BOOTSTRAP_SUCCEEDED = "telegram.poller.bootstrap.succeeded"
+    TELEGRAM_POLLER_BOOTSTRAP_FAILED = "telegram.poller.bootstrap.failed"
+    TELEGRAM_POLLER_BOOTSTRAP_RETRYING = "telegram.poller.bootstrap.retrying"
+    TELEGRAM_POLLER_ERROR = "telegram.poller.error"
+    TELEGRAM_POLLER_RECOVERED = "telegram.poller.recovered"
+    TELEGRAM_POLLER_WATCHDOG_TIMEOUT = "telegram.poller.watchdog_timeout"
+
 
 # ---------------------------------------------------------------------------
 # Envelope

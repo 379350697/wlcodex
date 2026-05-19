@@ -80,6 +80,7 @@ class WlCodexHandlers:
         approval_service: object,
         bot: object,
         runtime_event_store: object | None = None,
+        outbox: object | None = None,
     ) -> None:
         self._config = config
         self._controller = controller
@@ -87,6 +88,7 @@ class WlCodexHandlers:
         self._approval = approval_service
         self._bot = bot
         self._runtime_store = runtime_event_store
+        self._outbox = outbox
 
     # --- Auth guard ---
 
@@ -262,8 +264,25 @@ class WlCodexHandlers:
     async def send_telegram(
         self, chat_id: int, text: str, buttons: list[list[dict[str, str]]] | None = None
     ) -> int:
-        """Send a message via the bot. Returns message_id, or SEND_FAILED (-1)
-        on transient network errors so handlers don't crash."""
+        """Send a message via the bot, routed through the outbox when available.
+
+        Returns message_id, or SEND_FAILED (-1) on transient network errors.
+        When the outbox is active, this returns -1 and the real send is queued.
+        """
+        if self._outbox is not None:
+            self._outbox.enqueue_send(
+                chat_id, text, buttons,
+                send_fn=self._raw_send_message,
+                edit_fn=self._raw_edit_message,
+                correlation_id="outbox-send",
+            )
+            return SEND_FAILED
+        return await self._raw_send_message(chat_id, text, buttons)
+
+    async def _raw_send_message(
+        self, chat_id: int, text: str, buttons: list[list[dict[str, str]]] | None = None
+    ) -> int:
+        """Direct Bot API send (used by outbox as its _send_fn)."""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         reply_markup = None
@@ -323,11 +342,25 @@ class WlCodexHandlers:
         self, chat_id: int, message_id: int, text: str,
         buttons: list[list[dict[str, str]]] | None = None,
     ) -> None:
-        """Edit an existing message, optionally with inline keyboard buttons.
+        """Edit an existing message, routed through the outbox when available.
 
         Network errors are caught and logged; they do NOT fall back to
         send_message (which would likely also fail on the same network).
         """
+        if self._outbox is not None:
+            self._outbox.enqueue_edit(
+                chat_id, message_id, text, buttons,
+                edit_fn=self._raw_edit_message,
+                correlation_id="outbox-edit",
+            )
+            return
+        await self._raw_edit_message(chat_id, message_id, text, buttons)
+
+    async def _raw_edit_message(
+        self, chat_id: int, message_id: int, text: str,
+        buttons: list[list[dict[str, str]]] | None = None,
+    ) -> None:
+        """Direct Bot API edit (used by outbox as its _edit_fn)."""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         reply_markup = None
@@ -352,20 +385,13 @@ class WlCodexHandlers:
             )
         except Exception as exc:
             if _is_message_not_modified_error(exc):
-                try:
-                    await self._bot.edit_message_text(
-                        chat_id=chat_id, message_id=message_id,
-                        text=text + "​",
-                        reply_markup=reply_markup,
-                    )
-                    self._append_telegram_delivery_event(
-                        "telegram.message.edited",
-                        chat_id=chat_id,
-                        text=text,
-                        message_id=message_id,
-                    )
-                except Exception:
-                    pass
+                # Do NOT add zero-width char hack — outbox records skip event.
+                self._append_telegram_delivery_event(
+                    "telegram.edit.skipped_no_change",
+                    chat_id=chat_id,
+                    text=text,
+                    message_id=message_id,
+                )
                 return
 
             if _is_telegram_network_error(exc):
@@ -927,6 +953,8 @@ class WlCodexHandlers:
             await self._conversation_callback_impl(update, query, data)
         elif data.startswith("settings:"):
             await self._settings_callback_impl(update, query, data)
+        elif data.startswith("busy_"):
+            await self._workspace_busy_callback_impl(update, query, data)
         else:
             await query.answer("未知回调类型。")
 
@@ -971,6 +999,65 @@ class WlCodexHandlers:
             logger.exception("Conversation callback error")
             await query.answer(f"错误：{exc}")
 
+    async def _workspace_busy_callback_impl(
+        self, update: Update, query: object, data: str
+    ) -> None:
+        from wlcodex.conversation_state_machine import decode_busy_callback
+
+        decoded = decode_busy_callback(data)
+        if decoded is None:
+            await query.answer("无效的工作区忙回调数据。")
+            return
+
+        action, conversation_id = decoded
+        try:
+            response = await self._controller.handle_workspace_busy_callback(
+                action, conversation_id
+            )
+            await query.answer("完成")
+            await self._edit_callback_message(
+                update, query, response.text, response.buttons
+            )
+        except Exception as exc:
+            logger.exception("Workspace busy callback error")
+            await query.answer(f"错误：{exc}")
+
+    async def _poller_error_handler(
+        self, update: object, context: object
+    ) -> None:
+        """Global error handler for Telegram polling resilience.
+
+        Logs the error, emits a runtime event, and never crashes the poller.
+        """
+        exc = context.error if hasattr(context, "error") else None
+        if exc is None:
+            return
+        logger.error("Telegram poller error: %s", exc)
+
+        if self._runtime_store is not None:
+            try:
+                from wlcodex.runtime_events import (
+                    AggregateType, EventSource, EventType, RuntimeEvent,
+                    Visibility, now_iso,
+                )
+                self._runtime_store.append(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TELEGRAM_POLLER_ERROR,
+                    aggregate_type=AggregateType.SYSTEM,
+                    aggregate_id="telegram-poller",
+                    correlation_id="poller-error",
+                    source=EventSource.SYSTEM,
+                    actor="telegram_poller",
+                    visibility=Visibility.INTERNAL,
+                    payload={
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:500],
+                    },
+                    occurred_at=now_iso(),
+                ))
+            except Exception:
+                logger.debug("Failed to emit poller error event", exc_info=True)
+
     async def _approval_callback_impl(
         self, update: Update, query: object, data: str
     ) -> None:
@@ -980,6 +1067,76 @@ class WlCodexHandlers:
         if callback is None:
             await query.answer("无效的审批回调数据。")
             return
+
+        # Check if this approval has been superseded by new user context.
+        # Must scope by conversation AND time: only superseded events that
+        # occurred AFTER this approval was created.
+        if self._runtime_store is not None:
+            try:
+                approvals_conn = self._runtime_store._conn
+                # Get this approval's conversation_id and created_at
+                approval_row = approvals_conn.execute(
+                    """
+                    SELECT task_id, created_at FROM approval_requests WHERE id = ?
+                    """,
+                    (callback.approval_id,),
+                ).fetchone()
+                if approval_row is not None:
+                    task_id = approval_row["task_id"]
+                    approval_created_at = str(approval_row["created_at"])
+                    # Find conversation_id from tasks
+                    task_row = approvals_conn.execute(
+                        "SELECT telegram_chat_id FROM tasks WHERE id = ?",
+                        (task_id,),
+                    ).fetchone()
+                    if task_row is not None:
+                        chat_id = task_row["telegram_chat_id"]
+                        # Find all active conversations for this chat
+                        conv_row = approvals_conn.execute(
+                            """
+                            SELECT id FROM conversation_sessions
+                            WHERE chat_id = ? AND archived_at IS NULL
+                            ORDER BY updated_at DESC LIMIT 1
+                            """,
+                            (chat_id,),
+                        ).fetchone()
+                        if conv_row is not None:
+                            conversation_id = conv_row["id"]
+                            # Check for supersession events for THIS conversation
+                            # that happened AFTER this approval was created
+                            superseded = approvals_conn.execute(
+                                """
+                                SELECT 1 FROM runtime_events
+                                WHERE event_type = 'approval.superseded'
+                                  AND conversation_id = ?
+                                  AND occurred_at >= ?
+                                LIMIT 1
+                                """,
+                                (conversation_id, approval_created_at),
+                            ).fetchone()
+                            if superseded is not None:
+                                from wlcodex.runtime_events import (
+                                    AggregateType, EventSource, EventType,
+                                    RuntimeEvent, Visibility, now_iso,
+                                )
+                                self._runtime_store.append(RuntimeEvent(
+                                    schema_version=1,
+                                    event_type=EventType.APPROVAL_STALE_BUTTON_IGNORED,
+                                    aggregate_type=AggregateType.APPROVAL,
+                                    aggregate_id=str(callback.approval_id),
+                                    correlation_id="stale-check",
+                                    source=EventSource.TELEGRAM,
+                                    actor="telegram_bot",
+                                    visibility=Visibility.INTERNAL,
+                                    payload={"reason": "approval_superseded",
+                                             "approval_id": callback.approval_id,
+                                             "conversation_id": conversation_id},
+                                    occurred_at=now_iso(),
+                                ))
+                                await query.answer("该审批已被新的用户上下文取代，请使用新的审批按钮。")
+                                return
+            except Exception:
+                logger.debug("Supersession check failed (non-fatal)", exc_info=True)
 
         try:
             msg = await self._approval.resolve_callback(
@@ -1062,13 +1219,24 @@ def build_application(
     ledger: Ledger | None = None,
     approval_service: object = None,
     runtime_event_store: object | None = None,
+    outbox: object | None = None,
 ) -> tuple[Application, WlCodexHandlers | None]:
-    application = Application.builder().token(token).concurrent_updates(8).build()
+    application = (
+        Application.builder()
+        .token(token)
+        .concurrent_updates(8)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .pool_timeout(5.0)
+        .build()
+    )
 
     if controller is not None and ledger is not None:
         handlers = WlCodexHandlers(
             config, controller, ledger, approval_service, application.bot,
             runtime_event_store=runtime_event_store,
+            outbox=outbox,
         )
     else:
         application.add_handler(CommandHandler("start", _skeleton_start))
@@ -1112,6 +1280,9 @@ def build_application(
     )
 
     application.add_handler(CallbackQueryHandler(handlers.callback_router))
+
+    # Register global error handler for polling resilience.
+    application.add_error_handler(handlers._poller_error_handler)
 
     return application, handlers
 
