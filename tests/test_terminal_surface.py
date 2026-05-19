@@ -128,16 +128,6 @@ class FakeTerminalAdapter:
         self.inputs.append((session_ref.external_session_id, text))
 
 
-class FakeDetachAdapter:
-    """Minimal adapter that tracks detach calls."""
-
-    def __init__(self):
-        self.detached: list[str] = []
-
-    async def detach(self, session_ref):
-        self.detached.append(session_ref.external_session_id)
-
-
 @pytest.mark.asyncio
 async def test_terminal_manager_sends_input_to_selected_session():
     adapter = FakeTerminalAdapter()

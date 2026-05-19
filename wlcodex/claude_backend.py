@@ -89,6 +89,7 @@ class ClaudeBackend:
         )
         self._runtime_source = runtime_source
         self._hook_events_supported: bool | None = None
+        self._last_session_id: str = ""
 
     @property
     def enabled(self) -> bool:
@@ -277,6 +278,9 @@ class ClaudeBackend:
                             for parsed in parsed_events:
                                 # Emit to runtime store when wired.
                                 _emit_runtime(self._runtime_source, parsed)
+                                # Capture session_id from result/system events
+                                if parsed.session_id:
+                                    self._last_session_id = parsed.session_id
                                 # Yield AgentStreamEvent for backward compat.
                                 agent_event = _to_agent_stream_event(parsed)
                                 if agent_event is None:
@@ -427,6 +431,76 @@ class ClaudeBackend:
         # Claude subprocess termination is managed at the process level
         pass
 
+    async def send_terminal_input(self, session_id: str, text: str) -> AgentResult:
+        """Send raw input text to a Claude session for terminal surface.
+
+        Uses ``claude --resume <session_id> -p <text>`` to continue the
+        existing conversation context.  Returns the full text result so
+        the terminal surface can display it as a frame.
+
+        Raises ValueError when *session_id* is empty — callers must
+        ensure a real session exists before calling this method.
+        """
+        if not session_id:
+            raise ValueError(
+                "Cannot send terminal input without a Claude session_id. "
+                "Run a Claude task first to create a session, then attach "
+                "via /terminal claude."
+            )
+        if not self._config.enabled:
+            raise RuntimeError("Claude backend is not enabled.")
+
+        resume_args = [
+            "--resume", session_id,
+            "-p", text,
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--permission-mode",
+            normalize_claude_permission_mode(self.permission_mode),
+        ]
+        if self._config.model:
+            resume_args.extend(["--model", normalize_claude_model_name(self._config.model)])
+        if self._config.effort:
+            resume_args.extend(["--effort", self._config.effort])
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._config.binary,
+                *resume_args,
+                cwd=None,
+                env=_sanitized_env(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                limit=1024 * 1024 * 16,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(f"Claude binary not found: {self._config.binary}") from None
+
+        accumulated: list[str] = []
+        try:
+            if proc.stdout is not None:
+                async for line in proc.stdout:
+                    decoded = line.decode("utf-8", errors="replace")
+                    parsed_events, _ = parse_line(decoded)
+                    for parsed in parsed_events:
+                        if parsed.session_id:
+                            self._last_session_id = parsed.session_id
+                        if parsed.agent_delta:
+                            accumulated.append(parsed.agent_delta)
+            await proc.wait()
+        except Exception:
+            await _kill_process(proc)
+            raise
+
+        text_output = "".join(accumulated)
+        return AgentResult(
+            text=text_output or "(no output)",
+            exit_code=proc.returncode or 0,
+            session_id=self._last_session_id,
+        )
+
     def health(self) -> object:
         return _ClaudeHealth(self._config.enabled, self._config.binary)
 
@@ -537,12 +611,14 @@ def _to_agent_stream_event(parsed: ClaudeStreamEvent) -> AgentStreamEvent | None
         return AgentStreamEvent(
             delta=parsed.agent_delta,
             event_type=parsed.agent_event_type,
+            session_id=parsed.session_id,
         )
     if parsed.agent_usage is not None:
         return AgentStreamEvent(
             delta="",
             event_type="usage",
             usage=parsed.agent_usage,
+            session_id=parsed.session_id,
         )
     return None
 

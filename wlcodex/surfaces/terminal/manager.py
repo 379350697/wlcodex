@@ -66,15 +66,20 @@ class TerminalSessionManager:
                      ref.conversation_id, ref.agent, ref.external_session_id)
         return detached
 
-    async def send_input(self, ref: TerminalSessionRef, text: str) -> None:
-        """Send user input text to the agent adapter for this session."""
+    async def send_input(self, ref: TerminalSessionRef, text: str):
+        """Send user input text to the agent adapter for this session.
+
+        Returns the adapter's result when available (e.g. AgentResult for
+        Claude backends), or None for backends whose output arrives
+        through a separate notification channel (e.g. Codex app-server).
+        """
         adapter = self._adapters.get(ref.agent)
         if adapter is None:
             raise ValueError(
                 f"No adapter registered for agent '{ref.agent}'. "
                 f"Available: {list(self._adapters)}"
             )
-        await adapter.send_input(ref, text)
+        return await adapter.send_input(ref, text)
 
     def active_for_conversation(self, conversation_id: int) -> TerminalSessionRef | None:
         """Return the latest attached session for a conversation, or None.

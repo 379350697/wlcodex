@@ -71,6 +71,7 @@ def _install_telegram_stubs() -> None:
     class _Application:
         def __init__(self, max_concurrent_updates: int = 1) -> None:
             self.handlers: dict[int, list[object]] = {}
+            self.error_handlers: list[object] = []
             self.bot = SimpleNamespace()
             self.update_processor = SimpleNamespace(
                 max_concurrent_updates=max_concurrent_updates
@@ -83,6 +84,9 @@ def _install_telegram_stubs() -> None:
         def add_handler(self, handler: object, group: int = 0) -> None:
             self.handlers.setdefault(group, []).append(handler)
 
+        def add_error_handler(self, callback: object) -> None:
+            self.error_handlers.append(callback)
+
     class _ApplicationBuilder:
         def __init__(self) -> None:
             self._max_concurrent_updates = 1
@@ -93,6 +97,14 @@ def _install_telegram_stubs() -> None:
         def concurrent_updates(self, count: int) -> "_ApplicationBuilder":
             self._max_concurrent_updates = count
             return self
+
+        # Builder pattern: unknown methods (connect_timeout, read_timeout,
+        # write_timeout, pool_timeout, get_updates_* etc.) return self
+        # for chain compatibility with the real python-telegram-bot builder.
+        def __getattr__(self, name: str) -> object:
+            if name.startswith("_"):
+                raise AttributeError(name)
+            return lambda *args, **kwargs: self
 
         def build(self) -> _Application:
             return _Application(self._max_concurrent_updates)

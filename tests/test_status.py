@@ -180,4 +180,4 @@ def test_render_conversation_help_is_compact_for_natural_profile() -> None:
 
     assert "直接发消息" in text
     assert "/task" not in text
-    assert len(text.splitlines()) <= 8
+    assert len(text.splitlines()) <= 14

@@ -172,6 +172,35 @@ async def _initialize_app_with_retry(
             return False
 
 
+def _create_terminal_manager(
+    config: object,
+    *,
+    claude_backend: object | None = None,
+    codex_backend: object,
+) -> object | None:
+    """Create a TerminalSessionManager when the terminal surface is enabled.
+
+    Returns ``None`` when ``config.terminal.enabled`` is ``False``.
+    Otherwise wires the Claude and Codex adapters registered for the
+    given backends and returns a ready-to-use manager.
+    """
+    if not config.terminal.enabled:
+        logger.info("Terminal surface disabled (set terminal.enabled = true to enable)")
+        return None
+
+    from wlcodex.surfaces.terminal.manager import TerminalSessionManager
+    from wlcodex.surfaces.terminal.claude_remote import ClaudeTerminalAdapter
+    from wlcodex.surfaces.terminal.codex_terminal import CodexTerminalAdapter
+
+    adapters: dict[str, object] = {}
+    if claude_backend is not None:
+        adapters["claude"] = ClaudeTerminalAdapter(claude_backend)
+    adapters["codex"] = CodexTerminalAdapter(codex_backend)
+    manager = TerminalSessionManager(adapters=adapters)
+    logger.info("Terminal surface enabled (agents: %s)", list(adapters.keys()))
+    return manager
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     # httpx logs full Telegram Bot API URLs at INFO, including the bot token.
@@ -365,6 +394,11 @@ def main() -> None:
         runtime_event_store=runtime_store,
     )
 
+    # Terminal surface — wire terminal session manager when enabled.
+    terminal_manager = _create_terminal_manager(
+        config, claude_backend=claude_backend, codex_backend=backend,
+    )
+
     # Telegram app
     app, handlers = build_application(
         config,
@@ -374,6 +408,7 @@ def main() -> None:
         approval_service,
         runtime_event_store=runtime_store,
         outbox=telegram_outbox,
+        terminal_manager=terminal_manager,
     )
 
     if handlers is None:

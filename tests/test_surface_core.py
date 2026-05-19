@@ -1,7 +1,6 @@
 """Tests for wlcodex.surfaces.core — mode, cursor, checkpoint, and routing."""
 
 import pytest
-from dataclasses import FrozenInstanceError
 
 from wlcodex.surfaces.core.models import (
     ModeSwitchCheckpoint,

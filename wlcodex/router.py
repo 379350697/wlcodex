@@ -372,14 +372,23 @@ def _parse_task(text: str) -> StartTaskCommand | ShowTaskCommand:
 def _parse_terminal_command(text: str) -> ParsedCommand:
     """Parse /terminal <subcommand|agent|product>.
 
-    /terminal claude  -> mode_switch with agent claude
-    /terminal codex   -> mode_switch with agent codex
-    /terminal tail    -> terminal_subcommand tail
-    /terminal detach  -> terminal_subcommand detach
-    /terminal product -> mode_switch to product
+    /terminal           -> mode_switch to terminal
+    /terminal claude    -> mode_switch with agent claude
+    /terminal codex     -> mode_switch with agent codex
+    /terminal agent claude -> mode_switch with agent claude
+    /terminal agent codex  -> mode_switch with agent codex
+    /terminal tail      -> terminal_subcommand tail
+    /terminal pause     -> terminal_subcommand pause
+    /terminal detach    -> terminal_subcommand detach
+    /terminal product   -> mode_switch to product
     """
-    parts = text.split(maxsplit=1)
+    parts = text.split(maxsplit=2)
     arg = parts[1].strip() if len(parts) >= 2 else ""
+
+    if arg == "agent":
+        if len(parts) >= 3 and parts[2].strip() in ("claude", "codex"):
+            return ModeSwitchCommand(mode="terminal", agent=parts[2].strip())
+        raise ParseError("用法：/terminal agent <claude|codex>")
 
     if arg == "claude":
         return ModeSwitchCommand(mode="terminal", agent="claude")
@@ -387,12 +396,14 @@ def _parse_terminal_command(text: str) -> ParsedCommand:
         return ModeSwitchCommand(mode="terminal", agent="codex")
     if arg == "tail":
         return TerminalSubCommand(subcommand="tail")
+    if arg == "pause":
+        return TerminalSubCommand(subcommand="pause")
     if arg == "detach":
         return TerminalSubCommand(subcommand="detach")
     if arg == "product":
         return ModeSwitchCommand(mode="product")
 
-    raise ParseError("用法：/terminal [claude|codex|tail|detach|product]")
+    raise ParseError("用法：/terminal [claude|codex|agent claude|agent codex|tail|pause|detach|product]")
 
 
 def _parse_task_id(value: str) -> int | None:

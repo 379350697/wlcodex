@@ -446,3 +446,68 @@ def test_usage_event_invalid_metadata_json_sanitized(tmp_path: Path) -> None:
         metadata_json="not json",
     )
     assert event.metadata_json == "{}"
+
+
+def test_list_recent_agent_runs_returns_newest_first(tmp_path: Path) -> None:
+    """list_recent_agent_runs returns runs in newest-first order."""
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    convo = ledger.create_conversation(
+        chat_id=123, user_id=1, title="test", workspace_alias="demo", mode="product",
+    )
+
+    # Create 3 runs with distinct external_session_ids
+    for i in range(1, 4):
+        ledger.create_agent_run(
+            conversation_id=convo.id,
+            agent="claude",
+            role="implementation",
+            external_session_id=f"session_{i}",
+        )
+
+    recent = ledger.list_recent_agent_runs(convo.id, limit=10)
+    assert len(recent) == 3
+    assert recent[0].external_session_id == "session_3"
+    assert recent[1].external_session_id == "session_2"
+    assert recent[2].external_session_id == "session_1"
+
+    # list_agent_runs still returns oldest-first (backward compat)
+    oldest_first = ledger.list_agent_runs(convo.id, limit=10)
+    assert oldest_first[0].external_session_id == "session_1"
+    assert oldest_first[2].external_session_id == "session_3"
+
+
+def test_list_recent_agent_runs_with_more_than_50_runs_finds_latest(tmp_path: Path) -> None:
+    """When a conversation has >50 agent_runs, list_recent_agent_runs still
+    finds the most recent external_session_id for each agent."""
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    convo = ledger.create_conversation(
+        chat_id=123, user_id=1, title="test", workspace_alias="demo", mode="product",
+    )
+
+    # Create 60 runs: first 59 with old session ids, last one with target
+    for i in range(1, 60):
+        ledger.create_agent_run(
+            conversation_id=convo.id,
+            agent="claude",
+            role="implementation",
+            external_session_id=f"old_session_{i}",
+        )
+    # The 60th run has the session we want to find
+    ledger.create_agent_run(
+        conversation_id=convo.id,
+        agent="claude",
+        role="implementation",
+        external_session_id="target_session_60",
+    )
+
+    recent = ledger.list_recent_agent_runs(convo.id, limit=50)
+    assert len(recent) == 50
+    # The newest run should be first
+    assert recent[0].external_session_id == "target_session_60"
+    # The 50th-oldest should NOT be in results (only 50 most recent)
+    for r in recent:
+        assert r.external_session_id != "old_session_1"

@@ -175,7 +175,12 @@ def render_help() -> str:
   /terminal — 切到远程终端模式
   /terminal claude — 接入 Claude 终端
   /terminal codex — 接入 Codex 终端
+  /terminal agent claude — 接入 Claude 终端（显式）
+  /terminal agent codex — 接入 Codex 终端（显式）
+  /terminal tail — 恢复终端推送 / 查看最新输出
+  /terminal pause — 暂停终端推送但保留会话
   /terminal detach — 停止终端推送但保留会话
+  /terminal product — 切回产品模式
   /mode — 查看当前模式
 
 对话模式 — 直接发消息开始：
@@ -376,7 +381,12 @@ def render_conversation_help(profile: str = "natural") -> str:
   • /terminal — 切到远程终端模式
   • /terminal claude — 接入 Claude 终端
   • /terminal codex — 接入 Codex 终端
+  • /terminal agent claude — 接入 Claude 终端（显式）
+  • /terminal agent codex — 接入 Codex 终端（显式）
+  • /terminal tail — 恢复终端推送
+  • /terminal pause — 暂停终端推送
   • /terminal detach — 停止终端推送但保留会话
+  • /terminal product — 切回产品模式
   • /mode — 查看当前模式
 
 对话模式：

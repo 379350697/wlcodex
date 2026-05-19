@@ -443,7 +443,7 @@ async def test_help_shows_new_commands(ctrl: CommandController) -> None:
     assert "WLCodex" in response.text
     assert "/new" in response.text
     assert "/help" in response.text
-    assert len(response.text.splitlines()) <= 8
+    assert len(response.text.splitlines()) <= 14
 
 
 @pytest.mark.asyncio

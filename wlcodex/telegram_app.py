@@ -81,6 +81,7 @@ class WlCodexHandlers:
         bot: object,
         runtime_event_store: object | None = None,
         outbox: object | None = None,
+        terminal_manager: object | None = None,
     ) -> None:
         self._config = config
         self._controller = controller
@@ -89,6 +90,7 @@ class WlCodexHandlers:
         self._bot = bot
         self._runtime_store = runtime_event_store
         self._outbox = outbox
+        self._terminal_manager = terminal_manager
 
     # --- Auth guard ---
 
@@ -847,7 +849,19 @@ class WlCodexHandlers:
             await self.send_telegram(chat_id, str(e))
             return
 
+        # Check terminal.enabled before allowing mode switch or subcommands
+        terminal_config = getattr(self._config, "terminal", None)
+        terminal_enabled = getattr(terminal_config, "enabled", False) if terminal_config is not None else False
+
         if isinstance(command, ModeSwitchCommand):
+            # /terminal product is the escape hatch back to product mode
+            # — always allowed even when terminal.enabled is false.
+            if command.mode != "product" and not terminal_enabled:
+                await self.send_telegram(
+                    chat_id,
+                    "Terminal 模式尚未启用。请联系管理员开启 terminal.enabled 配置。"
+                )
+                return
             await self._apply_mode_switch(update, command)
             return
 
@@ -857,6 +871,11 @@ class WlCodexHandlers:
                     chat_id,
                     "Terminal tail 功能将在终端会话实现后可用。"
                 )
+            elif command.subcommand == "pause":
+                await self.send_telegram(
+                    chat_id,
+                    "Terminal 推送已暂停。使用 /terminal tail 恢复查看。"
+                )
             elif command.subcommand == "detach":
                 await self.send_telegram(
                     chat_id,
@@ -864,7 +883,167 @@ class WlCodexHandlers:
                 )
             return
 
-        await self.send_telegram(chat_id, "未知终端命令。用法：/terminal [claude|codex|tail|detach|product]")
+        await self.send_telegram(
+            chat_id,
+            "未知终端命令。用法：/terminal [claude|codex|agent claude|agent codex|tail|pause|detach|product]"
+        )
+
+    def _find_external_session_id(self, conversation_id: int, agent: str) -> str | None:
+        """Look up an existing external session id from agent_runs.
+
+        Returns the most recent non-null external_session_id for *agent*
+        within *conversation_id*, or None when no run exists / no id is set.
+
+        Uses ``list_recent_agent_runs`` (newest-first) so that conversations
+        with more than 50 agent runs still find the latest session id.
+        """
+        if conversation_id is None:
+            return None
+        try:
+            runs = self._ledger.list_recent_agent_runs(conversation_id, limit=50)
+        except Exception:
+            logger.debug("Failed to list agent runs for session lookup", exc_info=True)
+            return None
+        for run in runs:
+            if run.agent == agent and run.external_session_id:
+                return run.external_session_id
+        return None
+
+    def _get_active_surface_mode(self, chat_id: int) -> str:
+        """Query the current surface mode for a chat from runtime events.
+
+        Returns 'product' if unset or if the store is unavailable.
+        Terminal sessions that became orphaned still report 'terminal'.
+        """
+        if self._runtime_store is None:
+            return "product"
+        try:
+            active = self._ledger.get_active_conversation(chat_id)
+        except Exception:
+            return "product"
+        if active is None:
+            return "product"
+        try:
+            row = self._runtime_store._conn.execute(
+                "SELECT * FROM runtime_events WHERE conversation_id = ? "
+                "AND event_type = 'conversation.mode.switched' "
+                "ORDER BY id DESC LIMIT 1",
+                (active.id,),
+            ).fetchone()
+            if row is not None:
+                import json as _json
+                raw = row["payload"]
+                payload = _json.loads(raw) if isinstance(raw, str) else raw
+                return payload.get("to_mode", "product")
+        except Exception:
+            pass
+        return "product"
+
+    async def _handle_terminal_text(self, chat_id: int, text: str) -> None:
+        """Route text to the terminal input path when in terminal mode.
+
+        If a terminal manager is wired and an active session exists for the
+        current conversation, the text is sent as terminal input and a
+        ``terminal.session.input.sent`` runtime event is recorded.
+
+        If no terminal manager or no active session is available, this must
+        NOT silently fall through to the product orchestrator.  It sends an
+        actionable hint so the user can attach a session.
+        """
+        conversation_id = None
+        try:
+            active = self._ledger.get_active_conversation(chat_id)
+            conversation_id = active.id if active is not None else None
+        except Exception:
+            pass
+
+        # Try to route through the terminal manager when available.
+        if self._terminal_manager is not None and conversation_id is not None:
+            session_ref = self._terminal_manager.active_for_conversation(
+                conversation_id
+            )
+            if session_ref is not None:
+                try:
+                    result = await self._terminal_manager.send_input(session_ref, text)
+                except ValueError as exc:
+                    # No active turn / no session — actionable error
+                    await self.send_telegram(
+                        chat_id,
+                        f"无法发送终端输入：{exc}"
+                    )
+                    return
+                except Exception:
+                    logger.exception(
+                        "Terminal manager send_input failed: conv=%d", conversation_id
+                    )
+                    await self.send_telegram(
+                        chat_id,
+                        "发送终端输入失败。终端会话可能已断开，"
+                        "请使用 /terminal 重新连接。"
+                    )
+                    return
+
+                # Display Claude terminal output (Codex output arrives
+                # through the app-server WebSocket notification channel).
+                if result is not None and hasattr(result, "text"):
+                    output = result.text
+                    if output:
+                        # Truncate to a reasonable length for Telegram
+                        max_len = getattr(
+                            getattr(self._config, "terminal", None),
+                            "max_frame_chars", 3500,
+                        )
+                        display = output if len(output) <= max_len else (
+                            output[:max_len] + "\n\n... (输出已截断)"
+                        )
+                        await self.send_telegram(chat_id, display)
+
+                # Record terminal.session.input.sent runtime event
+                if self._runtime_store is not None:
+                    try:
+                        from wlcodex.runtime_events import (
+                            AggregateType,
+                            EventSource,
+                            EventType,
+                            RuntimeEvent,
+                            Visibility,
+                            now_iso,
+                        )
+
+                        self._runtime_store.append(RuntimeEvent(
+                            schema_version=1,
+                            event_type=EventType.TERMINAL_SESSION_INPUT_SENT,
+                            aggregate_type=AggregateType.CONVERSATION,
+                            aggregate_id=str(conversation_id),
+                            correlation_id=f"terminal-input-{chat_id}",
+                            source=EventSource.TELEGRAM,
+                            actor="user",
+                            visibility=Visibility.USER,
+                            payload={
+                                "chat_id": chat_id,
+                                "conversation_id": conversation_id,
+                                "agent": session_ref.agent,
+                                "external_session_id": session_ref.external_session_id,
+                                "text_preview": text[:500],
+                                "text_length": len(text),
+                            },
+                            occurred_at=now_iso(),
+                            conversation_id=conversation_id,
+                        ))
+                    except Exception:
+                        logger.debug(
+                            "Failed to append terminal.session.input.sent event",
+                            exc_info=True,
+                        )
+                return
+
+        # No terminal manager or no active session — send actionable hint.
+        await self.send_telegram(
+            chat_id,
+            "当前为 terminal 模式，但没有活跃的终端会话。"
+            "请使用 /terminal claude 或 /terminal codex 连接终端会话，"
+            "或使用 /product 切回产品模式。"
+        )
 
     async def _apply_mode_switch(
         self, update: Update, command: object
@@ -936,15 +1115,83 @@ class WlCodexHandlers:
             except Exception:
                 logger.debug("Failed to append mode switch event", exc_info=True)
 
-        # Send confirmation
+        # Send confirmation + attach terminal session when applicable
         if to_mode == "product":
             await self.send_telegram(chat_id, "已切到 product 模式。")
         elif to_mode == "terminal":
             display_agent = agent or "claude"
-            await self.send_telegram(
-                chat_id,
-                f"已切到 terminal 模式，当前 agent: {display_agent}。"
-            )
+            attached = False
+            if agent and self._terminal_manager is not None and conversation_id is not None:
+                # Check if conversation already has an active session for this agent
+                existing = self._terminal_manager.active_for_conversation(conversation_id)
+                if existing is not None and existing.agent == agent:
+                    attached = True
+                else:
+                    ext_id = self._find_external_session_id(conversation_id, agent)
+                    if ext_id:
+                        strategy = "stream_json" if agent == "claude" else "app_server"
+                        try:
+                            ref = self._terminal_manager.attach(
+                                conversation_id=conversation_id,
+                                agent=agent,
+                                strategy=strategy,
+                                external_session_id=ext_id,
+                            )
+                            attached = True
+                            # Record terminal.session.attached runtime event
+                            if self._runtime_store is not None:
+                                try:
+                                    from wlcodex.runtime_events import (
+                                        AggregateType,
+                                        EventSource,
+                                        EventType,
+                                        RuntimeEvent,
+                                        Visibility,
+                                        now_iso,
+                                    )
+
+                                    self._runtime_store.append(RuntimeEvent(
+                                        schema_version=1,
+                                        event_type=EventType.TERMINAL_SESSION_ATTACHED,
+                                        aggregate_type=AggregateType.CONVERSATION,
+                                        aggregate_id=str(conversation_id),
+                                        correlation_id=f"terminal-attach-{update.update_id}",
+                                        source=EventSource.TELEGRAM,
+                                        actor="user",
+                                        visibility=Visibility.USER,
+                                        payload={
+                                            "chat_id": chat_id,
+                                            "conversation_id": conversation_id,
+                                            "agent": agent,
+                                            "strategy": strategy,
+                                            "external_session_id": ext_id,
+                                            "status": "attached",
+                                        },
+                                        occurred_at=now_iso(),
+                                        conversation_id=conversation_id,
+                                    ))
+                                except Exception:
+                                    logger.debug(
+                                        "Failed to append terminal.session.attached event",
+                                        exc_info=True,
+                                    )
+                        except Exception:
+                            logger.exception(
+                                "Terminal session attach failed: conv=%d agent=%s",
+                                conversation_id, agent,
+                            )
+
+            if attached:
+                await self.send_telegram(
+                    chat_id,
+                    f"已切到 terminal 模式，已接入 {display_agent} session。"
+                )
+            else:
+                await self.send_telegram(
+                    chat_id,
+                    f"已切到 terminal 模式，但尚无可接入的 {display_agent} session。"
+                    f"请先通过 /codex 或 /claude 启动 {display_agent} 任务。"
+                )
 
     # --- New conversation handlers ---
 
@@ -1089,11 +1336,22 @@ class WlCodexHandlers:
         await self._reply_with_buttons(update, response.text, response.buttons)
 
     async def conversation_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle non-command text as a conversation message."""
+        """Handle non-command text as a conversation message.
+
+        Routes by active surface mode:
+          - product  -> existing conversation controller
+          - terminal -> terminal session input (never the product orchestrator)
+        """
         if not self._guard(update):
             return
         text = update.effective_message.text
         chat_id = update.effective_chat.id
+
+        # Check active surface mode so terminal input never calls product orchestrator
+        active_mode = self._get_active_surface_mode(chat_id)
+        if active_mode == "terminal":
+            await self._handle_terminal_text(chat_id, text)
+            return
 
         interaction = getattr(self._config, "interaction", None)
         profile_name = getattr(interaction, "profile", "legacy")
@@ -1441,6 +1699,7 @@ def build_application(
     approval_service: object = None,
     runtime_event_store: object | None = None,
     outbox: object | None = None,
+    terminal_manager: object | None = None,
 ) -> tuple[Application, WlCodexHandlers | None]:
     # Bot API HTTP timeouts.
     # Long-polling HTTP timeouts (getUpdates).
@@ -1464,6 +1723,7 @@ def build_application(
             config, controller, ledger, approval_service, application.bot,
             runtime_event_store=runtime_event_store,
             outbox=outbox,
+            terminal_manager=terminal_manager,
         )
     else:
         application.add_handler(CommandHandler("start", _skeleton_start))

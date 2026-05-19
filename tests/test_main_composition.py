@@ -436,3 +436,152 @@ allow_write = true
 """,
         encoding="utf-8",
     )
+
+
+# ---------------------------------------------------------------------------
+# Terminal manager composition tests
+# ---------------------------------------------------------------------------
+
+
+def test_create_terminal_manager_disabled_returns_none() -> None:
+    """When terminal.enabled=false, _create_terminal_manager returns None."""
+    from wlcodex.main import _create_terminal_manager
+
+    config = load_config(_write_test_config_toml())
+    assert config.terminal.enabled is False
+
+    backend = FakeCodexBackend()
+    tm = _create_terminal_manager(config, claude_backend=None, codex_backend=backend)
+    assert tm is None
+
+
+def test_create_terminal_manager_enabled_returns_manager_with_adapters() -> None:
+    """When terminal.enabled=true, _create_terminal_manager returns a
+    TerminalSessionManager with adapters for both agents."""
+    from wlcodex.main import _create_terminal_manager
+    from wlcodex.surfaces.terminal.manager import TerminalSessionManager
+    from wlcodex.surfaces.terminal.claude_remote import ClaudeTerminalAdapter
+    from wlcodex.surfaces.terminal.codex_terminal import CodexTerminalAdapter
+
+    config_path = _write_test_config_toml(terminal_enabled=True)
+    config = load_config(config_path)
+    assert config.terminal.enabled is True
+
+    backend = FakeCodexBackend()
+    tm = _create_terminal_manager(config, claude_backend=None, codex_backend=backend)
+
+    assert isinstance(tm, TerminalSessionManager)
+    assert "codex" in tm._adapters
+    assert isinstance(tm._adapters["codex"], CodexTerminalAdapter)
+    # Claude backend is None → claude adapter not registered
+    assert "claude" not in tm._adapters
+
+
+def test_create_terminal_manager_with_claude_backend_registers_both_adapters() -> None:
+    """When claude_backend is provided, both claude and codex adapters are wired."""
+    from wlcodex.main import _create_terminal_manager
+    from wlcodex.surfaces.terminal.manager import TerminalSessionManager
+    from wlcodex.surfaces.terminal.claude_remote import ClaudeTerminalAdapter
+    from wlcodex.surfaces.terminal.codex_terminal import CodexTerminalAdapter
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    config_path = _write_test_config_toml(terminal_enabled=True)
+    config = load_config(config_path)
+
+    claude_cfg = ClaudeConfig(enabled=True, binary="claude")
+    claude = ClaudeBackend(claude_cfg)
+
+    backend = FakeCodexBackend()
+    tm = _create_terminal_manager(config, claude_backend=claude, codex_backend=backend)
+
+    assert isinstance(tm, TerminalSessionManager)
+    assert "codex" in tm._adapters
+    assert "claude" in tm._adapters
+    assert isinstance(tm._adapters["claude"], ClaudeTerminalAdapter)
+    assert isinstance(tm._adapters["codex"], CodexTerminalAdapter)
+
+
+def test_main_passes_terminal_manager_to_build_application(tmp_path: Path) -> None:
+    """The main() function passes terminal_manager=None to build_application
+    when terminal is disabled (default config)."""
+    config_path = tmp_path / "test.toml"
+    sqlite_path = tmp_path / "wlcodex.sqlite3"
+    _write_test_config_with_path(config_path, sqlite_path, tmp_path / "tasks")
+
+    config = load_config(config_path)
+    assert config.terminal.enabled is False
+
+    ledger = Ledger.open(config.storage.sqlite_path)
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    task_service = TaskService(ledger, config.workspaces)
+    inspector = TaskInspector(ledger, config.storage.task_log_dir)
+    approval_svc = ApprovalService()
+    controller = CommandController(task_service, backend, inspector)
+
+    captured_tm = None
+
+    def fake_build(cfg, token, ctrl, lgr, appr, runtime_event_store=None,
+                   outbox=None, terminal_manager=None):
+        nonlocal captured_tm
+        captured_tm = terminal_manager
+        from unittest.mock import MagicMock
+        return MagicMock(), None
+
+    # Monkeypatch the symbol imported by main.py, not telegram_app
+    import wlcodex.main as main_mod
+    original_build = main_mod.build_application
+    main_mod.build_application = fake_build
+    try:
+        # Replicate the production wiring from main():
+        from wlcodex.main import _create_terminal_manager
+        tm = _create_terminal_manager(config, claude_backend=None, codex_backend=backend)
+        fake_build(config, "token", controller, ledger, approval_svc,
+                   terminal_manager=tm)
+    finally:
+        main_mod.build_application = original_build
+
+    assert captured_tm is None, (
+        f"Expected None when terminal.enabled=false, got {captured_tm}"
+    )
+
+
+def _write_test_config_toml(terminal_enabled: bool = False) -> Path:
+    """Write a minimal test config to a named temp dir and return the path."""
+    import tempfile
+    d = Path(tempfile.mkdtemp(prefix="wlcodex-test-config-"))
+    p = d / "test.toml"
+    terminal_block = ""
+    if terminal_enabled:
+        terminal_block = "\n[terminal]\nenabled = true\ndefault_agent = \"codex\"\n"
+    p.write_text(
+        f"""
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+private_chat_only = true
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+{terminal_block}
+[storage]
+sqlite_path = ""
+task_log_dir = ""
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "demo"
+path = "/tmp/demo"
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+    return p

@@ -4,8 +4,6 @@ Recovery replays runtime events as source of truth.  Terminal orphan/detach
 must not affect product cursor or product active usability.
 """
 
-import pytest
-
 from wlcodex.runtime_events import (
     AggregateType,
     EventSource,

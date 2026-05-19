@@ -8,8 +8,8 @@ Real strategy implementations may later map to:
   - exec_json: codex exec --json JSONL stream
   - pty: PTY/tmux capture fallback
 
-For now, this adapter works with a fake backend that records steer_thread
-calls, enabling the manager to be tested without a real Codex process.
+Output from Codex terminal input arrives through the existing app-server
+WebSocket notification stream, so send_input does not return a result.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ class CodexTerminalAdapter:
     """Terminal surface adapter for Codex CLI / app-server sessions.
 
     Delegates input to a backend that implements steer_thread(thread_id, text).
+    Output arrives asynchronously through the app-server notification channel.
     """
 
     def __init__(self, backend: object):

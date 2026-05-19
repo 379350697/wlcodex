@@ -9,7 +9,8 @@ Product mode stays usable regardless of terminal-session state.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
+from uuid import uuid4
 
 from wlcodex.runtime_events import (
     AggregateType,
@@ -52,9 +53,10 @@ class RecoveryManager:
         """
         state = replay_surface_events(events)
         new_events: list[RuntimeEvent] = []
+        run_id = f"recovery:{uuid4().hex[:12]}"
 
         # Bookend: recovery started
-        new_events.append(_make_system_event(EventType.SYSTEM_RECOVERY_STARTED))
+        new_events.append(_make_system_event(EventType.SYSTEM_RECOVERY_STARTED, run_id))
 
         # Check each chat's terminal sessions for orphaned processes
         last_id = max((e.id for e in events), default=0)
@@ -70,6 +72,7 @@ class RecoveryManager:
                     if not alive:
                         orphan_event = _make_orphan_event(
                             next_id=next_id,
+                            run_id=run_id,
                             chat_id=chat_id,
                             conversation_id=session.conversation_id,
                             agent=agent,
@@ -80,7 +83,7 @@ class RecoveryManager:
 
         # Bookend: recovery completed
         new_events.append(_make_system_event(
-            EventType.SYSTEM_RECOVERY_COMPLETED,
+            EventType.SYSTEM_RECOVERY_COMPLETED, run_id,
         ))
 
         return state, new_events
@@ -91,13 +94,13 @@ class RecoveryManager:
         return self._process_checker.is_process_alive(external_session_id)
 
 
-def _make_system_event(event_type: str) -> RuntimeEvent:
+def _make_system_event(event_type: str, run_id: str) -> RuntimeEvent:
     return RuntimeEvent(
         schema_version=1,
         event_type=event_type,
         aggregate_type=AggregateType.SYSTEM,
-        aggregate_id="recovery",
-        correlation_id="recovery",
+        aggregate_id=run_id,
+        correlation_id=run_id,
         source=EventSource.SYSTEM,
         actor="system",
         visibility=Visibility.INTERNAL,
@@ -109,6 +112,7 @@ def _make_system_event(event_type: str) -> RuntimeEvent:
 def _make_orphan_event(
     *,
     next_id: int,
+    run_id: str,
     chat_id: int,
     conversation_id: int | None,
     agent: str,
@@ -119,7 +123,7 @@ def _make_orphan_event(
         event_type=EventType.TERMINAL_SESSION_DETACHED,
         aggregate_type=AggregateType.SURFACE_SESSION,
         aggregate_id=f"terminal:{chat_id}:{agent}",
-        correlation_id="recovery",
+        correlation_id=run_id,
         source=EventSource.SYSTEM,
         actor="system",
         visibility=Visibility.OPERATOR,

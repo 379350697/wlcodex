@@ -33,6 +33,9 @@ class ClaudeStreamEvent:
     agent_event_type: str = "text"
     agent_usage: dict | None = None
 
+    # Session tracking
+    session_id: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -335,6 +338,7 @@ def _handle_result(
     usage = _extract_usage(payload)
     model = payload.get("model")
     model_str = str(model) if isinstance(model, str) else ""
+    session_id = str(payload.get("session_id") or "")
 
     if usage:
         usage_payload: dict[str, Any] = dict(usage)
@@ -347,6 +351,7 @@ def _handle_result(
                 agent_delta="",
                 agent_event_type="usage",
                 agent_usage=usage_payload,
+                session_id=session_id,
             )
         )
 
@@ -359,6 +364,18 @@ def _handle_result(
                 runtime_payload={"text": result_text},
                 agent_delta=result_text,
                 agent_event_type="text",
+                session_id=session_id,
+            )
+        )
+
+    # Always emit a session-identity event so consumers can capture session_id
+    # even when there is no usage block and text was already emitted.
+    if session_id:
+        events.append(
+            ClaudeStreamEvent(
+                runtime_event_type=EventType.AGENT_RUN_COMPLETED,
+                runtime_payload={"session_id": session_id, "subtype": subtype},
+                session_id=session_id,
             )
         )
 

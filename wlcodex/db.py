@@ -1195,6 +1195,22 @@ class Ledger:
         ).fetchall()
         return [_agent_run(row) for row in rows]
 
+    def list_recent_agent_runs(
+        self, conversation_id: int, limit: int = 50
+    ) -> list[AgentRun]:
+        """Return the most recent agent runs for a conversation (newest first).
+
+        Unlike ``list_agent_runs`` which returns the oldest runs first, this
+        method orders by ``id DESC`` so callers looking for the latest
+        external_session_id, status, or other fact only see fresh data.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM agent_runs WHERE conversation_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (conversation_id, limit),
+        ).fetchall()
+        return [_agent_run(row) for row in rows]
+
     # --- Orchestration runs ---
 
     def create_orchestration_run(

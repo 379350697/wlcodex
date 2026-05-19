@@ -290,6 +290,14 @@ class FakeCodexBackend:
     async def steer_turn(self, thread_id: str, expected_turn_id: str, prompt: str) -> None:
         self.steers.append((thread_id, expected_turn_id, prompt))
 
+    async def steer_thread(self, thread_id: str, text: str) -> None:
+        """Send raw terminal input to an active Codex thread (terminal surface).
+
+        V1 stub — real implementation will route through app-server
+        or exec --json stream.
+        """
+        self.steers.append((thread_id, "", text))
+
     async def interrupt_turn(self, thread_id: str, turn_id: str) -> None:
         self._interrupts.append((thread_id, turn_id))
 
@@ -391,6 +399,8 @@ class AppServerCodexBackend:
         self._last_health_error: str | None = None
         self._ever_connected: bool = False
         self._runtime_event_callback: Callable[[BackendEvent], None] | None = None
+        # Terminal surface: track active turn per thread for steer_thread()
+        self._active_turn_ids: dict[str, str] = {}
 
     def set_transport(self, send_fn, recv_fn) -> None:
         self._transport_inject = (send_fn, recv_fn)
@@ -509,10 +519,15 @@ class AppServerCodexBackend:
 
     async def _on_turn_started(self, params: dict) -> None:
         thread_id, turn_id = parse_turn_notification_ids(params)
+        self._active_turn_ids[thread_id] = turn_id
         self._emit(BackendEvent("turn_started", {**params, "threadId": thread_id, "turnId": turn_id}))
 
     async def _on_turn_completed(self, params: dict) -> None:
         thread_id, turn_id = parse_turn_notification_ids(params)
+        # Clear the active turn for this thread so future steer_thread
+        # calls know there is no active turn to steer.
+        if self._active_turn_ids.get(thread_id) == turn_id:
+            del self._active_turn_ids[thread_id]
         self._emit(BackendEvent("turn_completed", {**params, "threadId": thread_id, "turnId": turn_id}))
 
     async def _on_diff_updated(self, params: dict) -> None:
@@ -703,6 +718,24 @@ class AppServerCodexBackend:
             "turn/steer",
             build_turn_steer_params(thread_id, expected_turn_id, prompt),
         )
+
+    async def steer_thread(self, thread_id: str, text: str) -> None:
+        """Send raw terminal input to an active Codex thread (terminal surface).
+
+        Resolves the active turn_id for *thread_id* from turn/started
+        notifications and delegates to ``steer_turn``.  When no active
+        turn is known, the method raises ``ValueError`` so the terminal
+        surface can tell the user there is no turn to steer — this is
+        not a silent failure.
+        """
+        active_turn_id = self._active_turn_ids.get(thread_id)
+        if active_turn_id is None:
+            raise ValueError(
+                f"No active turn found for thread {thread_id}. "
+                "Wait for a turn to start before sending terminal input, "
+                "or start a new turn via /codex."
+            )
+        await self.steer_turn(thread_id, active_turn_id, text)
 
     async def interrupt_turn(self, thread_id: str, turn_id: str) -> None:
         client = await self._ensure_client()

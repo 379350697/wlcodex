@@ -8,13 +8,14 @@ Real strategy implementations may later map to:
   - stream_json: Claude Code --output-format stream-json with multi-turn input
   - pty: PTY/tmux capture fallback
 
-For now, this adapter works with a fake backend that records send_terminal_input
-calls, enabling the manager to be tested without a real Claude subprocess.
+The V1 real implementation uses ``claude --resume <session_id> -p <text>``
+to send input and capture the stream-json output.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,18 +23,23 @@ logger = logging.getLogger(__name__)
 class ClaudeTerminalAdapter:
     """Terminal surface adapter for Claude Code sessions.
 
-    Delegates input to a backend that implements send_terminal_input(session_id, text).
+    Delegates input to a backend that implements send_terminal_input(session_id, text)
+    and returns an AgentResult with the captured output.
     """
 
     def __init__(self, backend: object):
         self._backend = backend
 
-    async def send_input(self, session_ref, text: str) -> None:
-        """Send user input to the Claude session (manager protocol)."""
+    async def send_input(self, session_ref, text: str) -> Any:
+        """Send user input to the Claude session (manager protocol).
+
+        Returns an AgentResult when the backend is real;
+        returns None for fake backends that just record the call.
+        """
         sid = session_ref.external_session_id
         logger.info("Claude terminal input: session=%s text=%r", sid, text)
-        await self._backend.send_terminal_input(sid, text)
+        return await self._backend.send_terminal_input(sid, text)
 
-    async def send_input_by_session_id(self, session_id: str, text: str) -> None:
+    async def send_input_by_session_id(self, session_id: str, text: str) -> Any:
         """Convenience: send input by raw session id, bypassing session_ref."""
-        await self._backend.send_terminal_input(session_id, text)
+        return await self._backend.send_terminal_input(session_id, text)

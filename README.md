@@ -134,7 +134,12 @@ WLCodex supports two independent surfaces over the same conversation:
 | `/terminal` | Switch to terminal mode (default agent: claude) |
 | `/terminal claude` | Switch to terminal mode with Claude agent |
 | `/terminal codex` | Switch to terminal mode with Codex agent |
+| `/terminal agent claude` | Switch to terminal mode with Claude agent (explicit) |
+| `/terminal agent codex` | Switch to terminal mode with Codex agent (explicit) |
+| `/terminal tail` | Resume terminal push / show latest output |
+| `/terminal pause` | Pause terminal push, keep session alive |
 | `/terminal detach` | Stop terminal push, keep session alive |
+| `/terminal product` | Switch back to product mode |
 | `/mode` | Show current surface mode |
 
 - **Product mode** is the default. It renders structured event cards for a
