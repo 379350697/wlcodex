@@ -149,6 +149,34 @@ class VerifyCommand:
     prompt: str = ""
 
 
+@dataclass(frozen=True)
+class ModeSwitchCommand:
+    """Parsed surface mode switch command.
+
+    /mode          -> kind="mode_switch", mode="" (query current)
+    /product       -> kind="mode_switch", mode="product"
+    /terminal      -> kind="mode_switch", mode="terminal"
+    /terminal <agent> -> kind="mode_switch", mode="terminal", agent="..."
+    /terminal product -> kind="mode_switch", mode="product"
+    """
+
+    kind: str = "mode_switch"
+    mode: str = ""  # "product" or "terminal"; empty = query
+    agent: str = ""  # "claude" or "codex"; only relevant for terminal
+
+
+@dataclass(frozen=True)
+class TerminalSubCommand:
+    """Parsed terminal surface subcommand.
+
+    /terminal tail   -> kind="terminal_subcommand", subcommand="tail"
+    /terminal detach -> kind="terminal_subcommand", subcommand="detach"
+    """
+
+    kind: str = "terminal_subcommand"
+    subcommand: str = ""  # "tail" or "detach"
+
+
 ParsedCommand = (
     HelpCommand
     | HealthCommand
@@ -177,6 +205,8 @@ ParsedCommand = (
     | SwitchWorkspaceCommand
     | ModelCommand
     | VerifyCommand
+    | ModeSwitchCommand
+    | TerminalSubCommand
 )
 
 
@@ -207,6 +237,16 @@ def parse_command(text: str) -> ParsedCommand:
         return TraceCommand(limit=max(1, min(limit, 100)))
     if stripped == "/codex-sessions" or stripped == "/sessions":
         return CodexSessionsCommand()
+
+    # Dual-surface mode commands
+    if stripped == "/mode":
+        return ModeSwitchCommand(mode="")
+    if stripped == "/product":
+        return ModeSwitchCommand(mode="product")
+    if stripped == "/terminal":
+        return ModeSwitchCommand(mode="terminal")
+    if stripped.startswith("/terminal "):
+        return _parse_terminal_command(stripped)
 
     # New conversation commands
     if stripped == "/new":
@@ -327,6 +367,32 @@ def _parse_task(text: str) -> StartTaskCommand | ShowTaskCommand:
     if not workspace_alias or not prompt:
         raise ParseError("用法：/task <workspace> <prompt>")
     return StartTaskCommand(workspace_alias=workspace_alias, prompt=prompt)
+
+
+def _parse_terminal_command(text: str) -> ParsedCommand:
+    """Parse /terminal <subcommand|agent|product>.
+
+    /terminal claude  -> mode_switch with agent claude
+    /terminal codex   -> mode_switch with agent codex
+    /terminal tail    -> terminal_subcommand tail
+    /terminal detach  -> terminal_subcommand detach
+    /terminal product -> mode_switch to product
+    """
+    parts = text.split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) >= 2 else ""
+
+    if arg == "claude":
+        return ModeSwitchCommand(mode="terminal", agent="claude")
+    if arg == "codex":
+        return ModeSwitchCommand(mode="terminal", agent="codex")
+    if arg == "tail":
+        return TerminalSubCommand(subcommand="tail")
+    if arg == "detach":
+        return TerminalSubCommand(subcommand="detach")
+    if arg == "product":
+        return ModeSwitchCommand(mode="product")
+
+    raise ParseError("用法：/terminal [claude|codex|tail|detach|product]")
 
 
 def _parse_task_id(value: str) -> int | None:

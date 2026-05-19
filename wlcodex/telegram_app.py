@@ -782,6 +782,170 @@ class WlCodexHandlers:
         response = await self._controller.handle("/health", _ctx(update))
         await self.send_telegram(update.effective_chat.id, response.text)
 
+    # --- Dual-surface mode command handlers ---
+
+    async def mode_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        text = update.effective_message.text
+        chat_id = update.effective_chat.id
+
+        from wlcodex.router import parse_command, ModeSwitchCommand
+
+        try:
+            command = parse_command(text)
+        except Exception:
+            await self.send_telegram(chat_id, "未知命令。发送 /help 查看可用命令。")
+            return
+
+        if isinstance(command, ModeSwitchCommand):
+            if command.mode == "":
+                # /mode - show current mode
+                active = self._ledger.get_active_conversation(chat_id)
+                current_mode = "product"
+                if self._runtime_store is not None and active is not None:
+                    try:
+                        row = self._runtime_store._conn.execute(
+                            "SELECT * FROM runtime_events WHERE conversation_id = ? "
+                            "AND event_type = 'conversation.mode.switched' "
+                            "ORDER BY id DESC LIMIT 1",
+                            (active.id,),
+                        ).fetchone()
+                        if row is not None:
+                            import json as _json
+                            raw = row["payload"]
+                            payload = _json.loads(raw) if isinstance(raw, str) else raw
+                            current_mode = payload.get("to_mode", "product")
+                    except Exception:
+                        pass
+                await self.send_telegram(chat_id, f"当前模式：{current_mode}。使用 /product 或 /terminal 切换。")
+                return
+            else:
+                await self._apply_mode_switch(update, command)
+                return
+
+        await self.send_telegram(chat_id, "未知模式命令。使用 /product 或 /terminal 切换。")
+
+    async def product_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        from wlcodex.router import ModeSwitchCommand
+        command = ModeSwitchCommand(mode="product")
+        await self._apply_mode_switch(update, command)
+
+    async def terminal_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        text = update.effective_message.text
+        chat_id = update.effective_chat.id
+
+        from wlcodex.router import parse_command, ModeSwitchCommand, TerminalSubCommand
+
+        try:
+            command = parse_command(text)
+        except Exception as e:
+            await self.send_telegram(chat_id, str(e))
+            return
+
+        if isinstance(command, ModeSwitchCommand):
+            await self._apply_mode_switch(update, command)
+            return
+
+        if isinstance(command, TerminalSubCommand):
+            if command.subcommand == "tail":
+                await self.send_telegram(
+                    chat_id,
+                    "Terminal tail 功能将在终端会话实现后可用。"
+                )
+            elif command.subcommand == "detach":
+                await self.send_telegram(
+                    chat_id,
+                    "已停止终端推送，终端会话仍在运行。使用 /terminal 重新接入。"
+                )
+            return
+
+        await self.send_telegram(chat_id, "未知终端命令。用法：/terminal [claude|codex|tail|detach|product]")
+
+    async def _apply_mode_switch(
+        self, update: Update, command: object
+    ) -> None:
+        """Record a conversation.mode.switched event and send confirmation.
+
+        Must NOT create a new conversation or start a new task.
+        """
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+
+        active = self._ledger.get_active_conversation(chat_id)
+        conversation_id = active.id if active is not None else None
+
+        from_mode = "product"
+        to_mode = command.mode
+        agent = getattr(command, "agent", "")
+
+        # Determine current mode from stored state
+        if self._runtime_store is not None and conversation_id is not None:
+            try:
+                row = self._runtime_store._conn.execute(
+                    "SELECT * FROM runtime_events WHERE conversation_id = ? "
+                    "AND event_type = 'conversation.mode.switched' "
+                    "ORDER BY id DESC LIMIT 1",
+                    (conversation_id,),
+                ).fetchone()
+                if row is not None:
+                    import json as _json
+                    raw = row["payload"]
+                    p = _json.loads(raw) if isinstance(raw, str) else raw
+                    from_mode = p.get("to_mode", "product")
+            except Exception:
+                pass
+
+        # Record the mode switch event
+        if self._runtime_store is not None:
+            try:
+                from wlcodex.runtime_events import (
+                    AggregateType,
+                    EventSource,
+                    EventType,
+                    RuntimeEvent,
+                    Visibility,
+                    now_iso,
+                )
+
+                self._runtime_store.append(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.CONVERSATION_MODE_SWITCHED,
+                    aggregate_type=AggregateType.CONVERSATION,
+                    aggregate_id=str(conversation_id or chat_id),
+                    correlation_id=f"mode-switch-{update.update_id}",
+                    source=EventSource.TELEGRAM,
+                    actor="user",
+                    visibility=Visibility.USER,
+                    payload={
+                        "chat_id": chat_id,
+                        "conversation_id": conversation_id,
+                        "from_mode": from_mode,
+                        "to_mode": to_mode,
+                        "active_agent": agent,
+                        "user_id": user.id if user is not None else None,
+                        "telegram_update_id": update.update_id,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=conversation_id,
+                ))
+            except Exception:
+                logger.debug("Failed to append mode switch event", exc_info=True)
+
+        # Send confirmation
+        if to_mode == "product":
+            await self.send_telegram(chat_id, "已切到 product 模式。")
+        elif to_mode == "terminal":
+            display_agent = agent or "claude"
+            await self.send_telegram(
+                chat_id,
+                f"已切到 terminal 模式，当前 agent: {display_agent}。"
+            )
+
     # --- New conversation handlers ---
 
     async def new_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1324,6 +1488,11 @@ def build_application(
     application.add_handler(CommandHandler("codex_sessions", handlers.codex_sessions))
     application.add_handler(CommandHandler("sessions", handlers.codex_sessions))
     application.add_handler(CommandHandler("health", handlers.health))
+
+    # Dual-surface mode commands
+    application.add_handler(CommandHandler("mode", handlers.mode_cmd))
+    application.add_handler(CommandHandler("product", handlers.product_cmd))
+    application.add_handler(CommandHandler("terminal", handlers.terminal_cmd))
 
     # New conversation commands
     application.add_handler(CommandHandler("new", handlers.new_cmd))
