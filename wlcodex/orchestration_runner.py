@@ -430,6 +430,12 @@ class OrchestrationRunner:
             is_terminal=is_terminal,
         )
 
+    def _uses_runtime_progress(self) -> bool:
+        return bool(
+            self._interaction_renderer is not None
+            and getattr(self._interaction_renderer, "_runtime_progress", None)
+        )
+
     def _record_workflow_overhead(
         self,
         *,
@@ -614,15 +620,16 @@ class OrchestrationRunner:
                                 orchestration_run_id=orchestration_run_id,
                                 task_id=task_id,
                             ))
-                            await self._emit_text_delta(
-                                chat_id,
-                                task_id,
-                                conversation.id,
-                                "\n\n" + render_user_progress_text(
-                                    progress.phase,
-                                    first_impl_delta=True,
-                                ),
-                            )
+                            if not self._uses_runtime_progress():
+                                await self._emit_text_delta(
+                                    chat_id,
+                                    task_id,
+                                    conversation.id,
+                                    "\n\n" + render_user_progress_text(
+                                        progress.phase,
+                                        first_impl_delta=True,
+                                    ),
+                                )
                             # Send runtime progress to renderer
                             if self._interaction_renderer is not None:
                                 await self._interaction_renderer.handle(
@@ -1332,6 +1339,8 @@ class OrchestrationRunner:
         task_id: int,
         conversation_id: int,
     ) -> None:
+        if self._uses_runtime_progress():
+            return
         if progress.text:
             text = render_user_progress_text(progress.phase)
             if text:

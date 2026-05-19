@@ -402,7 +402,19 @@ class VerificationDecision:
             decision = "retry"
             if "required_fix:" in text_lower:
                 fix_idx = text_lower.find("required_fix:")
-                required_fix = text[fix_idx:].split("\n")[0]
+                after_fix = text[fix_idx:]
+                after_fix_lower = after_fix.lower()
+                # Stop at the next structured field boundary
+                stop_markers = [
+                    "\nconfidence:", "\nsummary:", "\ndecision:",
+                    "\nnext_agent:", "\nreason:",
+                ]
+                stop_at = len(after_fix)
+                for marker in stop_markers:
+                    pos = after_fix_lower.find(marker)
+                    if pos > 0 and pos < stop_at:
+                        stop_at = pos
+                required_fix = after_fix[:stop_at].strip()
             else:
                 required_fix = text
         elif "decision: pass" in text_lower:
@@ -422,6 +434,42 @@ class VerificationDecision:
             decision = "pass"
 
         return cls(decision=decision, summary=summary, required_fix=required_fix)
+
+
+def _build_retry_analysis(
+    *,
+    required_fix: str,
+    original_analysis: str,
+    original_goal: str,
+    round_num: int,
+    pending_user_context: str = "",
+) -> str:
+    """Build a structured retry analysis block for the next Claude implementation.
+
+    Includes required_fix, pending context, original goal, and explicit
+    instructions that this round MUST address pending context and required_fix
+    before anything else.
+    """
+    parts: list[str] = []
+    parts.append(f"[RETRY_ROUND_{round_num}]")
+    parts.append("本轮是修复迭代，必须优先完成 pending context 和 required_fix。")
+    parts.append("不能仅根据旧目标判断完成，必须实际修改并验证文件。")
+    parts.append("")
+    if required_fix:
+        parts.append("[RETRY_REQUIRED_FIX]")
+        parts.append(required_fix.strip())
+        parts.append("")
+    if pending_user_context:
+        parts.append("[LATEST_PENDING_CONTEXT]")
+        parts.append(pending_user_context.strip())
+        parts.append("")
+    parts.append("[ORIGINAL_GOAL]")
+    parts.append(original_goal.strip())
+    parts.append("")
+    if original_analysis:
+        parts.append("[ORIGINAL_ANALYSIS]")
+        parts.append(original_analysis.strip())
+    return "\n".join(parts)
 
 
 class ChiefEngineerOrchestrator:
@@ -557,7 +605,13 @@ class ChiefEngineerOrchestrator:
                         f"Last verification: {decision.required_fix[:200]}"
                     )
                     return result
-                analysis = f"Previous verification failed: {decision.required_fix}\n\nOriginal analysis: {analysis}"
+                analysis = _build_retry_analysis(
+                    required_fix=decision.required_fix,
+                    original_analysis=analysis,
+                    original_goal=user_goal,
+                    round_num=round_num,
+                    pending_user_context=self._pending_user_context,
+                )
                 continue
 
         result.status = "needs_user"
@@ -992,7 +1046,13 @@ class ChiefEngineerOrchestrator:
                         round_num=round_num,
                     )
                     return
-                analysis = f"Previous verification failed: {decision.required_fix}\n\nOriginal analysis: {analysis}"
+                analysis = _build_retry_analysis(
+                    required_fix=decision.required_fix,
+                    original_analysis=analysis,
+                    original_goal=user_goal,
+                    round_num=round_num,
+                    pending_user_context=self._pending_user_context,
+                )
                 continue
 
         result.status = "needs_user"

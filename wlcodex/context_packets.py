@@ -107,6 +107,7 @@ class ClaudeHandoffPacket(ContextPacket):
         constraints: list[str] = field(default_factory=list)
         acceptance_criteria: list[str] = field(default_factory=list)
         prohibited_changes: list[str] = field(default_factory=list)
+        analysis: str = ""
 
     handoff_from_codex: HandoffFromCodex = field(default_factory=HandoffFromCodex)
 
@@ -116,6 +117,8 @@ class ClaudeHandoffPacket(ContextPacket):
         lines: list[str] = [base, "", "handoff_from_codex:"]
         if h.objective:
             lines.append(f"  objective: {h.objective}")
+        if h.analysis:
+            lines.append(f"  analysis: {h.analysis}")
         if h.files_to_touch:
             lines.append(f"  files_to_touch: {', '.join(h.files_to_touch)}")
         if h.steps:
@@ -213,6 +216,12 @@ def build_claude_handoff_packet(
         "若实现遇到不可解决的障碍才输出阻塞原因，否则必须产生实际 diff/文件变更。",
         "长时间测试/构建/命令不要用一个前台 Bash 卡住；使用 run_in_background 并用 BashOutput 查询进度。",
         "执行过程中给出可流式输出的简短进度，避免长时间静默。",
+        "完整闭环：从分析到实现到验证，确保每个步骤闭环完成，不留半成品。",
+        "没有漂移：严格遵守 Codex 分析方案和交接要求，不自行扩大或偏离范围。",
+        "编码前思考：修改每处代码前先理解上下文和影响范围，谋定而后动。",
+        "简洁优先：用最少代码完成目标，不引入不必要的抽象、重构或多余修改。",
+        "精准修改：每个编辑只改需要改的地方，精确匹配，不残留调试代码或临时方案。",
+        "目标驱动执行：始终以用户目标和验收标准为唯一方向，完成即止，不画蛇添足。",
     ]
     delivery_isolation_constraints = [
         "你是实施工程师，不是平台 reply agent。绝对不要发送 Telegram 消息。",
@@ -239,6 +248,7 @@ def build_claude_handoff_packet(
             constraints=merged_constraints,
             acceptance_criteria=acceptance_criteria or [],
             prohibited_changes=prohibited_changes or [],
+            analysis=trim_to_budget(codex_analysis, bgt.codex_to_claude_tokens),
         ),
     )
 

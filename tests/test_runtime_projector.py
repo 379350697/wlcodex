@@ -726,3 +726,112 @@ class TestFailureIsolation:
             "SELECT COUNT(*) as c FROM task_events"
         ).fetchone()["c"]
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: session_id in AGENT_RUN_COMPLETED / AGENT_RUN_ACTIVITY payload
+# must be projected to agent_runs.external_session_id
+# ---------------------------------------------------------------------------
+
+class TestAgentRunSessionIdProjection:
+    def test_completed_session_id_projected_without_external_session_id(
+        self, tmp_path: Path
+    ):
+        """When payload has session_id but no external_session_id,
+        agent_runs.external_session_id must equal session_id after projection."""
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.AGENT_RUN_QUEUED, AggregateType.AGENT_RUN,
+                            "ar-sess", agent_run_id=1, event_id=1,
+                            payload={"agent": "claude", "role": "implementation"}))
+        projector.apply(store.get_by_id(1))
+
+        store.append(_event(EventType.AGENT_RUN_STARTED, AggregateType.AGENT_RUN,
+                            "ar-sess", agent_run_id=1, event_id=2))
+        projector.apply(store.get_by_id(2))
+
+        # AGENT_RUN_COMPLETED with session_id only (no external_session_id)
+        store.append(_event(EventType.AGENT_RUN_COMPLETED, AggregateType.AGENT_RUN,
+                            "ar-sess", agent_run_id=1, event_id=3,
+                            payload={"session_id": "claude_sess_123"}))
+        projector.apply(store.get_by_id(3))
+
+        row = _row(ledger._conn, "agent_runs", 1)
+        assert row["external_session_id"] == "claude_sess_123"
+
+    def test_completed_external_session_id_takes_priority_over_session_id(
+        self, tmp_path: Path
+    ):
+        """When both external_session_id and session_id are present,
+        external_session_id takes priority."""
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.AGENT_RUN_QUEUED, AggregateType.AGENT_RUN,
+                            "ar-prio", agent_run_id=2, event_id=1,
+                            payload={"agent": "claude", "role": "implementation"}))
+        projector.apply(store.get_by_id(1))
+
+        store.append(_event(EventType.AGENT_RUN_STARTED, AggregateType.AGENT_RUN,
+                            "ar-prio", agent_run_id=2, event_id=2))
+        projector.apply(store.get_by_id(2))
+
+        store.append(_event(EventType.AGENT_RUN_COMPLETED, AggregateType.AGENT_RUN,
+                            "ar-prio", agent_run_id=2, event_id=3,
+                            payload={
+                                "external_session_id": "ext_priority",
+                                "session_id": "claude_sess_456",
+                            }))
+        projector.apply(store.get_by_id(3))
+
+        row = _row(ledger._conn, "agent_runs", 2)
+        assert row["external_session_id"] == "ext_priority"
+
+    def test_activity_session_id_projected_without_external_session_id(
+        self, tmp_path: Path
+    ):
+        """AGENT_RUN_ACTIVITY with session_id also propagates to agent_runs."""
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.AGENT_RUN_QUEUED, AggregateType.AGENT_RUN,
+                            "ar-act", agent_run_id=3, event_id=1,
+                            payload={"agent": "claude", "role": "implementation"}))
+        projector.apply(store.get_by_id(1))
+
+        store.append(_event(EventType.AGENT_RUN_STARTED, AggregateType.AGENT_RUN,
+                            "ar-act", agent_run_id=3, event_id=2))
+        projector.apply(store.get_by_id(2))
+
+        store.append(_event(EventType.AGENT_RUN_ACTIVITY, AggregateType.AGENT_RUN,
+                            "ar-act", agent_run_id=3, event_id=3,
+                            payload={"session_id": "claude_activity_sess"}))
+        projector.apply(store.get_by_id(3))
+
+        row = _row(ledger._conn, "agent_runs", 3)
+        assert row["external_session_id"] == "claude_activity_sess"
+
+    def test_completed_session_id_does_not_overwrite_existing_external_session(
+        self, tmp_path: Path
+    ):
+        """A late AGENT_RUN_COMPLETED without session_id must not wipe the
+        external_session_id that was already set by an earlier event."""
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.AGENT_RUN_QUEUED, AggregateType.AGENT_RUN,
+                            "ar-keep", agent_run_id=4, event_id=1,
+                            payload={"agent": "claude", "role": "implementation"}))
+        projector.apply(store.get_by_id(1))
+
+        # STARTED sets external_session_id first
+        store.append(_event(EventType.AGENT_RUN_STARTED, AggregateType.AGENT_RUN,
+                            "ar-keep", agent_run_id=4, event_id=2,
+                            payload={"external_session_id": "early_sess"}))
+        projector.apply(store.get_by_id(2))
+
+        # COMPLETED without session_id - must not wipe the existing value
+        store.append(_event(EventType.AGENT_RUN_COMPLETED, AggregateType.AGENT_RUN,
+                            "ar-keep", agent_run_id=4, event_id=3,
+                            payload={"summary": "done"}))
+        projector.apply(store.get_by_id(3))
+
+        row = _row(ledger._conn, "agent_runs", 4)
+        assert row["external_session_id"] == "early_sess"

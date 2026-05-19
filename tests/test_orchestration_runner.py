@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from wlcodex.agent_backend import AgentStreamEvent
+from wlcodex.agent_backend import AgentRequest, AgentStreamEvent
 from wlcodex.codex_backend import FakeCodexBackend
 from wlcodex.config import WorkspaceConfig
 from wlcodex.controller import CommandController
@@ -13,6 +13,14 @@ from wlcodex.inspection import TaskInspector
 from wlcodex.interaction.events import InteractionEvent
 from wlcodex.models import AgentRunStatus, OrchestrationStatus, TaskStatus
 from wlcodex.orchestrator import OrchestrationProgress
+from wlcodex.runtime_events import (
+    AggregateType,
+    EventSource,
+    EventType,
+    RuntimeEvent,
+    Visibility,
+    now_iso,
+)
 from wlcodex.orchestration_runner import OrchestrationRunner
 from wlcodex.task_service import TaskService
 
@@ -521,6 +529,57 @@ async def test_orchestration_runner_humanizes_telegram_progress_without_raw_mode
     assert updated_run.last_codex_analysis == "RAW_CODEX_ANALYSIS_FULL"
     assert updated_run.last_claude_summary == "RAW_CLAUDE_IMPL_FULL"
     assert "RAW_VERIFY_RESULT_FULL" in updated_run.last_verification_result
+
+
+@pytest.mark.asyncio
+async def test_orchestration_runner_suppresses_phase_text_delta_when_runtime_progress_is_enabled(
+    tmp_path: Path,
+) -> None:
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    renderer._runtime_progress = object()
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="新对话",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "实现功能", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "实现功能")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: RawVerboseStreamingOrchestrator(),
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="实现功能",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+    )
+    await background_task
+
+    assert any(event.event_type == "runtime_progress" for event in renderer.events)
+    visible_text = "\n".join(
+        event.text for event in renderer.events if event.event_type == "text_delta"
+    )
+    assert "我先看需求和改动范围" not in visible_text
+    assert "方案看完了" not in visible_text
+    assert "Claude 正在改代码" not in visible_text
+    assert "Claude 改完了" not in visible_text
+    assert "我在验收改动" not in visible_text
+    assert "验收结果出来了" not in visible_text
 
 
 @pytest.mark.asyncio
@@ -1178,3 +1237,145 @@ async def test_runner_wires_codex_runtime_source_for_analysis_turn(
     assert usage_events[0].actor == "codex"
     assert usage_events[0].agent_run_id == codex_run.id
     assert usage_events[0].payload["input_tokens"] == 21
+
+
+# ============================================================================
+# Fix 2: pending-context retry must force Claude implementation in next round
+# ============================================================================
+
+
+def test_build_retry_analysis_includes_all_required_blocks():
+    """_build_retry_analysis must produce a prompt with structured retry blocks
+    containing required_fix, pending context, original goal, and explicit
+    instruction to prioritize pending context."""
+    from wlcodex.orchestrator import _build_retry_analysis
+
+    result = _build_retry_analysis(
+        required_fix="文件末尾加 pending-context-ok\n同时更新测试文件",
+        original_analysis="analysis: create file",
+        original_goal="create file",
+        round_num=2,
+        pending_user_context="补充：文件末尾加 pending-context-ok",
+    )
+
+    assert "[RETRY_REQUIRED_FIX]" in result
+    assert "文件末尾加 pending-context-ok" in result
+    assert "同时更新测试文件" in result
+    assert "[LATEST_PENDING_CONTEXT]" in result
+    assert "补充：文件末尾加 pending-context-ok" in result
+    assert "[ORIGINAL_GOAL]" in result
+    assert "create file" in result
+    assert "[ORIGINAL_ANALYSIS]" in result
+    assert "必须优先完成 pending context" in result
+
+
+def test_build_retry_analysis_handoff_packet_roundtrip():
+    """Claude handoff packet built from retry analysis must preserve all
+    retry context (required_fix, pending context, original goal)."""
+    from wlcodex.orchestrator import _build_retry_analysis
+    from wlcodex.context_packets import build_claude_handoff_packet
+
+    retry_analysis = _build_retry_analysis(
+        required_fix="文件末尾加 pending-context-ok",
+        original_analysis="analysis: create file",
+        original_goal="在 docs/smoke/ 下创建 test.md 写入 product-terminal-smoke-ok",
+        round_num=2,
+        pending_user_context="补充：文件末尾加 pending-context-ok",
+    )
+
+    packet = build_claude_handoff_packet(
+        user_goal="在 docs/smoke/ 下创建 test.md 写入 product-terminal-smoke-ok",
+        codex_analysis=retry_analysis,
+    )
+    rendered = packet.render()
+
+    assert "pending-context-ok" in rendered
+    assert "[RETRY_REQUIRED_FIX]" in rendered
+    assert "[LATEST_PENDING_CONTEXT]" in rendered
+    assert "[ORIGINAL_GOAL]" in rendered
+    assert "必须优先完成 pending context" in rendered
+    assert "product-terminal-smoke-ok" in rendered
+
+
+# ============================================================================
+# Fix 2b: VerificationDecision.parse must not truncate multi-line required_fix
+# ============================================================================
+
+
+def test_required_fix_multiline_not_truncated():
+    """required_fix with multiple lines must be fully preserved by parse()."""
+    from wlcodex.orchestrator import VerificationDecision
+
+    text = (
+        "decision: retry\n"
+        "required_fix: 第一行修复要求\n"
+        "第二行修复要求：需要同时修改测试文件\n"
+        "第三行：验证 diff --check 通过\n"
+        "confidence: high\n"
+        "summary: 需要补充 pending context 的修改"
+    )
+    vd = VerificationDecision.parse(text)
+    assert vd.decision == "retry"
+    assert "第一行修复要求" in vd.required_fix
+    assert "第二行修复要求" in vd.required_fix, (
+        f"required_fix truncated, got: {vd.required_fix!r}"
+    )
+    assert "第三行" in vd.required_fix, (
+        f"required_fix truncated, got: {vd.required_fix!r}"
+    )
+
+
+def test_required_fix_empty_when_not_present_in_pass():
+    """When decision is pass, required_fix should be empty."""
+    from wlcodex.orchestrator import VerificationDecision
+
+    vd = VerificationDecision.parse("decision: pass\nsummary: all good")
+    assert vd.decision == "pass"
+    assert vd.required_fix == ""
+
+
+# ============================================================================
+# Fix 3: build_claude_handoff_packet must include mandatory Chinese constraints
+# ============================================================================
+
+
+MANDATORY_HANDOFF_CONSTRAINTS = [
+    "完整闭环",
+    "没有漂移",
+    "编码前思考",
+    "简洁优先",
+    "精准修改",
+    "目标驱动执行",
+]
+
+
+def test_claude_handoff_packet_includes_mandatory_constraints():
+    """Every Claude handoff packet rendered text MUST include the six
+    mandatory programming constraints verbatim."""
+    from wlcodex.context_packets import build_claude_handoff_packet
+
+    packet = build_claude_handoff_packet(
+        user_goal="test goal",
+        codex_analysis="test analysis",
+    )
+    rendered = packet.render()
+    for constraint in MANDATORY_HANDOFF_CONSTRAINTS:
+        assert constraint in rendered, (
+            f"Mandatory constraint '{constraint}' missing from handoff packet:\n{rendered[:1000]}"
+        )
+
+
+def test_claude_handoff_packet_constraints_in_constraints_field():
+    """The constraints must appear in the recent_user_constraints or
+    handoff_from_codex.constraints section, not just as a fluke in another field."""
+    from wlcodex.context_packets import build_claude_handoff_packet
+
+    packet = build_claude_handoff_packet(
+        user_goal="test goal",
+        codex_analysis="test analysis",
+    )
+    all_constraints = "; ".join(packet.recent_user_constraints)
+    for constraint in MANDATORY_HANDOFF_CONSTRAINTS:
+        assert constraint in all_constraints, (
+            f"Mandatory constraint '{constraint}' not in constraints list"
+        )

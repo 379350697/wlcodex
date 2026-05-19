@@ -27,6 +27,8 @@ class StreamingRenderer:
         self._buffer: list[str] = []
         self._last_edit_time = -float("inf")
         self._message_id: int | None = None
+        self._sent_length = 0
+        self._non_editable_mode = False
         self._edit_count = 0
         self._chat_id: int | None = None
 
@@ -37,10 +39,14 @@ class StreamingRenderer:
     async def start(self, chat_id: int, initial_text: str = "") -> None:
         self._chat_id = chat_id
         self._buffer = [initial_text] if initial_text else []
+        self._sent_length = 0
+        self._non_editable_mode = False
         if initial_text:
-            self._message_id = _editable_message_id(
-                await self._send(chat_id, initial_text)
-            )
+            sent_id = await self._send(chat_id, initial_text)
+            self._message_id = _editable_message_id(sent_id)
+            self._sent_length = len(initial_text)
+            if self._message_id is None:
+                self._non_editable_mode = True
 
     async def append(self, text: str) -> None:
         self._buffer.append(text)
@@ -59,18 +65,30 @@ class StreamingRenderer:
     ) -> None:
         if self._chat_id is None:
             return
-        text = _fit_text("".join(self._buffer), self._max_text_length)
-        if self._message_id is not None:
+        raw_text = "".join(self._buffer)
+        text = _fit_text(raw_text, self._max_text_length)
+        if self._message_id is not None and not self._non_editable_mode:
             try:
                 await self._edit(self._chat_id, self._message_id, text, buttons=buttons)
                 self._edit_count += 1
                 self._last_edit_time = self._clock.time()
+                self._sent_length = len(raw_text)
                 return
             except Exception:
-                pass
-        self._message_id = _editable_message_id(
-            await self._send(self._chat_id, text)
-        )
+                self._message_id = None
+                self._non_editable_mode = True
+
+        if self._non_editable_mode:
+            text = _fit_text(raw_text[self._sent_length:], self._max_text_length)
+            if not text and buttons is None:
+                self._last_edit_time = self._clock.time()
+                return
+
+        sent_id = await self._send(self._chat_id, text)
+        self._message_id = _editable_message_id(sent_id)
+        if self._message_id is None:
+            self._non_editable_mode = True
+        self._sent_length = len(raw_text)
         self._last_edit_time = self._clock.time()
 
 

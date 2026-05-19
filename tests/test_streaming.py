@@ -114,6 +114,37 @@ async def test_streaming_renderer_does_not_edit_placeholder_message_id() -> None
 
 
 @pytest.mark.asyncio
+async def test_streaming_renderer_sends_only_new_text_without_editable_message_id() -> None:
+    class OutboxLikeBot(FakeBot):
+        async def send(self, chat_id: int, text: str) -> int:
+            self.send_count += 1
+            self.last_text = text
+            self.messages.append((chat_id, text))
+            return -1
+
+        async def edit(
+            self, chat_id: int, message_id: int, text: str, buttons=None
+        ) -> None:
+            raise AssertionError("placeholder message id must not be edited")
+
+    fake_bot = OutboxLikeBot()
+    renderer = StreamingRenderer(
+        fake_bot.send, fake_bot.edit, min_interval_seconds=0.0,
+    )
+
+    await renderer.start(chat_id=1)
+    await renderer.append("first")
+    await renderer.append("\nsecond")
+    await renderer.append("\nthird")
+
+    assert [message for _, message in fake_bot.messages] == [
+        "first",
+        "\nsecond",
+        "\nthird",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_streaming_renderer_caps_telegram_text() -> None:
     fake_bot = FakeBot()
     renderer = StreamingRenderer(

@@ -298,6 +298,7 @@ class RuntimeProjector:
         elif etype in (EventType.AGENT_RUN_ACTIVITY, EventType.AGENT_RUN_HEARTBEAT):
             # Refresh idle — keeps row in running state.
             self._upsert_agent_run(event)
+            self._project_session_id(event, agent_run_id)
 
         elif etype == EventType.AGENT_RUN_COMPLETED:
             self._upsert_agent_run(event)
@@ -306,6 +307,7 @@ class RuntimeProjector:
                 "UPDATE agent_runs SET status = 'done', completion_summary = ?, updated_at = ? WHERE id = ?",
                 (summary, _now(), agent_run_id),
             )
+            self._project_session_id(event, agent_run_id)
 
         elif etype == EventType.AGENT_RUN_FAILED:
             self._upsert_agent_run(event)
@@ -514,6 +516,23 @@ class RuntimeProjector:
             return row is not None
 
         return False
+
+    def _project_session_id(self, event: RuntimeEvent, agent_run_id: int) -> None:
+        """Write the best available session identifier from *event* payload
+        into agent_runs.external_session_id.
+
+        Priority: external_session_id > session_id.
+        Does NOT overwrite an already-set external_session_id.
+        """
+        payload = event.payload
+        ext_sid = str(payload.get("external_session_id") or payload.get("session_id") or "")
+        if not ext_sid:
+            return
+        self._conn.execute(
+            "UPDATE agent_runs SET external_session_id = ? "
+            "WHERE id = ? AND (external_session_id IS NULL OR external_session_id = '')",
+            (ext_sid, agent_run_id),
+        )
 
     def _upsert_orchestration_run(self, event: RuntimeEvent) -> None:
         orch_run_id = event.orchestration_run_id
