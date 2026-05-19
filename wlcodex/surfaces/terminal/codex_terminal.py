@@ -1,11 +1,11 @@
 """Codex terminal adapter — thin shell over a Codex backend for terminal surface.
 
-The adapter does NOT own thread lifecycle or strategy selection. It only
+The adapter does NOT own subprocess lifecycle or strategy selection. It only
 provides the send_input protocol that TerminalSessionManager expects.
 
 Real strategy implementations may later map to:
-  - app_server: watch thread/turn notifications via Codex app-server
-  - exec_json: codex exec --json JSONL event stream
+  - app_server: Codex app-server thread/turn events as terminal frames
+  - exec_json: codex exec --json JSONL stream
   - pty: PTY/tmux capture fallback
 
 For now, this adapter works with a fake backend that records steer_thread
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class CodexTerminalAdapter:
-    """Terminal surface adapter for Codex CLI sessions.
+    """Terminal surface adapter for Codex CLI / app-server sessions.
 
     Delegates input to a backend that implements steer_thread(thread_id, text).
     """
@@ -29,7 +29,7 @@ class CodexTerminalAdapter:
         self._backend = backend
 
     async def send_input(self, session_ref, text: str) -> None:
-        """Send user input to the Codex thread (manager protocol)."""
+        """Send user input to the Codex session (manager protocol)."""
         tid = session_ref.external_session_id
         logger.info("Codex terminal input: thread=%s text=%r", tid, text)
         await self._backend.steer_thread(tid, text)
