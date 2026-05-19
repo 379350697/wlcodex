@@ -187,6 +187,11 @@ def load_config(path: Path) -> AppConfig:
     interaction_raw = data.get("interaction", {})
     menu_raw = data.get("menu", {})
     terminal_raw = data.get("terminal", {})
+    terminal_default_agent = str(terminal_raw.get("default_agent", "claude"))
+    if terminal_default_agent not in ("claude", "codex"):
+        raise ConfigError(
+            f"terminal.default_agent must be 'claude' or 'codex', got: {terminal_default_agent!r}"
+        )
     try:
         claude_permission_mode = normalize_claude_permission_mode(
             str(claude_raw.get("permission_mode", "acceptEdits"))
@@ -302,7 +307,7 @@ def load_config(path: Path) -> AppConfig:
         ),
         terminal=TerminalSurfaceConfig(
             enabled=bool(terminal_raw.get("enabled", False)),
-            default_agent=str(terminal_raw.get("default_agent", "claude")),
+            default_agent=terminal_default_agent,
             max_frame_chars=int(terminal_raw.get("max_frame_chars", 3500)),
             redaction_enabled=bool(terminal_raw.get("redaction_enabled", True)),
         ),

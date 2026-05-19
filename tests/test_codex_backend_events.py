@@ -1001,3 +1001,67 @@ async def test_resolve_approval_with_runtime_source_full_pipeline() -> None:
     fake = FakeCodexBackend()
     await fake.resolve_approval("req-5", {"decision": "accept"})
     assert fake._approval_resolutions == [("req-5", {"decision": "accept"})]
+
+
+# --- steer_thread tests (real AppServerCodexBackend, no websocket) ---
+
+
+@pytest.mark.asyncio
+async def test_steer_thread_delegates_to_steer_turn_with_active_turn_id():
+    """steer_thread uses the active turn id from _on_turn_started to call steer_turn."""
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+
+    # Simulate turn/started notification — populates _active_turn_ids
+    await backend._on_turn_started({"threadId": "thr-1", "turn": {"id": "turn-1"}})
+    assert backend._active_turn_ids == {"thr-1": "turn-1"}
+
+    # Capture steer_turn calls
+    steer_calls: list[tuple] = []
+
+    async def fake_steer_turn(thread_id: str, turn_id: str, prompt: str) -> None:
+        steer_calls.append((thread_id, turn_id, prompt))
+
+    backend.steer_turn = fake_steer_turn  # type: ignore[method-assign]
+
+    await backend.steer_thread("thr-1", "hello")
+
+    assert steer_calls == [("thr-1", "turn-1", "hello")], (
+        f"Expected steer_turn('thr-1', 'turn-1', 'hello'), got {steer_calls}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_steer_thread_raises_value_error_when_no_active_turn():
+    """steer_thread must raise ValueError when no active turn exists for the thread."""
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+
+    assert "thr-unknown" not in backend._active_turn_ids
+
+    with pytest.raises(ValueError, match="No active turn found"):
+        await backend.steer_thread("thr-unknown", "hello")
+
+
+@pytest.mark.asyncio
+async def test_steer_thread_raises_value_error_after_turn_completed():
+    """After _on_turn_completed clears the active turn, steer_thread must raise."""
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+
+    # Turn starts
+    await backend._on_turn_started({"threadId": "thr-2", "turn": {"id": "turn-2"}})
+    assert backend._active_turn_ids == {"thr-2": "turn-2"}
+
+    # Turn completes — clears the active turn
+    await backend._on_turn_completed({"threadId": "thr-2", "turn": {"id": "turn-2"}})
+    assert "thr-2" not in backend._active_turn_ids
+
+    with pytest.raises(ValueError, match="No active turn found"):
+        await backend.steer_thread("thr-2", "hello")

@@ -438,6 +438,47 @@ allow_write = true
     )
 
 
+def _write_test_config_toml(terminal_enabled: bool = False) -> Path:
+    """Write a minimal test config to a named temp dir and return the path."""
+    import tempfile
+    d = Path(tempfile.mkdtemp(prefix="wlcodex-test-config-"))
+    p = d / "test.toml"
+    terminal_block = ""
+    if terminal_enabled:
+        terminal_block = "\n[terminal]\nenabled = true\ndefault_agent = \"codex\"\n"
+    p.write_text(
+        f"""
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+private_chat_only = true
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+{terminal_block}
+[storage]
+sqlite_path = ""
+task_log_dir = ""
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "demo"
+path = "/tmp/demo"
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Terminal manager composition tests
 # ---------------------------------------------------------------------------
@@ -502,59 +543,163 @@ def test_create_terminal_manager_with_claude_backend_registers_both_adapters() -
 
 
 def test_main_passes_terminal_manager_to_build_application(tmp_path: Path) -> None:
-    """The main() function passes terminal_manager=None to build_application
-    when terminal is disabled (default config)."""
-    config_path = tmp_path / "test.toml"
-    sqlite_path = tmp_path / "wlcodex.sqlite3"
-    _write_test_config_with_path(config_path, sqlite_path, tmp_path / "tasks")
+    """main() passes terminal_manager=None to build_application when
+    terminal.enabled=false, and a real TerminalSessionManager when enabled=true.
 
-    config = load_config(config_path)
-    assert config.terminal.enabled is False
+    This test MUST call wlcodex.main.main() — not a manual replica.
+    """
+    import asyncio as _asyncio
+    import os as _os
+    import sys as _sys
+    from unittest.mock import MagicMock
 
-    ledger = Ledger.open(config.storage.sqlite_path)
-    ledger.migrate()
-    backend = FakeCodexBackend()
-    task_service = TaskService(ledger, config.workspaces)
-    inspector = TaskInspector(ledger, config.storage.task_log_dir)
-    approval_svc = ApprovalService()
-    controller = CommandController(task_service, backend, inspector)
+    import wlcodex.main as main_mod
+
+    def _make_fake_handlers():
+        fake = MagicMock()
+        fake.send_telegram = MagicMock()
+        fake.edit_telegram = MagicMock()
+        fake.create_interaction_renderer = MagicMock(return_value=None)
+        return fake
+
+    # ── Test case 1: terminal.enabled=false → terminal_manager is None ──
+    config_path = tmp_path / "test_disabled.toml"
+    sqlite_path = tmp_path / "wlcodex_disabled.sqlite3"
+    task_dir = tmp_path / "tasks_disabled"
+    task_dir.mkdir(exist_ok=True)
+    _write_test_config_with_path(
+        config_path,
+        sqlite_path,
+        task_dir,
+        terminal_enabled=False,
+    )
 
     captured_tm = None
+    build_called = False
 
     def fake_build(cfg, token, ctrl, lgr, appr, runtime_event_store=None,
                    outbox=None, terminal_manager=None):
-        nonlocal captured_tm
+        nonlocal captured_tm, build_called
         captured_tm = terminal_manager
-        from unittest.mock import MagicMock
-        return MagicMock(), None
+        build_called = True
+        fake_app = MagicMock()
+        fake_app.bot = MagicMock()
+        fake_app.updater = MagicMock()
+        fake_app.updater.running = False
+        return fake_app, _make_fake_handlers()
 
-    # Monkeypatch the symbol imported by main.py, not telegram_app
-    import wlcodex.main as main_mod
+    # Short-circuit the event loop — build_application is called before
+    # the loop runs, so we just need main() to exit after building.
+    # Patch on the concrete BaseEventLoop, not the abstract class.
+    from asyncio import base_events as _base_events
+    original_run_until_complete = _base_events.BaseEventLoop.run_until_complete
+    _base_events.BaseEventLoop.run_until_complete = lambda self, future: None
+
+    # Also prevent new_event_loop from returning a real loop.
+    original_new_event_loop = _asyncio.new_event_loop
+    original_set_event_loop = _asyncio.set_event_loop
+    _asyncio.new_event_loop = lambda: MagicMock()
+    _asyncio.set_event_loop = lambda loop: None
+
     original_build = main_mod.build_application
+    original_argv = _sys.argv[:]
+    _sys.argv = ["main.py", "--fake-backend", "--config", str(config_path)]
+    _os.environ["WLCODEX_TELEGRAM_BOT_TOKEN"] = "test-main-composition-token"
+
     main_mod.build_application = fake_build
     try:
-        # Replicate the production wiring from main():
-        from wlcodex.main import _create_terminal_manager
-        tm = _create_terminal_manager(config, claude_backend=None, codex_backend=backend)
-        fake_build(config, "token", controller, ledger, approval_svc,
-                   terminal_manager=tm)
+        main_mod.main()
     finally:
         main_mod.build_application = original_build
+        _sys.argv = original_argv
+        _base_events.BaseEventLoop.run_until_complete = original_run_until_complete
+        _asyncio.new_event_loop = original_new_event_loop
+        _asyncio.set_event_loop = original_set_event_loop
 
+    assert build_called, "build_application was never called by main()"
     assert captured_tm is None, (
-        f"Expected None when terminal.enabled=false, got {captured_tm}"
+        f"Expected terminal_manager=None when terminal.enabled=false, got {captured_tm}"
+    )
+
+    # ── Test case 2: terminal.enabled=true + claude.enabled=true →
+    #     build_application receives non-None TerminalSessionManager with
+    #     codex adapter; and because claude.enabled=true, also a claude adapter.
+    config2_path = tmp_path / "test_enabled.toml"
+    sqlite2_path = tmp_path / "wlcodex_enabled.sqlite3"
+    task2_dir = tmp_path / "tasks_enabled"
+    task2_dir.mkdir(exist_ok=True)
+    _write_test_config_with_path(
+        config2_path,
+        sqlite2_path,
+        task2_dir,
+        terminal_enabled=True,
+        claude_enabled=True,
+    )
+
+    captured_tm2 = None
+    build2_called = False
+
+    def fake_build2(cfg, token, ctrl, lgr, appr, runtime_event_store=None,
+                    outbox=None, terminal_manager=None):
+        nonlocal captured_tm2, build2_called
+        captured_tm2 = terminal_manager
+        build2_called = True
+        fake_app = MagicMock()
+        fake_app.bot = MagicMock()
+        fake_app.updater = MagicMock()
+        fake_app.updater.running = False
+        return fake_app, _make_fake_handlers()
+
+    # Re-apply event loop patches (they were restored in test case 1's finally).
+    _base_events.BaseEventLoop.run_until_complete = lambda self, future: None
+    _asyncio.new_event_loop = lambda: MagicMock()
+    _asyncio.set_event_loop = lambda loop: None
+
+    main_mod.build_application = fake_build2
+    original_argv2 = _sys.argv[:]
+    _sys.argv = ["main.py", "--fake-backend", "--config", str(config2_path)]
+
+    try:
+        main_mod.main()
+    finally:
+        main_mod.build_application = original_build
+        _sys.argv = original_argv2
+        _base_events.BaseEventLoop.run_until_complete = original_run_until_complete
+        _asyncio.new_event_loop = original_new_event_loop
+        _asyncio.set_event_loop = original_set_event_loop
+
+    assert build2_called, "build_application was never called by main() for enabled case"
+    assert captured_tm2 is not None, (
+        "Expected non-None terminal_manager when terminal.enabled=true"
+    )
+    from wlcodex.surfaces.terminal.manager import TerminalSessionManager
+    assert isinstance(captured_tm2, TerminalSessionManager), (
+        f"Expected TerminalSessionManager, got {type(captured_tm2)}"
+    )
+    assert "codex" in captured_tm2._adapters, (
+        "TerminalSessionManager must have a codex adapter"
+    )
+    assert "claude" in captured_tm2._adapters, (
+        "TerminalSessionManager must have a claude adapter when claude.enabled=true"
     )
 
 
-def _write_test_config_toml(terminal_enabled: bool = False) -> Path:
-    """Write a minimal test config to a named temp dir and return the path."""
-    import tempfile
-    d = Path(tempfile.mkdtemp(prefix="wlcodex-test-config-"))
-    p = d / "test.toml"
+def _write_test_config_with_path(
+    path: Path,
+    sqlite_path: Path,
+    task_log_dir: Path,
+    *,
+    terminal_enabled: bool = False,
+    claude_enabled: bool = False,
+) -> None:
+    path.parent.mkdir(exist_ok=True)
     terminal_block = ""
     if terminal_enabled:
-        terminal_block = "\n[terminal]\nenabled = true\ndefault_agent = \"codex\"\n"
-    p.write_text(
+        terminal_block = "[terminal]\nenabled = true\ndefault_agent = \"codex\"\n"
+    claude_block = ""
+    if claude_enabled:
+        claude_block = "[claude]\nenabled = true\nbinary = \"claude\"\n"
+    path.write_text(
         f"""
 [telegram]
 bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
@@ -567,15 +712,20 @@ app_server_host = "127.0.0.1"
 app_server_port = 17431
 approval_policy = "on-request"
 sandbox = "workspace-write"
+
 {terminal_block}
+{claude_block}
 [storage]
-sqlite_path = ""
-task_log_dir = ""
+sqlite_path = "{sqlite_path}"
+task_log_dir = "{task_log_dir}"
 
 [display]
 status_update_min_interval_seconds = 2
 tail_lines = 40
 diff_max_chars = 3500
+
+[interaction]
+profile = "legacy"
 
 [[workspaces]]
 alias = "demo"
@@ -584,4 +734,3 @@ allow_write = true
 """,
         encoding="utf-8",
     )
-    return p

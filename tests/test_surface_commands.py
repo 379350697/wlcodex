@@ -1273,3 +1273,314 @@ async def test_terminal_product_does_not_attach_session():
     # Terminal manager must have no active session for this conversation
     ref = terminal_manager.active_for_conversation(42)
     assert ref is None
+
+
+# --- bare /terminal default_agent tests ---
+
+
+@pytest.mark.asyncio
+async def test_bare_terminal_uses_default_agent_codex():
+    """Bare /terminal with terminal.default_agent=codex must attach codex session."""
+    from types import SimpleNamespace
+
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.surfaces.terminal.manager import TerminalSessionManager
+
+    class FakeAdapter:
+        def __init__(self):
+            self.refs = []
+
+        async def send_input(self, ref, text):
+            pass
+
+    codex_adapter = FakeAdapter()
+    claude_adapter = FakeAdapter()
+    terminal_manager = TerminalSessionManager(
+        adapters={"claude": claude_adapter, "codex": codex_adapter},
+    )
+
+    class FakeRuntimeStore:
+        def __init__(self):
+            self.events = []
+
+        def append(self, event):
+            self.events.append(event)
+
+    class FakeLedger:
+        def __init__(self):
+            self._updates = []
+
+        def get_active_conversation(self, chat_id):
+            return SimpleNamespace(id=42)
+
+        def record_telegram_update(self, **kwargs):
+            self._updates.append(kwargs)
+
+        def list_agent_runs(self, conversation_id, limit=50):
+            return [
+                SimpleNamespace(
+                    agent="codex",
+                    external_session_id="codex_sess_xyz",
+                    status="running",
+                ),
+            ]
+
+        def list_recent_agent_runs(self, conversation_id, limit=50):
+            return self.list_agent_runs(conversation_id, limit=limit)
+
+    store = FakeRuntimeStore()
+    ledger = FakeLedger()
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(
+            telegram=SimpleNamespace(allowed_user_ids=frozenset({123})),
+            interaction=SimpleNamespace(profile="natural"),
+            terminal=SimpleNamespace(enabled=True, default_agent="codex"),
+        ),
+        controller=SimpleNamespace(),
+        ledger=ledger,
+        approval_service=SimpleNamespace(),
+        bot=SimpleNamespace(),
+        runtime_event_store=store,
+        terminal_manager=terminal_manager,
+    )
+
+    sent_messages = []
+
+    async def fake_send(chat_id, text, buttons=None):
+        sent_messages.append((chat_id, text))
+        return 1
+
+    handlers.send_telegram = fake_send
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=100, type="private"),
+        effective_message=SimpleNamespace(text="/terminal"),
+        update_id=500,
+    )
+
+    await handlers.terminal_cmd(update, None)
+
+    # Must send confirmation that codex session was attached
+    assert len(sent_messages) == 1
+    assert "已接入" in sent_messages[0][1], (
+        f"Expected '已接入' in message, got: {sent_messages[0][1]}"
+    )
+    assert "codex" in sent_messages[0][1]
+
+    # Mode switch event must have active_agent=codex
+    mode_switches = [e for e in store.events
+                     if getattr(e, "event_type", "") == "conversation.mode.switched"]
+    assert len(mode_switches) == 1
+    assert mode_switches[0].payload["active_agent"] == "codex"
+
+    # terminal.session.attached event must have agent=codex
+    attached_events = [e for e in store.events
+                       if getattr(e, "event_type", "") == "terminal.session.attached"]
+    assert len(attached_events) == 1
+    assert attached_events[0].payload["agent"] == "codex"
+    assert attached_events[0].payload["external_session_id"] == "codex_sess_xyz"
+
+    # Terminal manager must reference the codex session
+    ref = terminal_manager.active_for_conversation(42)
+    assert ref is not None
+    assert ref.agent == "codex"
+    assert ref.external_session_id == "codex_sess_xyz"
+
+
+@pytest.mark.asyncio
+async def test_bare_terminal_uses_default_agent_claude():
+    """Bare /terminal with terminal.default_agent=claude must attach claude session."""
+    from types import SimpleNamespace
+
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.surfaces.terminal.manager import TerminalSessionManager
+
+    class FakeAdapter:
+        def __init__(self):
+            self.refs = []
+
+        async def send_input(self, ref, text):
+            pass
+
+    claude_adapter = FakeAdapter()
+    terminal_manager = TerminalSessionManager(adapters={"claude": claude_adapter})
+
+    class FakeRuntimeStore:
+        def __init__(self):
+            self.events = []
+
+        def append(self, event):
+            self.events.append(event)
+
+    class FakeLedger:
+        def __init__(self):
+            self._updates = []
+
+        def get_active_conversation(self, chat_id):
+            return SimpleNamespace(id=42)
+
+        def record_telegram_update(self, **kwargs):
+            self._updates.append(kwargs)
+
+        def list_agent_runs(self, conversation_id, limit=50):
+            return [
+                SimpleNamespace(
+                    agent="claude",
+                    external_session_id="claude_sess_def",
+                    status="done",
+                ),
+            ]
+
+        def list_recent_agent_runs(self, conversation_id, limit=50):
+            return self.list_agent_runs(conversation_id, limit=limit)
+
+    store = FakeRuntimeStore()
+    ledger = FakeLedger()
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(
+            telegram=SimpleNamespace(allowed_user_ids=frozenset({123})),
+            interaction=SimpleNamespace(profile="natural"),
+            terminal=SimpleNamespace(enabled=True, default_agent="claude"),
+        ),
+        controller=SimpleNamespace(),
+        ledger=ledger,
+        approval_service=SimpleNamespace(),
+        bot=SimpleNamespace(),
+        runtime_event_store=store,
+        terminal_manager=terminal_manager,
+    )
+
+    sent_messages = []
+
+    async def fake_send(chat_id, text, buttons=None):
+        sent_messages.append((chat_id, text))
+        return 1
+
+    handlers.send_telegram = fake_send
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=100, type="private"),
+        effective_message=SimpleNamespace(text="/terminal"),
+        update_id=501,
+    )
+
+    await handlers.terminal_cmd(update, None)
+
+    assert len(sent_messages) == 1
+    assert "已接入" in sent_messages[0][1]
+    assert "claude" in sent_messages[0][1]
+
+    mode_switches = [e for e in store.events
+                     if getattr(e, "event_type", "") == "conversation.mode.switched"]
+    assert len(mode_switches) == 1
+    assert mode_switches[0].payload["active_agent"] == "claude"
+
+    attached_events = [e for e in store.events
+                       if getattr(e, "event_type", "") == "terminal.session.attached"]
+    assert len(attached_events) == 1
+    assert attached_events[0].payload["agent"] == "claude"
+
+    ref = terminal_manager.active_for_conversation(42)
+    assert ref is not None
+    assert ref.agent == "claude"
+
+
+@pytest.mark.asyncio
+async def test_bare_terminal_event_payload_agent_is_correct():
+    """The mode switch and terminal.session.attached events must both record
+    the resolved agent, even when no explicit agent was given."""
+    from types import SimpleNamespace
+
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.surfaces.terminal.manager import TerminalSessionManager
+
+    class FakeAdapter:
+        def __init__(self):
+            self.refs = []
+
+        async def send_input(self, ref, text):
+            pass
+
+    adapter = FakeAdapter()
+    terminal_manager = TerminalSessionManager(adapters={"codex": adapter})
+
+    class FakeRuntimeStore:
+        def __init__(self):
+            self.events = []
+
+        def append(self, event):
+            self.events.append(event)
+
+    class FakeLedger:
+        def __init__(self):
+            self._updates = []
+
+        def get_active_conversation(self, chat_id):
+            return SimpleNamespace(id=42)
+
+        def record_telegram_update(self, **kwargs):
+            self._updates.append(kwargs)
+
+        def list_agent_runs(self, conversation_id, limit=50):
+            return [
+                SimpleNamespace(
+                    agent="codex",
+                    external_session_id="codex_def",
+                    status="running",
+                ),
+            ]
+
+        def list_recent_agent_runs(self, conversation_id, limit=50):
+            return self.list_agent_runs(conversation_id, limit=limit)
+
+    store = FakeRuntimeStore()
+    ledger = FakeLedger()
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(
+            telegram=SimpleNamespace(allowed_user_ids=frozenset({123})),
+            interaction=SimpleNamespace(profile="natural"),
+            terminal=SimpleNamespace(enabled=True, default_agent="codex"),
+        ),
+        controller=SimpleNamespace(),
+        ledger=ledger,
+        approval_service=SimpleNamespace(),
+        bot=SimpleNamespace(),
+        runtime_event_store=store,
+        terminal_manager=terminal_manager,
+    )
+
+    sent_messages = []
+
+    async def fake_send(chat_id, text, buttons=None):
+        sent_messages.append((chat_id, text))
+        return 1
+
+    handlers.send_telegram = fake_send
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=100, type="private"),
+        effective_message=SimpleNamespace(text="/terminal"),
+        update_id=502,
+    )
+
+    await handlers.terminal_cmd(update, None)
+
+    # Both events must agree on agent=codex
+    mode_switches = [e for e in store.events
+                     if getattr(e, "event_type", "") == "conversation.mode.switched"]
+    attached = [e for e in store.events
+                if getattr(e, "event_type", "") == "terminal.session.attached"]
+    assert len(mode_switches) == 1
+    assert len(attached) == 1
+    assert mode_switches[0].payload["active_agent"] == "codex"
+    assert attached[0].payload["agent"] == "codex"
+
+    # Confirmation message must mention codex
+    assert len(sent_messages) == 1
+    assert "codex" in sent_messages[0][1]

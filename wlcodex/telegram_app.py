@@ -1062,6 +1062,15 @@ class WlCodexHandlers:
         to_mode = command.mode
         agent = getattr(command, "agent", "")
 
+        # Resolve the terminal agent for bare /terminal: explicit > config default.
+        # Must happen before the mode-switch event so the recorded active_agent is correct.
+        if to_mode == "terminal" and not agent:
+            agent = getattr(
+                getattr(self._config, "terminal", None),
+                "default_agent",
+                "claude",
+            )
+
         # Determine current mode from stored state
         if self._runtime_store is not None and conversation_id is not None:
             try:
@@ -1119,7 +1128,6 @@ class WlCodexHandlers:
         if to_mode == "product":
             await self.send_telegram(chat_id, "已切到 product 模式。")
         elif to_mode == "terminal":
-            display_agent = agent or "claude"
             attached = False
             if agent and self._terminal_manager is not None and conversation_id is not None:
                 # Check if conversation already has an active session for this agent
@@ -1129,7 +1137,9 @@ class WlCodexHandlers:
                 else:
                     ext_id = self._find_external_session_id(conversation_id, agent)
                     if ext_id:
-                        strategy = "stream_json" if agent == "claude" else "app_server"
+                        strategy = (
+                            "stream_json" if agent == "claude" else "app_server"
+                        )
                         try:
                             ref = self._terminal_manager.attach(
                                 conversation_id=conversation_id,
@@ -1184,13 +1194,13 @@ class WlCodexHandlers:
             if attached:
                 await self.send_telegram(
                     chat_id,
-                    f"已切到 terminal 模式，已接入 {display_agent} session。"
+                    f"已切到 terminal 模式，已接入 {agent} session。"
                 )
             else:
                 await self.send_telegram(
                     chat_id,
-                    f"已切到 terminal 模式，但尚无可接入的 {display_agent} session。"
-                    f"请先通过 /codex 或 /claude 启动 {display_agent} 任务。"
+                    f"已切到 terminal 模式，但尚无可接入的 {agent} session。"
+                    f"请先通过 /codex 或 /claude 启动 {agent} 任务。"
                 )
 
     # --- New conversation handlers ---

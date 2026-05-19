@@ -521,3 +521,45 @@ allow_write = true
     assert config.terminal.max_frame_chars == 3500
     assert config.terminal.redaction_enabled is True
     assert config.telegram.default_surface_mode == "product"
+
+
+def test_terminal_default_agent_rejects_invalid_value(tmp_path: Path) -> None:
+    """ConfigError must be raised when terminal.default_agent is not claude or codex."""
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+private_chat_only = true
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+
+[terminal]
+enabled = true
+default_agent = "gemini"
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "demo"
+path = "/tmp/demo"
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="terminal.default_agent"):
+        load_config(config_path)
