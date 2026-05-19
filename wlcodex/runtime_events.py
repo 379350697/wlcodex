@@ -46,6 +46,7 @@ class AggregateType(StrEnum):
     AGENT_RUN = "agent_run"
     APPROVAL = "approval"
     TELEGRAM_MESSAGE = "telegram_message"
+    SURFACE_SESSION = "surface_session"
     SYSTEM = "system"
 
 
@@ -153,6 +154,17 @@ class EventType:
     USER_CONTEXT_APPENDED = "user.context.appended"
     CONVERSATION_PENDING_CONTEXT_RECORDED = "conversation.pending_context.recorded"
     CONVERSATION_PENDING_CONTEXT_REVIEWED = "conversation.pending_context.reviewed"
+
+    # Dual-surface mode switching and cursor tracking
+    CONVERSATION_MODE_SWITCHED = "conversation.mode.switched"
+    SURFACE_CURSOR_ADVANCED = "surface.cursor.advanced"
+    TERMINAL_SESSION_ATTACHED = "terminal.session.attached"
+    TERMINAL_SESSION_DETACHED = "terminal.session.detached"
+    TERMINAL_SESSION_INPUT_SENT = "terminal.session.input.sent"
+    TERMINAL_SESSION_OUTPUT_FRAME = "terminal.session.output.frame"
+    TERMINAL_SESSION_ABORTED = "terminal.session.aborted"
+    PRODUCT_DISPLAY_FRAME = "product.display.frame"
+    PRODUCT_PENDING_CONTEXT_RECORDED = "product.pending_context.recorded"
 
     # Workspace busy
     WORKSPACE_BUSY_DETECTED = "workspace.busy.detected"

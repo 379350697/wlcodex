@@ -176,6 +176,60 @@ class RuntimeApprovalState:
 
 
 @dataclass
+class TerminalSessionInfo:
+    """Terminal session lifecycle state reconstructed from events.
+
+    Keeps track of attach/detach/abort without depending on process liveness.
+    Actual reattach logic lives in recovery; this only replays recorded facts.
+    """
+
+    agent: str = ""
+    external_session_id: str = ""
+    strategy: str = ""
+    status: str = "detached"
+    conversation_id: int | None = None
+    chat_id: int = 0
+    last_event_id: int = 0
+    last_event_at: str = ""
+
+
+@dataclass
+class SurfaceCursorState:
+    """Per-surface cursor position."""
+
+    surface: str = ""
+    position: int = 0
+
+
+@dataclass
+class SurfaceViewState:
+    """Per-chat surface state reconstructed from runtime events.
+
+    This is the materialised view that both Product and Terminal surfaces
+    consult.  It is derived purely from events — never from mutable state.
+    """
+
+    chat_id: int = 0
+    conversation_id: int | None = None
+    active_mode: str = "product"
+    selected_terminal_agent: str = ""
+    cursors: dict[str, SurfaceCursorState] = field(default_factory=dict)
+    terminal_sessions: dict[str, TerminalSessionInfo] = field(default_factory=dict)
+    pending_context: list[dict] = field(default_factory=list)
+    last_event_id: int = 0
+    last_event_at: str = ""
+
+
+@dataclass
+class SurfaceStateSnapshot:
+    """Complete surface state across all chats at a point in the event stream."""
+
+    by_chat: dict[int, SurfaceViewState] = field(default_factory=dict)
+    last_event_id: int = 0
+    last_event_at: str = ""
+
+
+@dataclass
 class RuntimeConversationState:
     """Current state of one conversation reconstructed from events."""
 
@@ -253,6 +307,130 @@ def replay_events(events: list[Any]) -> RuntimeStateSnapshot:
         _apply_event(snapshot, event)
 
     return snapshot
+
+
+# ---------------------------------------------------------------------------
+# Surface state replay reducer (dual-surface core)
+# ---------------------------------------------------------------------------
+
+
+def replay_surface_events(events: list[Any]) -> SurfaceStateSnapshot:
+    """Replay runtime events into a SurfaceStateSnapshot.
+
+    Pure function: no side effects, no database access.
+    Deterministic: same events always produce the same state.
+
+    Reconstructs per-chat active mode, per-surface cursors, terminal session
+    lifecycle, and pending product context.  Both Product and Terminal surfaces
+    share this as their single source of truth.
+    """
+    snap = SurfaceStateSnapshot()
+
+    for event in events:
+        _apply_surface_event(snap, event)
+
+    return snap
+
+
+def _get_or_create_chat(snap: SurfaceStateSnapshot, chat_id: int) -> SurfaceViewState:
+    if chat_id not in snap.by_chat:
+        view = SurfaceViewState(chat_id=chat_id)
+        view.cursors["product"] = SurfaceCursorState(surface="product", position=0)
+        view.cursors["terminal"] = SurfaceCursorState(surface="terminal", position=0)
+        snap.by_chat[chat_id] = view
+    return snap.by_chat[chat_id]
+
+
+def _ensure_cursor(view: SurfaceViewState, surface: str) -> SurfaceCursorState:
+    if surface not in view.cursors:
+        view.cursors[surface] = SurfaceCursorState(surface=surface, position=0)
+    return view.cursors[surface]
+
+
+def _apply_surface_event(snap: SurfaceStateSnapshot, event: Any) -> None:
+    snap.last_event_id = event.id
+    snap.last_event_at = event.occurred_at
+
+    etype = event.event_type
+    payload = event.payload
+    chat_id = int(payload.get("chat_id", 0))
+    if not chat_id:
+        return
+
+    view = _get_or_create_chat(snap, chat_id)
+    view.last_event_id = event.id
+    view.last_event_at = event.occurred_at
+    view.conversation_id = event.conversation_id or view.conversation_id
+
+    # --- Mode switching ---
+    if etype == EventType.CONVERSATION_MODE_SWITCHED:
+        view.active_mode = str(payload.get("to_mode", view.active_mode))
+        agent = str(payload.get("active_agent", ""))
+        if agent:
+            view.selected_terminal_agent = agent
+
+    # --- Cursor advancement ---
+    elif etype == EventType.SURFACE_CURSOR_ADVANCED:
+        surface = str(payload.get("surface", ""))
+        position = int(payload.get("position", 0))
+        if surface:
+            cursor = _ensure_cursor(view, surface)
+            if position > cursor.position:
+                cursor.position = position
+
+    # --- Terminal session lifecycle ---
+    elif etype == EventType.TERMINAL_SESSION_ATTACHED:
+        agent = str(payload.get("agent", ""))
+        if agent:
+            view.terminal_sessions[agent] = TerminalSessionInfo(
+                agent=agent,
+                external_session_id=str(payload.get("external_session_id", "")),
+                strategy=str(payload.get("strategy", "")),
+                status="attached",
+                conversation_id=event.conversation_id,
+                chat_id=chat_id,
+                last_event_id=event.id,
+                last_event_at=event.occurred_at,
+            )
+
+    elif etype == EventType.TERMINAL_SESSION_DETACHED:
+        agent = str(payload.get("agent", ""))
+        status = str(payload.get("status", "detached"))
+        if agent and agent in view.terminal_sessions:
+            view.terminal_sessions[agent].status = status
+            view.terminal_sessions[agent].last_event_id = event.id
+            view.terminal_sessions[agent].last_event_at = event.occurred_at
+
+    elif etype == EventType.TERMINAL_SESSION_ABORTED:
+        agent = str(payload.get("agent", ""))
+        if agent and agent in view.terminal_sessions:
+            view.terminal_sessions[agent].status = "aborted"
+            view.terminal_sessions[agent].last_event_id = event.id
+            view.terminal_sessions[agent].last_event_at = event.occurred_at
+
+    # --- Product display frame advances product cursor ---
+    elif etype == EventType.PRODUCT_DISPLAY_FRAME:
+        surface = str(payload.get("surface", "product"))
+        position = int(payload.get("position", 0))
+        cursor = _ensure_cursor(view, surface)
+        if position > cursor.position:
+            cursor.position = position
+
+    # --- Terminal output frame advances terminal cursor ---
+    elif etype == EventType.TERMINAL_SESSION_OUTPUT_FRAME:
+        surface = str(payload.get("surface", "terminal"))
+        position = int(payload.get("position", 0))
+        cursor = _ensure_cursor(view, surface)
+        if position > cursor.position:
+            cursor.position = position
+
+    # --- Pending context for product mode ---
+    elif etype == EventType.PRODUCT_PENDING_CONTEXT_RECORDED:
+        view.pending_context.append({
+            "telegram_message_id": payload.get("telegram_message_id", 0),
+            "text_preview": str(payload.get("text_preview", "")),
+            "recorded_at": event.occurred_at,
+        })
 
 
 # ---------------------------------------------------------------------------

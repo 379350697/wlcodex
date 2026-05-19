@@ -827,6 +827,15 @@ _TASK_EVENT_COMPAT_TYPES: dict[str, str] = {
     EventType.TOOL_CALL_COMPLETED: "tool_call_completed",
     EventType.SECURITY_DELIVERY_BLOCKED: "security_delivery_blocked",
     EventType.SECURITY_TOKEN_ACCESS_ATTEMPTED: "security_token_access_attempted",
+    EventType.CONVERSATION_MODE_SWITCHED: "conversation_mode_switched",
+    EventType.SURFACE_CURSOR_ADVANCED: "surface_cursor_advanced",
+    EventType.TERMINAL_SESSION_ATTACHED: "terminal_session_attached",
+    EventType.TERMINAL_SESSION_DETACHED: "terminal_session_detached",
+    EventType.TERMINAL_SESSION_INPUT_SENT: "terminal_session_input_sent",
+    EventType.TERMINAL_SESSION_OUTPUT_FRAME: "terminal_session_output_frame",
+    EventType.TERMINAL_SESSION_ABORTED: "terminal_session_aborted",
+    EventType.PRODUCT_DISPLAY_FRAME: "product_display_frame",
+    EventType.PRODUCT_PENDING_CONTEXT_RECORDED: "product_pending_context_recorded",
 }
 
 
