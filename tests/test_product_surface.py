@@ -81,6 +81,15 @@ def test_product_display_event_allows_user_agent():
     assert event.agent == "user"
 
 
+def test_product_display_event_rejects_invalid_agent():
+    with pytest.raises(ValueError, match="agent must be one of"):
+        ProductDisplayEvent(
+            agent="openai",
+            phase="analysis",
+            text="bad agent",
+        )
+
+
 # ── product_speaker_line: speaker labels ───────────────────────────────────
 
 def test_codex_analysis_line_has_speaker_label():
