@@ -498,13 +498,13 @@ def _apply_event(snap: RuntimeStateSnapshot, event: Any) -> None:
     ):
         _apply_verification_event(snap, event)
 
-    # --- Projection events ---
     # --- Conversation events ---
     elif etype in (
         EventType.CONVERSATION_STARTED,
         EventType.CONVERSATION_ACTIVATED,
         EventType.CONVERSATION_STATE_CHANGED,
         EventType.CONVERSATION_CLOSED,
+        EventType.CONVERSATION_MODE_SWITCHED,
         EventType.USER_CONTEXT_APPENDED,
         EventType.CONVERSATION_PENDING_CONTEXT_RECORDED,
         EventType.CONVERSATION_PENDING_CONTEXT_REVIEWED,
@@ -514,6 +514,22 @@ def _apply_event(snap: RuntimeStateSnapshot, event: Any) -> None:
     # --- Approval supersession ---
     elif etype == EventType.APPROVAL_SUPERSEDED:
         _apply_approval_superseded(snap, event)
+
+    # --- Surface / recovery pass-through (handled by replay_surface_events) ---
+    elif etype in (
+        EventType.SURFACE_CURSOR_ADVANCED,
+        EventType.TERMINAL_SESSION_ATTACHED,
+        EventType.TERMINAL_SESSION_DETACHED,
+        EventType.TERMINAL_SESSION_ABORTED,
+        EventType.TERMINAL_SESSION_INPUT_SENT,
+        EventType.TERMINAL_SESSION_OUTPUT_FRAME,
+        EventType.PRODUCT_DISPLAY_FRAME,
+        EventType.PRODUCT_PENDING_CONTEXT_RECORDED,
+        EventType.SYSTEM_RECOVERY_STARTED,
+        EventType.SYSTEM_RECOVERY_COMPLETED,
+        EventType.RUNTIME_CAPABILITY_MISSING,
+    ):
+        pass  # informational — surface state is in SurfaceStateSnapshot
 
     elif etype == EventType.APPROVAL_STALE_BUTTON_IGNORED:
         pass  # informational diagnostic
@@ -902,6 +918,11 @@ def _apply_conversation_event(snap: RuntimeStateSnapshot, event: Any) -> None:
             "delivery_policy": "codex_phase_boundary_review",
             "recorded_at": event.occurred_at,
         })
+
+    elif event.event_type == EventType.CONVERSATION_MODE_SWITCHED:
+        new_mode = str(payload.get("to_mode", ""))
+        if new_mode:
+            conv.mode = new_mode
 
     elif event.event_type == EventType.CONVERSATION_PENDING_CONTEXT_REVIEWED:
         conv.pending_context = [
