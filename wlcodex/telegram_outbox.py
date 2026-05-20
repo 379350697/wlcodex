@@ -99,6 +99,7 @@ class TelegramOutbox:
         self._queue: list[DeliveryRequest] = []
         self._pending: dict[str, DeliveryRequest] = {}
         self._processing = False
+        self._waiters: dict[str, asyncio.Future[int]] = {}
 
     # ------------------------------------------------------------------
     # Enqueue
@@ -177,6 +178,33 @@ class TelegramOutbox:
         self._emit_enqueued(req, correlation_id)
         return delivery_id
 
+    async def enqueue_send_wait(
+        self,
+        chat_id: int,
+        text: str,
+        buttons: list[list[dict[str, str]]] | None = None,
+        *,
+        send_fn: Any = None,
+        edit_fn: Any = None,
+        correlation_id: str = "",
+        timeout_seconds: float = 5.0,
+    ) -> int:
+        delivery_id = self.enqueue_send(
+            chat_id,
+            text,
+            buttons,
+            send_fn=send_fn,
+            edit_fn=edit_fn,
+            correlation_id=correlation_id,
+        )
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[int] = loop.create_future()
+        self._waiters[delivery_id] = future
+        try:
+            return await asyncio.wait_for(future, timeout=timeout_seconds)
+        finally:
+            self._waiters.pop(delivery_id, None)
+
     # ------------------------------------------------------------------
     # Process (async)
     # ------------------------------------------------------------------
@@ -217,6 +245,9 @@ class TelegramOutbox:
                         "operation": req.operation,
                         "attempt": attempt,
                     })
+                    waiter = self._waiters.get(req.delivery_id)
+                    if waiter is not None and not waiter.done():
+                        waiter.set_result(req.result_message_id)
                 elif req.operation == "edit":
                     self._emit_event(EventType.TELEGRAM_MESSAGE_EDITED, payload={
                         "delivery_id": req.delivery_id,
@@ -267,6 +298,9 @@ class TelegramOutbox:
                             "delivery_id": req.delivery_id,
                             "attempts": attempt,
                         })
+                    waiter = self._waiters.get(req.delivery_id)
+                    if waiter is not None and not waiter.done():
+                        waiter.set_result(-1)
                     return
 
     async def _execute(self, req: DeliveryRequest) -> None:

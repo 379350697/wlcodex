@@ -457,6 +457,63 @@ def test_approval_superseded_is_scoped_by_conversation(tmp_path: Path) -> None:
     assert not any(e.event_type == EventType.APPROVAL_SUPERSEDED for e in conv2_events)
 
 
+def test_outbox_send_wait_returns_real_message_id(tmp_path: Path) -> None:
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.telegram_outbox import TelegramOutbox
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    outbox = TelegramOutbox(store=store)
+
+    async def fake_send(chat_id, text, buttons=None):
+        return 1234
+
+    async def scenario():
+        waiter = asyncio.create_task(
+            outbox.enqueue_send_wait(
+                chat_id=1,
+                text="preview",
+                send_fn=fake_send,
+                timeout_seconds=2.0,
+            )
+        )
+        await asyncio.sleep(0)  # yield so waiter can enqueue
+        await outbox.process_all()
+        return await waiter
+
+    assert _run(scenario()) == 1234
+
+
+def test_outbox_send_wait_times_out_without_processor(tmp_path: Path) -> None:
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.telegram_outbox import TelegramOutbox
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    outbox = TelegramOutbox(store=store)
+
+    async def fake_send(chat_id, text, buttons=None):
+        return 1234
+
+    async def scenario():
+        try:
+            await outbox.enqueue_send_wait(
+                chat_id=1,
+                text="preview",
+                send_fn=fake_send,
+                timeout_seconds=0.01,
+            )
+        except asyncio.TimeoutError:
+            return "timeout"
+        return "no-timeout"
+
+    assert _run(scenario()) == "timeout"
+
+
 def test_approval_superseded_respects_time_ordering(tmp_path: Path) -> None:
     """New approvals created AFTER superseded should not be blocked."""
     from wlcodex.runtime_events import (
