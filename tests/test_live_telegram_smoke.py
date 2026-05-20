@@ -125,6 +125,36 @@ def test_live_telegram_workbench_has_runtime_event_evidence() -> None:
     )
 
 
+def test_live_telegram_output_is_not_fragment_spam() -> None:
+    import json
+
+    db_path = _sqlite_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT event_type, payload_json
+        FROM runtime_events
+        WHERE event_type IN ('telegram.delivery.enqueued', 'telegram.message.sent', 'telegram.message.edited')
+        ORDER BY id DESC
+        LIMIT 80
+        """
+    ).fetchall()
+
+    previews = []
+    tiny_fragments = []
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        text = payload.get("text_preview", "")
+        if "正在" in text or "运行" in text:
+            previews.append(text)
+        if text in {"我", "查", "到", "的"}:
+            tiny_fragments.append(text)
+
+    assert previews
+    assert tiny_fragments == []
+
+
 def test_live_telegram_approval_evidence_when_required() -> None:
     if os.environ.get("WLCODEX_LIVE_APPROVAL_REQUIRED") != "1":
         pytest.skip("set WLCODEX_LIVE_APPROVAL_REQUIRED=1 after running approval smoke")
