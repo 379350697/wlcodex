@@ -334,8 +334,14 @@ async def test_status_uses_runtime_events_when_available(tmp_path: Path) -> None
 
     response = await controller.handle("/status", {"chat_id": 100, "user_id": 200})
 
-    assert "活跃 Agent：claude" in response.text
-    assert "最近事件" in response.text
+    # /status must use clean product formatter, not diagnostic dump.
+    assert "当前对话：Runtime" in response.text
+    assert "模式：总工程师" in response.text
+    assert "运行 #" not in response.text
+    assert "最近事件" not in response.text
+    assert "#10" not in response.text
+    assert "Agent 运行记录" not in response.text
+    assert "事件总数" not in response.text
 
 
 @pytest.mark.asyncio

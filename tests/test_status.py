@@ -197,3 +197,114 @@ def test_render_conversation_help_is_compact_for_natural_profile() -> None:
     assert "直接发消息" in text
     assert "/task" not in text
     assert len(text.splitlines()) <= 14
+
+
+# ═══════════════════════════════════════════════════════════════
+# BLOCKER A: /status must NOT leak internal IDs
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_format_status_display_leaks_internal_ids():
+    """format_status_display exposes banned terms — PROVES the problem.
+
+    This test guards against accidentally re-introducing the diagnostic
+    formatter into the normal /status path.  If format_status_display
+    stops leaking these terms, the /status path was fixed — verify
+    that was intentional.
+    """
+    from wlcodex.runtime_diagnostics import (
+        RuntimeAgentSummary,
+        RuntimeStatus,
+        format_status_display,
+    )
+
+    status = RuntimeStatus(
+        conversation_id=42,
+        active_agent="claude",
+        active_agent_run_id=15,
+        phase="implementation",
+        status="running",
+        last_event_type="agent.run.started",
+        last_event_id=1234,
+        total_events=456,
+        agents=[
+            RuntimeAgentSummary(
+                agent_run_id=12, agent="codex", status="completed",
+            ),
+            RuntimeAgentSummary(
+                agent_run_id=15, agent="claude", status="running",
+            ),
+        ],
+    )
+
+    output = format_status_display(status)
+    assert "#15" in output or "运行 #" in output, (
+        "format_status_display must leak agent_run_id. If this assertion "
+        "fails, the diagnostic formatter was cleaned — verify intentional."
+    )
+    assert "#1234" in output or "事件总数" in output, (
+        "format_status_display must leak event_id/event count."
+    )
+
+
+def test_status_command_must_not_use_format_status_display():
+    """/status handler with runtime_store routes through render_conversation_status.
+
+    Even when runtime_store is available, StatusCommand (/status, a
+    primary menu entry) must NOT call format_status_display.
+    The diagnostic dump is reserved for explicit /trace.
+    """
+    from unittest.mock import MagicMock, patch
+    from types import SimpleNamespace
+    from wlcodex.controller import CommandController
+
+    ledger = MagicMock()
+    ledger.get_active_conversation = MagicMock(
+        return_value=SimpleNamespace(
+            id=42, chat_id=7001, user_id=100,
+            title="test", mode="chief_engineer",
+            workspace_alias="wlcodex",
+            conversation_summary="testing user flow",
+            active_codex_task_id=None,
+            active_claude_run_id=None,
+            current_model="claude-sonnet-4-6",
+        )
+    )
+    ledger.list_agent_runs = MagicMock(return_value=[])
+    ledger.list_orchestration_runs = MagicMock(return_value=[])
+
+    store = MagicMock()
+    store.list_by_conversation = MagicMock(return_value=[])
+
+    ctrl = CommandController.__new__(CommandController)
+    ctrl._ledger = ledger
+    ctrl._service = MagicMock()
+    ctrl._backend = MagicMock()
+    ctrl._orchestration_runner = MagicMock()
+    ctrl._store = store
+    ctrl._claude = None
+    ctrl._default_workspace = "wlcodex"
+    ctrl._default_mode = "chief_engineer"
+    ctrl._background_tasks = set()
+    ctrl._emit_event = MagicMock()
+    ctrl._new_correlation_id = MagicMock(return_value="cid-1")
+    ctrl._interaction_renderer = None
+    ctrl._inspector = MagicMock()
+
+    with patch(
+        "wlcodex.runtime_diagnostics.format_status_display"
+    ) as diag_fmt:
+        diag_fmt.return_value = "诊断 #15"
+        import asyncio
+        response = asyncio.run(
+            ctrl.handle("/status", {"chat_id": 7001, "user_id": 100})
+        )
+
+    assert not diag_fmt.called, (
+        "After fix: StatusCommand MUST NOT call format_status_display. "
+        "The clean formatter (render_conversation_status) is used instead. "
+        "Diagnostic dump is reserved for /trace."
+    )
+    assert "#" not in response.text, (
+        f"/status output must not contain internal IDs. Got: {response.text[:200]}"
+    )

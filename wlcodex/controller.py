@@ -247,19 +247,6 @@ class CommandController:
                 if self._ledger is not None and telegram_context:
                     chat_id = telegram_context.get("chat_id", 0)
                     active = self._ledger.get_active_conversation(chat_id)
-                    if active is not None and self._store is not None:
-                        from wlcodex.runtime_diagnostics import (
-                            build_runtime_status,
-                            format_status_display,
-                        )
-
-                        runtime_status = build_runtime_status(
-                            self._store,
-                            active.id,
-                        )
-                        return ControllerResponse(
-                            format_status_display(runtime_status)
-                        )
                     if active is not None:
                         runs = self._ledger.list_agent_runs(active.id, limit=1)
                         latest_run = runs[0] if runs else None

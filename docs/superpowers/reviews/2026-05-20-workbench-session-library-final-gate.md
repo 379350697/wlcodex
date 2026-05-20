@@ -1,13 +1,14 @@
 # Final Gate — WLCodex Workbench Session Library And Task Internalization Repair
 
 **Date**: 2026-05-20
-**Reviewer**: Closed-Loop Verification Agent (third pass — strict re-review of 6 BLOCKERs)
+**Reviewer**: Closed-Loop Verification Agent (fourth pass — BLOCKER A (/status leaks) + BLOCKER B (continuation semantics))
 
 ---
 
 ## Verdict: BLOCKED
 
-> **阻塞原因**: Live Telegram smoke 未执行。Spec 要求 "live Telegram smoke covering Workbench continuity, Onsite, history picker, Claude-only verification action, and historical resume"。集成测试覆盖了所有场景（fake backends），但未在真实环境验证。这是硬性阻塞。
+> **阻塞原因**: Live Telegram smoke 未执行。这是硬性阻塞。
+> **已修复**: BLOCKER A (/status 内部ID泄漏) + BLOCKER B (历史continuation 语义断裂)。
 
 ---
 
@@ -90,7 +91,7 @@ pytest tests/test_controller_flow.py tests/test_telegram_handlers.py \
   tests/test_recovery.py tests/test_router.py tests/test_status.py \
   tests/test_task_service.py -q
 ```
-**结果: 301 passed, 0 failed**
+**结果: 303 passed, 0 failed**
 
 ---
 
@@ -130,6 +131,23 @@ pytest tests/test_controller_flow.py tests/test_telegram_handlers.py \
 ---
 
 ## Remaining Blockers
+
+### BLOCKER A: /status 内部ID泄漏 — ✅ 已修复 (pass 4)
+
+**根因**: `StatusCommand` handler 在 `runtime_store` 可用时调用 `build_runtime_status` + `format_status_display`，暴露 `运行 #<agent_run_id>`, `最近事件 #<event_id>`, `Agent 运行记录`, `事件总数`。
+
+**修复**: 删除 `StatusCommand` 中 `build_runtime_status`/`format_status_display` 分支。`/status` 统一使用 `render_conversation_status`（产品清洁格式化器）。诊断输出保留给 `/trace`。
+
+### BLOCKER B: 历史 continuation 语义断裂 — ✅ 已修复 (pass 4)
+
+**根因**: "继续修改"按钮立即调用 `create_agent_run`，不等用户输入。没有 pending continuation 状态。
+
+**修复**:
+- 新增 `_pending_continuation` dict：存储 `{agent, internal_ref, title, source_run_id, summary_only}`
+- `resume_session` / `resume_from_summary` 点击：存入 pending state，进入 Onsite
+- `attach_session` 点击：清空 pending，仅接管现场
+- `_handle_terminal_text`：首条 Onsite 文本 → `_execute_pending_continuation` → 创建 hidden task + agent_run（含 `hidden_task_id` 链接 + `external_session_id` 持久化）+ terminal attach + `send_input` + `set_task_status("running")`
+- 不创建新 Workbench（conversation_id 保持一致）
 
 ### B1: Live Telegram smoke 未执行 — **BLOCKING**
 
