@@ -25,12 +25,11 @@ _PRIMARY_COMMANDS: list[tuple[str, str]] = [
 ]
 
 _NATURAL_COMMANDS: list[tuple[str, str]] = [
-    ("new", "新对话"),
-    ("stop", "停止"),
+    ("new", "新任务"),
     ("status", "状态"),
-    ("model", "模型"),
-    ("claude_mode", "Claude 权限"),
-    ("diff", "查看 diff"),
+    ("terminal", "接管现场"),
+    ("diff", "变更"),
+    ("settings", "设置"),
     ("help", "帮助"),
 ]
 

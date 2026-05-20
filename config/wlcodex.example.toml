@@ -60,16 +60,21 @@ backend_dead_grace_seconds = 120
 
 [conversation]
 enabled = true
+# chief_engineer = default Codex -> Claude -> Codex orchestrated workflow
 default_mode = "chief_engineer"
 default_workspace = "wlcodex"
 summary_max_tokens = 800
 
 [orchestration]
+# Controls the default Codex -> Claude -> Codex workflow.
 enabled = true
 max_verify_rounds = 3
 auto_delegate_simple_edits = false
 
 [claude]
+# Claude backend for default orchestrated workflow and Claude-only direct mode.
+# When disabled, the default Codex -> Claude -> Codex workflow falls back to
+# Codex-only; the user can still use 只问 Codex.
 enabled = false
 binary = "claude"
 startup_timeout_seconds = 15.0
@@ -78,7 +83,8 @@ stream_idle_timeout_seconds = 600.0
 # Keep Claude implementation runs on the strongest configured backend profile.
 model = "deepseek-v4-pro"
 effort = "max"
-# User-facing switch: /claude_mode 允许编辑 / 自动模式 / 只规划 / 默认确认 / 不询问 / 跳过权限检查
+# Claude permission mode (operator setting).  User-facing switch via /claude_mode:
+# 允许编辑 / 自动模式 / 只规划 / 默认确认 / 不询问 / 跳过权限检查
 permission_mode = "acceptEdits"
 
 [context_budget]
@@ -92,15 +98,16 @@ enabled = true
 edit_min_interval_seconds = 1.0
 
 [interaction]
-# natural = quiet chat + same-run streaming
-# legacy = existing task/status-card style
-# cockpit = reserved for richer remote-control UI; currently falls back to legacy
+# natural = quiet chat + same-run streaming (recommended for Cockpit view)
+# legacy = task/status-card style for operator workflows
+# cockpit = reserved for richer Cockpit view rendering; currently behaves like legacy
 profile = "natural"
 streaming_enabled = true
 show_footer = false
 edit_min_interval_seconds = 1.0
 
 [menu]
+# Register daily-menu commands with Telegram: 新任务 状态 接管现场 变更 设置 帮助
 register_bot_commands = true
 
 [[workspaces]]

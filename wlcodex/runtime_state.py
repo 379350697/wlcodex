@@ -525,11 +525,24 @@ def _apply_event(snap: RuntimeStateSnapshot, event: Any) -> None:
         EventType.TERMINAL_SESSION_OUTPUT_FRAME,
         EventType.PRODUCT_DISPLAY_FRAME,
         EventType.PRODUCT_PENDING_CONTEXT_RECORDED,
+        EventType.WORKBENCH_CREATED,
+        EventType.WORKBENCH_VIEW_CHANGED,
+        EventType.WORKBENCH_EXECUTION_MODE_SELECTED,
+        EventType.WORKBENCH_ROUTE_DECIDED,
+        EventType.ONSITE_SESSION_STARTED,
+        EventType.ONSITE_SESSION_ATTACHED,
+        EventType.ONSITE_SESSION_DETACHED,
+        EventType.ONSITE_SESSION_ORPHANED,
+        EventType.ONSITE_INPUT_SENT,
+        EventType.ONSITE_OUTPUT_FRAME,
+        EventType.ONSITE_CURSOR_ADVANCED,
+        EventType.COCKPIT_CURSOR_ADVANCED,
+        EventType.COCKPIT_SUMMARY_RENDERED,
         EventType.SYSTEM_RECOVERY_STARTED,
         EventType.SYSTEM_RECOVERY_COMPLETED,
         EventType.RUNTIME_CAPABILITY_MISSING,
     ):
-        pass  # informational — surface state is in SurfaceStateSnapshot
+        pass  # informational — surface/workbench state is in projection replay
 
     elif etype == EventType.APPROVAL_STALE_BUTTON_IGNORED:
         pass  # informational diagnostic
@@ -938,3 +951,144 @@ def _apply_approval_superseded(snap: RuntimeStateSnapshot, event: Any) -> None:
         if approval.conversation_id == conv_id and not approval.is_terminal:
             approval.status = "cancelled"
             approval.error = "superseded_by_user_context"
+
+
+# ---------------------------------------------------------------------------
+# Workbench runtime state — pure replay for Task 6 recovery projection
+# ---------------------------------------------------------------------------
+
+_VIEW_MODE_MAP: dict[str, str] = {
+    "product": "cockpit",
+    "terminal": "onsite",
+    "cockpit": "cockpit",
+    "onsite": "onsite",
+}
+
+_VALID_EXECUTION_MODES = frozenset({"orchestrated", "codex_direct", "claude_direct"})
+
+_COCKPIT_SURFACES = frozenset({"product", "cockpit"})
+_ONSITE_SURFACES = frozenset({"terminal", "onsite"})
+
+
+@dataclass
+class WorkbenchRuntimeState:
+    """Workbench state reconstructed purely from runtime events.
+
+    This is NOT the source of truth — the runtime event log is.
+    This projection exists so recovery can answer "what view /
+    execution mode / agent / cursor were we in" after a restart.
+    """
+
+    view: str = "cockpit"
+    execution_mode: str = "orchestrated"
+    active_agent: str = ""
+    cockpit_cursor: int = 0
+    onsite_cursor: int = 0
+    onsite_session_status: str = "detached"
+    onsite_external_session_id: str = ""
+    onsite_orphan_reason: str = ""
+
+
+def replay_workbench_events(events: list[Any]) -> WorkbenchRuntimeState:
+    """Replay runtime events into a workbench-level projection.
+
+    Pure function: no side effects, no database access.
+    Deterministic: same events always produce the same state.
+
+    Reconstructs current view, execution mode, active onsite agent,
+    cockpit/onsite cursors, and onsite session lifecycle including
+    orphaned status.
+    """
+    state = WorkbenchRuntimeState()
+
+    for event in events:
+        _apply_workbench_event(state, event)
+
+    return state
+
+
+def _apply_workbench_event(state: WorkbenchRuntimeState, event: Any) -> None:
+    etype = event.event_type
+    payload = event.payload
+
+    # --- View change via conversation.mode.switched ---
+    if etype == EventType.CONVERSATION_MODE_SWITCHED:
+        to_mode = str(payload.get("to_mode", ""))
+        if to_mode:
+            state.view = _VIEW_MODE_MAP.get(to_mode, state.view)
+        agent = str(payload.get("active_agent", ""))
+        if agent:
+            state.active_agent = agent
+
+    # --- Execution mode ---
+    elif etype == EventType.WORKBENCH_EXECUTION_MODE_SELECTED:
+        mode = str(payload.get("execution_mode", ""))
+        if mode in _VALID_EXECUTION_MODES:
+            state.execution_mode = mode
+
+    # --- View change via workbench.view.changed ---
+    elif etype == EventType.WORKBENCH_VIEW_CHANGED:
+        view = str(payload.get("view", ""))
+        if view:
+            state.view = _VIEW_MODE_MAP.get(view, state.view)
+
+    # --- Cursor advancement ---
+    elif etype == EventType.SURFACE_CURSOR_ADVANCED:
+        surface = str(payload.get("surface", ""))
+        position = int(payload.get("position", 0))
+        if surface in _COCKPIT_SURFACES and position > state.cockpit_cursor:
+            state.cockpit_cursor = position
+        elif surface in _ONSITE_SURFACES and position > state.onsite_cursor:
+            state.onsite_cursor = position
+
+    # --- Terminal / onsite session attach ---
+    elif etype == EventType.TERMINAL_SESSION_ATTACHED:
+        agent = str(payload.get("agent", ""))
+        if agent:
+            state.active_agent = agent
+            state.onsite_session_status = "attached"
+            state.onsite_external_session_id = str(
+                payload.get("external_session_id", "")
+            )
+            state.onsite_orphan_reason = ""
+
+    # --- Terminal / onsite session detach ---
+    elif etype == EventType.TERMINAL_SESSION_DETACHED:
+        agent = str(payload.get("agent", ""))
+        if agent and agent == state.active_agent:
+            if state.onsite_session_status != "orphaned":
+                state.onsite_session_status = str(
+                    payload.get("status", "detached")
+                )
+
+    # --- Terminal / onsite session aborted ---
+    elif etype == EventType.TERMINAL_SESSION_ABORTED:
+        agent = str(payload.get("agent", ""))
+        if agent and agent == state.active_agent:
+            state.onsite_session_status = "aborted"
+
+    # --- Onsite session orphaned ---
+    elif etype == EventType.ONSITE_SESSION_ORPHANED:
+        agent = str(payload.get("agent", ""))
+        if agent:
+            state.active_agent = agent
+            state.onsite_session_status = "orphaned"
+            state.onsite_orphan_reason = str(payload.get("reason", ""))
+
+    # --- Agent run orphaned → mark onsite session orphaned ---
+    elif etype == EventType.AGENT_RUN_ORPHANED:
+        agent = str(payload.get("agent", ""))
+        if agent and agent == state.active_agent:
+            state.onsite_session_status = "orphaned"
+        elif agent and not state.active_agent:
+            state.active_agent = agent
+            state.onsite_session_status = "orphaned"
+
+    # --- System recovery started → orphan active sessions ---
+    elif etype == EventType.SYSTEM_RECOVERY_STARTED:
+        if state.onsite_session_status == "attached":
+            state.onsite_session_status = "orphaned"
+            if not state.onsite_orphan_reason:
+                state.onsite_orphan_reason = str(
+                    payload.get("reason", "daemon_restart")
+                )

@@ -647,6 +647,28 @@ class WlCodexHandlers:
             render_conversation_help(profile=profile_name),
         )
 
+    async def settings_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        await self.send_telegram(
+            update.effective_chat.id,
+            "⚙️ 设置\n\n"
+            "默认流程：Codex → Claude → Codex\n"
+            "当前视图：驾驶舱\n\n"
+            "你可以调整：",
+            buttons=[
+                [{"text": "默认流程（Codex → Claude → Codex）",
+                  "callback_data": "settings:exec_mode:orchestrated"}],
+                [{"text": "只问 Codex",
+                  "callback_data": "settings:exec_mode:codex_direct"}],
+                [{"text": "只叫 Claude",
+                  "callback_data": "settings:exec_mode:claude_direct"}],
+                [{"text": "模型", "callback_data": "settings:model"}],
+                [{"text": "Claude 权限", "callback_data": "settings:claude_permission:normal"}],
+                [{"text": "工作区", "callback_data": "settings:workspace"}],
+            ],
+        )
+
     async def task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
@@ -820,13 +842,14 @@ class WlCodexHandlers:
                             current_mode = payload.get("to_mode", "product")
                     except Exception:
                         pass
-                await self.send_telegram(chat_id, f"当前模式：{current_mode}。使用 /product 或 /terminal 切换。")
+                view_name = "驾驶舱" if current_mode == "product" else "现场"
+                await self.send_telegram(chat_id, f"当前视图：{view_name}。使用 /product 或 /terminal 切换。")
                 return
             else:
                 await self._apply_mode_switch(update, command)
                 return
 
-        await self.send_telegram(chat_id, "未知模式命令。使用 /product 或 /terminal 切换。")
+        await self.send_telegram(chat_id, "未知视图命令。使用 /product 或 /terminal 切换。")
 
     async def product_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -855,11 +878,11 @@ class WlCodexHandlers:
 
         if isinstance(command, ModeSwitchCommand):
             # /terminal product is the escape hatch back to product mode
-            # — always allowed even when terminal.enabled is false.
+            # — always allowed even when terminal is disabled.
             if command.mode != "product" and not terminal_enabled:
                 await self.send_telegram(
                     chat_id,
-                    "Terminal 模式尚未启用。请联系管理员开启 terminal.enabled 配置。"
+                    "现场接管当前不可用。驾驶舱仍可正常工作。"
                 )
                 return
             await self._apply_mode_switch(update, command)
@@ -869,23 +892,23 @@ class WlCodexHandlers:
             if command.subcommand == "tail":
                 await self.send_telegram(
                     chat_id,
-                    "Terminal tail 功能将在终端会话实现后可用。"
+                    "现场 tail 功能将在现场会话实现后可用。"
                 )
             elif command.subcommand == "pause":
                 await self.send_telegram(
                     chat_id,
-                    "Terminal 推送已暂停。使用 /terminal tail 恢复查看。"
+                    "现场推送已暂停。使用 /terminal tail 恢复查看。"
                 )
             elif command.subcommand == "detach":
                 await self.send_telegram(
                     chat_id,
-                    "已停止终端推送，终端会话仍在运行。使用 /terminal 重新接入。"
+                    "已离开现场，现场会话仍在运行。使用 /terminal 重新接入。"
                 )
             return
 
         await self.send_telegram(
             chat_id,
-            "未知终端命令。用法：/terminal [claude|codex|agent claude|agent codex|tail|pause|detach|product]"
+            "未知现场命令。用法：/terminal [claude|codex|agent claude|agent codex|tail|pause|detach|product]"
         )
 
     def _find_external_session_id(self, conversation_id: int, agent: str) -> str | None:
@@ -939,6 +962,17 @@ class WlCodexHandlers:
             pass
         return "product"
 
+    def _render_start_card_buttons(self, chat_id: int) -> list[list[dict[str, str]]]:
+        """Return inline keyboard buttons for the Onsite start card."""
+        return [
+            [{"text": "启动 Claude 现场",
+              "callback_data": f"conv:{chat_id}:start_claude_onsite"}],
+            [{"text": "启动 Codex 现场",
+              "callback_data": f"conv:{chat_id}:start_codex_onsite"}],
+            [{"text": "回驾驶舱",
+              "callback_data": f"conv:{chat_id}:return_cockpit"}],
+        ]
+
     async def _handle_terminal_text(self, chat_id: int, text: str) -> None:
         """Route text to the terminal input path when in terminal mode.
 
@@ -969,7 +1003,7 @@ class WlCodexHandlers:
                     # No active turn / no session — actionable error
                     await self.send_telegram(
                         chat_id,
-                        f"无法发送终端输入：{exc}"
+                        f"无法发送现场输入：{exc}"
                     )
                     return
                 except Exception:
@@ -978,7 +1012,7 @@ class WlCodexHandlers:
                     )
                     await self.send_telegram(
                         chat_id,
-                        "发送终端输入失败。终端会话可能已断开，"
+                        "发送现场输入失败。现场会话可能已断开，"
                         "请使用 /terminal 重新连接。"
                     )
                     return
@@ -1037,12 +1071,12 @@ class WlCodexHandlers:
                         )
                 return
 
-        # No terminal manager or no active session — send actionable hint.
+        # No terminal manager or no active session — never a dead end.
         await self.send_telegram(
             chat_id,
-            "当前为 terminal 模式，但没有活跃的终端会话。"
-            "请使用 /terminal claude 或 /terminal codex 连接终端会话，"
-            "或使用 /product 切回产品模式。"
+            "当前没有可接管的现场。\n\n"
+            "你可以：",
+            buttons=self._render_start_card_buttons(chat_id),
         )
 
     async def _apply_mode_switch(
@@ -1126,7 +1160,10 @@ class WlCodexHandlers:
 
         # Send confirmation + attach terminal session when applicable
         if to_mode == "product":
-            await self.send_telegram(chat_id, "已切到 product 模式。")
+            await self.send_telegram(
+                chat_id,
+                "已回到驾驶舱。现场仍在运行，我会继续用摘要跟进。"
+            )
         elif to_mode == "terminal":
             attached = False
             if agent and self._terminal_manager is not None and conversation_id is not None:
@@ -1194,13 +1231,18 @@ class WlCodexHandlers:
             if attached:
                 await self.send_telegram(
                     chat_id,
-                    f"已切到 terminal 模式，已接入 {agent} session。"
+                    f"已进入接管现场，当前接入 {agent}。"
                 )
             else:
+                # Start card with actionable buttons — never a dead end.
+                # Uses conv:{chat_id}:{action} so decode_conversation_callback
+                # succeeds (conversation_id may not exist yet; chat_id is the
+                # stable routing key).  Task 5 controller handles these actions.
                 await self.send_telegram(
                     chat_id,
-                    f"已切到 terminal 模式，但尚无可接入的 {agent} session。"
-                    f"请先通过 /codex 或 /claude 启动 {agent} 任务。"
+                    "当前没有可接管的现场。\n\n"
+                    "你可以：",
+                    buttons=self._render_start_card_buttons(chat_id),
                 )
 
     # --- New conversation handlers ---
@@ -1449,13 +1491,26 @@ class WlCodexHandlers:
         self, update: Update, query: object, data: str
     ) -> None:
         parts = data.split(":", 2)
-        if len(parts) != 3 or parts[1] != "claude_permission":
+        if len(parts) < 2:
+            await self._safe_callback_answer(query, "无效的设置回调数据。")
+            return
+
+        sub = parts[1]
+        if sub == "claude_permission" and len(parts) == 3:
+            controller_cmd = f"/claude_mode {parts[2]}"
+        elif sub == "exec_mode" and len(parts) == 3:
+            controller_cmd = f"/exec_mode {parts[2]}"
+        elif sub == "model":
+            controller_cmd = "/model"
+        elif sub == "workspace":
+            controller_cmd = "/switch"
+        else:
             await self._safe_callback_answer(query, "无效的设置回调数据。")
             return
 
         try:
             response = await self._controller.handle(
-                f"/claude_mode {parts[2]}",
+                controller_cmd,
                 _ctx(update),
             )
             await self._safe_callback_answer(query, "已切换")
@@ -1741,6 +1796,7 @@ def build_application(
 
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_cmd))
+    application.add_handler(CommandHandler("settings", handlers.settings_cmd))
     application.add_handler(CommandHandler("task", handlers.task))
     application.add_handler(CommandHandler("tasks", handlers.tasks_list))
     application.add_handler(CommandHandler("status", handlers.status))

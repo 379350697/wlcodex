@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
@@ -173,6 +174,7 @@ class CommandController:
         self._interaction_renderer = interaction_renderer
         self._orchestration_runner = orchestration_runner
         self._store = runtime_event_store
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     def set_interaction_renderer(self, renderer: object) -> None:
         """Set the interaction renderer after construction (created after handlers)."""
@@ -1246,13 +1248,15 @@ class CommandController:
         ]]
 
         return ControllerResponse(
-            "我先看一下。完成后会把结论发在这里。",
+            "这次只交给 Codex，不会调用 Claude 修改代码。",
             buttons=buttons,
         )
 
     async def handle_claude_direct(
         self, command: ClaudeDirectCommand, ctx: dict[str, Any] | None = None
     ) -> ControllerResponse:
+        """Claude Direct Mode — Claude-only implementation, no automatic Codex
+        analysis or verification.  Offers a 让 Codex 验收 action after completion."""
         if self._ledger is None:
             return ControllerResponse("系统未完全初始化。请检查配置。")
 
@@ -1261,10 +1265,220 @@ class CommandController:
                 "Claude Code 未启用。请在配置中设置 claude.enabled = true 后重试。"
             )
 
-        return await self.handle_auto_mode(
-            AutoModeCommand(prompt=command.prompt),
-            ctx,
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        user_id = ctx.get("user_id", 0) if ctx else 0
+
+        active = self._ledger.get_active_conversation(chat_id)
+        if active is None:
+            title = default_title(command.prompt)
+            active = self._ledger.create_conversation(
+                chat_id=chat_id,
+                user_id=user_id,
+                title=title,
+                mode=ConversationMode.CLAUDE_DIRECT.value,
+                workspace_alias=self._default_workspace,
+            )
+
+        return await self._handle_claude_direct_impl(command, active, ctx)
+
+    async def _handle_claude_direct_impl(
+        self,
+        command: ClaudeDirectCommand,
+        active: object,
+        ctx: dict[str, Any] | None = None,
+    ) -> ControllerResponse:
+        """Claude-only direct run — no Codex pre-analysis, no auto Codex verify.
+
+        Creates a Claude agent run and task, then launches Claude as a
+        background asyncio task so the controller can return immediately.
+        The response includes a 让 Codex 验收 button so the user can
+        explicitly request verification after Claude completes.
+        """
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        budget = ContextBudget()
+
+        task = self._service.reserve_task(
+            active.workspace_alias,
+            command.prompt,
+            telegram_chat_id=chat_id,
         )
+        self._ledger.set_conversation_active_task(active.id, task.id)
+
+        claude_run = self._ledger.create_agent_run(
+            conversation_id=active.id,
+            agent="claude",
+            role="implementation",
+            hidden_task_id=task.id,
+            prompt_packet_summary=command.prompt[:200],
+        )
+        self._ledger.update_agent_run_status(claude_run.id, "running")
+
+        self._ledger.update_conversation_summary(
+            active.id,
+            trim_to_budget(
+                f"Claude 直接实施：{command.prompt[:200]}",
+                budget.conversation_summary_tokens,
+            ),
+        )
+        self._ledger.set_conversation_active_task(active.id, task.id)
+
+        # Emit user message received event
+        cid = self._new_correlation_id()
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            aggregate_type=AggregateType.CONVERSATION,
+            aggregate_id=str(active.id),
+            correlation_id=cid,
+            source=EventSource.TELEGRAM,
+            actor="user",
+            visibility=Visibility.USER,
+            payload={"text_preview": command.prompt[:200]},
+            occurred_at=now_iso(),
+            conversation_id=active.id,
+        ))
+
+        workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+
+        # Launch Claude as a background task — must actually execute,
+        # not just record a database row.
+        bg_task = asyncio.create_task(
+            self._run_claude_direct_async(
+                agent_run_id=claude_run.id,
+                task_id=task.id,
+                conversation_id=active.id,
+                prompt=command.prompt,
+                workspace_path=workspace_path,
+                chat_id=chat_id,
+                correlation_id=cid,
+            ),
+            name=f"claude-direct-{claude_run.id}",
+        )
+        self._background_tasks.add(bg_task)
+        bg_task.add_done_callback(self._background_tasks.discard)
+
+        # Streaming path: delegate rendering to interaction renderer
+        if self._interaction_renderer is not None:
+            from wlcodex.interaction.events import InteractionEvent
+            await self._interaction_renderer.handle(
+                InteractionEvent(
+                    event_type="run_started",
+                    chat_id=chat_id,
+                    task_id=task.id,
+                    conversation_id=active.id,
+                )
+            )
+            return ControllerResponse("", already_rendered=True)
+
+        # Static response: mode label + verification affordance
+        buttons: list[list[dict[str, str]]] = [
+            [
+                {
+                    "text": "让 Codex 验收",
+                    "callback_data": encode_conversation_callback(active.id, VERIFY),
+                },
+            ],
+            [
+                {
+                    "text": "查看状态",
+                    "callback_data": encode_conversation_callback(active.id, CONTINUE),
+                },
+            ],
+        ]
+        return ControllerResponse(
+            "这次直接交给 Claude 实施。完成后你可以点\"让 Codex 验收\"。",
+            buttons=buttons,
+        )
+
+    async def _run_claude_direct_async(
+        self,
+        *,
+        agent_run_id: int,
+        task_id: int,
+        conversation_id: int,
+        prompt: str,
+        workspace_path: str,
+        chat_id: int,
+        correlation_id: str = "",
+    ) -> None:
+        """Background coroutine that actually invokes Claude as a subprocess.
+
+        Called via asyncio.create_task so the controller can return
+        immediately.  Updates the agent run status on completion/failure.
+        """
+        from wlcodex.agent_backend import AgentRequest
+
+        try:
+            request = AgentRequest(prompt=prompt, workspace_path=workspace_path)
+            if self._interaction_renderer is not None:
+                # Streaming path: forward deltas through the renderer
+                async for stream_event in self._claude.send_streaming(request):
+                    from wlcodex.interaction.events import InteractionEvent
+                    await self._interaction_renderer.handle(
+                        InteractionEvent(
+                            event_type="claude_delta",
+                            chat_id=chat_id,
+                            task_id=task_id,
+                            conversation_id=conversation_id,
+                            metadata={"delta": stream_event.delta,
+                                      "event_type": stream_event.event_type},
+                        )
+                    )
+            else:
+                # Non-streaming path: call send() and capture result
+                result = await self._claude.send(request)
+
+            # On success: mark agent run as done
+            completion_summary = ""
+            if self._interaction_renderer is None:
+                try:
+                    completion_summary = result.text[:2000]
+                except Exception:
+                    completion_summary = ""
+            self._ledger.update_agent_run_status(
+                agent_run_id,
+                "done",
+                completion_summary=completion_summary or "Claude 执行完成",
+            )
+
+            # Emit run.completed
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.RUN_COMPLETED,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id=str(agent_run_id),
+                correlation_id=correlation_id,
+                source=EventSource.CONTROLLER,
+                actor="claude",
+                visibility=Visibility.OPERATOR,
+                payload={"status": "done", "task_id": task_id},
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+                agent_run_id=agent_run_id,
+            ))
+
+        except Exception as exc:
+            logger.exception("Claude direct background task failed")
+            self._ledger.update_agent_run_status(
+                agent_run_id,
+                "failed",
+                completion_summary=str(exc)[:2000],
+            )
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.RUN_FAILED,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id=str(agent_run_id),
+                correlation_id=correlation_id,
+                source=EventSource.CONTROLLER,
+                actor="claude",
+                visibility=Visibility.OPERATOR,
+                payload={"status": "failed", "reason": str(exc)[:500],
+                         "task_id": task_id},
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+                agent_run_id=agent_run_id,
+            ))
 
     async def handle_auto_mode(
         self, command: AutoModeCommand, ctx: dict[str, Any] | None = None

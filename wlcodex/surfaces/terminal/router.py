@@ -17,6 +17,7 @@ class TerminalCommandKind(Enum):
     DETACH = "detach"                   # /terminal detach
     TAIL = "tail"                       # /terminal tail
     PAUSE = "pause"                     # /terminal pause
+    LEAVE = "leave"                     # /terminal leave (stop phone push)
     SHOW_STATUS = "show_status"         # /terminal (bare)
 
 
@@ -42,6 +43,7 @@ def route_terminal_command(text: str) -> TerminalCommand:
         /terminal detach              -> DETACH
         /terminal tail                -> TAIL
         /terminal pause               -> PAUSE
+        /terminal leave               -> LEAVE
     """
     stripped = text.strip()
     parts = stripped.split()
@@ -70,6 +72,9 @@ def route_terminal_command(text: str) -> TerminalCommand:
 
     if sub == "pause":
         return TerminalCommand(kind=TerminalCommandKind.PAUSE)
+
+    if sub == "leave":
+        return TerminalCommand(kind=TerminalCommandKind.LEAVE)
 
     if sub in ("claude", "codex"):
         return TerminalCommand(kind=TerminalCommandKind.SELECT_AGENT, agent=sub)

@@ -1,31 +1,58 @@
 # WLCodex
 
-WLCodex is a conversation-first chief-engineer Telegram cockpit. The user talks
-naturally. WLCodex routes intent to Codex (analysis, architecture, verification),
-Claude Code (implementation), or a Codex-led orchestration loop.
+WLCodex is a remote workbench for phone-driven software engineering. One local
+machine runs the work. The phone shows two views of the same live workbench:
+**Cockpit** (驾驶舱) for concise progress and decisions, and **Onsite** (现场)
+for raw terminal-style live control.
 
-## V2 — Conversation-First
+## Remote Workbench
 
-**Default UX**: Send a plain text message. WLCodex starts a conversation and
-routes it to Codex for analysis, not task-ID operations.
+**Default workflow**: Codex analysis → Claude implementation → Codex verification.
 
-**Direct channels**:
-- `/codex <prompt>` — talk directly to Codex
-- `/claude <prompt>` — talk directly to Claude Code (when enabled)
-- `/auto <prompt>` — full Codex → Claude → Codex orchestration loop
+Send a plain text message. WLCodex routes it through the default engineer
+workflow. The Cockpit shows progress, asks for decisions, and summarizes results.
+The Onsite shows live agent output when you need raw visibility.
 
-**Compact context**: Model prompts use compact context packets, never raw
-Telegram transcripts. Token budget is a hard architectural constraint.
+### Product terminology
 
-**Legacy commands** (advanced/diagnostic): `/task`, `/continue`, `/steer`,
-`/tail`, `/events`, `/diff`, `/files`, `/pause`, `/abort`, `/archive`, `/fork`
+| Internal concept | User-facing (Chinese) | User-facing (English) |
+|---|---|---|
+| Workbench | 工作台 | Remote Workbench |
+| Cockpit view | 驾驶舱 | Cockpit |
+| Onsite view | 现场 | Onsite / Live Worksite |
+| Default orchestrated | 默认流程：Codex -> Claude -> Codex | Default engineer workflow |
+| Codex-only mode | 只问 Codex | Ask Codex only |
+| Claude-only mode | 只叫 Claude | Ask Claude only |
+| Open Onsite | 接管现场 | Open live worksite |
+| Leave Onsite | 回驾驶舱 | Return to Cockpit |
+| Codex verify after Claude | 让 Codex 验收 | Let Codex verify |
 
-**Menu commands**: `/new`, `/stop`, `/status`, `/sessions`, `/switch`, `/model`,
-`/verify`, `/health`, `/help`
+**Execution modes** (who does the work — separate from which view you use):
 
-## Interaction profiles
+| Mode | Trigger | Behavior |
+|------|---------|----------|
+| Default orchestrated | plain text or `/auto` | Codex → Claude → Codex |
+| Codex-only | `/codex <prompt>` | Codex only, no Claude |
+| Claude-only | `/claude <prompt>` | Claude only, no automatic Codex analysis or verification |
 
-WLCodex separates runtime orchestration from Telegram presentation.
+Codex-only is best for analysis, design, review, and verification.
+Claude-only is for direct hands-on implementation; Cockpit will offer a
+"让 Codex 验收" action after Claude-only work completes.
+
+After any direct run finishes, the next plain text message returns to the
+default orchestrated workflow.
+
+**Views** (how you see and steer the work):
+
+| View | Purpose | Shows | Hides |
+|------|---------|-------|-------|
+| Cockpit 驾驶舱 | Concise progress and decisions | Workbench title, execution mode, phase, agent, progress, approvals, result summary | Raw JSON, session IDs, long stdout, full diffs by default |
+| Onsite 现场 | Raw live worksite control | Live agent output, recent frames, tail controls, direct input | Cockpit summaries |
+
+Both views share the same workbench. Switching views does not restart work.
+Leaving the Onsite does not stop the underlying agent.
+
+## Interaction
 
 ```toml
 [interaction]
@@ -35,34 +62,36 @@ show_footer = false
 edit_min_interval_seconds = 1.0
 ```
 
-`natural` is the default chat surface: plain text starts or continues a
-conversation, Telegram shows typing while work starts, and model deltas stream
-into one edited message. This does not double model tokens because it forwards
-deltas from the same Codex/Claude run.
+`natural` is the recommended interaction style for the Cockpit view: plain text
+starts or continues a conversation, Telegram shows typing while work starts, and
+model deltas stream into one edited message. This does not double model tokens
+because it forwards deltas from the same Codex/Claude run.
 
-`legacy` preserves task-card style behavior for operator workflows.
+`legacy` uses task-card style rendering for operator workflows.
 
-`cockpit` is reserved for a future richer remote-control profile.
+`cockpit` is reserved for richer Cockpit view rendering; currently behaves like
+`legacy`.
 
-## V1 safety rules
+## Safety rules
 
 - Private Telegram chat only
 - Allowlisted Telegram user IDs only
-- New tasks use fresh Codex threads by default
-- History resumes only by explicit task selection
+- New work uses fresh Codex threads by default
+- History resumes only by explicit selection
 - Telegram status cards are never fed back into Codex context
 - SQLite is a local ledger, not automatic model memory
 - One active write task per workspace
 - App-server binds to loopback only (127.0.0.1)
+- Onsite frames are redacted before Telegram delivery (tokens, keys, secrets)
 
 ## Task Liveness
 
 Paused tasks still hold the workspace write slot — they count as "active write tasks"
-and block new `/task` reservations on the same workspace.  This is intentional: a
+and block new reservations on the same workspace. This is intentional: a
 paused task has an open Codex thread that may resume.
 
 The `TaskWatchdog` runs inside the `EventBridge` event pump (every
-`watchdog_interval_seconds`, default 60 s).  It scans all active tasks and:
+`watchdog_interval_seconds`, default 60 s). It scans all active tasks and:
 
 - Marks a task `task_timeout` when it has been stuck in RUNNING / QUEUED /
   WAITING_APPROVAL beyond its configured threshold (`max_running_seconds`,
@@ -72,7 +101,14 @@ The `TaskWatchdog` runs inside the `EventBridge` event pump (every
 
 On startup, `main.py` pauses any task that was RUNNING, QUEUED, or
 WAITING_APPROVAL during the previous run, then sends recovery notifications to
-the Telegram chat so the user can `/continue` or `/abort` each one.
+the Telegram chat so the user can continue or abort each one.
+
+## Recovery
+
+On daemon restart, WLCodex replays runtime events, rebuilds the active workbench
+state, and restores Cockpit and Onsite cursors. Live sessions are reattached when
+the transport supports it. Missing local processes are marked as orphaned.
+Cockpit remains usable even if Onsite reattach fails.
 
 ## Local setup
 
@@ -105,54 +141,62 @@ export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
 
 ## Telegram Commands
 
-Primary conversation UX:
+### Daily menu
+
+| Command | Label | Purpose |
+|---------|-------|---------|
+| `/new` | 新任务 | Start fresh work |
+| `/status` | 状态 | Show active workbench |
+| `/terminal` | 接管现场 | Open Onsite live worksite |
+| `/diff` | 变更 | Inspect file changes |
+| `/settings` | 设置 | Route, model, permissions, workspace |
+| `/help` | 帮助 | Compact guide |
+
+### Primary commands
 
 | Command | Description |
 |---------|-------------|
 | `/start` / `/help` | Show help |
 | `/health` | Backend health check |
-| plain text | Continue the active conversation; default mode is chief-engineer orchestration |
+| plain text | Continue the active workbench; default is Codex → Claude → Codex |
 | `/new [title]` | Start a fresh conversation |
-| `/codex <prompt>` | Send one direct analysis turn to Codex |
-| `/claude <prompt>` | Send one direct implementation turn to Claude Code |
-| `/auto <prompt>` | Run Codex analysis → Claude implementation → Codex verification |
-| `/status` | Show active conversation/task status |
-| `/sessions` | List conversations/thread mappings |
-| `/switch <workspace>` | Switch the active conversation workspace |
+| `/codex <prompt>` | Codex-only direct analysis |
+| `/claude <prompt>` | Claude-only direct implementation |
+| `/auto <prompt>` | Full Codex → Claude → Codex orchestration |
+| `/status` | Show active workbench status |
+| `/switch <workspace>` | Switch the active workspace |
 | `/model [name]` | Show or set the preferred model |
 | `/verify` | Ask Codex to verify the latest implementation evidence |
-| `/stop` | Stop the current active conversation task |
+| `/stop` | Stop the current active conversation |
 
-### Dual Surface Modes
-
-WLCodex supports two independent surfaces over the same conversation:
-**Product mode** (default) and **Terminal mode** (raw remote control).
+### View switching
 
 | Command | Description |
 |---------|-------------|
-| `/product` | Switch to product mode (phone-friendly event UX) |
-| `/terminal` | Switch to terminal mode (default agent: claude) |
-| `/terminal claude` | Switch to terminal mode with Claude agent |
-| `/terminal codex` | Switch to terminal mode with Codex agent |
-| `/terminal agent claude` | Switch to terminal mode with Claude agent (explicit) |
-| `/terminal agent codex` | Switch to terminal mode with Codex agent (explicit) |
-| `/terminal tail` | Resume terminal push / show latest output |
-| `/terminal pause` | Pause terminal push, keep session alive |
-| `/terminal detach` | Stop terminal push, keep session alive |
-| `/terminal product` | Switch back to product mode |
-| `/mode` | Show current surface mode |
+| `/terminal` | Open Onsite view; auto-selects the active agent when a session exists |
+| `/terminal claude` | Open Onsite with Claude agent |
+| `/terminal codex` | Open Onsite with Codex agent |
+| `/terminal tail` | Resume Onsite push / show latest output |
+| `/terminal pause` | Pause Onsite push, keep session alive |
+| `/terminal detach` | Leave Onsite view, keep session alive |
+| `/product` | Return to Cockpit view |
+| `/mode` | Show current view mode |
 
-- **Product mode** is the default. It renders structured event cards for a
-  phone-friendly experience.
-- **Terminal mode** is a raw control surface that may produce large output.
-  It is disabled by default (`terminal.enabled = false`) until live smoke passes.
-- Mode switches do not create new conversations. The conversation ID stays
-  the same across `/product` and `/terminal`.
-- Terminal detach stops Telegram output delivery but does not abort the
+- Cockpit (驾驶舱) is the default view. It renders structured status and
+  approval cards for a phone-friendly experience.
+- Onsite (现场) opens a raw live worksite view. Text sent in Onsite routes
+  directly to the selected agent.
+- View switches do not create new conversations. The workbench stays the same
+  across Cockpit and Onsite.
+- Leaving the Onsite stops Telegram output delivery but does not abort the
   underlying agent session.
+- Opening the Onsite when no session exists shows a start card with options to
+  start a session or return to Cockpit.
+- Onsite availability depends on operator configuration.
 
-Legacy task commands remain available for diagnostics and low-level app-server
-acceptance:
+### Legacy diagnostics
+
+Legacy commands remain available for diagnostics and low-level inspection:
 
 | Command | Description |
 |---------|-------------|
@@ -169,6 +213,8 @@ acceptance:
 | `/abort <id>` | Abort a running task |
 | `/archive <id>` | Archive a completed task |
 | `/fork <id> <prompt>` | Fork a task to a new thread |
+| `/sessions` | List conversation/thread mappings |
+| `/claude_mode` | Set Claude permission mode |
 
 ## Manual smoke test
 
@@ -178,11 +224,12 @@ acceptance:
    - Send `/new 真人 smoke` → Should create a fresh conversation
    - Send `请用中文只回复：wlcodex telegram live ok`
    - Observe a conversation-first response, not a raw `/task` card
-   - Send `/status` → Should show the active conversation status
+   - Send `/status` → Should show the active workbench status
    - Send `/sessions` → Should list the conversation/session
 
 Use `/codex <prompt>`, `/claude <prompt>`, or `/auto <prompt>` only when you
-want to force a specific route. Plain text is the default product path.
+want to force a specific execution mode. Plain text uses the default
+orchestrated workflow.
 
 ### Human smoke pass criteria
 
@@ -195,24 +242,28 @@ interaction profile:
 3. Telegram shows typing while the run is being prepared.
 4. Visible model output streams into one edited message instead of a sequence of
    duplicate status cards.
-5. The normal reply body does not expose task id, thread id, workspace, mode, or
-   token counters. Those details remain available through `/status` and
+5. The normal reply body does not expose task id, thread id, session IDs, workspace,
+   mode, or token counters. Those details remain available through `/status` and
    diagnostic commands.
 6. Completion shows a compact action row. `查看 diff` appears when the workspace
    really has a git diff, including changes made by Claude Code.
-7. `/codex <prompt>` streams Codex deltas from the same Codex run. It must not
-   start a second model call just to render Telegram output.
-8. `/claude <prompt>` streams Claude output when Claude is enabled. If Claude
-   returns a streaming error, the Telegram run fails visibly and the agent run is
-   recorded as `failed`, not left `queued`.
-9. `/auto <prompt>` runs the full Codex analysis → Claude implementation →
-   Codex verification chain. A passing run records analysis, implementation,
-   verification, orchestration status, decision, active Claude run, and
-   conversation summary in SQLite.
+7. `/codex <prompt>` runs Codex-only and does not call Claude.
+8. `/claude <prompt>` runs Claude-only and does not trigger automatic Codex
+   analysis or verification. Completion should offer a "让 Codex 验收" action.
+9. `/auto <prompt>` runs the full Codex → Claude → Codex chain. A passing run
+   records all phases in SQLite.
 10. If Claude fails during `/auto`, the orchestration stops as `failed`; Codex
     verification must not continue after the Claude stream error.
-11. Approval requests still appear as explicit approval cards with buttons, not
-    as mixed natural-chat text.
+11. Approval requests appear as explicit approval cards with buttons, not as
+    mixed natural-chat text.
+12. `/terminal` with no active session shows a start card (options to start a
+    session or return to Cockpit), never a dead-end error.
+13. Text sent in Onsite view routes to the live agent session, not the Cockpit
+    controller.
+14. Switching between Cockpit and Onsite preserves the workbench — work does not
+    restart and the active run is not lost.
+15. `/help` uses "驾驶舱", "接管现场", and "默认流程：Codex → Claude → Codex"; it
+    does not expose configuration keys like `terminal.enabled`.
 
 The human smoke is considered passed only when the visible Telegram behavior and
 the ledger state both match the criteria above. A green unit test run alone is
@@ -221,7 +272,7 @@ not enough evidence for this smoke.
 ## Live Telegram Smoke (Real Acceptance)
 
 The primary human smoke is conversation-first, as above. The automated live
-pytest gate below still validates the lower-level legacy `/task` path because it
+pytest gate below validates the lower-level legacy `/task` path because it
 asserts a real Codex app-server UUID in the SQLite `tasks` ledger. Treat it as a
 diagnostic app-server evidence gate, not the default user journey.
 

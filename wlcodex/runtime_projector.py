@@ -855,6 +855,19 @@ _TASK_EVENT_COMPAT_TYPES: dict[str, str] = {
     EventType.TERMINAL_SESSION_ABORTED: "terminal_session_aborted",
     EventType.PRODUCT_DISPLAY_FRAME: "product_display_frame",
     EventType.PRODUCT_PENDING_CONTEXT_RECORDED: "product_pending_context_recorded",
+    EventType.WORKBENCH_CREATED: "workbench_created",
+    EventType.WORKBENCH_VIEW_CHANGED: "workbench_view_changed",
+    EventType.WORKBENCH_EXECUTION_MODE_SELECTED: "workbench_execution_mode_selected",
+    EventType.WORKBENCH_ROUTE_DECIDED: "workbench_route_decided",
+    EventType.ONSITE_SESSION_STARTED: "onsite_session_started",
+    EventType.ONSITE_SESSION_ATTACHED: "onsite_session_attached",
+    EventType.ONSITE_SESSION_DETACHED: "onsite_session_detached",
+    EventType.ONSITE_SESSION_ORPHANED: "onsite_session_orphaned",
+    EventType.ONSITE_INPUT_SENT: "onsite_input_sent",
+    EventType.ONSITE_OUTPUT_FRAME: "onsite_output_frame",
+    EventType.ONSITE_CURSOR_ADVANCED: "onsite_cursor_advanced",
+    EventType.COCKPIT_CURSOR_ADVANCED: "cockpit_cursor_advanced",
+    EventType.COCKPIT_SUMMARY_RENDERED: "cockpit_summary_rendered",
 }
 
 
@@ -904,6 +917,22 @@ def _event_summary(event: RuntimeEvent) -> str:
         return f"Terminal {payload.get('agent', '?')} aborted"
     if etype == EventType.PRODUCT_PENDING_CONTEXT_RECORDED:
         return f"Pending context: {payload.get('text_preview', '?')[:80]}"
+    if etype == EventType.WORKBENCH_EXECUTION_MODE_SELECTED:
+        return f"Execution mode → {payload.get('execution_mode', '?')}"
+    if etype == EventType.WORKBENCH_VIEW_CHANGED:
+        return f"View {payload.get('previous_view', '?')} → {payload.get('view', '?')}"
+    if etype == EventType.WORKBENCH_CREATED:
+        return f"Workbench created ({payload.get('workspace_alias', '?')})"
+    if etype == EventType.ONSITE_SESSION_ORPHANED:
+        return f"Onsite session orphaned: {payload.get('agent', '?')} ({payload.get('reason', '?')})"
+    if etype == EventType.ONSITE_SESSION_STARTED:
+        return f"Onsite session started: {payload.get('agent', '?')}"
+    if etype == EventType.ONSITE_CURSOR_ADVANCED:
+        return f"Onsite cursor → {payload.get('position', '?')}"
+    if etype == EventType.COCKPIT_CURSOR_ADVANCED:
+        return f"Cockpit cursor → {payload.get('position', '?')}"
+    if etype == EventType.COCKPIT_SUMMARY_RENDERED:
+        return f"Cockpit summary: {str(payload.get('summary', ''))[:80]}"
     return etype
 
 

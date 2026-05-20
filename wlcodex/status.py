@@ -168,19 +168,21 @@ def render_health_card(
 
 
 def render_help() -> str:
-    return """WLCodex — 总工程师驾驶舱
+    return """WLCodex — 远程工作台驾驶舱
 
-双面模式：
-  /product — 切到手机端产品模式
-  /terminal — 切到远程终端模式
-  /terminal claude — 接入 Claude 终端
-  /terminal codex — 接入 Codex 终端
-  /terminal agent claude — 接入 Claude 终端（显式）
-  /terminal agent codex — 接入 Codex 终端（显式）
-  /terminal tail — 恢复终端推送 / 查看最新输出
-  /terminal pause — 暂停终端推送但保留会话
-  /terminal detach — 停止终端推送但保留会话
-  /terminal product — 切回产品模式
+默认流程：Codex -> Claude -> Codex
+
+驾驶舱与现场：
+  /product — 回驾驶舱
+  /terminal — 接管现场
+  /terminal claude — 接入 Claude 现场
+  /terminal codex — 接入 Codex 现场
+  /terminal agent claude — 接入 Claude 现场（显式）
+  /terminal agent codex — 接入 Codex 现场（显式）
+  /terminal tail — 恢复现场推送 / 查看最新输出
+  /terminal pause — 暂停现场推送但保留会话
+  /terminal detach — 停止现场推送但保留会话
+  /terminal product — 回驾驶舱
   /mode — 查看当前模式
 
 对话模式 — 直接发消息开始：
@@ -190,7 +192,7 @@ def render_help() -> str:
   • /auto <提示> — 完整 Codex 分析 → Claude 实施 → Codex 验收
 
 常用命令：
-  /new — 开始新对话
+  /new — 开始新任务
   /stop — 停止当前运行
   /status — 查看当前对话和任务
   /sessions — 查看会话列表
@@ -363,30 +365,35 @@ def render_conversation_help(profile: str = "natural") -> str:
     if profile == "natural":
         return "\n".join(
             [
-                "WLCodex",
+                "WLCodex 已连接",
                 "",
-                "直接发消息就能继续当前对话。",
-                "/product 手机端模式 · /terminal 远程终端",
-                "/new 新对话",
-                "/status 看状态",
-                "/diff 看变更",
-                "/model 模型 · /claude_mode Claude 权限",
-                "/help 帮助",
+                "默认流程：Codex -> Claude -> Codex",
+                "当前视图：驾驶舱",
+                "工作区：当前项目",
+                "Codex：可用",
+                "Claude：可用",
+                "现场接管：可用",
+                "",
+                "直接发消息开始。",
+                "",
+                "[新任务] [接管现场] [设置]",
             ]
         )
-    return """WLCodex — 你的总工程师驾驶舱
+    return """WLCodex — 远程工作台驾驶舱
 
-双面模式：
-  • /product — 切到手机端产品模式
-  • /terminal — 切到远程终端模式
-  • /terminal claude — 接入 Claude 终端
-  • /terminal codex — 接入 Codex 终端
-  • /terminal agent claude — 接入 Claude 终端（显式）
-  • /terminal agent codex — 接入 Codex 终端（显式）
-  • /terminal tail — 恢复终端推送
-  • /terminal pause — 暂停终端推送
-  • /terminal detach — 停止终端推送但保留会话
-  • /terminal product — 切回产品模式
+默认流程：Codex -> Claude -> Codex
+
+驾驶舱与现场：
+  • /product — 回驾驶舱
+  • /terminal — 接管现场
+  • /terminal claude — 接入 Claude 现场
+  • /terminal codex — 接入 Codex 现场
+  • /terminal agent claude — 接入 Claude 现场（显式）
+  • /terminal agent codex — 接入 Codex 现场（显式）
+  • /terminal tail — 恢复现场推送
+  • /terminal pause — 暂停现场推送
+  • /terminal detach — 停止现场推送但保留会话
+  • /terminal product — 回驾驶舱
   • /mode — 查看当前模式
 
 对话模式：
@@ -397,7 +404,7 @@ def render_conversation_help(profile: str = "natural") -> str:
   • /verify — Codex 验收最新结果
 
 常用命令：
-  • /new — 开始新对话
+  • /new — 开始新任务
   • /stop — 停止当前运行
   • /status — 查看当前对话状态
   • /sessions — 查看所有会话

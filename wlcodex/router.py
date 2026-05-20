@@ -150,6 +150,11 @@ class VerifyCommand:
 
 
 @dataclass(frozen=True)
+class SettingsCommand:
+    pass
+
+
+@dataclass(frozen=True)
 class ModeSwitchCommand:
     """Parsed surface mode switch command.
 
@@ -207,6 +212,7 @@ ParsedCommand = (
     | VerifyCommand
     | ModeSwitchCommand
     | TerminalSubCommand
+    | SettingsCommand
 )
 
 
@@ -220,6 +226,8 @@ def parse_command(text: str) -> ParsedCommand:
         return HelpCommand()
     if stripped == "/health":
         return HealthCommand()
+    if stripped == "/settings" or stripped.startswith("/settings "):
+        return SettingsCommand()
     if stripped == "/tasks":
         return ListTasksCommand()
     if stripped == "/status":
