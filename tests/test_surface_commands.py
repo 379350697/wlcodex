@@ -1623,3 +1623,48 @@ async def test_bare_terminal_event_payload_agent_is_correct():
     # Confirmation message must mention codex
     assert len(sent_messages) == 1
     assert "codex" in sent_messages[0][1]
+
+
+# --- Preview transport tests ---
+
+
+@pytest.mark.asyncio
+async def test_send_telegram_preview_waits_for_outbox_message_id(tmp_path):
+    from types import SimpleNamespace
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.telegram_app import WlCodexHandlers
+    from wlcodex.telegram_outbox import TelegramOutbox
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    outbox = TelegramOutbox(store=store)
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            return SimpleNamespace(message_id=4321)
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(
+            telegram=SimpleNamespace(allowed_user_ids=frozenset({123})),
+            interaction=SimpleNamespace(profile="natural"),
+            telegram_output=SimpleNamespace(preview_send_timeout_seconds=2.0),
+        ),
+        controller=SimpleNamespace(),
+        ledger=ledger,
+        approval_service=SimpleNamespace(),
+        bot=Bot(),
+        runtime_event_store=store,
+        outbox=outbox,
+    )
+
+    import asyncio
+
+    waiter = asyncio.create_task(
+        handlers.send_telegram_preview(1, "Codex 正在处理")
+    )
+    await asyncio.sleep(0)  # yield so waiter enqueues
+    await outbox.process_all()
+
+    assert await waiter == 4321

@@ -19,12 +19,18 @@ class TelegramTransport:
         answer_callback_fn: AnswerCallbackFn | None = None,
         *,
         outbox: object | None = None,
+        preview_send_fn: Callable[[int, str], Awaitable[int]] | None = None,
+        preview_edit_fn: Callable[[int, int, str, Buttons], Awaitable[None]] | None = None,
+        body_send_fn: Callable[[int, str, Buttons], Awaitable[int]] | None = None,
     ) -> None:
         self._send = send_fn
         self._edit = edit_fn
         self._typing = typing_fn
         self._answer_callback = answer_callback_fn
         self._outbox = outbox
+        self._preview_send = preview_send_fn
+        self._preview_edit = preview_edit_fn
+        self._body_send = body_send_fn
 
     async def send(self, chat_id: int, text: str, buttons: Buttons = None) -> int:
         if self._outbox is not None:
@@ -61,3 +67,21 @@ class TelegramTransport:
             return
         if self._answer_callback is not None:
             await self._answer_callback(text)
+
+    async def send_preview(self, chat_id: int, text: str) -> int:
+        if self._preview_send is not None:
+            return await self._preview_send(chat_id, text)
+        return await self.send(chat_id, text)
+
+    async def edit_preview(
+        self, chat_id: int, message_id: int, text: str, buttons: Buttons = None
+    ) -> None:
+        if self._preview_edit is not None:
+            await self._preview_edit(chat_id, message_id, text, buttons)
+        else:
+            await self.edit(chat_id, message_id, text, buttons)
+
+    async def send_body(self, chat_id: int, text: str, buttons: Buttons = None) -> int:
+        if self._body_send is not None:
+            return await self._body_send(chat_id, text, buttons)
+        return await self.send(chat_id, text, buttons)

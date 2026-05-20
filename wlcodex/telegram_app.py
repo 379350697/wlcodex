@@ -310,6 +310,34 @@ class WlCodexHandlers:
             min_interval_seconds=min_interval,
         )
 
+    async def send_telegram_preview(self, chat_id: int, text: str) -> int:
+        if self._outbox is None:
+            return await self._raw_send_message(chat_id, text)
+        timeout = float(
+            getattr(
+                getattr(self._config, "telegram_output", None),
+                "preview_send_timeout_seconds",
+                5.0,
+            )
+        )
+        return await self._outbox.enqueue_send_wait(
+            chat_id,
+            text,
+            send_fn=self._raw_send_message,
+            edit_fn=self._raw_edit_message,
+            correlation_id="preview-send",
+            timeout_seconds=timeout,
+        )
+
+    async def edit_telegram_preview(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        buttons: list[list[dict[str, str]]] | None = None,
+    ) -> None:
+        await self.edit_telegram(chat_id, message_id, text, buttons)
+
     def create_streaming_renderer(self, chat_id: int) -> StreamingRenderer:
         """Create a StreamingRenderer bound to this handler's send/edit callbacks."""
         return StreamingRenderer(
