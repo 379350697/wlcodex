@@ -214,3 +214,86 @@ async def test_typing_task_is_none_does_not_crash() -> None:
     # Must not crash
     await renderer.handle(InteractionEvent(event_type="run_started", chat_id=1))
     await renderer.handle(InteractionEvent(event_type="run_completed", chat_id=1))
+
+
+# --- Output manager integration tests ---
+
+
+class FakePreviewTransport(TelegramTransport):
+    """Transport that supports preview send/edit/body for output manager."""
+
+    def __init__(self, send_fn, edit_fn, typing_fn):
+        super().__init__(send_fn, edit_fn, typing_fn)
+        self._preview_send_fn = send_fn
+        self._preview_edit_fn = edit_fn
+        self._body_send_fn = send_fn
+
+    async def send_preview(self, chat_id, text):
+        return await self._preview_send_fn(chat_id, text)
+
+    async def edit_preview(self, chat_id, message_id, text, buttons=None):
+        await self._preview_edit_fn(chat_id, message_id, text, buttons)
+
+    async def send_body(self, chat_id, text, buttons=None):
+        return await self._body_send_fn(chat_id, text, buttons)
+
+
+@pytest.mark.asyncio
+async def test_product_renderer_buffers_deltas_and_sends_final_once():
+    from types import SimpleNamespace
+
+    fake = FakeTransport()
+
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(
+            semantic_min_chars=20,
+            semantic_max_chars=80,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+
+    await renderer.handle(InteractionEvent(event_type="run_started", chat_id=1, conversation_id=7, task_id=10))
+    await renderer.handle(InteractionEvent(event_type="text_delta", chat_id=1, conversation_id=7, task_id=10, text="第一段。"))
+    await renderer.handle(InteractionEvent(event_type="text_delta", chat_id=1, conversation_id=7, task_id=10, text="第二段。"))
+
+    body_messages_before_completion = [m for m in fake.sent if "第一段" in m[1]]
+    assert body_messages_before_completion == []
+
+    await renderer.handle(InteractionEvent(event_type="run_completed", chat_id=1, conversation_id=7, task_id=10))
+
+    body_messages = [m for m in fake.sent if "第一段。第二段。" in m[1]]
+    assert len(body_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_renderer_sends_semantic_blocks_while_running():
+    from types import SimpleNamespace
+
+    fake = FakeTransport()
+
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "terminal",
+        telegram_output_config=SimpleNamespace(
+            semantic_min_chars=10,
+            semantic_max_chars=30,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+
+    await renderer.handle(InteractionEvent(event_type="run_started", chat_id=1, conversation_id=7, task_id=10))
+    await renderer.handle(InteractionEvent(event_type="text_delta", chat_id=1, conversation_id=7, task_id=10, text="第一段很长。\n\n第二段继续。"))
+
+    assert any(message[1] == "第一段很长。" for message in fake.sent)

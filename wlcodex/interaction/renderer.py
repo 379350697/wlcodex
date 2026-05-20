@@ -7,6 +7,11 @@ from wlcodex.interaction.events import InteractionEvent
 from wlcodex.interaction.profiles import InteractionProfile
 from wlcodex.interaction.transport import TelegramTransport
 from wlcodex.streaming import StreamingRenderer
+from wlcodex.telegram_output import (
+    OutputRunKey,
+    OutputSurface,
+    TelegramOutputManager,
+)
 
 if TYPE_CHECKING:
     from wlcodex.interaction.runtime_renderer import RuntimeProgressManager
@@ -26,6 +31,8 @@ class InteractionRenderer:
         profile: InteractionProfile,
         min_interval_seconds: float = 1.0,
         runtime_progress: "RuntimeProgressManager | None" = None,
+        surface_resolver=None,
+        telegram_output_config=None,
     ) -> None:
         self._transport = transport
         self._profile = profile
@@ -33,6 +40,21 @@ class InteractionRenderer:
         self._runtime_progress = runtime_progress
         self._sessions: dict[tuple[int, int], _StreamSession] = {}
         self._typing_tasks: dict[tuple[int, int], object] = {}
+        self._surface_resolver = surface_resolver or (lambda _chat_id: "product")
+        self._output_manager = TelegramOutputManager(
+            transport=transport,
+            semantic_min_chars=getattr(telegram_output_config, "semantic_min_chars", 900),
+            semantic_max_chars=getattr(telegram_output_config, "semantic_max_chars", 3200),
+            final_chunk_chars=getattr(telegram_output_config, "final_chunk_chars", 3900),
+        ) if telegram_output_config is not None else None
+
+    def _output_key(self, event: InteractionEvent) -> OutputRunKey:
+        run_id = str(event.task_id or event.thread_id or "chat")
+        return OutputRunKey(
+            chat_id=event.chat_id,
+            conversation_id=event.conversation_id or 0,
+            run_id=run_id,
+        )
 
     async def handle(self, event: InteractionEvent) -> None:
         try:
@@ -64,6 +86,16 @@ class InteractionRenderer:
 
     async def _handle_started(self, event: InteractionEvent) -> None:
         key = self._key(event)
+        if self._output_manager is not None:
+            ok = self._output_key(event)
+            surface = OutputSurface.TERMINAL if self._surface_resolver(event.chat_id) == "terminal" else OutputSurface.PRODUCT
+            text = self._profile.started_text(event) or "正在处理"
+            await self._output_manager.start(
+                ok,
+                surface=surface,
+                text=text,
+            )
+            return
         typing_task = await self._transport.typing(event.chat_id)
         if typing_task is not None:
             self._typing_tasks[key] = typing_task
@@ -73,6 +105,9 @@ class InteractionRenderer:
 
     async def _handle_text_delta(self, event: InteractionEvent) -> None:
         if not event.text:
+            return
+        if self._output_manager is not None:
+            await self._output_manager.append_text(self._output_key(event), event.text)
             return
         key = self._key(event)
         session = self._sessions.get(key)
@@ -95,6 +130,14 @@ class InteractionRenderer:
     async def _handle_completed(self, event: InteractionEvent) -> None:
         key = self._key(event)
         self._cancel_typing(key)
+        if self._output_manager is not None:
+            conversation_id = event.conversation_id or 0
+            buttons = self._profile.completion_buttons(
+                conversation_id=conversation_id,
+                has_diff=bool(event.metadata.get("has_diff", False)),
+            )
+            await self._output_manager.complete(self._output_key(event), buttons=buttons)
+            return
         session = self._sessions.get(key)
         if session is not None:
             conversation_id = event.conversation_id or session.conversation_id
@@ -116,6 +159,17 @@ class InteractionRenderer:
     async def _handle_failed(self, event: InteractionEvent) -> None:
         key = self._key(event)
         self._cancel_typing(key)
+        if self._output_manager is not None:
+            state = event.metadata.get("runtime_state")
+            if state in ("cancelled", "aborted") or "interrupted" in (event.text or ""):
+                await self._output_manager.interrupt(self._output_key(event))
+            else:
+                text = self._profile.error_text(event.text or event.summary)
+                await self._output_manager.complete(
+                    self._output_key(event),
+                    buttons=[[{"text": "重试", "callback_data": "retry"}]],
+                )
+            return
         session = self._sessions.get(key)
         text = self._profile.error_text(event.text or event.summary)
         if session is None:

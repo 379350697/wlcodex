@@ -299,15 +299,24 @@ class WlCodexHandlers:
         min_interval = float(
             getattr(interaction, "edit_min_interval_seconds", 1.0)
         )
+        telegram_output = getattr(self._config, "telegram_output", None)
+        # Use preview-aware transport when telegram_output is configured
+        # so the output manager can wait for real message_ids.
         transport = TelegramTransport(
             self.send_telegram,
             self.edit_telegram,
             self._start_typing,
+            outbox=self._outbox,
+            preview_send_fn=self.send_telegram_preview if telegram_output else None,
+            preview_edit_fn=self.edit_telegram_preview if telegram_output else None,
+            body_send_fn=self.send_telegram if telegram_output else None,
         )
         return InteractionRenderer(
             transport=transport,
             profile=profile_from_name(profile_name),
             min_interval_seconds=min_interval,
+            surface_resolver=self._get_active_surface_mode if telegram_output else None,
+            telegram_output_config=telegram_output,
         )
 
     async def send_telegram_preview(self, chat_id: int, text: str) -> int:
