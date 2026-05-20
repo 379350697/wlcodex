@@ -424,6 +424,33 @@ class RawVerboseStreamingOrchestrator:
         )
 
 
+class ReplyOnlyStreamingOrchestrator:
+    async def run_streaming(
+        self,
+        _prompt: str,
+        conversation_context: dict[str, Any] | None = None,
+    ):
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_STARTED,
+            text="analysis start",
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_COMPLETE,
+            text="wlcodex telegram live ok",
+            full_text="wlcodex telegram live ok",
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.COMPLETE,
+            text="wlcodex telegram live ok",
+            full_text="wlcodex telegram live ok",
+            agent="codex",
+            result_status="passed",
+            round_num=0,
+        )
+
+
 @pytest.mark.asyncio
 async def test_orchestration_runner_records_passed_background_result(
     tmp_path: Path,
@@ -580,6 +607,60 @@ async def test_orchestration_runner_suppresses_phase_text_delta_when_runtime_pro
     assert "Claude 改完了" not in visible_text
     assert "我在验收改动" not in visible_text
     assert "验收结果出来了" not in visible_text
+
+
+@pytest.mark.asyncio
+async def test_orchestration_runner_delivers_reply_only_answer_with_runtime_progress(
+    tmp_path: Path,
+) -> None:
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    renderer._runtime_progress = object()
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="真人历史现场 smoke 2",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task(
+        "wlcodex", "请用中文只回复：wlcodex telegram live ok",
+        telegram_chat_id=100,
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "reply only")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: ReplyOnlyStreamingOrchestrator(),
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="请用中文只回复：wlcodex telegram live ok",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+    )
+    await background_task
+
+    visible_text = "\n".join(
+        event.text for event in renderer.events if event.event_type == "text_delta"
+    )
+    assert "wlcodex telegram live ok" in visible_text
+    completed_events = [
+        event for event in renderer.events if event.event_type == "run_completed"
+    ]
+    assert completed_events
+    assert completed_events[-1].metadata["runtime_state"].phase == "completed"
+    assert renderer.events[-1].event_type == "run_completed"
 
 
 @pytest.mark.asyncio

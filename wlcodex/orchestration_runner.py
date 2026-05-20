@@ -1191,6 +1191,17 @@ class OrchestrationRunner:
                                 and not verification_text
                             )
                             if analysis_only:
+                                reply_text = (
+                                    terminal_text
+                                    or codex_analysis_text
+                                ).strip()
+                                if reply_text:
+                                    await self._emit_text_delta(
+                                        chat_id,
+                                        task_id,
+                                        conversation.id,
+                                        reply_text,
+                                    )
                                 last_verification_decision = "pass"
                                 self._emit_event(RuntimeEvent(
                                     schema_version=1,
@@ -1234,7 +1245,10 @@ class OrchestrationRunner:
                             task_id=task_id,
                         ))
                         await self._emit_completed(
-                            chat_id, task_id, conversation.id, workspace_path
+                            chat_id, task_id, conversation.id, workspace_path,
+                            runtime_state=self._build_runtime_state(
+                                "completed", is_terminal=True,
+                            ),
                         )
                     elif orch_result_status == "needs_user":
                         self._ledger.set_task_status(task_id, TaskStatus.FAILED)
@@ -1407,22 +1421,26 @@ class OrchestrationRunner:
         task_id: int,
         conversation_id: int,
         workspace_path: str,
+        runtime_state: RuntimeRunState | None = None,
     ) -> None:
         if self._interaction_renderer is None:
             return
         task = self._service.get_task(task_id)
+        metadata = {
+            "has_diff": (
+                _workspace_has_changes(workspace_path)
+                or bool(task.changed_file_count)
+            ),
+        }
+        if runtime_state is not None:
+            metadata["runtime_state"] = runtime_state
         await self._interaction_renderer.handle(
             InteractionEvent(
                 event_type="run_completed",
                 chat_id=chat_id,
                 task_id=task_id,
                 conversation_id=conversation_id,
-                metadata={
-                    "has_diff": (
-                        _workspace_has_changes(workspace_path)
-                        or bool(task.changed_file_count)
-                    ),
-                },
+                metadata=metadata,
             )
         )
 

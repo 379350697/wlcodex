@@ -256,6 +256,97 @@ async def test_onsite_text_routes_to_terminal_manager_not_controller():
     assert "ext-99" not in repr(input_events[0].payload)
 
 
+@pytest.mark.asyncio
+async def test_onsite_text_uses_runtime_event_mode_without_falling_to_product(
+    tmp_path,
+):
+    """A persisted terminal mode switch must route the next plain text onsite.
+
+    This covers the live path after selecting a historical session from
+    /sessions.  The user does not send /terminal before the next message.
+    """
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import (
+        AggregateType,
+        EventSource,
+        EventType,
+        RuntimeEvent,
+        Visibility,
+        now_iso,
+    )
+    from wlcodex.surfaces.terminal.models import TerminalSessionRef
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=200,
+        user_id=123,
+        title="真人历史现场 smoke 2",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.CONVERSATION_MODE_SWITCHED,
+        aggregate_type=AggregateType.CONVERSATION,
+        aggregate_id=str(conversation.id),
+        correlation_id="mode-switch-test",
+        source=EventSource.TELEGRAM,
+        actor="user",
+        visibility=Visibility.USER,
+        payload={
+            "chat_id": 200,
+            "conversation_id": conversation.id,
+            "from_mode": "product",
+            "to_mode": "terminal",
+            "active_agent": "codex",
+        },
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+    ))
+
+    session_ref = TerminalSessionRef(
+        conversation_id=conversation.id,
+        agent="codex",
+        strategy="exec",
+        external_session_id="thread-live-ok",
+        status="attached",
+    )
+    terminal_mgr = MagicMock()
+    terminal_mgr.active_for_conversation = MagicMock(return_value=session_ref)
+    terminal_mgr.send_input = AsyncMock(return_value=None)
+
+    controller = MagicMock()
+    controller.handle = AsyncMock()
+    controller.handle_conversation_text = AsyncMock(
+        return_value=SimpleNamespace(
+            text="product path should not run",
+            buttons=None,
+            already_rendered=False,
+        )
+    )
+
+    handlers = _make_handlers(
+        controller=controller,
+        ledger=ledger,
+        runtime_store=store,
+        terminal_manager=terminal_mgr,
+    )
+
+    await handlers.conversation_text(
+        _make_update("为什么你没有反馈回来，是wlcodex的问题吗", chat_id=200),
+        None,
+    )
+
+    terminal_mgr.send_input.assert_called_once_with(
+        session_ref, "为什么你没有反馈回来，是wlcodex的问题吗"
+    )
+    controller.handle.assert_not_called()
+    controller.handle_conversation_text.assert_not_called()
+
+
 # ── Onsite text without session → start card ───────────────────────
 
 

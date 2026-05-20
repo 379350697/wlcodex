@@ -952,7 +952,7 @@ class WlCodexHandlers:
             ).fetchone()
             if row is not None:
                 import json as _json
-                raw = row["payload"]
+                raw = row["payload_json"]
                 payload = _json.loads(raw) if isinstance(raw, str) else raw
                 return payload.get("to_mode", "product")
         except Exception:
