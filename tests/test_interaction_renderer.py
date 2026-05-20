@@ -297,3 +297,36 @@ async def test_terminal_renderer_sends_semantic_blocks_while_running():
     await renderer.handle(InteractionEvent(event_type="text_delta", chat_id=1, conversation_id=7, task_id=10, text="第一段很长。\n\n第二段继续。"))
 
     assert any(message[1] == "第一段很长。" for message in fake.sent)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_closes_old_output_session_before_new_run():
+    from types import SimpleNamespace
+
+    fake = FakeTransport()
+
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(
+            semantic_min_chars=20,
+            semantic_max_chars=80,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+
+    await renderer.handle(InteractionEvent(event_type="run_started", chat_id=1, conversation_id=7, task_id=10))
+    await renderer.handle(InteractionEvent(event_type="text_delta", chat_id=1, conversation_id=7, task_id=10, text="旧输出"))
+    await renderer.handle(InteractionEvent(event_type="run_failed", chat_id=1, conversation_id=7, task_id=10, text="interrupted", metadata={"runtime_state": "cancelled"}))
+    await renderer.handle(InteractionEvent(event_type="run_started", chat_id=1, conversation_id=7, task_id=11))
+    await renderer.handle(InteractionEvent(event_type="text_delta", chat_id=1, conversation_id=7, task_id=11, text="新输出"))
+    await renderer.handle(InteractionEvent(event_type="run_completed", chat_id=1, conversation_id=7, task_id=11))
+
+    assert any("已打断" in edit[2] for edit in fake.edited)
+    assert any("新输出" in sent[1] for sent in fake.sent)
+    assert not any("旧输出新输出" in sent[1] for sent in fake.sent)
