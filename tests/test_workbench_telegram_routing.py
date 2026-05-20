@@ -814,3 +814,170 @@ async def test_start_card_buttons_identical_from_both_call_sites():
     assert seen_labels == expected_labels, (
         f"Expected labels {expected_labels}, got {seen_labels}"
     )
+
+
+# ── Historical continuation lifecycle ───────────────────────────────
+
+
+class _ContinuationTerminalManager:
+    def __init__(self, *, fail_on_send: bool = False):
+        self.fail_on_send = fail_on_send
+        self.attached: list[SimpleNamespace] = []
+        self.inputs: list[tuple[object, str]] = []
+
+    def attach(self, **kwargs):
+        ref = SimpleNamespace(**kwargs, status="attached")
+        self.attached.append(ref)
+        return ref
+
+    def active_for_conversation(self, conversation_id: int):
+        return self.attached[-1] if self.attached else None
+
+    async def send_input(self, ref, text: str):
+        self.inputs.append((ref, text))
+        if self.fail_on_send:
+            raise RuntimeError("terminal send failed")
+        return SimpleNamespace(text="ok")
+
+
+def _make_continuation_harness(tmp_path, terminal_manager):
+    from wlcodex.config import WorkspaceConfig
+    from wlcodex.db import Ledger
+    from wlcodex.task_service import TaskService
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    conversation = ledger.create_conversation(
+        chat_id=7001,
+        user_id=100,
+        title="历史现场",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    service = TaskService(
+        ledger,
+        (WorkspaceConfig("wlcodex", tmp_path, True),),
+    )
+    controller = SimpleNamespace(_service=service)
+    handlers = _make_handlers(
+        controller=controller,
+        ledger=ledger,
+        terminal_manager=terminal_manager,
+    )
+    return handlers, ledger, service, conversation
+
+
+@pytest.mark.asyncio
+async def test_pending_continuation_marks_task_and_run_done_and_releases_lock(tmp_path):
+    from wlcodex.models import AgentRunStatus, TaskStatus
+
+    terminal_mgr = _ContinuationTerminalManager()
+    handlers, ledger, service, conversation = _make_continuation_harness(
+        tmp_path, terminal_mgr,
+    )
+
+    pending = {
+        "agent": "claude",
+        "internal_ref": "cl-session-1",
+        "title": "修复历史现场",
+        "source_run_id": 1,
+        "summary_only": False,
+    }
+
+    await handlers._execute_pending_continuation(
+        7001, conversation.id, conversation, "continue from history", pending,
+    )
+
+    task = service.list_tasks()[0]
+    runs = ledger.list_agent_runs(conversation.id)
+
+    assert task.status is TaskStatus.DONE
+    assert runs[0].status == AgentRunStatus.DONE.value
+    assert runs[0].hidden_task_id == task.id
+    assert runs[0].external_session_id == "cl-session-1"
+    assert terminal_mgr.inputs[0][1] == "continue from history"
+
+    # The continuation ticket must not keep the workspace locked.
+    next_task = service.reserve_task("wlcodex", "next work", telegram_chat_id=7001)
+    assert next_task.id != task.id
+
+
+@pytest.mark.asyncio
+async def test_pending_continuation_failure_marks_failed_and_releases_lock(tmp_path):
+    from wlcodex.models import AgentRunStatus, TaskStatus
+
+    terminal_mgr = _ContinuationTerminalManager(fail_on_send=True)
+    handlers, ledger, service, conversation = _make_continuation_harness(
+        tmp_path, terminal_mgr,
+    )
+
+    pending = {
+        "agent": "claude",
+        "internal_ref": "cl-session-1",
+        "title": "修复历史现场",
+        "source_run_id": 1,
+        "summary_only": False,
+    }
+
+    await handlers._execute_pending_continuation(
+        7001, conversation.id, conversation, "continue from history", pending,
+    )
+
+    task = service.list_tasks()[0]
+    runs = ledger.list_agent_runs(conversation.id)
+
+    assert task.status is TaskStatus.FAILED
+    assert runs[0].status == AgentRunStatus.FAILED.value
+    assert runs[0].hidden_task_id == task.id
+
+    next_task = service.reserve_task("wlcodex", "next work", telegram_chat_id=7001)
+    assert next_task.id != task.id
+
+
+@pytest.mark.asyncio
+async def test_resume_from_summary_prepares_pending_without_raw_attach(tmp_path):
+    from wlcodex.db import Ledger
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    conversation = ledger.create_conversation(
+        chat_id=7001,
+        user_id=100,
+        title="历史现场",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    run = ledger.create_agent_run(
+        conversation_id=conversation.id,
+        agent="claude",
+        role="implementation",
+        prompt_packet_summary="只有摘要，没有 raw session",
+    )
+    ledger.update_agent_run_status(
+        run.id,
+        "done",
+        completion_summary="只有摘要，没有 raw session",
+    )
+
+    terminal_mgr = MagicMock()
+    terminal_mgr.attach_historical = MagicMock(
+        side_effect=ValueError("summary-only cannot raw attach")
+    )
+    handlers = _make_handlers(ledger=ledger, terminal_manager=terminal_mgr)
+
+    query = SimpleNamespace(
+        answer=AsyncMock(),
+        message=SimpleNamespace(
+            chat_id=7001,
+            message_id=99,
+            chat=SimpleNamespace(id=7001),
+        ),
+    )
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=7001))
+
+    await handlers._handle_session_picker_callback(
+        update, query, conversation.id, ("resume_from_summary", run.id),
+    )
+
+    terminal_mgr.attach_historical.assert_not_called()
+    assert handlers._pending_continuation[conversation.id]["summary_only"] is True

@@ -1034,8 +1034,8 @@ class WlCodexHandlers:
         All sub-buttons encode *conversation_id* (Workbench identity), never
         chat_id.  After attach_session / resume_session the view mode is
         switched to Onsite so the next plain text routes to the terminal
-        manager.  resume_session and resume_from_summary also create an
-        internal agent_run record linked to the historical session.
+        manager.  resume_session and resume_from_summary store a pending
+        continuation; the first Onsite text creates the internal task/run.
         """
         kind, source_run_id = action
         chat_id = update.effective_chat.id
@@ -1101,8 +1101,15 @@ class WlCodexHandlers:
                 "source_run_id": source_run_id,
                 "summary_only": True,
             }
-            await self._attach_and_enter_onsite(
-                update, query, conversation_id, chat_id, session,
+            self._record_mode_switch(
+                conversation_id, chat_id, "terminal", session.agent,
+            )
+            await self._safe_callback_answer(query, "已准备")
+            await self._safe_callback_edit(
+                update, query,
+                f"已准备从摘要新开 {agent_label} 现场。\n"
+                f"标题：{session.title}\n\n"
+                "直接发送下一条消息即可继续。",
             )
 
         elif kind == "codex_verify_session":
@@ -1184,15 +1191,40 @@ class WlCodexHandlers:
     async def _execute_pending_continuation(
         self, chat_id: int, conversation_id: int,
         active: object, text: str, pending: dict,
-    ) -> None:
+    ) -> bool:
         """Create hidden task + agent_run for a pending history continuation.
 
         Called from _handle_terminal_text on the first Onsite text after
         the user tapped 继续修改 or 从摘要新开 in the session picker.
+        Returns True when the pending continuation was consumed.
         """
-        from wlcodex.workbench.sessions import AgentSessionLibrary
+        from wlcodex.models import AgentRunStatus, TaskStatus
+
+        if pending.get("summary_only"):
+            agent = pending["agent"]
+            cmd = "/claude" if agent == "claude" else "/codex"
+            prompt = (
+                f"{cmd} 从历史现场摘要继续：{pending['title']}\n\n"
+                f"用户输入：{text}"
+            )
+            try:
+                response = await self._controller.handle(
+                    prompt, {"chat_id": chat_id},
+                )
+            except Exception:
+                logger.exception("Summary-only continuation failed")
+                await self.send_telegram(
+                    chat_id,
+                    "从摘要新开失败。请稍后重试或回驾驶舱重新开始。",
+                )
+                return False
+            if not getattr(response, "already_rendered", False) and response.text:
+                await self.send_telegram(chat_id, response.text, response.buttons)
+            return True
 
         # 1. Create internal task (workspace lock).
+        task = None
+        agent_run = None
         try:
             task = self._controller._service.reserve_task(
                 active.workspace_alias,
@@ -1206,7 +1238,7 @@ class WlCodexHandlers:
                 chat_id,
                 "工作区正忙，请稍后重试或使用 /new 新开工作台。",
             )
-            return
+            return False
 
         # 2. Create agent_run linked to task.
         external_session_id = pending.get("internal_ref") or None
@@ -1218,7 +1250,20 @@ class WlCodexHandlers:
             external_session_id=external_session_id,
             prompt_packet_summary=f"继续历史现场：{pending['title'][:200]}",
         )
-        self._ledger.update_agent_run_status(agent_run.id, "running")
+        self._ledger.update_agent_run_status(
+            agent_run.id, AgentRunStatus.RUNNING.value,
+        )
+        self._ledger.set_task_status(
+            task.id, TaskStatus.RUNNING, phase="continuation",
+        )
+        try:
+            self._ledger.add_event(
+                task.id,
+                "historical_continuation_started",
+                {"agent_run_id": agent_run.id},
+            )
+        except Exception:
+            logger.debug("Unable to record continuation start", exc_info=True)
 
         # 3. Attach terminal session with the original session reference.
         if self._terminal_manager is not None and external_session_id:
@@ -1242,28 +1287,59 @@ class WlCodexHandlers:
             )
 
         # 4. Send user text as resume input.
-        if session_ref is not None:
-            try:
+        try:
+            if session_ref is not None:
                 await self._terminal_manager.send_input(session_ref, text)
-            except Exception:
-                logger.exception("Resume input failed")
-                await self.send_telegram(
-                    chat_id,
-                    "发送输入失败。使用 /terminal 重新接入后再试。",
+            else:
+                raise RuntimeError("no terminal session for continuation")
+        except Exception as exc:
+            logger.exception("Resume input failed")
+            self._ledger.update_agent_run_status(
+                agent_run.id,
+                AgentRunStatus.FAILED.value,
+                completion_summary=str(exc)[:2000],
+            )
+            self._ledger.set_task_status(
+                task.id,
+                TaskStatus.FAILED,
+                phase="continuation",
+                error=str(exc)[:240],
+            )
+            try:
+                self._ledger.add_event(
+                    task.id,
+                    "historical_continuation_failed",
+                    {"agent_run_id": agent_run.id, "error": str(exc)[:500]},
                 )
-                return
-        else:
+            except Exception:
+                logger.debug("Unable to record continuation failure", exc_info=True)
             await self.send_telegram(
                 chat_id,
-                "无法接入历史现场。使用 /terminal 重新连接。",
+                "发送输入失败。使用 /terminal 重新接入后再试。",
             )
-            return
+            return True
 
-        # 5. Mark task running.
+        # 5. Mark the dispatch ticket terminal so it does not hold the lock.
+        self._ledger.update_agent_run_status(
+            agent_run.id,
+            AgentRunStatus.DONE.value,
+            completion_summary="历史现场继续输入已发送",
+        )
+        self._ledger.set_task_status(
+            task.id,
+            TaskStatus.DONE,
+            phase="continuation",
+            summary="历史现场继续输入已发送",
+        )
         try:
-            self._ledger.set_task_status(task.id, "running", phase="continuation")
+            self._ledger.add_event(
+                task.id,
+                "historical_continuation_completed",
+                {"agent_run_id": agent_run.id},
+            )
         except Exception:
-            pass
+            logger.debug("Unable to record continuation completion", exc_info=True)
+        return True
 
     async def _handle_terminal_text(self, chat_id: int, text: str) -> None:
         """Route text to the terminal input path when in terminal mode.
@@ -1286,10 +1362,12 @@ class WlCodexHandlers:
         # BLOCKER B: pending historical continuation — create task/run
         # on the first Onsite text, then send resume input.
         if conversation_id is not None and conversation_id in self._pending_continuation:
-            pending = self._pending_continuation.pop(conversation_id)
-            await self._execute_pending_continuation(
+            pending = self._pending_continuation[conversation_id]
+            consumed = await self._execute_pending_continuation(
                 chat_id, conversation_id, active, text, pending,
             )
+            if consumed:
+                self._pending_continuation.pop(conversation_id, None)
             return
 
         # Try to route through the terminal manager when available.
