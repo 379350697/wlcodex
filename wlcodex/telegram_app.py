@@ -952,7 +952,10 @@ class WlCodexHandlers:
             ).fetchone()
             if row is not None:
                 import json as _json
-                raw = row["payload_json"]
+                try:
+                    raw = row["payload_json"]
+                except Exception:
+                    raw = row["payload"]
                 payload = _json.loads(raw) if isinstance(raw, str) else raw
                 return payload.get("to_mode", "product")
         except Exception:
@@ -1385,8 +1388,8 @@ class WlCodexHandlers:
         """Route text to the terminal input path when in terminal mode.
 
         If a terminal manager is wired and an active session exists for the
-        current conversation, the text is sent as terminal input and a
-        ``terminal.session.input.sent`` runtime event is recorded.
+        current conversation, the user gets the same busy-choice card as the
+        product surface instead of an implicit raw send.
 
         If no terminal manager or no active session is available, this must
         NOT silently fall through to the product orchestrator.  It sends an
@@ -1416,6 +1419,30 @@ class WlCodexHandlers:
                 conversation_id
             )
             if session_ref is not None:
+                busy_handler = getattr(
+                    self._controller, "handle_terminal_workspace_busy", None
+                )
+                if (
+                    busy_handler is not None
+                    and asyncio.iscoroutinefunction(busy_handler)
+                ):
+                    agent = str(getattr(session_ref, "agent", "") or "现场")
+                    agent_label = {
+                        "codex": "Codex",
+                        "claude": "Claude",
+                    }.get(agent.lower(), agent)
+                    response = await busy_handler(
+                        active,
+                        text,
+                        agent_label=agent_label,
+                    )
+                    await self.send_telegram(
+                        chat_id,
+                        response.text,
+                        response.buttons,
+                    )
+                    return
+
                 try:
                     result = await self._terminal_manager.send_input(session_ref, text)
                 except ValueError as exc:

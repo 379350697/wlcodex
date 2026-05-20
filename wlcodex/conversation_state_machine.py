@@ -217,28 +217,44 @@ def _busy_decision(
 
 # Inline callback data prefixes for workspace busy choices.
 BUSY_APPEND = "busy_append"
+BUSY_INTERRUPT = "busy_interrupt"
 BUSY_QUEUE = "busy_queue"
 BUSY_CANCEL = "busy_cancel"
+BUSY_NEW_SESSION = "busy_new_session"
 
 
 def build_workspace_busy_buttons(
-    conversation_id: int,
+    conversation_id: int, *, agent_label: str = "现场"
 ) -> list[list[dict[str, str]]]:
     """Build inline keyboard buttons for workspace busy user choice."""
-    return [[
-        {
-            "text": "追加到当前执行",
-            "callback_data": f"{BUSY_APPEND}:{conversation_id}",
-        },
-        {
-            "text": "等当前执行结束",
-            "callback_data": f"{BUSY_QUEUE}:{conversation_id}",
-        },
-        {
-            "text": "取消",
-            "callback_data": f"{BUSY_CANCEL}:{conversation_id}",
-        },
-    ]]
+    return [
+        [
+            {
+                "text": f"发给当前 {agent_label}",
+                "callback_data": f"{BUSY_APPEND}:{conversation_id}",
+            },
+            {
+                "text": "打断并执行这句",
+                "callback_data": f"{BUSY_INTERRUPT}:{conversation_id}",
+            },
+        ],
+        [
+            {
+                "text": "排队稍后",
+                "callback_data": f"{BUSY_QUEUE}:{conversation_id}",
+            },
+            {
+                "text": "新开隔离现场",
+                "callback_data": f"{BUSY_NEW_SESSION}:{conversation_id}",
+            },
+        ],
+        [
+            {
+                "text": "先不处理",
+                "callback_data": f"{BUSY_CANCEL}:{conversation_id}",
+            },
+        ],
+    ]
 
 
 def decode_busy_callback(data: str) -> tuple[str, int] | None:
@@ -246,7 +262,13 @@ def decode_busy_callback(data: str) -> tuple[str, int] | None:
 
     Returns (action, conversation_id) or None.
     """
-    for prefix in (BUSY_APPEND, BUSY_QUEUE, BUSY_CANCEL):
+    for prefix in (
+        BUSY_APPEND,
+        BUSY_INTERRUPT,
+        BUSY_QUEUE,
+        BUSY_CANCEL,
+        BUSY_NEW_SESSION,
+    ):
         if data.startswith(f"{prefix}:"):
             try:
                 return (prefix, int(data[len(prefix) + 1:]))

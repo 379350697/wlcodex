@@ -25,8 +25,10 @@ from wlcodex.conversation_state_machine import (
     build_workspace_busy_buttons,
     decode_busy_callback,
     BUSY_APPEND,
+    BUSY_INTERRUPT,
     BUSY_QUEUE,
     BUSY_CANCEL,
+    BUSY_NEW_SESSION,
 )
 from wlcodex.conversation import default_title, mode_from_command
 from wlcodex.conversation_callback import (
@@ -819,6 +821,145 @@ class CommandController:
             return "append"
         return "idle"
 
+    def _blocking_task_for(self, workspace_alias: str) -> object | None:
+        try:
+            return self._service.blocker_for_workspace(workspace_alias)
+        except Exception:
+            logger.debug("Failed to check workspace blocker", exc_info=True)
+            return None
+
+    async def _direct_command_busy_response(
+        self,
+        *,
+        active: object,
+        original_text: str,
+        agent_label: str,
+    ) -> ControllerResponse | None:
+        blocker = self._blocking_task_for(active.workspace_alias)
+        if blocker is None:
+            return None
+        decision = RouteDecision(
+            route="workspace_busy",
+            reason="direct_command_workspace_busy",
+            new_conversation=False,
+            intent="diagnostic",
+            conversation_state="running",
+        )
+        return await self._handle_workspace_busy(
+            decision,
+            active,
+            getattr(blocker, "id", None),
+            None,
+            self._new_correlation_id(),
+            original_text=original_text,
+            agent_label=agent_label,
+        )
+
+    async def handle_terminal_workspace_busy(
+        self,
+        active: object,
+        original_text: str,
+        *,
+        agent_label: str = "现场",
+    ) -> ControllerResponse:
+        """Return the same busy choice card for terminal/onsite input."""
+        decision = RouteDecision(
+            route="workspace_busy",
+            reason="terminal_workspace_busy",
+            new_conversation=False,
+            intent="normal_text",
+            conversation_state="running",
+        )
+        return await self._handle_workspace_busy(
+            decision,
+            active,
+            getattr(active, "active_codex_task_id", None),
+            getattr(active, "active_claude_run_id", None),
+            self._new_correlation_id(),
+            original_text=original_text,
+            agent_label=agent_label,
+        )
+
+    def _prompt_from_pending_text(self, text: str) -> str:
+        stripped = text.strip()
+        try:
+            command = parse_command(stripped)
+        except Exception:
+            return stripped
+        return str(getattr(command, "prompt", stripped) or stripped)
+
+    async def _send_pending_to_current_session(
+        self, convo: object, original_text: str
+    ) -> ControllerResponse | None:
+        prompt = self._prompt_from_pending_text(original_text)
+        if not prompt:
+            return None
+
+        task_id = getattr(convo, "active_codex_task_id", None)
+        if task_id:
+            try:
+                task = self._service.get_task(task_id)
+            except Exception:
+                task = None
+            if (
+                task is not None
+                and getattr(task, "codex_thread_id", None)
+                and getattr(task, "active_turn_id", None)
+            ):
+                await self._backend.steer_turn(
+                    task.codex_thread_id,
+                    task.active_turn_id,
+                    prompt,
+                )
+                return ControllerResponse("已发给当前 Codex。")
+
+        run_id = getattr(convo, "active_claude_run_id", None)
+        if run_id and self._claude is not None:
+            try:
+                run = self._ledger.get_agent_run(run_id)
+            except Exception:
+                run = None
+            session_id = getattr(run, "external_session_id", "") if run else ""
+            if session_id and hasattr(self._claude, "send_terminal_input"):
+                result = await self._claude.send_terminal_input(session_id, prompt)
+                text = getattr(result, "text", "") if result is not None else ""
+                if text:
+                    return ControllerResponse(text)
+                return ControllerResponse("已发给当前 Claude。")
+
+        return None
+
+    async def _abort_active_execution(self, convo: object) -> None:
+        task_id = getattr(convo, "active_codex_task_id", None)
+        if task_id:
+            try:
+                task = self._service.get_task(task_id)
+                if getattr(task, "codex_thread_id", None) and getattr(
+                    task, "active_turn_id", None
+                ):
+                    try:
+                        await self._backend.interrupt_turn(
+                            task.codex_thread_id,
+                            task.active_turn_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("interrupt_turn failed: %s", exc)
+                self._service.abort_task(task_id)
+            except Exception:
+                logger.debug("Failed to abort active Codex task", exc_info=True)
+
+        run_id = getattr(convo, "active_claude_run_id", None)
+        if run_id:
+            if self._claude is not None:
+                try:
+                    self._claude.interrupt()
+                except Exception as exc:
+                    logger.warning("Claude interrupt failed: %s", exc)
+            try:
+                self._ledger.update_agent_run_status(run_id, "aborted")
+            except Exception:
+                logger.debug("Failed to mark Claude run aborted", exc_info=True)
+
     async def _handle_workspace_busy(
         self,
         decision: RouteDecision,
@@ -828,6 +969,7 @@ class CommandController:
         correlation_id: str,
         *,
         original_text: str = "",
+        agent_label: str = "现场",
     ) -> ControllerResponse:
         """Handle workspace busy: emit events and return user choice buttons."""
         conv_id = active.id if active else 0
@@ -873,15 +1015,21 @@ class CommandController:
             visibility=Visibility.USER,
             payload={
                 "blocking_task_id": blocking_task_id,
-                "choices": ["append", "queue", "cancel"],
+                "choices": ["append", "interrupt", "queue", "new_session", "cancel"],
                 "original_text_preview": original_text[:200],
+                "agent_label": agent_label,
             },
             occurred_at=now_iso(),
             conversation_id=conv_id if conv_id else None,
         ))
-        buttons = build_workspace_busy_buttons(conv_id)
+        buttons = build_workspace_busy_buttons(conv_id, agent_label=agent_label)
         return ControllerResponse(
-            "当前工作台正在执行。你可以追加到当前执行，等它结束，停止当前后执行，或新开工作台。",
+            "当前工作区正在执行，新的话不会丢。\n\n"
+            f"你刚发的新话可以这样处理：\n"
+            f"- 发给当前 {agent_label}：把这句话送进当前正在跑的现场\n"
+            "- 打断并执行这句：停止当前任务，立刻改做最新输入\n"
+            "- 排队稍后：不影响当前任务，结束后再执行\n"
+            "- 新开隔离现场：另开现场，不混入当前上下文",
             buttons=buttons,
         )
 
@@ -923,7 +1071,7 @@ class CommandController:
     async def handle_codex_direct(
         self, command: CodexDirectCommand, ctx: dict[str, Any] | None = None
     ) -> ControllerResponse:
-        """Codex Direct Mode — analysis only, never enters implementation loop."""
+        """Codex Direct Mode — Codex-only work, independent from /auto."""
         if self._ledger is None:
             return ControllerResponse("系统未完全初始化。请检查配置。")
 
@@ -941,16 +1089,13 @@ class CommandController:
                 workspace_alias=self._default_workspace,
             )
 
-        budget = ContextBudget()
-        packet = build_codex_analysis_packet(
-            user_goal=command.prompt,
-            conversation_summary=trim_to_budget(
-                active.conversation_summary, budget.conversation_summary_tokens
-            ),
-            constraints=[],
-            workspace=active.workspace_alias,
-            budget=budget,
+        busy = await self._direct_command_busy_response(
+            active=active,
+            original_text=f"/codex {command.prompt}".strip(),
+            agent_label="Codex",
         )
+        if busy is not None:
+            return busy
 
         task = self._reserve_execution_lease(
             conversation_id=active.id,
@@ -962,9 +1107,9 @@ class CommandController:
         agent_run = self._ledger.create_agent_run(
             conversation_id=active.id,
             agent="codex",
-            role="analysis",
+            role="implementation",
             hidden_task_id=task.id,
-            prompt_packet_summary=packet.summary(),
+            prompt_packet_summary=command.prompt[:200],
         )
         self._ledger.update_agent_run_status(agent_run.id, "running")
 
@@ -976,7 +1121,7 @@ class CommandController:
             self._ledger.update_agent_run_status(
                 agent_run.id, "running", external_session_id=thread_id,
             )
-            await self._backend.start_turn(thread_id, packet.render())
+            await self._backend.start_turn(thread_id, command.prompt)
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
             self._ledger.update_agent_run_status(
@@ -988,7 +1133,10 @@ class CommandController:
 
         self._ledger.update_conversation_summary(
             active.id,
-            trim_to_budget(f"用户请求：{command.prompt[:200]}", budget.conversation_summary_tokens),
+            trim_to_budget(
+                f"Codex 单智能体干活：{command.prompt[:200]}",
+                ContextBudget().conversation_summary_tokens,
+            ),
         )
         # When interaction renderer is active, EventBridge forwards deltas and
         # terminal events — don't send a duplicate static response.
@@ -1010,7 +1158,7 @@ class CommandController:
         ]]
 
         return ControllerResponse(
-            "这次只交给 Codex，不会调用 Claude 修改代码。",
+            "这次只交给 Codex 独立干活，不会调用 Claude 或进入 /auto 编排。",
             buttons=buttons,
         )
 
@@ -1040,6 +1188,14 @@ class CommandController:
                 mode=ConversationMode.CLAUDE_DIRECT.value,
                 workspace_alias=self._default_workspace,
             )
+
+        busy = await self._direct_command_busy_response(
+            active=active,
+            original_text=f"/claude {command.prompt}".strip(),
+            agent_label="Claude",
+        )
+        if busy is not None:
+            return busy
 
         return await self._handle_claude_direct_impl(command, active, ctx)
 
@@ -1347,6 +1503,14 @@ class CommandController:
                 mode=ConversationMode.CHIEF_ENGINEER.value,
                 workspace_alias=self._default_workspace,
             )
+
+        busy = await self._direct_command_busy_response(
+            active=active,
+            original_text=f"/auto {command.prompt}".strip(),
+            agent_label="Auto",
+        )
+        if busy is not None:
+            return busy
 
         cid = self._new_correlation_id()
         self._emit_event(RuntimeEvent(
@@ -1792,6 +1956,7 @@ class CommandController:
             pass
 
         if action == BUSY_APPEND:
+            sent = await self._send_pending_to_current_session(convo, original_text)
             self._emit_event(RuntimeEvent(
                 schema_version=1,
                 event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
@@ -1807,6 +1972,8 @@ class CommandController:
                 occurred_at=now_iso(),
                 conversation_id=conversation_id,
             ))
+            if sent is not None:
+                return sent
             self._emit_event(RuntimeEvent(
                 schema_version=1,
                 event_type=EventType.USER_CONTEXT_APPENDED,
@@ -1826,6 +1993,33 @@ class CommandController:
                 conversation_id=conversation_id,
             ))
             return ControllerResponse("已追加到当前执行。当前阶段结束后由 Codex 判断处理。")
+
+        elif action == BUSY_INTERRUPT:
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
+                aggregate_type=AggregateType.SYSTEM,
+                aggregate_id=f"workspace-{self._default_workspace}",
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="user",
+                visibility=Visibility.OPERATOR,
+                payload={"decision": "interrupt_and_run_latest",
+                         "conversation_id": conversation_id,
+                         "original_text_preview": original_text[:200]},
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+            ))
+            await self._abort_active_execution(convo)
+            if original_text.strip().startswith("/"):
+                return await self.handle(
+                    original_text,
+                    {"chat_id": convo.chat_id, "user_id": convo.user_id},
+                )
+            return await self.handle_conversation_text(
+                original_text,
+                {"chat_id": convo.chat_id, "user_id": convo.user_id},
+            )
 
         elif action == BUSY_QUEUE:
             self._emit_event(RuntimeEvent(
@@ -1860,6 +2054,45 @@ class CommandController:
                 conversation_id=conversation_id,
             ))
             return ControllerResponse("已安排在当前执行之后，工作区空闲后自动启动。")
+
+        elif action == BUSY_NEW_SESSION:
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
+                aggregate_type=AggregateType.SYSTEM,
+                aggregate_id=f"workspace-{self._default_workspace}",
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="user",
+                visibility=Visibility.OPERATOR,
+                payload={"decision": "new_isolated_session",
+                         "conversation_id": conversation_id,
+                         "original_text_preview": original_text[:200]},
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+            ))
+            title = default_title(self._prompt_from_pending_text(original_text))
+            new_convo = self._ledger.create_conversation(
+                chat_id=convo.chat_id,
+                user_id=convo.user_id,
+                title=title,
+                mode=self._default_mode,
+                workspace_alias=convo.workspace_alias,
+            )
+            self._ledger.update_conversation_summary(
+                new_convo.id,
+                trim_to_budget(
+                    f"[工作区忙待处理] {original_text[:300]}",
+                    500,
+                ),
+            )
+            return ControllerResponse(
+                f"已新开隔离现场：「{new_convo.title}」。当前工作区仍在执行，"
+                "这句话已放到新现场里，等你选择排队或当前释放后再启动。",
+                buttons=build_workspace_busy_buttons(
+                    new_convo.id, agent_label="现场"
+                ),
+            )
 
         elif action == BUSY_CANCEL:
             self._emit_event(RuntimeEvent(

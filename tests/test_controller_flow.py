@@ -11,6 +11,7 @@ from wlcodex.codex_backend import BackendEvent, FakeCodexBackend
 from wlcodex.config import WorkspaceConfig
 from wlcodex.controller import CommandController
 from wlcodex.claude_permissions import ClaudePermissionState
+from wlcodex.conversation_state_machine import BUSY_APPEND, BUSY_INTERRUPT
 from wlcodex.db import Ledger
 from wlcodex.inspection import TaskInspector
 from wlcodex.models import AgentRunStatus, OrchestrationStatus, TaskStatus
@@ -254,6 +255,143 @@ async def test_codex_direct_creates_task(ctrl: CommandController) -> None:
     assert "只交给 Codex" in response.text
     tasks = ctrl._service.list_tasks()
     assert len(tasks) >= 1
+
+
+@pytest.mark.asyncio
+async def test_codex_direct_sends_raw_work_prompt_to_codex(
+    ctrl: CommandController,
+) -> None:
+    await ctrl.handle("/codex 修改 README 并运行测试", {"chat_id": 201, "user_id": 301})
+
+    assert ctrl._backend.turns
+    _thread_id, prompt = ctrl._backend.turns[-1]
+    assert prompt == "修改 README 并运行测试"
+
+
+@pytest.mark.asyncio
+async def test_codex_command_busy_returns_terminalized_choice_card(
+    ctrl_with_claude: CommandController,
+) -> None:
+    ledger = ctrl_with_claude._ledger
+    assert ledger is not None
+    active = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="正在执行",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    blocker = ctrl_with_claude._service.reserve_task(
+        "wlcodex", "旧任务", telegram_chat_id=100,
+    )
+    ledger.set_conversation_active_task(active.id, blocker.id)
+    ledger.set_task_status(blocker.id, TaskStatus.RUNNING)
+
+    response = await ctrl_with_claude.handle(
+        "/codex 你这些审核能做到自动吗",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert "workspace wlcodex is busy" not in response.text
+    assert "当前工作区正在执行" in response.text
+    flat_buttons = [button for row in response.buttons for button in row]
+    labels = {button["text"] for button in flat_buttons}
+    assert "发给当前 Codex" in labels
+    assert "打断并执行这句" in labels
+    assert "排队稍后" in labels
+    assert "新开隔离现场" in labels
+
+
+@pytest.mark.asyncio
+async def test_claude_command_busy_returns_terminalized_choice_card(
+    ctrl_with_claude: CommandController,
+) -> None:
+    ledger = ctrl_with_claude._ledger
+    assert ledger is not None
+    active = ledger.create_conversation(
+        chat_id=101,
+        user_id=201,
+        title="正在执行",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    blocker = ctrl_with_claude._service.reserve_task(
+        "wlcodex", "旧任务", telegram_chat_id=101,
+    )
+    ledger.set_conversation_active_task(active.id, blocker.id)
+    ledger.set_task_status(blocker.id, TaskStatus.RUNNING)
+
+    response = await ctrl_with_claude.handle(
+        "/claude 你这些审核能做到自动吗",
+        {"chat_id": 101, "user_id": 201},
+    )
+
+    assert "workspace wlcodex is busy" not in response.text
+    assert "当前工作区正在执行" in response.text
+    flat_buttons = [button for row in response.buttons for button in row]
+    labels = {button["text"] for button in flat_buttons}
+    assert "发给当前 Claude" in labels
+    assert "打断并执行这句" in labels
+    assert "排队稍后" in labels
+    assert "新开隔离现场" in labels
+
+
+@pytest.mark.asyncio
+async def test_busy_append_steers_current_codex_turn(
+    ctrl: CommandController,
+) -> None:
+    ledger = ctrl._ledger
+    assert ledger is not None
+    active = ledger.create_conversation(
+        chat_id=202,
+        user_id=302,
+        title="正在执行",
+        mode="codex_direct",
+        workspace_alias="wlcodex",
+    )
+    task = ctrl._service.reserve_task("wlcodex", "旧任务", telegram_chat_id=202)
+    ledger.set_conversation_active_task(active.id, task.id)
+    ctrl._service.set_task_thread(task.id, "thread-1")
+    ledger.set_active_turn(task.id, "turn-1")
+    ledger.set_task_status(task.id, TaskStatus.RUNNING)
+    ledger.update_conversation_summary(
+        active.id, "[工作区忙待处理] /codex 新插话"
+    )
+
+    response = await ctrl.handle_workspace_busy_callback(BUSY_APPEND, active.id)
+
+    assert "已发给当前 Codex" in response.text
+    assert ctrl._backend.steers[-1] == ("thread-1", "turn-1", "新插话")
+
+
+@pytest.mark.asyncio
+async def test_busy_interrupt_aborts_current_and_runs_pending_codex(
+    ctrl: CommandController,
+) -> None:
+    ledger = ctrl._ledger
+    assert ledger is not None
+    active = ledger.create_conversation(
+        chat_id=203,
+        user_id=303,
+        title="正在执行",
+        mode="codex_direct",
+        workspace_alias="wlcodex",
+    )
+    task = ctrl._service.reserve_task("wlcodex", "旧任务", telegram_chat_id=203)
+    ledger.set_conversation_active_task(active.id, task.id)
+    ctrl._service.set_task_thread(task.id, "thread-2")
+    ledger.set_active_turn(task.id, "turn-2")
+    ledger.set_task_status(task.id, TaskStatus.RUNNING)
+    ledger.update_conversation_summary(
+        active.id, "[工作区忙待处理] /codex 最新任务"
+    )
+
+    response = await ctrl.handle_workspace_busy_callback(BUSY_INTERRUPT, active.id)
+
+    assert "只交给 Codex" in response.text
+    assert ctrl._service.get_task(task.id).status == TaskStatus.ABORTED
+    assert ("thread-2", "turn-2") in ctrl._backend._interrupts
+    assert ctrl._backend.turns[-1][1] == "最新任务"
 
 
 @pytest.mark.asyncio

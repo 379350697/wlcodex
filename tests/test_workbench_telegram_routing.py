@@ -186,17 +186,16 @@ async def test_terminal_with_no_session_sends_start_card_not_dead_end():
         )
 
 
-# ── Onsite text → terminal manager, not controller ─────────────────
+# ── Onsite text → busy choices, not product controller ─────────────
 
 
 @pytest.mark.asyncio
-async def test_onsite_text_routes_to_terminal_manager_not_controller():
-    """Spec §Routing Rules: Onsite plain text → selected onsite session input.
+async def test_onsite_text_prompts_busy_choices_not_controller():
+    """Spec §Routing Rules: Onsite plain text → explicit busy choices.
 
     The product controller MUST NOT be called for ordinary text while in
     terminal / Onsite mode.
     """
-    from wlcodex.runtime_events import EventType, Visibility
     from wlcodex.surfaces.terminal.models import TerminalSessionRef
 
     update = _make_update("继续修失败测试", chat_id=200)
@@ -225,6 +224,17 @@ async def test_onsite_text_routes_to_terminal_manager_not_controller():
     controller = MagicMock()
     controller.handle = AsyncMock()
     controller.handle_conversation_text = AsyncMock()
+    controller.handle_terminal_workspace_busy = AsyncMock(
+        return_value=SimpleNamespace(
+            text="当前工作区正在执行，新的话不会丢。",
+            buttons=[
+                [{"text": "发给当前 Claude", "callback_data": "busy_append:55"}],
+                [{"text": "打断并执行这句", "callback_data": "busy_interrupt:55"}],
+                [{"text": "排队稍后", "callback_data": "busy_queue:55"}],
+                [{"text": "新开隔离现场", "callback_data": "busy_new_session:55"}],
+            ],
+        )
+    )
 
     handlers = _make_handlers(
         controller=controller, ledger=ledger,
@@ -235,25 +245,17 @@ async def test_onsite_text_routes_to_terminal_manager_not_controller():
     with patch.object(handlers, "_get_active_surface_mode", return_value="terminal"):
         await handlers.conversation_text(update, None)
 
-    # Terminal manager must receive the input
-    terminal_mgr.send_input.assert_called_once()
-    call_args = terminal_mgr.send_input.call_args
-    assert call_args[0][0] is session_ref
-    assert call_args[0][1] == "继续修失败测试"
+    # Terminal manager must not receive input until user chooses an action.
+    terminal_mgr.send_input.assert_not_called()
+    controller.handle_terminal_workspace_busy.assert_awaited_once()
+    call_args = controller.handle_terminal_workspace_busy.call_args
+    assert call_args.args[0].id == 55
+    assert call_args.args[1] == "继续修失败测试"
+    assert call_args.kwargs["agent_label"] == "Claude"
 
     # Controller must NOT be called
     controller.handle.assert_not_called()
     controller.handle_conversation_text.assert_not_called()
-
-    input_events = [
-        call.args[0]
-        for call in runtime_store.append.call_args_list
-        if call.args[0].event_type == EventType.TERMINAL_SESSION_INPUT_SENT
-    ]
-    assert len(input_events) == 1
-    assert input_events[0].visibility == Visibility.USER
-    assert "external_session_id" not in input_events[0].payload
-    assert "ext-99" not in repr(input_events[0].payload)
 
 
 @pytest.mark.asyncio
@@ -327,6 +329,32 @@ async def test_onsite_text_uses_runtime_event_mode_without_falling_to_product(
             already_rendered=False,
         )
     )
+    controller.handle_terminal_workspace_busy = AsyncMock(
+        return_value=SimpleNamespace(
+            text="当前工作区正在执行，新的话不会丢。",
+            buttons=[
+                [
+                    {
+                        "text": "发给当前 Codex",
+                        "callback_data": f"busy_append:{conversation.id}",
+                    }
+                ],
+                [
+                    {
+                        "text": "打断并执行这句",
+                        "callback_data": f"busy_interrupt:{conversation.id}",
+                    }
+                ],
+                [{"text": "排队稍后", "callback_data": f"busy_queue:{conversation.id}"}],
+                [
+                    {
+                        "text": "新开隔离现场",
+                        "callback_data": f"busy_new_session:{conversation.id}",
+                    }
+                ],
+            ],
+        )
+    )
 
     handlers = _make_handlers(
         controller=controller,
@@ -340,9 +368,12 @@ async def test_onsite_text_uses_runtime_event_mode_without_falling_to_product(
         None,
     )
 
-    terminal_mgr.send_input.assert_called_once_with(
-        session_ref, "为什么你没有反馈回来，是wlcodex的问题吗"
-    )
+    terminal_mgr.send_input.assert_not_called()
+    controller.handle_terminal_workspace_busy.assert_awaited_once()
+    call_args = controller.handle_terminal_workspace_busy.call_args
+    assert call_args.args[0].id == conversation.id
+    assert call_args.args[1] == "为什么你没有反馈回来，是wlcodex的问题吗"
+    assert call_args.kwargs["agent_label"] == "Codex"
     controller.handle.assert_not_called()
     controller.handle_conversation_text.assert_not_called()
 

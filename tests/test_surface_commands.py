@@ -730,9 +730,8 @@ async def test_terminal_product_bypasses_disabled_check():
 
 
 @pytest.mark.asyncio
-async def test_terminal_input_with_active_session_calls_manager_not_controller():
-    """When terminal mode has an active session, plain text must be sent to
-    the terminal manager and must NOT call the product controller."""
+async def test_terminal_input_with_active_session_prompts_busy_choices_not_raw_send():
+    """Terminal mode plain text should offer the same busy choices as product."""
     from types import SimpleNamespace
 
     from wlcodex.telegram_app import WlCodexHandlers
@@ -741,6 +740,42 @@ async def test_terminal_input_with_active_session_calls_manager_not_controller()
     controller_called = []
 
     class FakeController:
+        async def handle_terminal_workspace_busy(
+            self, active, original_text, agent_label
+        ):
+            return SimpleNamespace(
+                text=(
+                    "当前工作区正在执行，新的话不会丢。\n\n"
+                    "你刚发的新话可以这样处理："
+                ),
+                buttons=[
+                    [
+                        {
+                            "text": f"发给当前 {agent_label}",
+                            "callback_data": f"busy_append:{active.id}",
+                        }
+                    ],
+                    [
+                        {
+                            "text": "打断并执行这句",
+                            "callback_data": f"busy_interrupt:{active.id}",
+                        }
+                    ],
+                    [
+                        {
+                            "text": "排队稍后",
+                            "callback_data": f"busy_queue:{active.id}",
+                        }
+                    ],
+                    [
+                        {
+                            "text": "新开隔离现场",
+                            "callback_data": f"busy_new_session:{active.id}",
+                        }
+                    ],
+                ],
+            )
+
         async def handle_conversation_text(self, text, ctx):
             controller_called.append(text)
 
@@ -807,9 +842,9 @@ async def test_terminal_input_with_active_session_calls_manager_not_controller()
     manager = FakeTerminalManager(adapter)
     manager.attach(
         conversation_id=42,
-        agent="claude",
+        agent="codex",
         strategy="stream_json",
-        external_session_id="claude_session_1",
+        external_session_id="codex_thread_1",
     )
 
     store = FakeRuntimeStoreWithConn()
@@ -833,7 +868,7 @@ async def test_terminal_input_with_active_session_calls_manager_not_controller()
     sent_messages = []
 
     async def fake_send(chat_id, text, buttons=None):
-        sent_messages.append((chat_id, text))
+        sent_messages.append((chat_id, text, buttons))
         return 1
 
     handlers.send_telegram = fake_send
@@ -851,21 +886,20 @@ async def test_terminal_input_with_active_session_calls_manager_not_controller()
     assert len(controller_called) == 0, (
         f"product controller was called {controller_called} times"
     )
-    # Must send input to terminal adapter
-    assert len(adapter.inputs) == 1, (
-        f"adapter.inputs has {len(adapter.inputs)} entries"
-    )
-    assert adapter.inputs[0] == ("claude_session_1", "pytest -q")
-    # No hint message since session was active
-    assert len(sent_messages) == 0
-    # terminal.session.input.sent event must be recorded
+    # Must not silently feed raw input; user gets explicit control choices.
+    assert adapter.inputs == []
+    assert len(sent_messages) == 1
+    _, text, buttons = sent_messages[0]
+    assert "当前工作区正在执行" in text
+    labels = {button["text"] for row in buttons for button in row}
+    assert "发给当前 Codex" in labels
+    assert "打断并执行这句" in labels
+    assert "排队稍后" in labels
+    assert "新开隔离现场" in labels
+    # terminal.session.input.sent event must not be recorded until user chooses.
     input_events = [e for e in store.events
                     if getattr(e, "event_type", "") == "terminal.session.input.sent"]
-    assert len(input_events) == 1
-    assert input_events[0].payload["agent"] == "claude"
-    assert input_events[0].visibility == "user"
-    assert "external_session_id" not in input_events[0].payload
-    assert "claude_session_1" not in repr(input_events[0].payload)
+    assert input_events == []
 
 
 @pytest.mark.asyncio

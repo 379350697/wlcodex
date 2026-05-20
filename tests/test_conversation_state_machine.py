@@ -27,8 +27,10 @@ from wlcodex.conversation_state_machine import (
     build_workspace_busy_buttons,
     decode_busy_callback,
     BUSY_APPEND,
+    BUSY_INTERRUPT,
     BUSY_QUEUE,
     BUSY_CANCEL,
+    BUSY_NEW_SESSION,
 )
 
 
@@ -387,19 +389,28 @@ def test_production_classify_intent_normal():
 
 
 def test_production_busy_buttons():
-    buttons = build_workspace_busy_buttons(42)
-    assert len(buttons) == 1
-    assert len(buttons[0]) == 3
-    assert buttons[0][0]["text"] == "追加到当前执行"
-    assert buttons[0][0]["callback_data"] == "busy_append:42"
-    assert buttons[0][1]["text"] == "等当前执行结束"
-    assert buttons[0][2]["text"] == "取消"
+    buttons = build_workspace_busy_buttons(42, agent_label="Codex")
+    flat = [button for row in buttons for button in row]
+    assert [button["text"] for button in flat] == [
+        "发给当前 Codex",
+        "打断并执行这句",
+        "排队稍后",
+        "新开隔离现场",
+        "先不处理",
+    ]
+    assert flat[0]["callback_data"] == "busy_append:42"
+    assert flat[1]["callback_data"] == "busy_interrupt:42"
+    assert flat[2]["callback_data"] == "busy_queue:42"
+    assert flat[3]["callback_data"] == "busy_new_session:42"
+    assert flat[4]["callback_data"] == "busy_cancel:42"
 
 
 def test_production_decode_busy_callback():
     assert decode_busy_callback("busy_append:42") == (BUSY_APPEND, 42)
+    assert decode_busy_callback("busy_interrupt:42") == (BUSY_INTERRUPT, 42)
     assert decode_busy_callback("busy_queue:99") == (BUSY_QUEUE, 99)
     assert decode_busy_callback("busy_cancel:7") == (BUSY_CANCEL, 7)
+    assert decode_busy_callback("busy_new_session:8") == (BUSY_NEW_SESSION, 8)
     assert decode_busy_callback("unknown:1") is None
     assert decode_busy_callback("busy_append:abc") is None
 
