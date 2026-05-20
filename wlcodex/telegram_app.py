@@ -806,7 +806,7 @@ class WlCodexHandlers:
                 library = AgentSessionLibrary(self._ledger)
                 sessions = library.list_for_workbench(active.id)
                 text = render_session_library(sessions)
-                buttons = self._render_session_picker_buttons(chat_id, sessions)
+                buttons = self._render_session_picker_buttons(active.id, sessions)
                 await self.send_telegram(chat_id, text, buttons=buttons)
                 return
 
@@ -977,21 +977,27 @@ class WlCodexHandlers:
             pass
         return "product"
 
-    def _render_start_card_buttons(self, chat_id: int) -> list[list[dict[str, str]]]:
-        """Return inline keyboard buttons for the Onsite start card."""
+    def _render_start_card_buttons(self, conversation_id: int) -> list[list[dict[str, str]]]:
+        """Return inline keyboard buttons for the Onsite start card.
+
+        Callback data encodes *conversation_id* (Workbench identity), not chat_id.
+        """
         return [
             [{"text": "启动 Claude 现场",
-              "callback_data": f"conv:{chat_id}:start_claude_onsite"}],
+              "callback_data": f"conv:{conversation_id}:start_claude_onsite"}],
             [{"text": "启动 Codex 现场",
-              "callback_data": f"conv:{chat_id}:start_codex_onsite"}],
+              "callback_data": f"conv:{conversation_id}:start_codex_onsite"}],
             [{"text": "回驾驶舱",
-              "callback_data": f"conv:{chat_id}:return_cockpit"}],
+              "callback_data": f"conv:{conversation_id}:return_cockpit"}],
         ]
 
     def _render_session_picker_buttons(
-        self, chat_id: int, sessions: list
+        self, conversation_id: int, sessions: list
     ) -> list[list[dict[str, str]]]:
-        """Return inline keyboard buttons for the historical session picker."""
+        """Return inline keyboard buttons for the historical session picker.
+
+        Callback data encodes *conversation_id* (Workbench identity), not chat_id.
+        """
         from wlcodex.workbench.sessions import AgentSessionResumability
 
         buttons: list[list[dict[str, str]]] = []
@@ -999,29 +1005,36 @@ class WlCodexHandlers:
             agent_label = "Claude" if s.agent == "claude" else "Codex"
             row = [
                 {"text": f"查看{agent_label}回顾",
-                 "callback_data": f"conv:{chat_id}:review_session:{s.source_run_id}"},
+                 "callback_data": f"conv:{conversation_id}:review_session:{s.source_run_id}"},
             ]
             if s.resumability is not AgentSessionResumability.SUMMARY_ONLY:
                 row.append({"text": "接管现场",
-                            "callback_data": f"conv:{chat_id}:attach_session:{s.source_run_id}"})
+                            "callback_data": f"conv:{conversation_id}:attach_session:{s.source_run_id}"})
                 row.append({"text": "继续修改",
-                            "callback_data": f"conv:{chat_id}:resume_session:{s.source_run_id}"})
+                            "callback_data": f"conv:{conversation_id}:resume_session:{s.source_run_id}"})
             else:
                 row.append({"text": "从摘要新开",
-                            "callback_data": f"conv:{chat_id}:resume_from_summary:{s.source_run_id}"})
+                            "callback_data": f"conv:{conversation_id}:resume_from_summary:{s.source_run_id}"})
             if s.agent == "claude" and s.status == "done":
                 row.append({"text": "让 Codex 验收",
-                            "callback_data": f"conv:{chat_id}:codex_verify_session:{s.source_run_id}"})
+                            "callback_data": f"conv:{conversation_id}:codex_verify_session:{s.source_run_id}"})
             buttons.append(row)
         buttons.append([{"text": "回驾驶舱",
-                         "callback_data": f"conv:{chat_id}:return_cockpit"}])
+                         "callback_data": f"conv:{conversation_id}:return_cockpit"}])
         return buttons
 
     async def _handle_session_picker_callback(
         self, update: Update, query: object,
         conversation_id: int, action: tuple[str, int],
     ) -> None:
-        """Handle session picker button: review, attach, resume, verify."""
+        """Handle session picker button: review, attach, resume, verify.
+
+        All sub-buttons encode *conversation_id* (Workbench identity), never
+        chat_id.  After attach_session / resume_session the view mode is
+        switched to Onsite so the next plain text routes to the terminal
+        manager.  resume_session and resume_from_summary also create an
+        internal agent_run record linked to the historical session.
+        """
         kind, source_run_id = action
         chat_id = update.effective_chat.id
 
@@ -1051,45 +1064,45 @@ class WlCodexHandlers:
                 update, query, "\n".join(lines),
                 buttons=[[
                     {"text": "接管现场",
-                     "callback_data": f"conv:{chat_id}:attach_session:{source_run_id}"},
+                     "callback_data": f"conv:{conversation_id}:attach_session:{source_run_id}"},
                     {"text": "回驾驶舱",
-                     "callback_data": f"conv:{chat_id}:return_cockpit"},
+                     "callback_data": f"conv:{conversation_id}:return_cockpit"},
                 ]],
             )
 
         elif kind == "attach_session":
-            if self._terminal_manager is None:
-                await self._safe_callback_answer(query, "现场接管未配置。")
-                return
-            try:
-                self._terminal_manager.attach_historical(
-                    conversation_id=conversation_id, session=session,
-                )
-                await self._safe_callback_answer(query, "已接入")
-                await self._safe_callback_edit(
-                    update, query,
-                    f"已进入接管现场，当前接入 {session.agent}。",
-                )
-            except ValueError as exc:
-                await self._safe_callback_answer(query, str(exc)[:200])
+            await self._attach_and_enter_onsite(
+                update, query, conversation_id, chat_id, session,
+            )
 
         elif kind == "resume_session":
-            if self._terminal_manager is None:
-                await self._safe_callback_answer(query, "现场接管未配置。")
-                return
-            try:
-                self._terminal_manager.attach_historical(
-                    conversation_id=conversation_id, session=session,
+            # Create internal agent_run before entering Onsite.
+            if session.internal_ref:
+                self._ledger.create_agent_run(
+                    conversation_id=conversation_id,
+                    agent=session.agent,
+                    role="continuation",
+                    external_session_id=session.internal_ref,
+                    prompt_packet_summary=f"继续历史现场：{session.title}",
                 )
-                await self._safe_callback_answer(query, "已接入，可直接发送消息继续。")
-                await self._safe_callback_edit(
-                    update, query,
-                    f"已接入 {session.agent} 历史现场。直接发送消息即可继续修改。",
+            else:
+                self._ledger.create_agent_run(
+                    conversation_id=conversation_id,
+                    agent=session.agent,
+                    role="continuation",
+                    prompt_packet_summary=f"继续历史现场：{session.title}",
                 )
-            except ValueError as exc:
-                await self._safe_callback_answer(query, str(exc)[:200])
+            await self._attach_and_enter_onsite(
+                update, query, conversation_id, chat_id, session,
+            )
 
         elif kind == "resume_from_summary":
+            self._ledger.create_agent_run(
+                conversation_id=conversation_id,
+                agent=session.agent,
+                role="continuation",
+                prompt_packet_summary=f"从摘要新开：{session.title}",
+            )
             await self._safe_callback_answer(query, "已创建新现场")
             await self._safe_callback_edit(
                 update, query,
@@ -1113,6 +1126,66 @@ class WlCodexHandlers:
 
         else:
             await self._safe_callback_answer(query, f"未知的会话操作：{kind}")
+
+    async def _attach_and_enter_onsite(
+        self, update: Update, query: object,
+        conversation_id: int, chat_id: int, session: object,
+    ) -> None:
+        """Attach a historical session and switch view mode to Onsite."""
+        if self._terminal_manager is None:
+            await self._safe_callback_answer(query, "现场接管未配置。")
+            return
+        try:
+            self._terminal_manager.attach_historical(
+                conversation_id=conversation_id, session=session,
+            )
+        except ValueError as exc:
+            await self._safe_callback_answer(query, str(exc)[:200])
+            return
+
+        # Record mode switch so subsequent plain text routes to Onsite.
+        self._record_mode_switch(conversation_id, chat_id, "terminal", session.agent)
+
+        await self._safe_callback_answer(query, "已接入")
+        await self._safe_callback_edit(
+            update, query,
+            f"已进入接管现场，当前接入 {session.agent}。"
+            f"直接发送消息即可继续。",
+        )
+
+    def _record_mode_switch(
+        self, conversation_id: int, chat_id: int,
+        to_mode: str, agent: str,
+    ) -> None:
+        """Emit conversation.mode.switched runtime event."""
+        if self._runtime_store is None:
+            return
+        try:
+            from wlcodex.runtime_events import (
+                AggregateType, EventSource, EventType,
+                RuntimeEvent, Visibility, now_iso,
+            )
+            self._runtime_store.append(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.CONVERSATION_MODE_SWITCHED,
+                aggregate_type=AggregateType.CONVERSATION,
+                aggregate_id=str(conversation_id),
+                correlation_id=f"mode-switch-{conversation_id}-{to_mode}",
+                source=EventSource.TELEGRAM,
+                actor="user",
+                visibility=Visibility.USER,
+                payload={
+                    "chat_id": chat_id,
+                    "conversation_id": conversation_id,
+                    "from_mode": "product",
+                    "to_mode": to_mode,
+                    "active_agent": agent,
+                },
+                occurred_at=now_iso(),
+                conversation_id=conversation_id,
+            ))
+        except Exception:
+            logger.debug("Failed to record mode switch", exc_info=True)
 
     async def _handle_terminal_text(self, chat_id: int, text: str) -> None:
         """Route text to the terminal input path when in terminal mode.
@@ -1213,11 +1286,12 @@ class WlCodexHandlers:
                 return
 
         # No terminal manager or no active session — never a dead end.
+        cid = conversation_id if conversation_id is not None else chat_id
         await self.send_telegram(
             chat_id,
             "当前没有可接管的现场。\n\n"
             "你可以：",
-            buttons=self._render_start_card_buttons(chat_id),
+            buttons=self._render_start_card_buttons(cid),
         )
 
     async def _apply_mode_switch(
@@ -1388,14 +1462,17 @@ class WlCodexHandlers:
                 if sessions:
                     from wlcodex.workbench.rendering import render_session_library
                     text = render_session_library(sessions)
-                    buttons = self._render_session_picker_buttons(chat_id, sessions)
+                    cid = conversation_id if conversation_id is not None else chat_id
+                    buttons = self._render_session_picker_buttons(cid, sessions)
                     await self.send_telegram(chat_id, text, buttons=buttons)
                 else:
                     await self.send_telegram(
                         chat_id,
                         "当前没有可接管的现场。\n\n"
                         "你可以：",
-                        buttons=self._render_start_card_buttons(chat_id),
+                        buttons=self._render_start_card_buttons(
+                            conversation_id if conversation_id is not None else chat_id
+                        ),
                     )
 
     # --- New conversation handlers ---

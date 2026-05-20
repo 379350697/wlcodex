@@ -1229,6 +1229,10 @@ class CommandController:
         try:
             thread_id = await self._backend.create_thread(workspace_path)
             self._service.set_task_thread(task.id, thread_id)
+            # Persist thread reference so /sessions shows this as resumable.
+            self._ledger.update_agent_run_status(
+                agent_run.id, "running", external_session_id=thread_id,
+            )
             await self._backend.start_turn(thread_id, packet.render())
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
@@ -1445,12 +1449,17 @@ class CommandController:
             result = None
             had_error = False
             error_text = ""
+            claude_session_id: str = ""
             if self._interaction_renderer is not None:
                 stream = self._claude.send_streaming(request)
                 if hasattr(stream, "__aiter__"):
                     async for stream_event in stream:
                         event_type = getattr(stream_event, "event_type", "")
                         delta = getattr(stream_event, "delta", "")
+                        # Capture latest non-empty session_id for persistence.
+                        sid = getattr(stream_event, "session_id", "")
+                        if sid:
+                            claude_session_id = sid
                         if event_type == "error":
                             had_error = True
                             error_text = delta or "Claude streaming returned error"
@@ -1470,6 +1479,10 @@ class CommandController:
                 # Non-streaming path: call send() and capture result
                 result = await self._claude.send(request)
 
+            # Capture session_id from non-streaming result.
+            if not claude_session_id and result is not None:
+                claude_session_id = getattr(result, "session_id", "") or ""
+
             if had_error:
                 try:
                     self._service.fail_task(task_id, error_text or "Claude direct failed")
@@ -1479,6 +1492,7 @@ class CommandController:
                     agent_run_id,
                     "failed",
                     completion_summary=error_text[:2000],
+                    external_session_id=claude_session_id or None,
                 )
                 self._emit_event(RuntimeEvent(
                     schema_version=1,
@@ -1490,7 +1504,7 @@ class CommandController:
                     actor="claude",
                     visibility=Visibility.OPERATOR,
                     payload={"status": "failed", "reason": error_text[:500],
-                             "task_id": task_id},
+                             "task_id": task_id, "session_id": claude_session_id},
                     occurred_at=now_iso(),
                     conversation_id=conversation_id,
                     agent_run_id=agent_run_id,
@@ -1508,6 +1522,7 @@ class CommandController:
                 agent_run_id,
                 "done",
                 completion_summary=completion_summary or "Claude 执行完成",
+                external_session_id=claude_session_id or None,
             )
             try:
                 self._ledger.set_task_status(

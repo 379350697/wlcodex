@@ -348,8 +348,8 @@ async def test_start_card_callbacks_decode_via_conv_protocol():
         assert cb is not None, (
             f"Button cb_data {btn.callback_data!r} failed to decode as conv protocol"
         )
-        assert cb.conversation_id == 555, (
-            f"Expected chat_id=555 in callback, got {cb.conversation_id}"
+        assert cb.conversation_id == 99, (
+            f"Expected conversation_id=99 in callback (active.id), got {cb.conversation_id}"
         )
         seen_actions.add(cb.action)
 
@@ -762,7 +762,7 @@ async def test_start_card_buttons_identical_from_both_call_sites():
     runtime_store_1.append = MagicMock()
 
     ledger_1 = MagicMock()
-    ledger_1.get_active_conversation = MagicMock(return_value=SimpleNamespace(id=88))
+    ledger_1.get_active_conversation = MagicMock(return_value=SimpleNamespace(id=42))
     ledger_1.record_telegram_update = MagicMock()
 
     handlers_1 = _make_handlers(
@@ -786,7 +786,7 @@ async def test_start_card_buttons_identical_from_both_call_sites():
     terminal_mgr_2.active_for_conversation = MagicMock(return_value=None)
 
     ledger_2 = MagicMock()
-    ledger_2.get_active_conversation = MagicMock(return_value=SimpleNamespace(id=99))
+    ledger_2.get_active_conversation = MagicMock(return_value=SimpleNamespace(id=42))
     ledger_2.list_recent_agent_runs = MagicMock(return_value=[])
     ledger_2.record_telegram_update = MagicMock()
 

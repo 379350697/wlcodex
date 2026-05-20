@@ -343,17 +343,6 @@ def render_conversation_status(
     if session.conversation_summary:
         lines.append(f"摘要：{_trim(session.conversation_summary, 120)}")
 
-    # Advanced details: task IDs if present
-    advanced: list[str] = []
-    if session.active_codex_task_id:
-        advanced.append(f"内部任务：#{session.active_codex_task_id}")
-    if session.active_claude_run_id:
-        advanced.append(f"内部 Claude 运行：#{session.active_claude_run_id}")
-    if advanced:
-        lines.append("")
-        lines.append("高级详情：")
-        lines.extend(advanced)
-
     return "\n".join(lines)
 
 
@@ -433,8 +422,6 @@ def render_session_list(sessions: Sequence[ConversationSession]) -> str:
         line = f"  #{s.id} [{mode_label}] {_trim(s.title, 60)} · {s.workspace_alias}"
         if s.archived_at:
             line += " · 已归档"
-        elif s.active_codex_task_id:
-            line += f" · 内部任务 #{s.active_codex_task_id}"
         lines.append(line)
     return "\n".join(lines)
 
