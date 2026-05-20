@@ -3,9 +3,11 @@
 from datetime import datetime, timezone
 
 from wlcodex.models import Task, TaskStatus
-from wlcodex.status import (
+from wlcodex.legacy_task_status import (
     render_task_card,
     render_task_list,
+)
+from wlcodex.status import (
     render_help,
     render_health_card,
     render_approval_card,
@@ -80,15 +82,17 @@ def test_task_list_with_various_states() -> None:
 
 def test_task_list_empty() -> None:
     text = render_task_list([])
-    assert "暂无任务" in text
+    assert "legacy diagnostic task" in text
+    assert "创建新任务" not in text
 
 
 def test_help_is_not_empty() -> None:
     text = render_help()
     assert len(text) > 100
-    assert "/task" in text
-    assert "/continue" in text
-    assert "/steer" in text
+    assert "新工作台" in text
+    assert "/task" not in text
+    assert "/continue" not in text
+    assert "/steer" not in text
 
 
 def test_health_card_shows_status() -> None:
@@ -100,6 +104,7 @@ def test_health_card_shows_status() -> None:
 def test_approval_card_compact() -> None:
     card = render_approval_card(42, 1, "command", "Run rm -rf /")
     assert "审批 #1" in card
+    assert "任务 #" not in card
     assert "命令" in card
     assert "请使用下面按钮" in card
     assert len(card) < 500

@@ -1,5 +1,9 @@
 # WLCodex Interaction Layer Natural Streaming Implementation Plan
 
+> Superseded for product implementation: follow the 2026-05-20 Remote
+> Workbench repair plans instead. "New conversation" and task-led user copy
+> below is historical and must not be restored into normal Telegram paths.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a swappable Telegram interaction layer and make the default `natural` profile render plain-text Codex/Claude conversations with typing plus same-run streaming, while preserving legacy cockpit/task behavior.

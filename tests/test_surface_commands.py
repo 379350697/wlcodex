@@ -180,7 +180,7 @@ async def test_product_handler_sends_confirmation():
     await handlers.product_cmd(update, None)
 
     assert len(sent_messages) == 1
-    assert sent_messages[0][1] == "已切到 product 模式。"
+    assert sent_messages[0][1] == "已回到驾驶舱。现场仍在运行，我会继续用摘要跟进。"
     assert len(store.events) == 2
     assert store.events[1].event_type == "conversation.mode.switched"
 
@@ -240,8 +240,7 @@ async def test_terminal_handler_sends_confirmation():
     await handlers.terminal_cmd(update, None)
 
     assert len(sent_messages) == 1
-    assert "已切到 terminal 模式" in sent_messages[0][1]
-    assert "claude" in sent_messages[0][1]
+    assert "当前没有可接管的现场" in sent_messages[0][1]
     assert len(store.events) == 2
     assert store.events[1].event_type == "conversation.mode.switched"
     assert store.events[1].payload["active_agent"] == "claude"
@@ -424,7 +423,8 @@ async def test_terminal_cmd_blocked_when_disabled():
     await handlers.terminal_cmd(update, None)
 
     assert len(sent_messages) == 1
-    assert "尚未启用" in sent_messages[0][1]
+    assert "现场接管当前不可用" in sent_messages[0][1]
+    assert "terminal.enabled" not in sent_messages[0][1]
     # No mode switch event should have been recorded
     mode_switch_events = [e for e in store.events
                          if getattr(e, "event_type", "") == "conversation.mode.switched"]
@@ -486,8 +486,7 @@ async def test_terminal_cmd_allowed_when_enabled():
     await handlers.terminal_cmd(update, None)
 
     assert len(sent_messages) == 1
-    assert "已切到 terminal 模式" in sent_messages[0][1]
-    assert "claude" in sent_messages[0][1]
+    assert "当前没有可接管的现场" in sent_messages[0][1]
     # Mode switch event must be recorded
     assert len(store.events) == 2
     assert store.events[1].event_type == "conversation.mode.switched"
@@ -573,9 +572,9 @@ async def test_conversation_text_in_terminal_mode_does_not_call_product_controll
 
     # Must NOT call product controller
     assert len(controller_called) == 0
-    # Must send terminal mode hint
+    # Must send an actionable Onsite start-card hint.
     assert len(sent_messages) == 1
-    assert "terminal 模式" in sent_messages[0][1]
+    assert "当前没有可接管的现场" in sent_messages[0][1]
 
 
 @pytest.mark.asyncio
@@ -717,7 +716,7 @@ async def test_terminal_product_bypasses_disabled_check():
 
     # Must have sent mode switch confirmation for product
     assert len(sent_messages) == 1
-    assert "product" in sent_messages[0][1].lower()
+    assert "驾驶舱" in sent_messages[0][1]
     # Must NOT be the "terminal mode not enabled" message
     assert "尚未启用" not in sent_messages[0][1]
     # Mode switch event must be recorded
@@ -864,7 +863,9 @@ async def test_terminal_input_with_active_session_calls_manager_not_controller()
                     if getattr(e, "event_type", "") == "terminal.session.input.sent"]
     assert len(input_events) == 1
     assert input_events[0].payload["agent"] == "claude"
-    assert input_events[0].payload["external_session_id"] == "claude_session_1"
+    assert input_events[0].visibility == "user"
+    assert "external_session_id" not in input_events[0].payload
+    assert "claude_session_1" not in repr(input_events[0].payload)
 
 
 @pytest.mark.asyncio
@@ -947,8 +948,7 @@ async def test_terminal_input_without_active_session_sends_hint():
     assert len(controller_called) == 0
     # Must send a hint about no active session
     assert len(sent_messages) == 1
-    assert "terminal" in sent_messages[0][1].lower()
-    assert "product" in sent_messages[0][1].lower()
+    assert "当前没有可接管的现场" in sent_messages[0][1]
 
 
 # --- `/terminal claude|codex` attach behavior with terminal_manager ---
@@ -1040,7 +1040,8 @@ async def test_terminal_claude_cmd_attaches_when_external_session_exists():
 
     # Must send confirmation that session was attached
     assert len(sent_messages) == 1
-    assert "已接入" in sent_messages[0][1]
+    assert "接管现场" in sent_messages[0][1]
+    assert "claude" in sent_messages[0][1]
 
     # Must record mode switch AND terminal.session.attached
     event_types = [getattr(e, "event_type", "") for e in store.events]
@@ -1052,6 +1053,7 @@ async def test_terminal_claude_cmd_attaches_when_external_session_exists():
                        if getattr(e, "event_type", "") == "terminal.session.attached"]
     assert len(attached_events) == 1
     ae = attached_events[0]
+    assert ae.visibility == "operator"
     assert ae.payload["agent"] == "claude"
     assert ae.payload["external_session_id"] == "claude_sess_abc"
     assert ae.payload["status"] == "attached"
@@ -1151,7 +1153,7 @@ async def test_terminal_claude_cmd_no_external_session_reports_unavailable():
 
     # Must send a message indicating no session is available
     assert len(sent_messages) == 1
-    assert "无可接入" in sent_messages[0][1]
+    assert "当前没有可接管的现场" in sent_messages[0][1]
 
     # Must NOT have created a fake active session in the manager
     ref = terminal_manager.active_for_conversation(42)
@@ -1180,7 +1182,7 @@ async def test_terminal_claude_cmd_no_external_session_reports_unavailable():
     await handlers.conversation_text(text_update, None)
 
     assert len(sent_messages) == 1
-    assert "terminal" in sent_messages[0][1].lower()
+    assert "当前没有可接管的现场" in sent_messages[0][1]
 
 
 @pytest.mark.asyncio
@@ -1263,7 +1265,7 @@ async def test_terminal_product_does_not_attach_session():
 
     # Must confirm product mode switch
     assert len(sent_messages) == 1
-    assert "product" in sent_messages[0][1].lower()
+    assert "驾驶舱" in sent_messages[0][1]
 
     # Must NOT record terminal.session.attached
     attached = [e for e in store.events
@@ -1364,9 +1366,10 @@ async def test_bare_terminal_uses_default_agent_codex():
 
     # Must send confirmation that codex session was attached
     assert len(sent_messages) == 1
-    assert "已接入" in sent_messages[0][1], (
-        f"Expected '已接入' in message, got: {sent_messages[0][1]}"
+    assert "接管现场" in sent_messages[0][1], (
+        f"Expected Onsite confirmation in message, got: {sent_messages[0][1]}"
     )
+    assert "codex" in sent_messages[0][1]
     assert "codex" in sent_messages[0][1]
 
     # Mode switch event must have active_agent=codex
@@ -1379,6 +1382,7 @@ async def test_bare_terminal_uses_default_agent_codex():
     attached_events = [e for e in store.events
                        if getattr(e, "event_type", "") == "terminal.session.attached"]
     assert len(attached_events) == 1
+    assert attached_events[0].visibility == "operator"
     assert attached_events[0].payload["agent"] == "codex"
     assert attached_events[0].payload["external_session_id"] == "codex_sess_xyz"
 
@@ -1471,7 +1475,8 @@ async def test_bare_terminal_uses_default_agent_claude():
     await handlers.terminal_cmd(update, None)
 
     assert len(sent_messages) == 1
-    assert "已接入" in sent_messages[0][1]
+    assert "接管现场" in sent_messages[0][1]
+    assert "claude" in sent_messages[0][1]
     assert "claude" in sent_messages[0][1]
 
     mode_switches = [e for e in store.events

@@ -19,6 +19,7 @@ from telegram.ext import (
 from wlcodex.config import AppConfig
 from wlcodex.controller import CommandController
 from wlcodex.db import Ledger
+from wlcodex.execution_scheduler import RunIntent
 from wlcodex.interaction.profiles import profile_from_name
 from wlcodex.interaction.renderer import InteractionRenderer
 from wlcodex.interaction.transport import TelegramTransport
@@ -82,6 +83,7 @@ class WlCodexHandlers:
         runtime_event_store: object | None = None,
         outbox: object | None = None,
         terminal_manager: object | None = None,
+        execution_scheduler: object | None = None,
     ) -> None:
         self._config = config
         self._controller = controller
@@ -91,7 +93,8 @@ class WlCodexHandlers:
         self._runtime_store = runtime_event_store
         self._outbox = outbox
         self._terminal_manager = terminal_manager
-        # BLOCKER B: pending historical continuation per conversation_id
+        self._execution_scheduler = execution_scheduler
+        # Pending historical continuation per conversation_id.
         self._pending_continuation: dict[int, dict] = {}
 
     # --- Auth guard ---
@@ -170,11 +173,6 @@ class WlCodexHandlers:
             ))
         except Exception:
             logger.debug("Failed to append Telegram command event", exc_info=True)
-
-    async def _store_status_message(
-        self, task_id: int, chat_id: int, message_id: int
-    ) -> None:
-        self._ledger.set_status_message(task_id, chat_id, message_id)
 
     async def _reply_with_buttons(
         self,
@@ -492,10 +490,6 @@ class WlCodexHandlers:
                 error=str(send_exc),
             )
             return
-        for task in self._ledger.list_tasks(limit=50, include_archived=True):
-            if task.telegram_status_message_id == message_id:
-                self._ledger.set_status_message(task.id, chat_id, new_msg.message_id)
-
     def _append_telegram_delivery_event(
         self,
         event_type: str,
@@ -678,24 +672,9 @@ class WlCodexHandlers:
         ctx = {"chat_id": update.effective_chat.id, "user_id": update.effective_user.id}
         response = await self._controller.handle(text, ctx)
 
-        sent = await self._reply_with_buttons(
+        await self._reply_with_buttons(
             update, response.text, response.buttons
         )
-        # If this was a StartTaskCommand, store the message for status editing
-        from wlcodex.router import parse_command, StartTaskCommand
-        try:
-            cmd = parse_command(text)
-            if isinstance(cmd, StartTaskCommand):
-                if "任务 #" in response.text or "Task #" in response.text:
-                    import re
-                    m = re.search(r"(?:任务|Task) #(\d+)", response.text)
-                    if m and sent.message_id != SEND_FAILED:
-                        task_id = int(m.group(1))
-                        await self._store_status_message(
-                            task_id, update.effective_chat.id, sent.message_id
-                        )
-        except Exception:
-            pass  # Best effort
 
     async def tasks_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -717,9 +696,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        sent = await self._send_response(update, response.text)
-        # Track status message for continue too
-        await self._track_status_from_response(response.text, update.effective_chat.id, sent.message_id)
+        await self._send_response(update, response.text)
 
     async def steer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -791,8 +768,7 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        sent = await self._send_response(update, response.text)
-        await self._track_status_from_response(response.text, update.effective_chat.id, sent.message_id)
+        await self._send_response(update, response.text)
 
     async def codex_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -889,9 +865,13 @@ class WlCodexHandlers:
             await self.send_telegram(chat_id, str(e))
             return
 
-        # Check terminal.enabled before allowing mode switch or subcommands
+        # Check the Onsite feature flag before allowing mode switches.
         terminal_config = getattr(self._config, "terminal", None)
-        terminal_enabled = getattr(terminal_config, "enabled", False) if terminal_config is not None else False
+        terminal_enabled = (
+            getattr(terminal_config, "enabled", False)
+            if terminal_config is not None
+            else False
+        )
 
         if isinstance(command, ModeSwitchCommand):
             # /terminal product is the escape hatch back to product mode
@@ -1035,7 +1015,7 @@ class WlCodexHandlers:
         chat_id.  After attach_session / resume_session the view mode is
         switched to Onsite so the next plain text routes to the terminal
         manager.  resume_session and resume_from_summary store a pending
-        continuation; the first Onsite text creates the internal task/run.
+        continuation; the first Onsite text reserves an execution lease/run.
         """
         kind, source_run_id = action
         chat_id = update.effective_chat.id
@@ -1110,7 +1090,7 @@ class WlCodexHandlers:
                     ]],
                 )
                 return
-            # Pure attach — no task/run, just enter Onsite.
+            # Pure attach: enter Onsite without scheduling a new run.
             self._pending_continuation.pop(conversation_id, None)
             await self._attach_and_enter_onsite(
                 update, query, conversation_id, chat_id, session,
@@ -1136,8 +1116,8 @@ class WlCodexHandlers:
                     "直接发送下一条消息即可继续。",
                 )
                 return
-            # Store pending continuation — task/run creation deferred
-            # to the first Onsite text from this conversation.
+            # Store pending continuation; execution lease reservation is
+            # deferred to the first Onsite text from this conversation.
             self._pending_continuation[conversation_id] = {
                 "agent": session.agent,
                 "internal_ref": session.internal_ref,
@@ -1248,7 +1228,7 @@ class WlCodexHandlers:
         self, chat_id: int, conversation_id: int,
         active: object, text: str, pending: dict,
     ) -> bool:
-        """Create hidden task + agent_run for a pending history continuation.
+        """Reserve an internal lease and agent_run for a history continuation.
 
         Called from _handle_terminal_text on the first Onsite text after
         the user tapped 继续修改 or 从摘要新开 in the session picker.
@@ -1278,18 +1258,22 @@ class WlCodexHandlers:
                 await self.send_telegram(chat_id, response.text, response.buttons)
             return True
 
-        # 1. Create internal task (workspace lock).
-        task = None
+        # 1. Reserve the internal execution lease that guards workspace writes.
+        hidden_task_id = None
         agent_run = None
         try:
-            task = self._controller._service.reserve_task(
-                active.workspace_alias,
-                f"继续：{pending['title']}",
+            if self._execution_scheduler is None:
+                raise RuntimeError("execution scheduler unavailable")
+            lease = self._execution_scheduler.reserve(RunIntent(
+                conversation_id=conversation_id,
+                workspace_alias=active.workspace_alias,
+                prompt=f"继续：{pending['title']}",
                 telegram_chat_id=chat_id,
-            )
-            self._ledger.set_conversation_active_task(conversation_id, task.id)
+                purpose="historical_continuation",
+            ))
+            hidden_task_id = lease.hidden_task_id
         except Exception:
-            logger.debug("Failed to reserve task for continuation", exc_info=True)
+            logger.debug("Failed to reserve execution lease for continuation", exc_info=True)
             await self.send_telegram(
                 chat_id,
                 "工作区正忙，请稍后重试或使用 /new 新开工作台。",
@@ -1302,7 +1286,7 @@ class WlCodexHandlers:
             conversation_id=conversation_id,
             agent=pending["agent"],
             role="continuation",
-            hidden_task_id=task.id,
+            hidden_task_id=hidden_task_id,
             external_session_id=external_session_id,
             prompt_packet_summary=f"继续历史现场：{pending['title'][:200]}",
         )
@@ -1310,11 +1294,11 @@ class WlCodexHandlers:
             agent_run.id, AgentRunStatus.RUNNING.value,
         )
         self._ledger.set_task_status(
-            task.id, TaskStatus.RUNNING, phase="continuation",
+            hidden_task_id, TaskStatus.RUNNING, phase="continuation",
         )
         try:
             self._ledger.add_event(
-                task.id,
+                hidden_task_id,
                 "historical_continuation_started",
                 {"agent_run_id": agent_run.id},
             )
@@ -1356,14 +1340,14 @@ class WlCodexHandlers:
                 completion_summary=str(exc)[:2000],
             )
             self._ledger.set_task_status(
-                task.id,
+                hidden_task_id,
                 TaskStatus.FAILED,
                 phase="continuation",
                 error=str(exc)[:240],
             )
             try:
                 self._ledger.add_event(
-                    task.id,
+                    hidden_task_id,
                     "historical_continuation_failed",
                     {"agent_run_id": agent_run.id, "error": str(exc)[:500]},
                 )
@@ -1382,14 +1366,14 @@ class WlCodexHandlers:
             completion_summary="历史现场继续输入已发送",
         )
         self._ledger.set_task_status(
-            task.id,
+            hidden_task_id,
             TaskStatus.DONE,
             phase="continuation",
             summary="历史现场继续输入已发送",
         )
         try:
             self._ledger.add_event(
-                task.id,
+                hidden_task_id,
                 "historical_continuation_completed",
                 {"agent_run_id": agent_run.id},
             )
@@ -1415,8 +1399,8 @@ class WlCodexHandlers:
         except Exception:
             pass
 
-        # BLOCKER B: pending historical continuation — create task/run
-        # on the first Onsite text, then send resume input.
+        # Pending historical continuation: reserve the lease on first
+        # Onsite text, then send resume input.
         if conversation_id is not None and conversation_id in self._pending_continuation:
             pending = self._pending_continuation[conversation_id]
             consumed = await self._execute_pending_continuation(
@@ -1492,7 +1476,6 @@ class WlCodexHandlers:
                                 "chat_id": chat_id,
                                 "conversation_id": conversation_id,
                                 "agent": session_ref.agent,
-                                "external_session_id": session_ref.external_session_id,
                                 "text_preview": text[:500],
                                 "text_length": len(text),
                             },
@@ -1520,7 +1503,7 @@ class WlCodexHandlers:
     ) -> None:
         """Record a conversation.mode.switched event and send confirmation.
 
-        Must NOT create a new conversation or start a new task.
+        Must NOT create a new conversation or start a new run.
         """
         chat_id = update.effective_chat.id
         user = update.effective_user
@@ -1641,7 +1624,7 @@ class WlCodexHandlers:
                                         correlation_id=f"terminal-attach-{update.update_id}",
                                         source=EventSource.TELEGRAM,
                                         actor="user",
-                                        visibility=Visibility.USER,
+                                        visibility=Visibility.OPERATOR,
                                         payload={
                                             "chat_id": chat_id,
                                             "conversation_id": conversation_id,
@@ -1720,8 +1703,7 @@ class WlCodexHandlers:
         # Streaming path: renderer already handled all output
         if response.already_rendered:
             return
-        sent = await self._reply_with_buttons(update, response.text, response.buttons)
-        await self._track_status_from_response(response.text, chat_id, sent.message_id)
+        await self._reply_with_buttons(update, response.text, response.buttons)
 
     async def claude_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -1911,7 +1893,7 @@ class WlCodexHandlers:
     # --- Callback routing ---
 
     async def callback_router(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Route callbacks by prefix: approval:*, waiting:*, worktree_done:*, settings:*."""
+        """Route active Workbench callbacks by prefix."""
         query = update.callback_query
         if query is None:
             return
@@ -1925,10 +1907,6 @@ class WlCodexHandlers:
 
         if data.startswith("approval:"):
             await self._approval_callback_impl(update, query, data)
-        elif data.startswith("waiting:"):
-            await self._waiting_callback_impl(update, query, data)
-        elif data.startswith("worktree_done:"):
-            await self._worktree_done_callback_impl(update, query, data)
         elif data.startswith("conv:"):
             await self._conversation_callback_impl(update, query, data)
         elif data.startswith("settings:"):
@@ -2156,60 +2134,10 @@ class WlCodexHandlers:
             logger.exception("Approval callback error")
             await self._safe_callback_answer(query, f"错误：{exc}")
 
-    async def _waiting_callback_impl(
-        self, update: Update, query: object, data: str
-    ) -> None:
-        from wlcodex.waiting_callback import decode_waiting_callback
-
-        callback = decode_waiting_callback(data)
-        if callback is None:
-            await self._safe_callback_answer(query, "无效的等待回调数据。")
-            return
-
-        try:
-            response = await self._controller.handle_waiting_callback(callback)
-            await self._safe_callback_answer(query, "完成")
-            await self._safe_callback_edit(
-                update, query, response.text, response.buttons
-            )
-        except Exception as exc:
-            logger.exception("Waiting callback error")
-            await self._safe_callback_answer(query, f"错误：{exc}")
-
-    async def _worktree_done_callback_impl(
-        self, update: Update, query: object, data: str
-    ) -> None:
-        from wlcodex.waiting_callback import decode_worktree_done_callback
-
-        callback = decode_worktree_done_callback(data)
-        if callback is None:
-            await self._safe_callback_answer(query, "无效的 worktree 回调数据。")
-            return
-
-        try:
-            response = await self._controller.handle_worktree_done_callback(callback)
-            await self._safe_callback_answer(query, "完成")
-            await self._safe_callback_edit(
-                update, query, response.text, response.buttons
-            )
-        except Exception as exc:
-            logger.exception("Worktree done callback error")
-            await self._safe_callback_answer(query, f"错误：{exc}")
-
     # --- Legacy approval callback (kept for backward compat) ---
 
     async def approval_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.callback_router(update, context)
-
-    async def _track_status_from_response(
-        self, text: str, chat_id: int, message_id: int
-    ) -> None:
-        if message_id == SEND_FAILED:
-            return
-        import re
-        m = re.search(r"(?:任务|Task) #(\d+)", text)
-        if m:
-            await self._store_status_message(int(m.group(1)), chat_id, message_id)
 
 
 # --- Application builder ---
@@ -2245,6 +2173,7 @@ def build_application(
     runtime_event_store: object | None = None,
     outbox: object | None = None,
     terminal_manager: object | None = None,
+    execution_scheduler: object | None = None,
 ) -> tuple[Application, WlCodexHandlers | None]:
     # Bot API HTTP timeouts.
     # Long-polling HTTP timeouts (getUpdates).
@@ -2264,11 +2193,17 @@ def build_application(
     )
 
     if controller is not None and ledger is not None:
+        scheduler = (
+            execution_scheduler
+            if execution_scheduler is not None
+            else getattr(controller, "execution_scheduler", None)
+        )
         handlers = WlCodexHandlers(
             config, controller, ledger, approval_service, application.bot,
             runtime_event_store=runtime_event_store,
             outbox=outbox,
             terminal_manager=terminal_manager,
+            execution_scheduler=scheduler,
         )
     else:
         application.add_handler(CommandHandler("start", _skeleton_start))
@@ -2327,7 +2262,7 @@ def build_application(
 
 async def _skeleton_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "WLCodex 已在线。使用 /task <workspace> <prompt> 创建任务，或用 /tasks 查看任务。"
+        "WLCodex 已在线。直接发消息继续工作台，或使用 /new 开始新的工作台。"
     )
 
 

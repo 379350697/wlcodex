@@ -34,7 +34,7 @@ def test_natural_bot_commands_are_compact() -> None:
     commands = build_bot_commands(profile="natural")
     names = [cmd[0] for cmd in commands]
 
-    assert names == ["new", "stop", "status", "model", "claude_mode", "diff", "help"]
+    assert names == ["new", "status", "terminal", "diff", "settings", "help"]
 
 
 def test_legacy_bot_commands_keep_operator_routes() -> None:

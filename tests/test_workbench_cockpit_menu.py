@@ -36,6 +36,11 @@ REQUIRED_HELP_PHRASES = [
 FORBIDDEN_HELP_PHRASES = [
     "terminal.enabled",
     "external_session_id",
+    "新任务",
+    "任务 #",
+    "/task",
+    "/continue",
+    "/steer",
 ]
 
 
@@ -116,18 +121,18 @@ def test_menu_labels_use_cockpit_product_language():
     commands = build_bot_commands(profile="natural")
     cmd_map = dict(commands)
     assert cmd_map.get("terminal") == "接管现场"
-    assert cmd_map.get("new") == "新任务"
+    assert cmd_map.get("new") == "新工作台"
     assert cmd_map.get("status") == "状态"
     assert cmd_map.get("diff") == "变更"
     assert cmd_map.get("settings") == "设置"
     assert cmd_map.get("help") == "帮助"
 
 
-def test_legacy_help_still_lists_advanced_diagnostics():
-    """Legacy help must still reference advanced diagnostic commands."""
+def test_legacy_help_keeps_advanced_diagnostics_hidden():
+    """Legacy help still avoids teaching the old task command flow."""
     from wlcodex.status import render_conversation_help
 
     text = render_conversation_help(profile="legacy")
-    assert "/task" in text
-    assert "/continue" in text
-    assert "/steer" in text
+    assert "/task" not in text
+    assert "/continue" not in text
+    assert "/steer" not in text

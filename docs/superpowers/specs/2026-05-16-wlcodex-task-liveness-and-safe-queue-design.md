@@ -1,5 +1,10 @@
 # WLCodex Task Liveness And Safe Queue Design
 
+> Superseded for product UX: the 2026-05-20 Remote Workbench repair keeps
+> locking/queueing internal and removes task semantics from normal user paths.
+> Queue, blocker, task id, `/continue`, and `/steer` language below is legacy
+> diagnostic material only.
+
 ## Summary
 
 This design tightens WLCodex task lifecycle safety without weakening the current V1 invariant that one workspace may have only one active write task. It fixes the immediate paused-task self-lock bug, adds a real escape hatch for paused tasks, introduces task liveness watchdogs, detects dead app-server sessions conservatively, and sends recovery notifications after daemon restart.

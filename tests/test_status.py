@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 
 from wlcodex.models import Task, TaskStatus
-from wlcodex.status import render_task_card, render_task_list
+from wlcodex.legacy_task_status import render_task_card, render_task_list
 
 
 def _task(task_id: int, status: TaskStatus, title: str) -> Task:

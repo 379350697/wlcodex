@@ -244,7 +244,7 @@ async def test_health_reports_backend_and_db_status(ctrl: CommandController) -> 
 @pytest.mark.asyncio
 async def test_new_conversation_command(ctrl: CommandController) -> None:
     response = await ctrl.handle("/new", {"chat_id": 100, "user_id": 200})
-    assert "新对话" in response.text or "已创建" in response.text
+    assert "新工作台" in response.text
 
 
 @pytest.mark.asyncio
@@ -440,7 +440,50 @@ async def test_claude_permission_command_switches_with_chinese_mode(
 @pytest.mark.asyncio
 async def test_legacy_commands_still_work(ctrl: CommandController) -> None:
     response = await ctrl.handle("/status", {"chat_id": 1, "user_id": 2})
-    assert "任务列表" in response.text or "暂无任务" in response.text
+    assert "当前还没有工作台" in response.text
+    assert "/task" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_diff_without_workbench_uses_workbench_copy(ctrl: CommandController) -> None:
+    response = await ctrl.handle("/diff", {"chat_id": 123})
+
+    assert "工作台" in response.text
+    assert "任务 ID" not in response.text
+    assert "任务 #" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_files_without_workbench_uses_workbench_copy(ctrl: CommandController) -> None:
+    response = await ctrl.handle("/files", {"chat_id": 123})
+
+    assert "工作台" in response.text
+    assert "任务 ID" not in response.text
+    assert "任务 #" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_task_command_is_routed_through_legacy_diagnostics(
+    ctrl: CommandController,
+) -> None:
+    class FakeLegacyDiagnostics:
+        def __init__(self) -> None:
+            self.seen: list[object] = []
+
+        def can_handle(self, command: object) -> bool:
+            return command.__class__.__name__ == "StartTaskCommand"
+
+        async def handle(self, command: object, telegram_context: dict | None) -> object:
+            self.seen.append(command)
+            return type("Response", (), {"text": "legacy adapter", "buttons": []})()
+
+    adapter = FakeLegacyDiagnostics()
+    ctrl.set_legacy_diagnostics(adapter)
+
+    response = await ctrl.handle("/task demo Fix the health timeout", {"chat_id": 123})
+
+    assert response.text == "legacy adapter"
+    assert len(adapter.seen) == 1
 
 
 @pytest.mark.asyncio
@@ -456,7 +499,7 @@ async def test_help_shows_new_commands(ctrl: CommandController) -> None:
     assert "WLCodex" in response.text
     assert "默认流程：Codex -> Claude -> Codex" in response.text
     assert "当前视图：驾驶舱" in response.text
-    assert "[新任务]" in response.text
+    assert "[新工作台]" in response.text
     assert "[接管现场]" in response.text
     assert len(response.text.splitlines()) <= 14
 
@@ -481,9 +524,10 @@ async def test_status_shows_conversation_when_active(ctrl: CommandController) ->
 
 
 @pytest.mark.asyncio
-async def test_status_falls_back_to_task_list_without_conversation(ctrl: CommandController) -> None:
+async def test_status_without_workbench_uses_workbench_copy(ctrl: CommandController) -> None:
     response = await ctrl.handle("/status", {"chat_id": 999, "user_id": 999})
-    assert "任务列表" in response.text or "暂无任务" in response.text
+    assert "当前还没有工作台" in response.text
+    assert "/task" not in response.text
 
 
 @pytest.mark.asyncio
@@ -495,6 +539,34 @@ async def test_verify_with_conversation_calls_codex(ctrl: CommandController) -> 
     # /verify should find the latest run and attempt Codex verification
     response = await ctrl.handle("/verify 确认修复", {"chat_id": 100, "user_id": 200})
     assert "验收" in response.text
+
+
+@pytest.mark.asyncio
+async def test_verify_without_active_codex_task_hides_internal_task_id(ctrl: CommandController) -> None:
+    ledger = ctrl._ledger
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="claude done",
+        mode="claude_direct",
+        workspace_alias="wlcodex",
+    )
+    run = ledger.create_agent_run(
+        conversation_id=conversation.id,
+        agent="claude",
+        role="implementation",
+        prompt_packet_summary="done",
+    )
+    ledger.update_agent_run_status(
+        run.id,
+        AgentRunStatus.DONE.value,
+        completion_summary="changed files",
+    )
+
+    response = await ctrl.handle("/verify 确认修复", {"chat_id": 100, "user_id": 200})
+
+    assert "验收" in response.text
+    assert "任务 #" not in response.text
 
 
 # ---------------------------------------------------------------------------
@@ -1296,6 +1368,7 @@ async def test_verify_response_hides_internal_codex_thread_id(tmp_path: Path) ->
 
     assert "thread-secret" not in response.text
     assert "线程：" not in response.text
+    assert "任务 #" not in response.text
 
 
 def test_encode_decode_conversation_callback_roundtrip() -> None:
@@ -1314,7 +1387,7 @@ def test_encode_decode_conversation_callback_roundtrip() -> None:
 
 
 def test_decode_conversation_callback_rejects_waiting() -> None:
-    """decode_conversation_callback must reject waiting: protocol."""
+    """decode_conversation_callback must reject the legacy waiting prefix."""
     from wlcodex.conversation_callback import decode_conversation_callback
     assert decode_conversation_callback("waiting:1:diff") is None
     assert decode_conversation_callback("approval:xxx") is None

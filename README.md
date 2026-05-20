@@ -145,7 +145,7 @@ export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
 
 | Command | Label | Purpose |
 |---------|-------|---------|
-| `/new` | 新任务 | Start fresh work |
+| `/new` | 新工作台 | Start a fresh workbench |
 | `/status` | 状态 | Show active workbench |
 | `/terminal` | 接管现场 | Open Onsite live worksite |
 | `/diff` | 变更 | Inspect file changes |
@@ -159,7 +159,7 @@ export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
 | `/start` / `/help` | Show help |
 | `/health` | Backend health check |
 | plain text | Continue the active workbench; default is Codex → Claude → Codex |
-| `/new [title]` | Start a fresh conversation |
+| `/new [title]` | Start a fresh workbench |
 | `/codex <prompt>` | Codex-only direct analysis |
 | `/claude <prompt>` | Claude-only direct implementation |
 | `/auto <prompt>` | Full Codex → Claude → Codex orchestration |
@@ -167,6 +167,7 @@ export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
 | `/switch <workspace>` | Switch the active workspace |
 | `/model [name]` | Show or set the preferred model |
 | `/verify` | Ask Codex to verify the latest implementation evidence |
+| `/sessions` | List historical agent sessions for the active workbench |
 | `/stop` | Stop the current active conversation |
 
 ### View switching
@@ -196,7 +197,9 @@ export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
 
 ### Legacy diagnostics
 
-Legacy commands remain available for diagnostics and low-level inspection:
+Legacy commands remain available only for diagnostics and low-level inspection.
+They are hidden from the daily menu and are not part of the normal Workbench
+journey:
 
 | Command | Description |
 |---------|-------------|
@@ -213,7 +216,6 @@ Legacy commands remain available for diagnostics and low-level inspection:
 | `/abort <id>` | Abort a running task |
 | `/archive <id>` | Archive a completed task |
 | `/fork <id> <prompt>` | Fork a task to a new thread |
-| `/sessions` | List conversation/thread mappings |
 | `/claude_mode` | Set Claude permission mode |
 
 ## Manual smoke test
@@ -221,11 +223,11 @@ Legacy commands remain available for diagnostics and low-level inspection:
 1. Start the bot: `.venv/bin/wlcodex --config config/wlcodex.toml`
 2. In private Telegram chat with the bot:
    - Send `/health` → Should report backend status
-   - Send `/new 真人 smoke` → Should create a fresh conversation
+   - Send `/new 真人 smoke` → Should create a fresh workbench
    - Send `请用中文只回复：wlcodex telegram live ok`
-   - Observe a conversation-first response, not a raw `/task` card
+   - Observe a Workbench-first response, not a raw diagnostic card
    - Send `/status` → Should show the active workbench status
-   - Send `/sessions` → Should list the conversation/session
+   - Send `/sessions` → Should list historical agent sessions for the workbench
 
 Use `/codex <prompt>`, `/claude <prompt>`, or `/auto <prompt>` only when you
 want to force a specific execution mode. Plain text uses the default
@@ -237,14 +239,14 @@ Use this as the real product acceptance smoke for the current `natural`
 interaction profile:
 
 1. Config has `[interaction] profile = "natural"` and `streaming_enabled = true`.
-2. A plain text message starts or continues a conversation without a mechanical
+2. A plain text message starts or continues a workbench without a mechanical
    textual ACK such as "正在处理你的消息，请稍候".
 3. Telegram shows typing while the run is being prepared.
 4. Visible model output streams into one edited message instead of a sequence of
    duplicate status cards.
-5. The normal reply body does not expose task id, thread id, session IDs, workspace,
-   mode, or token counters. Those details remain available through `/status` and
-   diagnostic commands.
+5. The normal reply body does not expose task ids, thread ids, session IDs,
+   workspace locks, queue positions, or token counters. Operator details remain
+   limited to explicit diagnostic commands.
 6. Completion shows a compact action row. `查看 diff` appears when the workspace
    really has a git diff, including changes made by Claude Code.
 7. `/codex <prompt>` runs Codex-only and does not call Claude.
@@ -271,10 +273,10 @@ not enough evidence for this smoke.
 
 ## Live Telegram Smoke (Real Acceptance)
 
-The primary human smoke is conversation-first, as above. The automated live
-pytest gate below validates the lower-level legacy `/task` path because it
-asserts a real Codex app-server UUID in the SQLite `tasks` ledger. Treat it as a
-diagnostic app-server evidence gate, not the default user journey.
+The primary human smoke is Workbench-first, as above. The automated live pytest
+gate should be treated as a product evidence gate when it exercises `/new`,
+plain text, `/terminal`, `/product`, `/claude`, the "让 Codex 验收" action,
+`/codex`, and `/sessions` without exposing internal ids.
 
 Set the environment:
 
@@ -285,21 +287,25 @@ export WLCODEX_RUN_TELEGRAM_LIVE=1
 .venv/bin/python -m pytest tests/test_live_telegram_smoke.py -q
 ```
 
-This preflight does not require `chat_id` or `task_id`; those only exist after
-a real legacy `/task` interaction. Start WLCodex with the same config. From the
-authorized private Telegram chat, send this diagnostic sequence:
+This preflight does not require `chat_id` or diagnostic ids. Start WLCodex with
+the same config. From the authorized private Telegram chat, send this product
+sequence:
 
 ```text
 /health
-/task <workspace> Reply exactly with: wlcodex telegram live ok
-/tasks
+/new 真人历史现场 smoke
+请用中文只回复：wlcodex telegram live ok
+/terminal
+/product
+/claude Reply exactly with: claude only ok
+点击：让 Codex 验收
+/codex Reply exactly with: codex only ok
 /sessions
 ```
 
-After the status card shows the created task id, export and run:
+Then run:
 
 ```bash
-export WLCODEX_LIVE_SMOKE_TASK_ID=<task_id>
 .venv/bin/python -m pytest tests/test_live_telegram_smoke.py -q
 ```
 
@@ -307,10 +313,12 @@ export WLCODEX_LIVE_SMOKE_TASK_ID=<task_id>
 private chat created by the allowlisted Telegram user and verifies the actual
 `telegram_chat_id` recorded in SQLite.
 
-### Approval Smoke
+### Legacy Diagnostic Smoke
 
-Approval smoke also uses legacy `/task`, because approval rows are tied to raw
-Codex task/app-server request evidence:
+Legacy `/task` smoke is an operator diagnostic for the app-server ledger. It is
+not the default user journey and must not be used as product release evidence.
+It is intentionally manual; the automated live smoke follows Workbench runtime
+events and agent session refs instead of legacy task ids.
 
 ```text
 /task <workspace> Create file wlcodex_approval_probe.txt with text approval-ok. If permission is requested, wait for my Telegram approval.
@@ -320,14 +328,6 @@ Codex task/app-server request evidence:
 2. Click Approve once.
 3. Observe task status returning to running or done.
 4. Verify the file exists.
-
-Then set:
-
-```bash
-export WLCODEX_LIVE_APPROVAL_REQUIRED=1
-export WLCODEX_LIVE_SMOKE_TASK_ID=<approval_task_id>
-WLCODEX_RUN_TELEGRAM_LIVE=1 .venv/bin/python -m pytest tests/test_live_telegram_smoke.py -q
-```
 
 ## systemd
 

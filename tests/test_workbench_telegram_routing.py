@@ -31,7 +31,8 @@ def _make_update(text: str = "/terminal", chat_id: int = 100, user_id: int = 123
 
 
 def _make_handlers(*, controller=None, ledger=None, config=None,
-                   runtime_store=None, terminal_manager=None):
+                   runtime_store=None, terminal_manager=None,
+                   execution_scheduler=None):
     """Build a WlCodexHandlers instance with test doubles."""
     from wlcodex.telegram_app import WlCodexHandlers
 
@@ -69,6 +70,7 @@ def _make_handlers(*, controller=None, ledger=None, config=None,
         runtime_event_store=runtime_store,
         outbox=None,
         terminal_manager=terminal_manager,
+        execution_scheduler=execution_scheduler,
     )
 
 
@@ -78,6 +80,7 @@ def _make_handlers(*, controller=None, ledger=None, config=None,
 @pytest.mark.asyncio
 async def test_terminal_with_active_claude_session_auto_opens_onsite():
     """Spec §View Switching: /terminal with active Claude → auto-attach Claude onsite."""
+    from wlcodex.runtime_events import EventType, Visibility
     from wlcodex.surfaces.terminal.models import TerminalSessionRef
 
     update = _make_update("/terminal")
@@ -98,7 +101,14 @@ async def test_terminal_with_active_claude_session_auto_opens_onsite():
     ])
     ledger.record_telegram_update = MagicMock()
 
-    handlers = _make_handlers(ledger=ledger, terminal_manager=terminal_mgr)
+    runtime_store = MagicMock()
+    runtime_store.append = MagicMock()
+
+    handlers = _make_handlers(
+        ledger=ledger,
+        terminal_manager=terminal_mgr,
+        runtime_store=runtime_store,
+    )
 
     await handlers.terminal_cmd(update, None)
 
@@ -114,6 +124,15 @@ async def test_terminal_with_active_claude_session_auto_opens_onsite():
     assert any("已切到 terminal" in t or "已进入接管现场" in t for t in sent_texts), (
         f"No attach-success copy found in: {sent_texts}"
     )
+
+    attached_events = [
+        call.args[0]
+        for call in runtime_store.append.call_args_list
+        if call.args[0].event_type == EventType.TERMINAL_SESSION_ATTACHED
+    ]
+    assert len(attached_events) == 1
+    assert attached_events[0].visibility == Visibility.OPERATOR
+    assert attached_events[0].payload["external_session_id"] == "ext-1"
 
 
 # ── /terminal  no session → start card ─────────────────────────────
@@ -177,6 +196,7 @@ async def test_onsite_text_routes_to_terminal_manager_not_controller():
     The product controller MUST NOT be called for ordinary text while in
     terminal / Onsite mode.
     """
+    from wlcodex.runtime_events import EventType, Visibility
     from wlcodex.surfaces.terminal.models import TerminalSessionRef
 
     update = _make_update("继续修失败测试", chat_id=200)
@@ -224,6 +244,16 @@ async def test_onsite_text_routes_to_terminal_manager_not_controller():
     # Controller must NOT be called
     controller.handle.assert_not_called()
     controller.handle_conversation_text.assert_not_called()
+
+    input_events = [
+        call.args[0]
+        for call in runtime_store.append.call_args_list
+        if call.args[0].event_type == EventType.TERMINAL_SESSION_INPUT_SENT
+    ]
+    assert len(input_events) == 1
+    assert input_events[0].visibility == Visibility.USER
+    assert "external_session_id" not in input_events[0].payload
+    assert "ext-99" not in repr(input_events[0].payload)
 
 
 # ── Onsite text without session → start card ───────────────────────
@@ -843,6 +873,7 @@ class _ContinuationTerminalManager:
 def _make_continuation_harness(tmp_path, terminal_manager):
     from wlcodex.config import WorkspaceConfig
     from wlcodex.db import Ledger
+    from wlcodex.execution_scheduler import ExecutionScheduler
     from wlcodex.task_service import TaskService
 
     ledger = Ledger.open(tmp_path / "db.sqlite3")
@@ -858,11 +889,13 @@ def _make_continuation_harness(tmp_path, terminal_manager):
         ledger,
         (WorkspaceConfig("wlcodex", tmp_path, True),),
     )
-    controller = SimpleNamespace(_service=service)
+    scheduler = ExecutionScheduler(service, ledger)
+    controller = SimpleNamespace()
     handlers = _make_handlers(
         controller=controller,
         ledger=ledger,
         terminal_manager=terminal_manager,
+        execution_scheduler=scheduler,
     )
     return handlers, ledger, service, conversation
 

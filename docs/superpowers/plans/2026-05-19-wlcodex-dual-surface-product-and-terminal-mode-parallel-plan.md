@@ -1,5 +1,9 @@
 # WLCodex Dual Surface Product And Terminal Mode Implementation Plan
 
+> Superseded for product implementation: follow the 2026-05-20 Remote
+> Workbench repair plans instead. Product/terminal mode wording below maps to
+> Cockpit/Onsite views over one Workbench.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build two independent Telegram surfaces over one shared conversation core: Product Surface for event-driven phone UX and Terminal Surface for Claude Remote style raw session control.

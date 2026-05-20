@@ -1,5 +1,9 @@
 # WLCodex Conversation-First Dual-Agent Orchestration Implementation Plan
 
+> Superseded for product implementation: follow the 2026-05-20 Remote
+> Workbench repair plans instead. "Conversation" copy below maps to the
+> current Workbench model; task-led user flows are legacy diagnostics only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build WLCodex v2 as a conversation-first chief-engineer Telegram cockpit with Codex direct mode, Claude direct mode, Codex-led orchestration, humanized menus, streaming, and compact model context packets.

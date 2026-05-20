@@ -21,6 +21,7 @@ def _install_telegram_stubs() -> None:
     class InlineKeyboardMarkup:
         def __init__(self, keyboard: object) -> None:
             self.keyboard = keyboard
+            self.inline_keyboard = keyboard
 
     telegram.InlineKeyboardButton = InlineKeyboardButton
     telegram.InlineKeyboardMarkup = InlineKeyboardMarkup

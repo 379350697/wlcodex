@@ -1,5 +1,10 @@
 # WLCodex Interaction Layer Natural Streaming Design
 
+> Superseded in user semantics by the 2026-05-20 Remote Workbench repair.
+> "new conversation" and task-led copy below is historical context. Current
+> normal Telegram copy must say Workbench/Cockpit/Onsite and must not expose
+> task ids, queue blockers, session ids, or thread ids.
+
 ## Final Decision
 
 WLCodex should split Telegram interaction behavior into an independent

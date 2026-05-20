@@ -23,9 +23,9 @@ KNOWN_PHASES = {
     "running_implementation": "Claude 开始实施",
     "running_verification": "Codex 正在验收",
     "retrying_implementation": "Claude 重新实施",
-    "completed": "任务完成",
-    "failed": "任务失败",
-    "cancelled": "任务已取消",
+    "completed": "运行完成",
+    "failed": "运行失败",
+    "cancelled": "运行已取消",
 }
 
 
@@ -89,7 +89,7 @@ class RuntimeRenderer:
         return "\n".join(lines) if lines else ""
 
     def heartbeat_text(self, state: RuntimeRunState) -> str:
-        """Heartbeat for long-running tasks (verbosity 1+ only)."""
+        """Heartbeat for long-running runs (verbosity 1+ only)."""
         if self.verbosity < 1:
             return ""
         ago = _time_ago(state.last_activity_at)
@@ -98,12 +98,12 @@ class RuntimeRenderer:
     def final_text(self, state: RuntimeRunState) -> str:
         """Final summary when a run reaches a terminal state."""
         if state.phase == "completed":
-            base = "任务完成 ✓"
+            base = "运行完成 ✓"
         elif state.phase == "failed":
             reason = state.error_summary or "未知错误"
-            base = f"任务失败: {reason}"
+            base = f"运行失败: {reason}"
         elif state.phase == "cancelled":
-            base = "任务已取消"
+            base = "运行已取消"
         else:
             base = f"执行结束 ({self._phase_label(state.phase)})"
 

@@ -1,5 +1,9 @@
 # WLCodex Dual Surface Product And Terminal Mode Design
 
+> Superseded: the 2026-05-20 Remote Workbench repair replaces the product vs.
+> terminal mode framing with Cockpit and Onsite views over one Workbench.
+> Raw task/session ids and task-led user flows below are legacy diagnostics only.
+
 ## Decision
 
 WLCodex should expose two independent Telegram-facing surfaces over one shared

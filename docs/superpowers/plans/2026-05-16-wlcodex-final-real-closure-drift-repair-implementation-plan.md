@@ -1,5 +1,10 @@
 # WLCodex Final Real Closure Drift Repair Implementation Plan
 
+> Superseded for product implementation: follow the 2026-05-20 Remote
+> Workbench repair plans instead. Task-led `/task`, `/continue`, `/steer`,
+> queue, blocker, task id, session id, and thread id user flows below are
+> legacy diagnostics only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Repair WLCodex drift so the real Telegram cockpit drives the real local Codex app-server end to end, with fake backends limited to unit-test helpers and excluded from smoke acceptance.

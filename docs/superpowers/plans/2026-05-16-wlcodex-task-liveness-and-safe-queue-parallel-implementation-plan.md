@@ -1,5 +1,10 @@
 # WLCodex Task Liveness And Safe Queue Implementation Plan
 
+> Superseded for product implementation: follow the 2026-05-20 Remote
+> Workbench repair plans instead. Queue/lock behavior below is internal
+> execution infrastructure; task ids, blockers, and queue positions must not
+> appear in normal Workbench user paths.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix paused-task self-locking, add task liveness cleanup, and notify Telegram about recovery-paused tasks while preserving the one-active-write-task-per-workspace invariant.

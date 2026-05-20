@@ -1,5 +1,11 @@
 # WLCodex Full Telegram Codex Cockpit Closure Design
 
+> Superseded: the 2026-05-20 Remote Workbench repair replaces this task-led
+> product model. References to `/task`, `/continue`, `/steer`, task queues,
+> task ids, and user-managed session/thread ids are legacy diagnostics only and
+> must not be used for Cockpit, Onsite, `/status`, `/help`, `/sessions`, or
+> ordinary Telegram text.
+
 ## Summary
 
 This design replaces the earlier skeleton-first WLCodex scope with a full business closure scope. The target is a usable personal Telegram cockpit that can remotely drive local Linux Codex CLI through Codex app-server: start real Codex tasks, stream progress into low-noise Telegram status cards, request approvals through Telegram buttons, continue or steer historical tasks explicitly, inspect logs/diffs on demand, and recover after daemon restarts.
@@ -441,4 +447,3 @@ Manual smoke test:
 - Daemon restart preserves task history and pauses active work safely.
 - Tests and lint pass.
 - README documents the actual commands that work on this Linux host.
-

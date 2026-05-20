@@ -15,6 +15,7 @@ def test_events_reads_from_sqlite(tmp_path: Path) -> None:
     inspector = TaskInspector(ledger, tmp_path / "logs")
     result = inspector.events(task.id)
 
+    assert "任务 #" not in result.title
     assert "test_event" in result.body
     assert len(result.body) < 2000
 
@@ -38,6 +39,7 @@ def test_tail_no_log_file(tmp_path: Path) -> None:
     inspector = TaskInspector(ledger, tmp_path / "logs")
     result = inspector.tail(task.id)
 
+    assert "任务 #" not in result.title
     assert "没有找到本地日志" in result.body
 
 
@@ -67,6 +69,7 @@ def test_files_list_touched(tmp_path: Path) -> None:
     inspector = TaskInspector(ledger, tmp_path / "logs")
     result = inspector.files(task.id)
 
+    assert "任务 #" not in result.title
     assert "src/a.py" in result.body
     assert "src/b.py" in result.body
 
@@ -90,6 +93,7 @@ def test_diff_no_information(tmp_path: Path) -> None:
     inspector = TaskInspector(ledger, tmp_path / "logs")
     result = inspector.diff(task.id, workspace_path=str(tmp_path))
 
+    assert "任务 #" not in result.title
     assert "暂无 diff" in result.body or "没有未提交变更" in result.body
 
 

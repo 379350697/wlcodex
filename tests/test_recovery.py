@@ -449,6 +449,8 @@ def test_format_recovery_summary_output() -> None:
     )
 
     assert "启动恢复摘要" in summary
+    assert "暂停的任务" not in summary
+    assert "暂停的执行" in summary
     assert "#1" in summary and "#2" in summary  # paused tasks
     assert "#10" in summary  # orphaned run
     assert "#20" in summary  # orphaned run
@@ -469,6 +471,7 @@ def test_format_recovery_summary_empty() -> None:
     )
 
     assert "启动恢复摘要" in summary
+    assert "暂停的任务" not in summary
     assert "无" in summary
 
 

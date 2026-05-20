@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from wlcodex.db import Ledger
 from wlcodex.runtime_events import EventType
-from wlcodex.status import render_task_card
 
 if TYPE_CHECKING:
     from wlcodex.runtime_events import RuntimeEvent
@@ -14,7 +13,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SendTelegram = Callable[[int, str, list[list[dict[str, str]]] | None], Awaitable[int]]
-EditTelegram = Callable[[int, int, str], Awaitable[None]]
+
+
+_RECOVERY_WORKBENCH_TEXT = (
+    "WLCodex 已恢复。\n\n"
+    "上次运行已安全暂停。当前工作仍在驾驶舱中可见，"
+    "可以查看状态、接管现场，或发送 /new 开始新的工作台。"
+)
 
 
 async def notify_recovery_paused_tasks(
@@ -22,7 +27,6 @@ async def notify_recovery_paused_tasks(
     ledger: Ledger,
     paused_ids: list[int],
     send_telegram: SendTelegram,
-    edit_telegram: EditTelegram | None,
 ) -> int:
     sent = 0
     for task_id in paused_ids:
@@ -33,26 +37,11 @@ async def notify_recovery_paused_tasks(
         if task.telegram_chat_id is None:
             continue
 
-        text = (
-            f"任务 #{task.id} 已因 WLCodex 重启暂停。\n"
-            f"可用 /continue {task.id} <prompt> 继续，"
-            f"或 /abort {task.id} 释放工作区。"
-        )
         try:
-            await send_telegram(task.telegram_chat_id, text, None)
+            await send_telegram(task.telegram_chat_id, _RECOVERY_WORKBENCH_TEXT, None)
             sent += 1
         except Exception:
             logger.exception("failed to send recovery notification for task #%d", task.id)
-
-        if edit_telegram is not None and task.telegram_status_message_id is not None:
-            try:
-                await edit_telegram(
-                    task.telegram_chat_id,
-                    task.telegram_status_message_id,
-                    render_task_card(task),
-                )
-            except Exception:
-                logger.exception("failed to edit recovery status card for task #%d", task.id)
     return sent
 
 
@@ -78,11 +67,11 @@ def format_recovery_summary(
     lines = ["WLCodex 启动恢复摘要：", ""]
 
     if paused_task_ids:
-        lines.append(f"暂停的任务（{len(paused_task_ids)}）：")
+        lines.append(f"暂停的执行（{len(paused_task_ids)}）：")
         for tid in paused_task_ids:
             lines.append(f"  #{tid}")
     else:
-        lines.append("暂停的任务：无")
+        lines.append("暂停的执行：无")
 
     lines.append("")
 

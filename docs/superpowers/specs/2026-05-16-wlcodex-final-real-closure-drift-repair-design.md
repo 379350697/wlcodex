@@ -1,5 +1,11 @@
 # WLCodex Final Real Closure Drift Repair Design
 
+> Superseded: the 2026-05-20 Remote Workbench repair replaces this task-led
+> product model. References to `/task`, `/continue`, `/steer`, task queues,
+> task ids, and user-managed session/thread ids are legacy diagnostics only and
+> must not be used for Cockpit, Onsite, `/status`, `/help`, `/sessions`, or
+> ordinary Telegram text.
+
 ## Summary
 
 This is the final V1 repair spec for WLCodex after review found protocol drift and incomplete business closure. The target is not a fake-backend demonstration. The target is a personal Telegram cockpit that can drive the real local Linux Codex CLI app-server end to end: start real Codex work, monitor progress remotely, approve real app-server requests from Telegram, inspect local artifacts without adding Codex context, continue historical sessions explicitly, and survive daemon restarts.

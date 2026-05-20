@@ -100,7 +100,7 @@ triage, and verification.
 Expose only the smallest set of daily user actions:
 
 ```text
-new task
+new workbench
 status
 take over live worksite
 view diff
@@ -362,7 +362,7 @@ Recommended visible menu:
 
 | Command | Label | Purpose |
 | --- | --- | --- |
-| `/new` | 新任务 | start fresh work |
+| `/new` | 新工作台 | start a fresh workbench |
 | `/status` | 状态 | show active workbench |
 | `/terminal` | 接管现场 | open Onsite |
 | `/diff` | 变更 | inspect file changes |
@@ -407,7 +407,7 @@ Claude：可用
 
 直接发消息开始。
 
-[新任务] [接管现场] [设置]
+[新工作台] [接管现场] [设置]
 ```
 
 If Claude is disabled:
@@ -588,7 +588,7 @@ WLCodex 已恢复。
 当前工作仍在驾驶舱中可见。
 现场会话已断开，可以重新接管或继续从摘要处理。
 
-[接管现场] [状态] [新任务]
+[接管现场] [状态] [新工作台]
 ```
 
 ## Security
@@ -687,4 +687,3 @@ The primary product path should prefer:
 - Do not rewrite the orchestration runner unless a specific acceptance test
   proves the current boundary cannot support the workbench model.
 - Do not expose session ids in primary user copy.
-

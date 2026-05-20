@@ -1,5 +1,11 @@
 # Code Quality Review — Task 9: Documentation And Config Alignment
 
+> Superseded on 2026-05-21 by the Remote Workbench deep repair documentation
+> cleanup. This review was written before `/new` copy changed from the old
+> task-led label to the current Workbench-first label. Current product docs and
+> config comments treat `/new` as "新工作台" and live smoke evidence as
+> Workbench/runtime-event evidence.
+
 **Reviewer**: Code Quality Reviewer (independent)
 **Date**: 2026-05-20
 **Verdict**: **PASS**
@@ -93,6 +99,6 @@ Every documentation claim cross-checked against actual code:
 | `Controls the default Codex -> Claude -> Codex workflow` | `orchestration.enabled` gates orchestration runner | ✓ |
 | `Claude backend for default orchestrated + Claude-only direct` | Claude used in both orchestration step + `handle_claude_direct` | ✓ |
 | `cockpit = reserved; currently behaves like legacy` | `profile_from_name("cockpit")` returns `LegacyProfile()` | ✓ |
-| `Register daily-menu: 新任务 状态 接管现场 变更 设置 帮助` | `_NATURAL_COMMANDS` has exactly these 6 labels | ✓ |
+| historical `Register daily-menu` comment | Superseded; current config/docs use Workbench-first menu copy | historical only |
 | `natural = quiet chat + same-run streaming (recommended for Cockpit view)` | `NaturalChatProfile` returns empty `started_text` | ✓ |
 | `Claude permission mode (operator setting)` | `/claude_mode` routes to permission mode switch | ✓ |

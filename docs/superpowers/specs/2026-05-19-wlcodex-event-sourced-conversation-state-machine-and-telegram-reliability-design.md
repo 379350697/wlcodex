@@ -1,5 +1,11 @@
 # WLCodex Event-Sourced Conversation State Machine And Telegram Reliability Design
 
+> Superseded in user semantics by the 2026-05-20 Remote Workbench repair.
+> Runtime events remain the fact source, but "new task"/queue wording below is
+> historical. Current product paths keep Workbench continuity until `/new`;
+> natural-language phrases such as "新任务", "另起一个", and "重新开始" are
+> ordinary Workbench text unless the user sends `/new`.
+
 ## Decision
 
 WLCodex must treat Telegram input as an event-sourced conversation state
@@ -459,4 +465,3 @@ Use a temporary, easy-to-clean code task.
 7. Confirm `/status` and `/trace` explain the same conversation.
 8. Clean up the temporary files and confirm cleanup is part of the same
    conversation unless `/new` is used.
-

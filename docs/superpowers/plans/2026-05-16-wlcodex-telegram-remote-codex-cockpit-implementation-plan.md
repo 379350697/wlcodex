@@ -1,5 +1,10 @@
 # WLCodex Telegram Remote Codex Cockpit Implementation Plan
 
+> Superseded for product implementation: follow the 2026-05-20 Remote
+> Workbench repair plans instead. Task-led `/task`, `/continue`, `/steer`,
+> queue, blocker, task id, session id, and thread id user flows below are
+> legacy diagnostics only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a lightweight personal Telegram cockpit that controls local Linux Codex CLI tasks while preserving task isolation, low token usage, and explicit history resume.

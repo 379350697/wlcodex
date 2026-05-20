@@ -20,6 +20,7 @@ from wlcodex.config import load_config
 from wlcodex.controller import CommandController
 from wlcodex.db import Ledger
 from wlcodex.event_bridge import EventBridge
+from wlcodex.execution_scheduler import ExecutionScheduler
 from wlcodex.inspection import TaskInspector
 from wlcodex.menu import build_bot_commands
 from wlcodex.orchestration_runner import OrchestrationRunner
@@ -384,6 +385,8 @@ def main() -> None:
     else:
         logger.info("Claude backend disabled (set claude.enabled = true to enable)")
 
+    execution_scheduler = ExecutionScheduler(task_service, ledger)
+
     # Controller
     controller = CommandController(
         task_service, backend, inspector,
@@ -392,6 +395,7 @@ def main() -> None:
         default_mode=config.conversation.default_mode,
         default_workspace=config.conversation.default_workspace,
         runtime_event_store=runtime_store,
+        execution_scheduler=execution_scheduler,
     )
 
     # Terminal surface — wire terminal session manager when enabled.
@@ -409,6 +413,7 @@ def main() -> None:
         runtime_event_store=runtime_store,
         outbox=telegram_outbox,
         terminal_manager=terminal_manager,
+        execution_scheduler=execution_scheduler,
     )
 
     if handlers is None:
@@ -535,7 +540,6 @@ def main() -> None:
                     ledger=ledger,
                     paused_ids=paused_ids,
                     send_telegram=handlers.send_telegram,
-                    edit_telegram=handlers.edit_telegram,
                 )
             # Keep running until cancelled
             while True:

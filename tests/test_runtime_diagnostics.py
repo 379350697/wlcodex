@@ -316,6 +316,36 @@ def test_trace_sanitizes_sensitive_payload_keys(tmp_path: Path) -> None:
     assert payload["phase"] == "analysis"
 
 
+def test_trace_sanitizes_internal_session_refs(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.append(
+        _make_event(
+            event_type=EventType.TERMINAL_SESSION_ATTACHED,
+            visibility=Visibility.USER,
+            payload={
+                "agent": "claude",
+                "external_session_id": "cl-secret-session",
+                "session_id": "raw-session",
+                "thread_id": "raw-thread",
+                "hidden_task_id": "hidden-task-secret",
+            },
+        )
+    )
+
+    trace = build_runtime_trace(store, conversation_id=1)
+    payload = trace.events[0]["payload"]
+    rendered = format_trace_display(trace)
+
+    assert payload["external_session_id"] == "[REDACTED]"
+    assert payload["session_id"] == "[REDACTED]"
+    assert payload["thread_id"] == "[REDACTED]"
+    assert payload["hidden_task_id"] == "[REDACTED]"
+    assert "cl-secret-session" not in rendered
+    assert "raw-session" not in rendered
+    assert "raw-thread" not in rendered
+    assert "hidden-task-secret" not in rendered
+
+
 # ---------------------------------------------------------------------------
 # format_status_display
 # ---------------------------------------------------------------------------

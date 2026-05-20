@@ -6,6 +6,7 @@ These tests verify the fixes for the 2026-05-19 blocking issues.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,10 @@ def _make_handlers(tmp_path: Path, *, bot=None, controller=None):
     ), ledger, store
 
 
+def _run(coro):
+    return asyncio.run(coro)
+
+
 # ===========================================================================
 # Outbox: raw API raises, outbox records events
 # ===========================================================================
@@ -53,9 +58,8 @@ def test_raw_send_raises_on_failure_does_not_record_events(tmp_path: Path) -> No
 
     handlers, ledger, store = _make_handlers(tmp_path, bot=FailingBot())
 
-    import asyncio
     with pytest.raises(Exception):
-        asyncio.get_event_loop().run_until_complete(
+        _run(
             handlers._raw_send_message(chat_id=1, text="test")
         )
 
@@ -72,8 +76,7 @@ def test_send_telegram_direct_path_succeeds(tmp_path: Path) -> None:
 
     handlers, _ledger, _store = _make_handlers(tmp_path, bot=WorkingBot())
 
-    import asyncio
-    result = asyncio.get_event_loop().run_until_complete(
+    result = _run(
         handlers.send_telegram(chat_id=1, text="hello")
     )
     assert result == 42
@@ -96,8 +99,7 @@ def test_outbox_enqueue_send_records_delivery_enqueued(tmp_path: Path) -> None:
 
     outbox.enqueue_send(chat_id=1, text="hello", send_fn=fake_send)
 
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(outbox.process_all())
+    _run(outbox.process_all())
 
     events = store.list_by_correlation("")
     enqueued = [e for e in events if e.event_type == EventType.TELEGRAM_DELIVERY_ENQUEUED]
@@ -124,8 +126,7 @@ def test_outbox_records_message_is_not_modified_as_skipped(tmp_path: Path) -> No
         edit_fn=fake_edit_not_modified,
     )
 
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(outbox.process_all())
+    _run(outbox.process_all())
 
     events = store.list_by_correlation("")
     skipped = [e for e in events if e.event_type == EventType.TELEGRAM_EDIT_SKIPPED_NO_CHANGE]
@@ -157,9 +158,8 @@ def test_callback_answer_failure_records_event_does_not_raise(tmp_path: Path) ->
         mode="chief_engineer", workspace_alias="test",
     )
 
-    import asyncio
     # _safe_callback_answer should NOT raise
-    asyncio.get_event_loop().run_until_complete(
+    _run(
         handlers._safe_callback_answer(FailingQuery(), "test answer")
     )
 
@@ -211,7 +211,6 @@ def test_callback_edit_failure_is_recorded_when_edit_crashes(tmp_path: Path) -> 
         effective_user=SimpleNamespace(id=1),
     )
 
-    import asyncio
     # Edit path: _edit_callback_message → edit_telegram →
     # _raw_edit_message → bot.edit_message_text() → AttributeError
     # → not network, not not-modified → _fallback_send_on_edit_failure
@@ -226,7 +225,7 @@ def test_callback_edit_failure_is_recorded_when_edit_crashes(tmp_path: Path) -> 
     # after fallback fails. Currently it doesn't. The _safe_callback_edit
     # wrapper exists for future-proofing; the test below verifies it
     # doesn't itself crash on a successful edit path.
-    asyncio.get_event_loop().run_until_complete(
+    _run(
         handlers._safe_callback_edit(update, FailingEditQuery(), "updated text")
     )
     # Not asserting callback.edit.failed since edit_telegram handles the error
@@ -269,8 +268,7 @@ def test_process_queued_runs_skips_when_workspace_busy(tmp_path: Path) -> None:
         runtime_event_store=store,
     )
 
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(
+    _run(
         controller.process_queued_runs("demo")
     )
 
@@ -324,8 +322,7 @@ def test_process_queued_runs_consumes_queued_event(tmp_path: Path) -> None:
         runtime_event_store=store,
     )
 
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(
+    _run(
         controller.process_queued_runs("demo")
     )
 

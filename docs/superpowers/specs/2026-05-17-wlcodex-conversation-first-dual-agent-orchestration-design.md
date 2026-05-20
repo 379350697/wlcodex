@@ -1,5 +1,10 @@
 # WLCodex Conversation-First Dual-Agent Orchestration Design
 
+> Superseded in user semantics by the 2026-05-20 Remote Workbench repair.
+> Conversation/task wording below is historical context. The current product
+> object is one continuing Workbench until `/new`; tasks are internal execution
+> records or legacy diagnostics only.
+
 ## Final Decision
 
 WLCodex v2 is a conversation-first engineering cockpit, not a task-first Telegram bot.

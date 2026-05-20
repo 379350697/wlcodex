@@ -1,5 +1,11 @@
 # WLCodex Telegram Remote Codex Cockpit Design
 
+> Superseded: the 2026-05-20 Remote Workbench repair replaces this task-led
+> product model. References to `/task`, `/continue`, `/steer`, task queues,
+> task ids, and user-managed session/thread ids are legacy diagnostics only and
+> must not be used for Cockpit, Onsite, `/status`, `/help`, `/sessions`, or
+> ordinary Telegram text.
+
 ## Summary
 
 WLCodex is a personal Telegram remote cockpit for running Codex CLI on a Linux host. It lets the owner start new coding tasks, monitor progress, approve risky actions, inspect logs and diffs, continue historical sessions, and steer long-running work from a phone without standing next to the machine.
@@ -470,4 +476,3 @@ The bot should never stream unbounded logs into Telegram.
 - Only the configured Telegram user can control the bot.
 - Two write tasks cannot run in the same workspace at the same time.
 - The Codex backend is isolated behind an interface.
-

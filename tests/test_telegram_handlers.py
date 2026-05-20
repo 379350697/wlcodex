@@ -76,6 +76,65 @@ allow_write = true
     assert not missing, f"Missing handler registrations: {missing}"
 
 
+def test_build_application_derives_execution_scheduler_from_controller(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.approval import ApprovalService
+    from wlcodex.codex_backend import FakeCodexBackend
+    from wlcodex.config import WorkspaceConfig, load_config
+    from wlcodex.controller import CommandController
+    from wlcodex.db import Ledger
+    from wlcodex.inspection import TaskInspector
+    from wlcodex.task_service import TaskService
+
+    config_path = Path(__file__).parent / "fixtures" / "test_handler_config.toml"
+    config = load_config(config_path)
+    ledger = Ledger.open(tmp_path / "test.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        (WorkspaceConfig("demo", Path("/tmp/demo"), True),),
+    )
+    controller = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+    )
+
+    _, handlers = build_application(
+        config,
+        "dummy-token",
+        controller,
+        ledger,
+        ApprovalService(),
+    )
+
+    assert handlers is not None
+    assert handlers._execution_scheduler is controller.execution_scheduler
+
+
+def test_telegram_handler_source_does_not_parse_legacy_task_cards() -> None:
+    source = Path("wlcodex/telegram_app.py").read_text(encoding="utf-8")
+    assert '"任务 #"' not in source
+    assert '"Task #"' not in source
+
+
+def test_telegram_callback_router_does_not_route_legacy_waiting_callbacks() -> None:
+    source = Path("wlcodex/telegram_app.py").read_text(encoding="utf-8")
+    assert 'data.startswith("waiting:")' not in source
+    assert 'data.startswith("worktree_done:")' not in source
+    assert "_waiting_callback_impl" not in source
+    assert "_worktree_done_callback_impl" not in source
+
+
+def test_telegram_handlers_do_not_track_legacy_task_status_cards() -> None:
+    source = Path("wlcodex/telegram_app.py").read_text(encoding="utf-8")
+    assert "_track_status_from_response" not in source
+    assert "_store_status_message" not in source
+    assert "extract_legacy_status_task_id" not in source
+
+
 def test_authorized_private_chat_user() -> None:
     assert is_authorized(user_id=123, chat_type="private", allowed_user_ids=frozenset({123}))
 
@@ -93,8 +152,8 @@ def test_rejects_none_user_id() -> None:
     assert not is_authorized(user_id=None, chat_type="private", allowed_user_ids=frozenset({123}))
 
 
-def test_all_v1_commands_including_waiting_callbacks_registered(tmp_path: Path) -> None:
-    """Verify that waiting callback handler is registered alongside commands."""
+def test_active_callback_router_is_registered(tmp_path: Path) -> None:
+    """Verify that the active callback router is registered."""
     from wlcodex.config import load_config
     from wlcodex.codex_backend import FakeCodexBackend
     from wlcodex.db import Ledger
@@ -152,25 +211,6 @@ allow_write = true
             if hasattr(handler, "callback"):
                 callback_handlers.append(handler)
     assert len(callback_handlers) > 0
-
-
-def test_waiting_callback_decode_rejects_approval_data() -> None:
-    """Waiting callback decoder must return None for approval callback data."""
-    from wlcodex.approval import encode_approval_callback
-    from wlcodex.waiting_callback import decode_waiting_callback
-
-    approval_data = encode_approval_callback(1, "approve_once")
-    assert decode_waiting_callback(approval_data) is None
-
-
-def test_approval_callback_decode_rejects_waiting_data() -> None:
-    """Approval callback decoder must return None for waiting callback data."""
-    from wlcodex.approval import decode_approval_callback
-    from wlcodex.waiting_callback import encode_waiting_callback, KEEP
-
-    waiting_data = encode_waiting_callback(1, KEEP)
-    assert decode_approval_callback(waiting_data) is None
-
 
 @pytest.mark.asyncio
 async def test_edit_telegram_ignores_message_not_modified() -> None:

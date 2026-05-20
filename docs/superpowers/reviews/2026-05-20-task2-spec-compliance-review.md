@@ -1,5 +1,12 @@
 # Spec Compliance Review — Task 2: Cockpit Menu And Help UX
 
+> Superseded on 2026-05-20 by
+> `docs/superpowers/reviews/2026-05-20-deep-repair-spec-compliance-review.md`.
+> This review used the older `/new` = "新任务" and `/sessions` legacy-menu
+> framing. Current product semantics are Workbench-first: `/new` creates a new
+> Workbench, and `/sessions` lists historical agent sessions for the active
+> Workbench.
+
 **Reviewer:** Spec Compliance Reviewer
 **Date:** 2026-05-20
 **Verdict: PASS** (1 notation)

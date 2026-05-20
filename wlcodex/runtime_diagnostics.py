@@ -894,10 +894,22 @@ def _sanitize_event_for_display(ev: RuntimeEvent) -> dict[str, Any]:
     payload = ev.payload.copy()
     # Already redacted on append, but double-check sensitive keys for display
     sensitive_keys = {"secret", "token", "password", "auth", "key", "credential"}
+    internal_ref_keys = {
+        "external_session_id",
+        "session_id",
+        "thread_id",
+        "hidden_task_id",
+        "active_codex_task_id",
+        "codex_thread_id",
+        "codex_turn_id",
+        "claude_session_id",
+    }
     safe_payload: dict[str, Any] = {}
     for k, v in payload.items():
         kl = k.lower()
-        if any(s in kl for s in sensitive_keys):
+        if kl in internal_ref_keys:
+            safe_payload[k] = "[REDACTED]"
+        elif any(s in kl for s in sensitive_keys):
             safe_payload[k] = "[REDACTED]"
         elif isinstance(v, str) and len(v) > 500:
             safe_payload[k] = v[:500] + "..."

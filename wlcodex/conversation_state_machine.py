@@ -227,11 +227,11 @@ def build_workspace_busy_buttons(
     """Build inline keyboard buttons for workspace busy user choice."""
     return [[
         {
-            "text": "追加到当前任务",
+            "text": "追加到当前执行",
             "callback_data": f"{BUSY_APPEND}:{conversation_id}",
         },
         {
-            "text": "排队新任务",
+            "text": "等当前执行结束",
             "callback_data": f"{BUSY_QUEUE}:{conversation_id}",
         },
         {

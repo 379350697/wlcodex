@@ -12,8 +12,10 @@ import uuid
 from typing import Any
 
 from wlcodex.health_snapshot import build_health_snapshot
+from wlcodex.execution_scheduler import ExecutionScheduler, RunIntent
 from wlcodex.interaction.errors import classify_user_error
 from wlcodex.inspection import TaskInspector
+from wlcodex.legacy_diagnostics import LegacyDiagnosticsController
 from wlcodex.models import TaskStatus
 from wlcodex.conversation_state_machine import (
     RouteDecision,
@@ -59,32 +61,21 @@ from wlcodex.runtime_events import (
     now_iso,
 )
 from wlcodex.router import (
-    AbortCommand,
-    ArchiveCommand,
     AutoModeCommand,
     ClaudeDirectCommand,
     ClaudePermissionCommand,
     CodexDirectCommand,
     CodexSessionsCommand,
-    ContinueCommand,
     DiffCommand,
-    EventsCommand,
     FilesCommand,
-    ForkCommand,
     HealthCommand,
     HelpCommand,
-    ListTasksCommand,
     ModelCommand,
     NewConversationCommand,
     ParseError,
-    PauseCommand,
-    ShowTaskCommand,
-    StartTaskCommand,
     StatusCommand,
-    SteerCommand,
     StopCurrentCommand,
     SwitchWorkspaceCommand,
-    TailCommand,
     TraceCommand,
     VerifyCommand,
     parse_command,
@@ -97,30 +88,10 @@ from wlcodex.status import (
 )
 from wlcodex.models import ConversationMode
 from wlcodex.status import (
-    render_task_card,
-    render_task_list,
     render_health_card,
     render_help,
-    STATUS_LABELS,
 )
-from wlcodex.task_service import TaskService, drain_workspace
-from wlcodex.waiting_callback import (
-    ABORT_BLOCKER_CONFIRM,
-    ABORT_BLOCKER_START_NEXT,
-    CONTINUE_BLOCKER,
-    FORCE_PARALLEL_CONFIRM,
-    FORCE_PARALLEL_REQUEST,
-    KEEP,
-    SHOW_BLOCKER,
-    WORKTREE_DIFF,
-    WORKTREE_DISCARD,
-    WORKTREE_ISOLATED,
-    WORKTREE_KEEP,
-    WORKTREE_MERGE,
-    WaitingCallback,
-    encode_waiting_callback,
-    encode_worktree_done_callback,
-)
+from wlcodex.task_service import TaskService
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +133,7 @@ class CommandController:
         interaction_renderer: object | None = None,
         orchestration_runner: object | None = None,
         runtime_event_store: object | None = None,
+        execution_scheduler: object | None = None,
     ) -> None:
         self._service = task_service
         self._backend = backend
@@ -174,6 +146,14 @@ class CommandController:
         self._interaction_renderer = interaction_renderer
         self._orchestration_runner = orchestration_runner
         self._store = runtime_event_store
+        self._execution_scheduler = (
+            execution_scheduler
+            if execution_scheduler is not None
+            else ExecutionScheduler(task_service, ledger) if ledger is not None else None
+        )
+        self._legacy_diagnostics = LegacyDiagnosticsController(
+            task_service, backend, inspector
+        )
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     def set_interaction_renderer(self, renderer: object) -> None:
@@ -184,6 +164,19 @@ class CommandController:
         """Set the background orchestration runner after runtime wiring."""
         self._orchestration_runner = runner
 
+    def set_legacy_diagnostics(self, adapter: object) -> None:
+        """Replace the legacy diagnostics adapter in tests or composition."""
+        self._legacy_diagnostics = adapter
+
+    def set_execution_scheduler(self, scheduler: object) -> None:
+        """Replace the internal execution scheduler in tests or composition."""
+        self._execution_scheduler = scheduler
+
+    @property
+    def execution_scheduler(self) -> object | None:
+        """Return the internal Workbench execution scheduler."""
+        return self._execution_scheduler
+
     def _emit_event(self, event: RuntimeEvent) -> RuntimeEvent:
         if self._store is None:
             return event
@@ -191,6 +184,29 @@ class CommandController:
 
     def _new_correlation_id(self) -> str:
         return str(uuid.uuid4())
+
+    def _reserve_execution_lease(
+        self,
+        *,
+        conversation_id: int,
+        workspace_alias: str,
+        prompt: str,
+        telegram_chat_id: int | None,
+        purpose: str,
+    ) -> object:
+        if self._execution_scheduler is None:
+            raise RuntimeError("execution scheduler unavailable")
+        lease = self._execution_scheduler.reserve(RunIntent(
+            conversation_id=conversation_id,
+            workspace_alias=workspace_alias,
+            prompt=prompt,
+            telegram_chat_id=telegram_chat_id,
+            purpose=purpose,
+        ))
+        task = getattr(lease, "task", None)
+        if task is not None:
+            return task
+        return self._service.get_task(lease.hidden_task_id)
 
     async def handle(
         self, text: str, telegram_context: dict[str, Any] | None = None
@@ -203,6 +219,16 @@ class CommandController:
             return ControllerResponse(str(exc))
 
         try:
+            if self._legacy_diagnostics.can_handle(command):
+                response = await self._legacy_diagnostics.handle(
+                    command, telegram_context
+                )
+                return ControllerResponse(
+                    response.text,
+                    buttons=getattr(response, "buttons", []),
+                    already_rendered=getattr(response, "already_rendered", False),
+                )
+
             if isinstance(command, HelpCommand):
                 return ControllerResponse(HELP_TEXT)
 
@@ -214,34 +240,6 @@ class CommandController:
                 return ControllerResponse(render_health_card(
                     self._backend.health(), snapshot=snapshot
                 ))
-
-            elif isinstance(command, ListTasksCommand):
-                # Conversation-first: show conversation status when available
-                if self._ledger is not None and telegram_context:
-                    chat_id = telegram_context.get("chat_id", 0)
-                    active = self._ledger.get_active_conversation(chat_id)
-                    if active is not None:
-                        runs = self._ledger.list_agent_runs(active.id, limit=1)
-                        latest_run = runs[0] if runs else None
-                        orch_runs = self._ledger.list_orchestration_runs(active.id, limit=1)
-                        orch_run = orch_runs[0] if orch_runs else None
-                        return ControllerResponse(
-                            render_conversation_status(active, latest_run=latest_run, orch_run=orch_run)
-                        )
-
-                # Fall back to task list
-                tasks = self._service.list_tasks()
-                wmeta: dict[int, tuple[int, str, int]] = {}
-                for t in tasks:
-                    if t.status == TaskStatus.WAITING_SLOT:
-                        blocker = self._service.blocker_for_workspace(t.workspace_alias)
-                        if blocker is not None:
-                            wmeta[t.id] = (
-                                blocker.id,
-                                STATUS_LABELS.get(blocker.status, blocker.status.value),
-                                self._service.waiting_position(t.id),
-                            )
-                return ControllerResponse(render_task_list(tasks, waiting_meta=wmeta or None))
 
             elif isinstance(command, StatusCommand):
                 if self._ledger is not None and telegram_context:
@@ -257,8 +255,9 @@ class CommandController:
                                 active, latest_run=latest_run, orch_run=orch_run
                             )
                         )
-                tasks = self._service.list_tasks()
-                return ControllerResponse(render_task_list(tasks))
+                return ControllerResponse(
+                    "当前还没有工作台。发送 /new 开始一个新的工作台。"
+                )
 
             elif isinstance(command, TraceCommand):
                 if self._ledger is None or self._store is None:
@@ -274,46 +273,6 @@ class CommandController:
                     visibility_filter="operator",
                 )
                 return ControllerResponse(f"{result.title}\n\n{result.body}")
-
-            elif isinstance(command, ShowTaskCommand):
-                task = self._service.get_task(command.task_id)
-                extra: dict[str, object] = {}
-                buttons: list[list[dict[str, str]]] = []
-                if task.status == TaskStatus.WAITING_SLOT:
-                    blocker = self._service.blocker_for_workspace(task.workspace_alias)
-                    if blocker is not None:
-                        extra["blocker_id"] = blocker.id
-                        extra["blocker_status"] = STATUS_LABELS.get(
-                            blocker.status, blocker.status.value
-                        )
-                    extra["queue_position"] = self._service.waiting_position(task.id)
-                    buttons = _build_waiting_buttons(task.id)
-                elif task.worktree_path and task.status in (
-                    TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.ABORTED,
-                ):
-                    buttons = _build_worktree_done_buttons(task.id)
-                return ControllerResponse(render_task_card(task, **extra), buttons=buttons)
-
-            elif isinstance(command, StartTaskCommand):
-                return await self._handle_start(command, telegram_context)
-
-            elif isinstance(command, ContinueCommand):
-                return await self._handle_continue(command)
-
-            elif isinstance(command, SteerCommand):
-                return await self._handle_steer(command)
-
-            elif isinstance(command, TailCommand):
-                result = self._inspector.tail(command.task_id)
-                return ControllerResponse(
-                    f"{result.title}\n\n{result.body}"
-                )
-
-            elif isinstance(command, EventsCommand):
-                result = self._inspector.events(command.task_id)
-                return ControllerResponse(
-                    f"{result.title}\n\n{result.body}"
-                )
 
             elif isinstance(command, DiffCommand):
                 task_id = command.task_id
@@ -333,7 +292,9 @@ class CommandController:
                             f"{result.title}\n\n{result.body}"
                         )
                 if task_id is None:
-                    return ControllerResponse("请指定任务 ID 或在活跃对话中使用 /diff。")
+                    return ControllerResponse(
+                        "当前还没有可查看变更的工作台。发送 /new 开始新的工作台。"
+                    )
                 task = self._service.get_task(task_id)
                 result = self._inspector.diff(task_id, task.workspace_path)
                 return ControllerResponse(
@@ -352,50 +313,13 @@ class CommandController:
                         # Claude run: use agent run for files lookup
                         task_id = active.active_claude_run_id
                 if task_id is None:
-                    return ControllerResponse("请指定任务 ID 或在活跃对话中使用 /files。")
+                    return ControllerResponse(
+                        "当前还没有可查看文件的工作台。发送 /new 开始新的工作台。"
+                    )
                 result = self._inspector.files(task_id)
                 return ControllerResponse(
                     f"{result.title}\n\n{result.body}"
                 )
-
-            elif isinstance(command, PauseCommand):
-                task = self._service.get_task(command.task_id)
-                hint = ""
-                if task.active_turn_id:
-                    hint = (
-                        "\n⚠️ Codex 里仍有活跃 turn。"
-                        "可用 /abort 停止它，或稍后用 /continue 继续。"
-                    )
-                task = self._service.pause_task(command.task_id)
-                return ControllerResponse(
-                    f"任务 #{command.task_id} 已暂停。{hint}\n\n{render_task_card(task)}"
-                )
-
-            elif isinstance(command, AbortCommand):
-                task = self._service.get_task(command.task_id)
-                if task.active_turn_id and task.codex_thread_id:
-                    try:
-                        await self._backend.interrupt_turn(
-                            task.codex_thread_id, task.active_turn_id
-                        )
-                    except Exception as exc:
-                        logger.warning("interrupt_turn failed: %s", exc)
-                workspace_alias = task.workspace_alias
-                task = self._service.abort_task(command.task_id)
-                # Drain waiting queue if the aborted task freed the workspace
-                await drain_workspace(self._service, self._backend, workspace_alias)
-                return ControllerResponse(
-                    f"任务 #{command.task_id} 已中止。\n\n{render_task_card(task)}"
-                )
-
-            elif isinstance(command, ArchiveCommand):
-                task = self._service.archive_task(command.task_id)
-                return ControllerResponse(
-                    f"任务 #{command.task_id} 已归档。\n\n{render_task_card(task)}"
-                )
-
-            elif isinstance(command, ForkCommand):
-                return await self._handle_fork(command, telegram_context)
 
             elif isinstance(command, CodexSessionsCommand):
                 if self._ledger is not None and telegram_context:
@@ -403,16 +327,9 @@ class CommandController:
                     convos = self._ledger.list_conversations_by_chat(chat_id)
                     if convos:
                         return ControllerResponse(render_session_list(convos))
-                # Fall back to task-based sessions
-                tasks = self._service.list_tasks(include_archived=True)
-                lines = ["Codex 会话：", f"{'ID':>4}  {'状态':<10}  标题"]
-                for task in tasks:
-                    if task.codex_thread_id:
-                        lines.append(
-                            f"{task.id:>4}  {STATUS_LABELS.get(task.status, task.status.value):<10}  "
-                            f"{task.title[:60]}"
-                        )
-                return ControllerResponse("\n".join(lines))
+                return ControllerResponse(
+                    "当前还没有历史现场。发送 /new 开始新的工作台。"
+                )
 
             # --- New conversation commands ---
 
@@ -450,173 +367,6 @@ class CommandController:
             logger.exception("Command handler error")
             return ControllerResponse(f"错误：{exc}")
 
-    # --- Internal handlers ---
-
-    async def _handle_start(
-        self, command: StartTaskCommand, ctx: dict[str, Any] | None
-    ) -> ControllerResponse:
-        chat_id = ctx.get("chat_id") if ctx else None
-
-        blocker = self._service.blocker_for_workspace(command.workspace_alias)
-        if blocker is not None:
-            task = self._service.reserve_waiting_task(
-                command.workspace_alias,
-                command.prompt,
-                telegram_chat_id=chat_id,
-                blocker_task_id=blocker.id,
-            )
-            position = self._service.waiting_position(task.id)
-            buttons = _build_waiting_buttons(task.id)
-            return ControllerResponse(
-                f"任务 #{task.id} — 等待工作区空闲\n"
-                f"工作区：{command.workspace_alias}\n"
-                f"阻塞者：#{blocker.id}（{STATUS_LABELS.get(blocker.status, blocker.status.value)}）\n"
-                f"队列位置：第 {position} 位\n"
-                f"标题：{task.title}\n\n"
-                f"{render_task_card(task)}",
-                buttons=buttons,
-            )
-
-        # 1. Reserve local task first (enforces write/availability)
-        task = self._service.reserve_task(
-            command.workspace_alias,
-            command.prompt,
-            telegram_chat_id=chat_id,
-        )
-        workspace = self._service.get_workspace(command.workspace_alias)
-
-        # 2. Create app-server thread + persist + start turn
-        try:
-            thread_id = await self._backend.create_thread(str(workspace.path))
-            self._service.set_task_thread(task.id, thread_id)
-            await self._backend.start_turn(thread_id, command.prompt)
-        except Exception as exc:
-            task = self._service.fail_task(task.id, str(exc))
-            return ControllerResponse(
-                f"任务 #{task.id} 启动失败：{exc}\n\n{render_task_card(task)}"
-            )
-
-        task = self._service.get_task(task.id)
-        return ControllerResponse(
-            f"任务 #{task.id} 已启动。\n\n{render_task_card(task)}"
-        )
-
-    async def _handle_continue(self, command: ContinueCommand) -> ControllerResponse:
-        task = self._service.continue_task(command.task_id, command.prompt)
-
-        if task.codex_thread_id is None:
-            self._service.fail_task(task.id, "no codex thread; cannot continue")
-            return ControllerResponse(
-                f"任务 #{command.task_id} 没有 Codex 线程。"
-            )
-
-        try:
-            await self._backend.continue_turn(task.codex_thread_id, command.prompt)
-        except Exception as exc:
-            task = self._service.fail_task(task.id, str(exc))
-            return ControllerResponse(
-                f"继续任务失败：{exc}\n\n{render_task_card(task)}"
-            )
-
-        task = self._service.get_task(task.id)
-        return ControllerResponse(
-            f"任务 #{command.task_id} 已继续。\n\n{render_task_card(task)}"
-        )
-
-    async def _handle_steer(self, command: SteerCommand) -> ControllerResponse:
-        task = self._service.steer_task(command.task_id, command.prompt)
-
-        if task.codex_thread_id is None:
-            raise RuntimeError(f"task #{task.id} has no codex thread")
-        if task.active_turn_id is None:
-            raise RuntimeError(
-                f"task #{task.id} has no active turn. Use /continue to start a new turn."
-            )
-
-        await self._backend.steer_turn(
-            task.codex_thread_id, task.active_turn_id, command.prompt
-        )
-
-        return ControllerResponse(
-            f"任务 #{command.task_id} 已追加指令。\n\n{render_task_card(task)}"
-        )
-
-    async def _handle_fork(
-        self, command: ForkCommand, ctx: dict[str, Any] | None
-    ) -> ControllerResponse:
-        parent = self._service.get_task(command.task_id)
-        chat_id = ctx.get("chat_id") if ctx else None
-
-        if parent.codex_thread_id is None:
-            raise RuntimeError(
-                f"task #{command.task_id} has no codex thread; cannot fork"
-            )
-
-        workspace = self._service.ensure_workspace_writable(parent.workspace_alias)
-        self._service.ensure_workspace_available(parent.workspace_alias)
-
-        task = self._service.reserve_task(
-            parent.workspace_alias,
-            command.prompt,
-            telegram_chat_id=chat_id,
-            parent_task_id=command.task_id,
-        )
-
-        try:
-            new_thread_id = await self._backend.fork_thread(
-                parent.codex_thread_id, str(workspace.path)
-            )
-            self._service.set_task_thread(task.id, new_thread_id)
-            await self._backend.start_turn(new_thread_id, command.prompt)
-        except Exception as exc:
-            task = self._service.fail_task(task.id, str(exc))
-            return ControllerResponse(
-                f"Fork 失败：{exc}\n\n{render_task_card(task)}"
-            )
-
-        task = self._service.get_task(task.id)
-        return ControllerResponse(
-            f"已从任务 #{command.task_id} fork 到任务 #{task.id}。\n\n{render_task_card(task)}"
-        )
-
-    # --- Waiting callback handlers ---
-
-    async def handle_waiting_callback(
-        self, callback: WaitingCallback
-    ) -> ControllerResponse:
-        """Route a waiting-slot decision callback to the correct handler."""
-        try:
-            task = self._service.get_task(callback.task_id)
-        except KeyError:
-            return ControllerResponse("任务不存在或已被删除。")
-
-        if task.status != TaskStatus.WAITING_SLOT:
-            # Task is no longer waiting — check if we can still serve the action
-            if callback.action in (SHOW_BLOCKER,):
-                return await self._handle_show_blocker(callback.task_id)
-            return ControllerResponse(
-                f"任务 #{callback.task_id} 已不在等待状态（当前：{STATUS_LABELS.get(task.status, task.status.value)}）。"
-            )
-
-        if callback.action == KEEP:
-            return await self._handle_keep(callback.task_id)
-        elif callback.action == SHOW_BLOCKER:
-            return await self._handle_show_blocker(callback.task_id)
-        elif callback.action == ABORT_BLOCKER_START_NEXT:
-            return await self._handle_abort_blocker_start_next(callback.task_id)
-        elif callback.action == ABORT_BLOCKER_CONFIRM:
-            return await self._handle_abort_blocker_confirm(callback.task_id)
-        elif callback.action == CONTINUE_BLOCKER:
-            return await self._handle_continue_blocker(callback.task_id)
-        elif callback.action == FORCE_PARALLEL_REQUEST:
-            return await self._handle_force_parallel_request(callback.task_id)
-        elif callback.action == FORCE_PARALLEL_CONFIRM:
-            return await self._handle_force_parallel_confirm(callback.task_id)
-        elif callback.action == WORKTREE_ISOLATED:
-            return await self._handle_worktree_isolated(callback.task_id)
-        else:
-            return ControllerResponse(f"未知等待操作：{callback.action}")
-
     # --- Conversation handlers ---
 
     async def handle_conversation_text(
@@ -647,7 +397,10 @@ class CommandController:
                 )
             self._ledger.update_conversation_summary(
                 active.id,
-                trim_to_budget("用户打招呼，等待具体任务。", ContextBudget().conversation_summary_tokens),
+                trim_to_budget(
+                    "用户打招呼，等待具体需求。",
+                    ContextBudget().conversation_summary_tokens,
+                ),
             )
             return ControllerResponse("你好！直接说需要我看什么就行。")
 
@@ -834,10 +587,13 @@ class CommandController:
             workspace=active.workspace_alias,
             budget=budget,
         )
-        task = self._service.reserve_task(
-            active.workspace_alias, text, telegram_chat_id=chat_id,
+        task = self._reserve_execution_lease(
+            conversation_id=active.id,
+            workspace_alias=active.workspace_alias,
+            prompt=text,
+            telegram_chat_id=chat_id,
+            purpose="codex_analysis",
         )
-        self._ledger.set_conversation_active_task(active.id, task.id)
         agent_run = self._ledger.create_agent_run(
             conversation_id=active.id, agent="codex", role="analysis",
             hidden_task_id=task.id, prompt_packet_summary=packet.summary(),
@@ -858,7 +614,6 @@ class CommandController:
             active.id,
             trim_to_budget(f"用户请求：{text[:200]}", budget.conversation_summary_tokens),
         )
-        self._ledger.set_conversation_active_task(active.id, task.id)
         buttons: list[list[dict[str, str]]] = [[
             {"text": "查看状态", "callback_data": encode_conversation_callback(active.id, CONTINUE)},
         ]]
@@ -1144,7 +899,7 @@ class CommandController:
         if old is not None:
             self._ledger.archive_conversation(old.id)
 
-        title = command.title if command.title else "新对话"
+        title = command.title if command.title else "新工作台"
         convo = self._ledger.create_conversation(
             chat_id=chat_id,
             user_id=user_id,
@@ -1158,10 +913,10 @@ class CommandController:
             {"text": "切换模式", "callback_data": encode_conversation_callback(convo.id, NEW_CONVO)},
         ]]
         return ControllerResponse(
-            f"新对话已创建：「{convo.title}」\n"
+            f"新工作台已创建：「{convo.title}」\n"
             f"模式：{mode_label}\n"
             f"工作区：{convo.workspace_alias}\n\n"
-            f"直接发消息开始对话，或用 /codex /claude /auto 切换模式。",
+            f"直接发消息继续这个工作台，或用 /codex /claude /auto 切换执行模式。",
             buttons=buttons,
         )
 
@@ -1197,12 +952,13 @@ class CommandController:
             budget=budget,
         )
 
-        task = self._service.reserve_task(
-            active.workspace_alias,
-            command.prompt,
+        task = self._reserve_execution_lease(
+            conversation_id=active.id,
+            workspace_alias=active.workspace_alias,
+            prompt=command.prompt,
             telegram_chat_id=chat_id,
+            purpose="codex_direct",
         )
-        self._ledger.set_conversation_active_task(active.id, task.id)
         agent_run = self._ledger.create_agent_run(
             conversation_id=active.id,
             agent="codex",
@@ -1234,8 +990,6 @@ class CommandController:
             active.id,
             trim_to_budget(f"用户请求：{command.prompt[:200]}", budget.conversation_summary_tokens),
         )
-        self._ledger.set_conversation_active_task(active.id, task.id)
-
         # When interaction renderer is active, EventBridge forwards deltas and
         # terminal events — don't send a duplicate static response.
         if self._interaction_renderer is not None:
@@ -1305,12 +1059,13 @@ class CommandController:
         chat_id = ctx.get("chat_id", 0) if ctx else 0
         budget = ContextBudget()
 
-        task = self._service.reserve_task(
-            active.workspace_alias,
-            command.prompt,
+        task = self._reserve_execution_lease(
+            conversation_id=active.id,
+            workspace_alias=active.workspace_alias,
+            prompt=command.prompt,
             telegram_chat_id=chat_id,
+            purpose="claude_direct",
         )
-        self._ledger.set_conversation_active_task(active.id, task.id)
 
         claude_run = self._ledger.create_agent_run(
             conversation_id=active.id,
@@ -1329,8 +1084,6 @@ class CommandController:
                 budget.conversation_summary_tokens,
             ),
         )
-        self._ledger.set_conversation_active_task(active.id, task.id)
-
         # Emit user message received event
         cid = self._new_correlation_id()
         self._emit_event(RuntimeEvent(
@@ -1670,12 +1423,13 @@ class CommandController:
         from wlcodex.interaction.events import InteractionEvent
 
         chat_id = ctx.get("chat_id", 0) if ctx else 0
-        task = self._service.reserve_task(
-            active.workspace_alias,
-            command.prompt,
+        task = self._reserve_execution_lease(
+            conversation_id=active.id,
+            workspace_alias=active.workspace_alias,
+            prompt=command.prompt,
             telegram_chat_id=chat_id,
+            purpose="chief_engineer",
         )
-        self._ledger.set_conversation_active_task(active.id, task.id)
         if self._interaction_renderer is not None:
             await self._interaction_renderer.handle(
                 InteractionEvent(
@@ -1800,15 +1554,16 @@ class CommandController:
             else:
                 workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
                 thread_id = await self._backend.create_thread(workspace_path)
-                task = self._service.reserve_task(
-                    active.workspace_alias,
-                    f"验证：{verify_payload}",
+                task = self._reserve_execution_lease(
+                    conversation_id=active.id,
+                    workspace_alias=active.workspace_alias,
+                    prompt=f"验证：{verify_payload}",
                     telegram_chat_id=chat_id,
+                    purpose="codex_verification",
                 )
                 self._service.set_task_thread(task.id, thread_id)
-                self._ledger.set_conversation_active_task(active.id, task.id)
                 await self._backend.start_turn(thread_id, packet.render())
-                verification_text = f"已创建 Codex 验证任务 #{task.id}。\n" \
+                verification_text = "已向 Codex 发送验收请求。\n" \
                                     f"对话：{active.title}\n" \
                                     f"验收内容：{verify_payload}\n" \
                                     f"变更文件：{len(changed_files)} 个"
@@ -1852,7 +1607,7 @@ class CommandController:
                     except Exception as exc:
                         logger.warning("interrupt_turn failed: %s", exc)
                 self._service.abort_task(active.active_codex_task_id)
-                stopped_items.append(f"Codex 任务 #{active.active_codex_task_id}")
+                stopped_items.append("Codex 执行")
             except KeyError:
                 pass
 
@@ -1868,7 +1623,7 @@ class CommandController:
             )
             stopped_items.append(f"Claude 运行 #{active.active_claude_run_id}")
 
-        detail = "；".join(stopped_items) if stopped_items else "无活跃任务"
+        detail = "；".join(stopped_items) if stopped_items else "无活跃执行"
         return ControllerResponse(
             f"对话「{active.title}」已停止。\n{detail}"
         )
@@ -1968,29 +1723,6 @@ class CommandController:
             if current:
                 return ControllerResponse(f"当前偏好模型：{current}\n使用 /model <name> 切换。")
             return ControllerResponse("当前未设置偏好模型。使用 /model <name> 切换。")
-
-    async def handle_worktree_done_callback(
-        self, callback: WaitingCallback
-    ) -> ControllerResponse:
-        """Route a worktree post-completion callback."""
-        try:
-            task = self._service.get_task(callback.task_id)
-        except KeyError:
-            return ControllerResponse("任务不存在或已被删除。")
-
-        if not task.worktree_path:
-            return ControllerResponse(f"任务 #{callback.task_id} 不是 worktree 任务。")
-
-        if callback.action == WORKTREE_DIFF:
-            return await self._handle_worktree_diff(callback.task_id)
-        elif callback.action == WORKTREE_MERGE:
-            return await self._handle_worktree_merge(callback.task_id)
-        elif callback.action == WORKTREE_DISCARD:
-            return await self._handle_worktree_discard(callback.task_id)
-        elif callback.action == WORKTREE_KEEP:
-            return await self._handle_worktree_keep(callback.task_id)
-        else:
-            return ControllerResponse(f"未知 worktree 操作：{callback.action}")
 
     # --- Conversation callback handler ---
 
@@ -2093,7 +1825,7 @@ class CommandController:
                 occurred_at=now_iso(),
                 conversation_id=conversation_id,
             ))
-            return ControllerResponse("已追加到当前任务。当前阶段结束后由 Codex 判断处理。")
+            return ControllerResponse("已追加到当前执行。当前阶段结束后由 Codex 判断处理。")
 
         elif action == BUSY_QUEUE:
             self._emit_event(RuntimeEvent(
@@ -2127,7 +1859,7 @@ class CommandController:
                 occurred_at=now_iso(),
                 conversation_id=conversation_id,
             ))
-            return ControllerResponse("新任务已排队，当前工作区空闲后自动启动。")
+            return ControllerResponse("已安排在当前执行之后，工作区空闲后自动启动。")
 
         elif action == BUSY_CANCEL:
             self._emit_event(RuntimeEvent(
@@ -2256,11 +1988,13 @@ class CommandController:
             workspace_path = str(
                 self._service.get_workspace(conv.workspace_alias).path
             )
-            task = self._service.reserve_task(
-                conv.workspace_alias, goal,
+            task = self._reserve_execution_lease(
+                conversation_id=conv.id,
+                workspace_alias=conv.workspace_alias,
+                prompt=goal,
                 telegram_chat_id=conv.chat_id,
+                purpose="queued_chief_engineer",
             )
-            self._ledger.set_conversation_active_task(conv.id, task.id)
 
             logger.info(
                 "run.queued consumer: starting chief-engineer for conv %d, goal=%s",
@@ -2276,326 +2010,6 @@ class CommandController:
                 workspace_path=workspace_path,
                 correlation_id=cid,
             )
-
-    # --- Individual waiting action handlers ---
-
-    async def _handle_keep(self, task_id: int) -> ControllerResponse:
-        task = self._service.get_task(task_id)
-        return ControllerResponse(
-            f"任务 #{task_id} 保持排队。\n\n{render_task_card(task)}",
-            buttons=_build_waiting_buttons(task_id),
-        )
-
-    async def _handle_continue_blocker(self, task_id: int) -> ControllerResponse:
-        """Show a hint that continuing needs user text via /continue command."""
-        task = self._service.get_task(task_id)
-        blocker = self._service.blocker_for_workspace(task.workspace_alias)
-        if blocker is None:
-            return ControllerResponse(
-                f"任务 #{task_id} 的阻塞者已结束。\n\n{render_task_card(task)}",
-                buttons=_build_waiting_buttons(task_id),
-            )
-        return ControllerResponse(
-            f"阻塞者 #{blocker.id} 仍在运行，无法通过按钮自动继续。\n"
-            f"继续任务需要你提供新的提示词，请使用命令：\n\n"
-            f"/continue {blocker.id} <你的提示词>\n\n"
-            f"阻塞者信息：\n{render_task_card(blocker)}",
-        )
-
-    async def _handle_show_blocker(self, task_id: int) -> ControllerResponse:
-        task = self._service.get_task(task_id)
-        blocker = self._service.blocker_for_workspace(task.workspace_alias)
-        if blocker is None:
-            return ControllerResponse(
-                f"任务 #{task_id} 的阻塞者已结束。\n\n{render_task_card(task)}"
-            )
-        card = render_task_card(blocker)
-        return ControllerResponse(
-            f"任务 #{task_id} 的阻塞者：\n\n{card}"
-        )
-
-    async def _handle_abort_blocker_start_next(
-        self, task_id: int
-    ) -> ControllerResponse:
-        """First step: show confirmation card before aborting the blocker."""
-        task = self._service.get_task(task_id)
-        blocker = self._service.blocker_for_workspace(task.workspace_alias)
-
-        if blocker is None:
-            # Blocker already ended — try to drain directly
-            self._service._ledger.add_event(task_id, "queue_drained", {
-                "reason": "blocker_already_gone",
-            })
-            promoted = await drain_workspace(
-                self._service, self._backend, task.workspace_alias
-            )
-            if promoted is not None:
-                return ControllerResponse(
-                    f"阻塞者已结束。任务 #{promoted.id} 已启动。\n\n{render_task_card(promoted)}"
-                )
-            return ControllerResponse(
-                f"阻塞者已结束，但队列为空。\n\n{render_task_card(task)}"
-            )
-
-        return ControllerResponse(
-            f"⚠️ 确认中止阻塞任务\n\n"
-            f"将中止阻塞者 #{blocker.id}（{STATUS_LABELS.get(blocker.status, blocker.status.value)}）\n"
-            f"标题：{blocker.title}\n\n"
-            f"中止后将自动启动队首等待任务。\n\n"
-            f"等待任务 #{task_id}：{task.title}",
-            buttons=[[
-                {"text": "确认中止阻塞任务", "callback_data": encode_waiting_callback(task_id, ABORT_BLOCKER_CONFIRM)},
-                {"text": "取消", "callback_data": encode_waiting_callback(task_id, KEEP)},
-            ]],
-        )
-
-    async def _handle_abort_blocker_confirm(
-        self, task_id: int
-    ) -> ControllerResponse:
-        """Second step: actually abort the blocker and drain the queue."""
-        task = self._service.get_task(task_id)
-        blocker = self._service.blocker_for_workspace(task.workspace_alias)
-
-        if blocker is None:
-            # Blocker ended between confirmation and this click
-            self._service._ledger.add_event(task_id, "queue_drained", {
-                "reason": "blocker_already_gone",
-            })
-            promoted = await drain_workspace(
-                self._service, self._backend, task.workspace_alias
-            )
-            if promoted is not None:
-                return ControllerResponse(
-                    f"阻塞者已结束。任务 #{promoted.id} 已启动。\n\n{render_task_card(promoted)}"
-                )
-            return ControllerResponse(
-                f"阻塞者已结束，但队列为空。\n\n{render_task_card(task)}"
-            )
-
-        # Record abort request
-        self._service._ledger.add_event(task_id, "queue_blocker_abort_requested", {
-            "blocker_task_id": blocker.id,
-        })
-
-        # Interrupt active turn if any
-        if blocker.active_turn_id and blocker.codex_thread_id:
-            try:
-                await self._backend.interrupt_turn(
-                    blocker.codex_thread_id, blocker.active_turn_id
-                )
-            except Exception as exc:
-                logger.warning("interrupt_turn failed: %s", exc)
-
-        self._service.abort_task(blocker.id)
-        self._service._ledger.add_event(task_id, "queue_blocker_aborted", {
-            "blocker_task_id": blocker.id,
-        })
-
-        # Drain the queue
-        self._service._ledger.add_event(task_id, "queue_drained", {
-            "reason": "blocker_aborted",
-        })
-        promoted = await drain_workspace(
-            self._service, self._backend, task.workspace_alias
-        )
-        if promoted is not None:
-            return ControllerResponse(
-                f"阻塞者 #{blocker.id} 已中止。队首任务 #{promoted.id} 已启动。\n\n{render_task_card(promoted)}"
-            )
-        return ControllerResponse(
-            f"阻塞者 #{blocker.id} 已中止，但队首任务启动失败。"
-        )
-
-    async def _handle_force_parallel_request(
-        self, task_id: int
-    ) -> ControllerResponse:
-        task = self._service.get_task(task_id)
-        blocker = self._service.blocker_for_workspace(task.workspace_alias)
-        self._service._ledger.add_event(task_id, "force_parallel_requested", {
-            "blocker_task_id": blocker.id if blocker else None,
-            "workspace_alias": task.workspace_alias,
-            "workspace_path": task.workspace_path,
-            "telegram_chat_id": task.telegram_chat_id,
-        })
-        return ControllerResponse(
-            f"⚠️ 危险操作：同目录并行\n\n"
-            f"这将同时在同一个工作目录运行两个 Codex 任务。"
-            f"它们的编辑、命令、审批和本地 git diff 可能互相冲突、覆盖文件或混淆审批。"
-            f"只有在你理解风险的情况下才使用此功能。\n\n"
-            f"任务 #{task_id}：{task.title}\n"
-            f"工作区：{task.workspace_alias}\n",
-            buttons=[[
-                {"text": "确认并行 — 我了解风险", "callback_data": encode_waiting_callback(task_id, FORCE_PARALLEL_CONFIRM)},
-                {"text": "取消", "callback_data": encode_waiting_callback(task_id, KEEP)},
-            ]],
-        )
-
-    async def _handle_force_parallel_confirm(
-        self, task_id: int
-    ) -> ControllerResponse:
-        task = self._service.get_task(task_id)
-        blocker = self._service.blocker_for_workspace(task.workspace_alias)
-        if task.status != TaskStatus.WAITING_SLOT:
-            # Check if blocker is gone — task may have been auto-drained already
-            if blocker is None:
-                self._service._ledger.add_event(task_id, "force_parallel_no_longer_needed", {
-                    "workspace_alias": task.workspace_alias,
-                    "current_status": task.status.value,
-                })
-                if task.status in (TaskStatus.QUEUED, TaskStatus.RUNNING):
-                    return ControllerResponse(
-                        f"任务 #{task_id} 已通过正常排队启动，无需强制并行。\n\n{render_task_card(task)}"
-                    )
-                return ControllerResponse(
-                    f"任务 #{task_id} 已不在等待状态（当前：{STATUS_LABELS.get(task.status, task.status.value)}）。"
-                )
-            return ControllerResponse(
-                f"任务 #{task_id} 已不在等待状态（当前：{STATUS_LABELS.get(task.status, task.status.value)}）。"
-            )
-
-        self._service._ledger.add_event(task_id, "force_parallel_confirmed", {
-            "blocker_task_id": blocker.id if blocker else None,
-            "workspace_alias": task.workspace_alias,
-            "workspace_path": task.workspace_path,
-            "telegram_chat_id": task.telegram_chat_id,
-        })
-
-        try:
-            promoted, prompt = self._service.force_parallel_start(task_id)
-        except Exception as exc:
-            return ControllerResponse(f"强制并行启动失败：{exc}")
-
-        workspace = self._service.get_workspace(promoted.workspace_alias)
-        try:
-            thread_id = await self._backend.create_thread(str(workspace.path))
-            self._service.set_task_thread(promoted.id, thread_id)
-            await self._backend.start_turn(thread_id, prompt)
-        except Exception as exc:
-            self._service.fail_task(promoted.id, str(exc))
-            return ControllerResponse(
-                f"强制并行任务启动失败：{exc}\n\n{render_task_card(self._service.get_task(task_id))}"
-            )
-
-        task = self._service.get_task(task_id)
-        return ControllerResponse(
-            f"⚠️ 任务 #{task_id} 已强制并行启动。\n"
-            f"注意：两个 Codex 在同一工作目录运行，可能产生冲突。\n\n"
-            f"{render_task_card(task)}"
-        )
-
-    async def _handle_worktree_isolated(
-        self, task_id: int
-    ) -> ControllerResponse:
-        task = self._service.get_task(task_id)
-        if task.status != TaskStatus.WAITING_SLOT:
-            return ControllerResponse(
-                f"任务 #{task_id} 已不在等待状态。"
-            )
-
-        # Slugify the title for branch name
-        slug = "".join(c if c.isalnum() else "-" for c in task.title)[:40].strip("-").lower()
-        if not slug:
-            slug = "task"
-
-        try:
-            wt_task, wt_path, branch = self._service.setup_worktree(
-                task_id, slug=slug,
-            )
-        except Exception as exc:
-            self._service.fail_task(task_id, str(exc))
-            return ControllerResponse(
-                f"Worktree 创建失败：{exc}\n\n{render_task_card(self._service.get_task(task_id))}"
-            )
-
-        try:
-            promoted, prompt, wt_path = self._service.start_worktree_task(task_id)
-        except Exception as exc:
-            self._service.fail_task(task_id, str(exc))
-            return ControllerResponse(
-                f"Worktree 任务启动失败：{exc}"
-            )
-
-        try:
-            thread_id = await self._backend.create_thread(wt_path)
-            self._service.set_task_thread(promoted.id, thread_id)
-            await self._backend.start_turn(thread_id, prompt)
-        except Exception as exc:
-            self._service.fail_task(promoted.id, str(exc))
-            return ControllerResponse(
-                f"Worktree Codex 启动失败：{exc}"
-            )
-
-        task = self._service.get_task(task_id)
-        return ControllerResponse(
-            f"任务 #{task_id} 已在隔离 worktree 中启动。\n"
-            f"Worktree 路径：{wt_path}\n"
-            f"分支：{branch}\n"
-            f"此任务不阻塞原工作区队列。\n\n"
-            f"{render_task_card(task)}"
-        )
-
-    # --- Worktree post-completion handlers ---
-
-    async def _handle_worktree_diff(self, task_id: int) -> ControllerResponse:
-        task = self._service.get_task(task_id)
-        result = self._inspector.diff(task_id, task.worktree_path or task.workspace_path)
-        buttons = _build_worktree_done_buttons(task_id)
-        return ControllerResponse(
-            f"{result.title}\n\n{result.body}",
-            buttons=buttons,
-        )
-
-    async def _handle_worktree_merge(self, task_id: int) -> ControllerResponse:
-        try:
-            msg = self._service.merge_worktree(task_id)
-        except Exception as exc:
-            return ControllerResponse(
-                f"合并失败：{exc}",
-                buttons=_build_worktree_done_buttons(task_id),
-            )
-        return ControllerResponse(
-            f"任务 #{task_id} worktree 合并结果：\n{msg}",
-        )
-
-    async def _handle_worktree_discard(self, task_id: int) -> ControllerResponse:
-        try:
-            msg = self._service.discard_worktree(task_id)
-        except Exception as exc:
-            return ControllerResponse(f"丢弃 worktree 失败：{exc}")
-        return ControllerResponse(
-            f"任务 #{task_id}：{msg}"
-        )
-
-    async def _handle_worktree_keep(self, task_id: int) -> ControllerResponse:
-        task = self._service.get_task(task_id)
-        return ControllerResponse(
-            f"任务 #{task_id} worktree 已保留。\n"
-            f"路径：{task.worktree_path}\n"
-            f"分支：{task.worktree_branch}"
-        )
-
-
-# --- Button builders ---
-
-
-def _build_waiting_buttons(task_id: int) -> list[list[dict[str, str]]]:
-    return [
-        [
-            {"text": "保留排队", "callback_data": encode_waiting_callback(task_id, KEEP)},
-            {"text": "查看阻塞任务", "callback_data": encode_waiting_callback(task_id, SHOW_BLOCKER)},
-        ],
-        [
-            {"text": "Continue 阻塞任务", "callback_data": encode_waiting_callback(task_id, CONTINUE_BLOCKER)},
-            {"text": "中止阻塞并启动队首", "callback_data": encode_waiting_callback(task_id, ABORT_BLOCKER_START_NEXT)},
-        ],
-        [
-            {"text": "危险：同目录并行", "callback_data": encode_waiting_callback(task_id, FORCE_PARALLEL_REQUEST)},
-        ],
-        [
-            {"text": "隔离 worktree 并行", "callback_data": encode_waiting_callback(task_id, WORKTREE_ISOLATED)},
-        ],
-    ]
-
 
 def _trim_result_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
@@ -2627,16 +2041,3 @@ def _telegram_visible_model_summary(text: str, max_chars: int) -> str:
     if not _contains_cjk(stripped) and any(char.isalpha() for char in stripped):
         return "模型返回了非中文内容，已隐藏原文；详细记录已保留在运行日志中。"
     return _trim_result_text(stripped, max_chars)
-
-
-def _build_worktree_done_buttons(task_id: int) -> list[list[dict[str, str]]]:
-    return [
-        [
-            {"text": "查看 diff", "callback_data": encode_worktree_done_callback(task_id, WORKTREE_DIFF)},
-            {"text": "合并到主工作区", "callback_data": encode_worktree_done_callback(task_id, WORKTREE_MERGE)},
-        ],
-        [
-            {"text": "丢弃 worktree", "callback_data": encode_worktree_done_callback(task_id, WORKTREE_DISCARD)},
-            {"text": "保留 worktree", "callback_data": encode_worktree_done_callback(task_id, WORKTREE_KEEP)},
-        ],
-    ]

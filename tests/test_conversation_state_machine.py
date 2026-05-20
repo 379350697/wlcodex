@@ -390,9 +390,9 @@ def test_production_busy_buttons():
     buttons = build_workspace_busy_buttons(42)
     assert len(buttons) == 1
     assert len(buttons[0]) == 3
-    assert buttons[0][0]["text"] == "追加到当前任务"
+    assert buttons[0][0]["text"] == "追加到当前执行"
     assert buttons[0][0]["callback_data"] == "busy_append:42"
-    assert buttons[0][1]["text"] == "排队新任务"
+    assert buttons[0][1]["text"] == "等当前执行结束"
     assert buttons[0][2]["text"] == "取消"
 
 

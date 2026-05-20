@@ -169,8 +169,8 @@ async def test_active_thread_status_does_not_refresh_status_card(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_duplicate_status_card_payload_is_not_edited_twice(tmp_path: Path) -> None:
-    """Rendering the same status card twice should produce at most one edit."""
+async def test_backend_events_do_not_edit_legacy_task_status_cards(tmp_path: Path) -> None:
+    """Backend events no longer refresh legacy task cards in Telegram."""
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
     service = TaskService(
@@ -198,12 +198,12 @@ async def test_duplicate_status_card_payload_is_not_edited_twice(tmp_path: Path)
     await bridge.process_event(event)
     await bridge.process_event(event)
 
-    assert len(edited) == 1
+    assert edited == []
 
 
 @pytest.mark.asyncio
-async def test_terminal_status_still_refreshes_status_card(tmp_path: Path) -> None:
-    """Skipping active churn must not hide the terminal task state."""
+async def test_terminal_status_does_not_refresh_legacy_task_status_card(tmp_path: Path) -> None:
+    """Terminal task state is tracked in runtime events, not old task cards."""
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
     service = TaskService(
@@ -238,8 +238,7 @@ async def test_terminal_status_still_refreshes_status_card(tmp_path: Path) -> No
         {"threadId": "thread-1", "status": "completed"},
     ))
 
-    assert len(edited) == 1
-    assert "已完成" in edited[0]
+    assert edited == []
 
 
 @pytest.mark.asyncio

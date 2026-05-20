@@ -53,10 +53,10 @@ backend_dead_grace_seconds = 120
 # Optional before first real interaction:
 #   WLCODEX_LIVE_WORKSPACE_ALIAS=...
 #   WLCODEX_LIVE_SQLITE_PATH=...
-# Optional after first real /task:
+# Optional after a real Workbench interaction, to pin automated smoke evidence:
 #   WLCODEX_TELEGRAM_CHAT_ID=...
-#   WLCODEX_LIVE_SMOKE_TASK_ID=...
-#   WLCODEX_LIVE_APPROVAL_REQUIRED=1  (after running approval smoke)
+#   WLCODEX_LIVE_CONVERSATION_ID=...
+# Legacy diagnostic /task approval smoke is manual and is not product release evidence.
 
 [conversation]
 enabled = true
@@ -107,7 +107,7 @@ show_footer = false
 edit_min_interval_seconds = 1.0
 
 [menu]
-# Register daily-menu commands with Telegram: 新任务 状态 接管现场 变更 设置 帮助
+# Register daily-menu commands with Telegram: 新工作台 状态 接管现场 变更 设置 帮助
 register_bot_commands = true
 
 [[workspaces]]

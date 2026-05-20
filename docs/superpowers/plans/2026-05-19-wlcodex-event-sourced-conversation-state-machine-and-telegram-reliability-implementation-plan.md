@@ -1,5 +1,11 @@
 # WLCodex Event-Sourced Conversation State Machine And Telegram Reliability Implementation Plan
 
+> Superseded for product semantics by the 2026-05-20 Remote Workbench repair.
+> Runtime events remain the fact source; "new task" and queue wording below is
+> historical and must not appear in normal Workbench user paths. Natural
+> language like "新任务", "另起一个", or "重新开始" no longer creates a new
+> Workbench; only `/new` does.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` or `superpowers:subagent-driven-development` to execute this plan, and use `superpowers:test-driven-development` for every behavior change. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement the event-sourced conversation state machine and Telegram reliability behavior described in `docs/superpowers/specs/2026-05-19-wlcodex-event-sourced-conversation-state-machine-and-telegram-reliability-design.md`.
@@ -375,4 +381,3 @@
 - The chief workflow remains Codex design, Claude implementation, Codex
   verification, Telegram reply.
 - No `/recent` command or tests are added.
-

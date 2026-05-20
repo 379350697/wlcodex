@@ -79,7 +79,7 @@ class TestRuntimeRendererPure:
             is_terminal=True,
         )
         text = r.final_text(state)
-        assert "任务完成" in text
+        assert "运行完成" in text
         assert "5000" not in text  # no token detail at v0
 
     def test_v0_final_failed(self) -> None:
@@ -90,7 +90,7 @@ class TestRuntimeRendererPure:
             is_terminal=True,
         )
         text = r.final_text(state)
-        assert "任务失败" in text
+        assert "运行失败" in text
         assert "Claude 超时" in text
 
     # -- verbosity 1 ----------------------------------------------------
@@ -130,7 +130,7 @@ class TestRuntimeRendererPure:
             is_terminal=True,
         )
         text = r.final_text(state)
-        assert "任务完成" in text
+        assert "运行完成" in text
         assert "12000" in text
 
     def test_v1_progress_empty_for_terminal(self) -> None:
@@ -385,7 +385,7 @@ class TestRuntimeProgressManager:
         )
 
         assert len(fake.edited) == 1
-        assert "任务完成" in fake.edited[0][2]
+        assert "运行完成" in fake.edited[0][2]
         assert "5000" in fake.edited[0][2]
 
     @pytest.mark.asyncio
@@ -400,7 +400,7 @@ class TestRuntimeProgressManager:
         )
 
         assert len(fake.sent) == 1
-        assert "任务完成" in fake.sent[0][1]
+        assert "运行完成" in fake.sent[0][1]
 
     @pytest.mark.asyncio
     async def test_finish_not_called_twice(self) -> None:
@@ -692,7 +692,7 @@ class TestInteractionRendererRuntimeEvents:
 
         # Progress message was edited to final
         assert len(fake.edited) == 1
-        assert "任务完成" in fake.edited[0][2]
+        assert "运行完成" in fake.edited[0][2]
 
     @pytest.mark.asyncio
     async def test_run_completed_finishes_progress_even_without_stream_session(self) -> None:
@@ -728,7 +728,7 @@ class TestInteractionRendererRuntimeEvents:
         # Progress was sent then finished via edit
         assert len(fake.sent) == 1  # initial progress
         assert len(fake.edited) == 1
-        assert "任务完成" in fake.edited[0][2]
+        assert "运行完成" in fake.edited[0][2]
 
     @pytest.mark.asyncio
     async def test_run_failed_finishes_runtime_progress(self) -> None:
@@ -762,7 +762,7 @@ class TestInteractionRendererRuntimeEvents:
         ))
 
         assert len(fake.edited) == 1
-        assert "任务失败" in fake.edited[0][2]
+        assert "运行失败" in fake.edited[0][2]
         assert "timeout" in fake.edited[0][2]
 
     @pytest.mark.asyncio
@@ -795,7 +795,7 @@ class TestInteractionRendererRuntimeEvents:
         ))
 
         assert len(fake.edited) == 1
-        assert "任务完成" in fake.edited[0][2]
+        assert "运行完成" in fake.edited[0][2]
         assert "999" in fake.edited[0][2]
 
     @pytest.mark.asyncio

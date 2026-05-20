@@ -290,7 +290,7 @@ def test_event_bridge_receives_task_watchdog_from_runtime_config(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_recovery_notification_sends_for_paused_restart_task(tmp_path: Path) -> None:
-    """Recovery path notifies chat and refreshes the existing status card."""
+    """Recovery path notifies chat without refreshing legacy status cards."""
     from wlcodex.recovery_notifications import notify_recovery_paused_tasks
 
     config_path = tmp_path / "test.toml"
@@ -309,32 +309,24 @@ async def test_recovery_notification_sends_for_paused_restart_task(tmp_path: Pat
     ledger._conn.commit()
     paused_ids = ledger.mark_active_tasks_recovery_paused()
     sent: list[tuple[int, str]] = []
-    edited: list[tuple[int, int, str]] = []
 
     async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
         sent.append((chat_id, text))
         return 789
 
-    async def edit_telegram(chat_id: int, message_id: int, text: str) -> None:
-        edited.append((chat_id, message_id, text))
-
     count = await notify_recovery_paused_tasks(
         ledger=ledger,
         paused_ids=paused_ids,
         send_telegram=send_telegram,
-        edit_telegram=edit_telegram,
     )
 
     assert count == 1
     expected_text = (
-        f"任务 #{task.id} 已因 WLCodex 重启暂停。\n"
-        f"可用 /continue {task.id} <prompt> 继续，或 /abort {task.id} 释放工作区。"
+        "WLCodex 已恢复。\n\n"
+        "上次运行已安全暂停。当前工作仍在驾驶舱中可见，"
+        "可以查看状态、接管现场，或发送 /new 开始新的工作台。"
     )
     assert sent == [(123, expected_text)]
-    assert edited
-    assert edited[0][0] == 123
-    assert edited[0][1] == 456
-    assert "已暂停" in edited[0][2]
 
 
 # ---------------------------------------------------------------------------
@@ -575,12 +567,15 @@ def test_main_passes_terminal_manager_to_build_application(tmp_path: Path) -> No
     )
 
     captured_tm = None
+    captured_scheduler = None
     build_called = False
 
     def fake_build(cfg, token, ctrl, lgr, appr, runtime_event_store=None,
-                   outbox=None, terminal_manager=None):
-        nonlocal captured_tm, build_called
+                   outbox=None, terminal_manager=None,
+                   execution_scheduler=None):
+        nonlocal captured_tm, captured_scheduler, build_called
         captured_tm = terminal_manager
+        captured_scheduler = execution_scheduler
         build_called = True
         fake_app = MagicMock()
         fake_app.bot = MagicMock()
@@ -620,6 +615,9 @@ def test_main_passes_terminal_manager_to_build_application(tmp_path: Path) -> No
     assert captured_tm is None, (
         f"Expected terminal_manager=None when terminal.enabled=false, got {captured_tm}"
     )
+    assert captured_scheduler is not None, (
+        "Expected main() to pass the shared ExecutionScheduler to build_application"
+    )
 
     # ── Test case 2: terminal.enabled=true + claude.enabled=true →
     #     build_application receives non-None TerminalSessionManager with
@@ -637,12 +635,15 @@ def test_main_passes_terminal_manager_to_build_application(tmp_path: Path) -> No
     )
 
     captured_tm2 = None
+    captured_scheduler2 = None
     build2_called = False
 
     def fake_build2(cfg, token, ctrl, lgr, appr, runtime_event_store=None,
-                    outbox=None, terminal_manager=None):
-        nonlocal captured_tm2, build2_called
+                    outbox=None, terminal_manager=None,
+                    execution_scheduler=None):
+        nonlocal captured_tm2, captured_scheduler2, build2_called
         captured_tm2 = terminal_manager
+        captured_scheduler2 = execution_scheduler
         build2_called = True
         fake_app = MagicMock()
         fake_app.bot = MagicMock()
@@ -671,6 +672,9 @@ def test_main_passes_terminal_manager_to_build_application(tmp_path: Path) -> No
     assert build2_called, "build_application was never called by main() for enabled case"
     assert captured_tm2 is not None, (
         "Expected non-None terminal_manager when terminal.enabled=true"
+    )
+    assert captured_scheduler2 is not None, (
+        "Expected main() to pass the shared ExecutionScheduler in terminal mode"
     )
     from wlcodex.surfaces.terminal.manager import TerminalSessionManager
     assert isinstance(captured_tm2, TerminalSessionManager), (

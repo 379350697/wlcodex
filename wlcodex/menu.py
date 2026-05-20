@@ -1,13 +1,13 @@
 """Telegram BotCommands definitions and registration helper.
 
 Primary commands are ordered around daily conversation use.
-Legacy task commands are hidden from the menu.
+Diagnostic-only legacy commands are hidden from the menu.
 """
 
 from __future__ import annotations
 
 _PRIMARY_COMMANDS: list[tuple[str, str]] = [
-    ("new", "新对话"),
+    ("new", "新工作台"),
     ("codex", "问 Codex"),
     ("claude", "叫 Claude"),
     ("auto", "总工程师模式"),
@@ -25,7 +25,7 @@ _PRIMARY_COMMANDS: list[tuple[str, str]] = [
 ]
 
 _NATURAL_COMMANDS: list[tuple[str, str]] = [
-    ("new", "新任务"),
+    ("new", "新工作台"),
     ("status", "状态"),
     ("terminal", "接管现场"),
     ("diff", "变更"),
@@ -37,9 +37,8 @@ _NATURAL_COMMANDS: list[tuple[str, str]] = [
 def build_bot_commands(profile: str = "natural") -> list[tuple[str, str]]:
     """Return bot commands as (command, description) pairs.
 
-    Legacy commands like /task, /continue, /steer, /tail, /events,
-    /archive, /fork, /codex-sessions are excluded from the menu to
-    keep the primary UX conversation-first.
+    Diagnostic-only legacy commands are excluded from the menu to keep
+    the primary UX conversation-first.
     """
     if profile == "natural":
         return list(_NATURAL_COMMANDS)

@@ -36,7 +36,7 @@ def natural_completion_buttons(
     if include_new:
         row.append(
             {
-                "text": "新对话",
+                "text": "新工作台",
                 "callback_data": encode_conversation_callback(conversation_id, NEW_CONVO),
             }
         )

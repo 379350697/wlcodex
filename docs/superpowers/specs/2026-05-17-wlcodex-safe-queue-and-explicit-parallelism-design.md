@@ -1,5 +1,10 @@
 # WLCodex Safe Queue And Explicit Parallelism Design
 
+> Superseded for product UX: the 2026-05-20 Remote Workbench repair keeps
+> locking/queueing internal and removes task semantics from normal user paths.
+> Queue, blocker, task id, `/continue`, and `/steer` language below is legacy
+> diagnostic material only.
+
 ## Summary
 
 WLCodex should keep the current safety invariant that a normal workspace has

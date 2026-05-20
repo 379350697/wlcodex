@@ -1,7 +1,7 @@
-"""Conversation callback protocol — inline button actions for conversation UX.
+"""Conversation callback protocol — inline button actions for Workbench UX.
 
-Separate from the waiting-slot callback protocol (waiting:*). These handle
-post-completion actions like "查看 diff", "Codex 验收", "继续修改".
+These handle post-completion actions like "查看 diff", "Codex 验收",
+"继续修改".
 """
 
 from __future__ import annotations

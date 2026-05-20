@@ -1,5 +1,5 @@
-"""Background event pump — consumes backend.events(), updates task state,
-sends Telegram approval buttons, and edits status cards.
+"""Background event pump — consumes backend.events(), updates internal state,
+sends Telegram approval buttons, and records runtime events.
 
 Status/log data is NEVER fed back into Codex context.
 """
@@ -7,7 +7,6 @@ Status/log data is NEVER fed back into Codex context.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -16,19 +15,13 @@ from wlcodex.codex_backend import BackendEvent
 from wlcodex.codex_runtime_source import CodexRuntimeSource
 from wlcodex.db import Ledger
 from wlcodex.models import TaskStatus
-from wlcodex.status import render_approval_card, render_task_card
+from wlcodex.status import render_approval_card
 from wlcodex.task_service import TaskService, drain_workspace
 
 logger = logging.getLogger(__name__)
 
 EXPIRY_SCAN_INTERVAL_SECONDS = 60
 TASK_WATCHDOG_INTERVAL_SECONDS = 60
-TERMINAL_TASK_STATUSES = {
-    TaskStatus.DONE,
-    TaskStatus.FAILED,
-    TaskStatus.ABORTED,
-}
-
 # Callback: send_telegram(chat_id, text, buttons) -> message_id
 SendTelegram = Callable[[int, str, list[list[dict[str, str]]] | None], Coroutine[Any, Any, int]]
 # Callback: edit_telegram(chat_id, message_id, text, buttons=None) -> None
@@ -63,7 +56,6 @@ class EventBridge:
         self._interaction_renderer = interaction_renderer
         self._runtime_store = runtime_event_store
         self._on_workspace_freed = on_workspace_freed
-        self._status_card_fingerprints: dict[int, tuple[str, str]] = {}
         self._runtime_causation_by_agent_run: dict[int, int] = {}
         self._running = False
 
@@ -143,16 +135,13 @@ class EventBridge:
         task = self._task_for_runtime_event(event, thread_id, task_before)
         self._append_runtime_events(event, task)
 
-        # Forward agent message deltas to interaction renderer (before status-card skip)
+        # Forward agent message deltas to the interaction renderer.
         if event.event_type == "agent_message_delta":
             await self._forward_agent_delta(event)
 
         # Handle approval — send Telegram buttons
         if event.event_type == "approval_requested":
             await self._on_approval_requested(event)
-
-        # Update status card
-        await self._update_status_card(event)
 
         # Trigger queue drain when a task reaches terminal state
         if event.event_type in ("turn_completed", "thread_status_changed") and task_before:
@@ -313,56 +302,6 @@ class EventBridge:
         except Exception:
             logger.exception("Failed to send approval Telegram message")
 
-    async def _update_status_card(self, event: BackendEvent) -> None:
-        """Edit the task's status card if it has one."""
-        thread_id = str(event.payload.get("threadId", ""))
-        task = self._service._find_by_thread(thread_id)
-        if task is None:
-            return
-        if task.telegram_chat_id is None or task.telegram_status_message_id is None:
-            return
-
-        # Throttle: skip noisy deltas and approval/status churn.  Approval
-        # requests already get their own card; active phase changes tend to
-        # produce Telegram noise without adding useful action.
-        if event.event_type in (
-            "command_output_delta",
-            "agent_message_delta",
-            "item_started",
-            "item_completed",
-            "approval_requested",
-        ):
-            return
-
-        try:
-            current = self._service.get_task(task.id)
-            if not _should_refresh_status_card(event, current.status):
-                return
-            text = render_task_card(current)
-            buttons = None
-            # Attach worktree post-completion buttons when a worktree task
-            # reaches a terminal state.
-            if (
-                current.worktree_path
-                and current.status in TERMINAL_TASK_STATUSES
-            ):
-                from wlcodex.controller import _build_worktree_done_buttons
-                buttons = _build_worktree_done_buttons(current.id)
-            fingerprint = (
-                text,
-                json.dumps(buttons or [], ensure_ascii=False, sort_keys=True),
-            )
-            if self._status_card_fingerprints.get(current.id) == fingerprint:
-                return
-            await self._edit_telegram(
-                task.telegram_chat_id, task.telegram_status_message_id, text,
-                buttons=buttons,
-            )
-            self._status_card_fingerprints[current.id] = fingerprint
-        except Exception:
-            logger.exception("Failed to edit status card for task #%d", task.id)
-
-
     async def _forward_agent_delta(self, event: BackendEvent) -> None:
         if self._interaction_renderer is None:
             return
@@ -405,11 +344,3 @@ class EventBridge:
                 metadata={"has_diff": bool(task.changed_file_count)},
             )
         )
-
-
-def _should_refresh_status_card(event: BackendEvent, status: TaskStatus) -> bool:
-    if event.event_type == "turn_started":
-        return True
-    if status in TERMINAL_TASK_STATUSES:
-        return True
-    return False

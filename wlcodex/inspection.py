@@ -1,4 +1,4 @@
-"""Local task inspection — never calls Codex backend."""
+"""Local Workbench inspection — never calls Codex backend."""
 
 from __future__ import annotations
 
@@ -40,16 +40,16 @@ class TaskInspector:
     def events(self, task_id: int) -> InspectionResult:
         events = self._ledger.list_events(task_id, limit=200)
         if not events:
-            return InspectionResult(title=f"任务 #{task_id} 的事件", body="暂无事件记录。")
+            return InspectionResult(title="Workbench 事件", body="暂无事件记录。")
 
-        lines = [f"任务 #{task_id} 的事件："]
+        lines = ["Workbench 事件："]
         for ev in events:
             lines.append(
                 f"  [{ev.created_at.isoformat()}] {ev.event_type} "
                 f"{_summarize(ev)}"
             )
         return InspectionResult(
-            title=f"任务 #{task_id} 的事件",
+            title="Workbench 事件",
             body="\n".join(lines),
         )
 
@@ -62,12 +62,12 @@ class TaskInspector:
                 lines = log_file.read_text(encoding="utf-8").splitlines()
                 recent = lines[-self._tail_lines :]
                 return InspectionResult(
-                    title=f"任务 #{task_id} 的日志尾部（最近 {len(recent)} 行）",
+                    title=f"现场日志尾部（最近 {len(recent)} 行）",
                     body="\n".join(recent),
                 )
             except Exception as exc:
                 return InspectionResult(
-                    title=f"任务 #{task_id} 的日志尾部",
+                    title="现场日志尾部",
                     body=f"读取日志失败：{exc}",
                 )
 
@@ -87,12 +87,12 @@ class TaskInspector:
         if deltas:
             body = "\n".join(deltas[-self._tail_lines :])
             return InspectionResult(
-                title=f"任务 #{task_id} 的日志尾部（来自事件记录）",
+                title="现场日志尾部（来自事件记录）",
                 body=body,
             )
 
         return InspectionResult(
-            title=f"任务 #{task_id} 的日志尾部",
+            title="现场日志尾部",
             body="没有找到本地日志或事件输出。",
         )
 
@@ -102,15 +102,15 @@ class TaskInspector:
         touched = self._ledger.list_touched_files(task_id)
         if not touched:
             return InspectionResult(
-                title=f"任务 #{task_id} 涉及的文件",
+                title="相关文件",
                 body="暂无文件记录。",
             )
 
-        lines = [f"任务 #{task_id} 涉及的文件："]
+        lines = ["相关文件："]
         for tf in touched:
             lines.append(f"  [{tf.change_kind}] {tf.path}")
         return InspectionResult(
-            title=f"任务 #{task_id} 涉及的文件",
+            title="相关文件",
             body="\n".join(lines),
         )
 
@@ -188,7 +188,7 @@ class TaskInspector:
             return self._from_git_diff(task_id, workspace_path)
 
         return InspectionResult(
-            title=f"任务 #{task_id} 的 diff",
+            title="工作区 diff",
             body="暂无 diff 信息。",
         )
 
@@ -203,7 +203,7 @@ class TaskInspector:
                     if truncated:
                         body += "\n… [已截断]"
                     return InspectionResult(
-                        title=f"任务 #{task_id} 的 diff",
+                        title="工作区 diff",
                         body=body,
                         truncated=truncated,
                     )
@@ -220,7 +220,7 @@ class TaskInspector:
             output = proc.stdout.strip()
             if not output:
                 return InspectionResult(
-                    title=f"任务 #{task_id} 的 diff", body="工作区没有未提交变更。"
+                    title="工作区 diff", body="工作区没有未提交变更。"
                 )
 
             truncated = len(output) > self._diff_max_chars
@@ -228,18 +228,18 @@ class TaskInspector:
             if truncated:
                 body += "\n… [已截断]"
             return InspectionResult(
-                title=f"任务 #{task_id} 的 diff（git diff --stat）",
+                title="工作区 diff（git diff --stat）",
                 body=body,
                 truncated=truncated,
             )
         except subprocess.TimeoutExpired:
             return InspectionResult(
-                title=f"任务 #{task_id} 的 diff",
+                title="工作区 diff",
                 body="git diff 超时。",
             )
         except FileNotFoundError:
             return InspectionResult(
-                title=f"任务 #{task_id} 的 diff",
+                title="工作区 diff",
                 body="当前主机没有可用的 git。",
             )
 

@@ -10,7 +10,7 @@ def classify_user_error(error: object) -> str:
     if "429" in lowered or "rate limit" in lowered or "too many requests" in lowered:
         return "现在被限流了，等一会儿再继续会更稳。"
     if "context" in lowered and ("long" in lowered or "length" in lowered):
-        return "上下文太长了。我建议开新对话，或者先让我压缩范围。"
+        return "上下文太长了。我建议开新工作台，或者先让我压缩范围。"
     if "codex" in lowered and ("启动失败" in raw or "failed" in lowered):
         return "Codex 没启动起来。我保留了这次请求，可以稍后重试。"
     if "network" in lowered or "timed out" in lowered or "timeout" in lowered:
