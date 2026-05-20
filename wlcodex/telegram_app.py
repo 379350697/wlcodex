@@ -1044,7 +1044,10 @@ class WlCodexHandlers:
             await self._safe_callback_answer(query, "系统未完全初始化。")
             return
 
-        from wlcodex.workbench.sessions import AgentSessionLibrary
+        from wlcodex.workbench.sessions import (
+            AgentSessionLibrary,
+            AgentSessionResumability,
+        )
 
         library = AgentSessionLibrary(self._ledger)
         session = library.get_for_workbench(conversation_id, source_run_id)
@@ -1061,18 +1064,52 @@ class WlCodexHandlers:
                 f"状态：{session.status}",
                 f"可继续状态：{session.user_label}",
             ]
+            action_buttons = []
+            if session.resumability is AgentSessionResumability.SUMMARY_ONLY:
+                action_buttons.append(
+                    {"text": "从摘要新开",
+                     "callback_data": f"conv:{conversation_id}:resume_from_summary:{source_run_id}"}
+                )
+            else:
+                action_buttons.extend([
+                    {"text": "接管现场",
+                     "callback_data": f"conv:{conversation_id}:attach_session:{source_run_id}"},
+                    {"text": "继续修改",
+                     "callback_data": f"conv:{conversation_id}:resume_session:{source_run_id}"},
+                ])
+            if session.agent == "claude" and session.status == "done":
+                action_buttons.append(
+                    {"text": "让 Codex 验收",
+                     "callback_data": f"conv:{conversation_id}:codex_verify_session:{source_run_id}"}
+                )
+            action_buttons.append(
+                {"text": "回驾驶舱",
+                 "callback_data": f"conv:{conversation_id}:return_cockpit"}
+            )
             await self._safe_callback_answer(query, "已查看")
             await self._safe_callback_edit(
                 update, query, "\n".join(lines),
-                buttons=[[
-                    {"text": "接管现场",
-                     "callback_data": f"conv:{conversation_id}:attach_session:{source_run_id}"},
-                    {"text": "回驾驶舱",
-                     "callback_data": f"conv:{conversation_id}:return_cockpit"},
-                ]],
+                buttons=[action_buttons],
             )
 
         elif kind == "attach_session":
+            if session.resumability is AgentSessionResumability.SUMMARY_ONLY:
+                await self._safe_callback_answer(
+                    query, "这个现场只有回顾，可从摘要新开。"
+                )
+                await self._safe_callback_edit(
+                    update, query,
+                    f"{agent_label} 现场只有回顾。\n"
+                    f"摘要：{session.title}\n\n"
+                    "可以从摘要新开一个现场继续。",
+                    buttons=[[
+                        {"text": "从摘要新开",
+                         "callback_data": f"conv:{conversation_id}:resume_from_summary:{source_run_id}"},
+                        {"text": "回驾驶舱",
+                         "callback_data": f"conv:{conversation_id}:return_cockpit"},
+                    ]],
+                )
+                return
             # Pure attach — no task/run, just enter Onsite.
             self._pending_continuation.pop(conversation_id, None)
             await self._attach_and_enter_onsite(
@@ -1080,6 +1117,25 @@ class WlCodexHandlers:
             )
 
         elif kind == "resume_session":
+            if session.resumability is AgentSessionResumability.SUMMARY_ONLY:
+                self._pending_continuation[conversation_id] = {
+                    "agent": session.agent,
+                    "internal_ref": "",
+                    "title": session.title,
+                    "source_run_id": source_run_id,
+                    "summary_only": True,
+                }
+                self._record_mode_switch(
+                    conversation_id, chat_id, "terminal", session.agent,
+                )
+                await self._safe_callback_answer(query, "已准备")
+                await self._safe_callback_edit(
+                    update, query,
+                    f"已准备从摘要新开 {agent_label} 现场。\n"
+                    f"标题：{session.title}\n\n"
+                    "直接发送下一条消息即可继续。",
+                )
+                return
             # Store pending continuation — task/run creation deferred
             # to the first Onsite text from this conversation.
             self._pending_continuation[conversation_id] = {

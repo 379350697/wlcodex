@@ -981,3 +981,65 @@ async def test_resume_from_summary_prepares_pending_without_raw_attach(tmp_path)
 
     terminal_mgr.attach_historical.assert_not_called()
     assert handlers._pending_continuation[conversation.id]["summary_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_review_summary_only_session_does_not_offer_attach_session(tmp_path):
+    from wlcodex.db import Ledger
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    conversation = ledger.create_conversation(
+        chat_id=7001,
+        user_id=100,
+        title="历史现场",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    run = ledger.create_agent_run(
+        conversation_id=conversation.id,
+        agent="codex",
+        role="analysis",
+        prompt_packet_summary="",
+    )
+    ledger.update_agent_run_status(
+        run.id,
+        "done",
+        completion_summary='{"summary":"default flow ok","needs_implementation":false}',
+    )
+
+    terminal_mgr = MagicMock()
+    terminal_mgr.attach_historical = MagicMock()
+    handlers = _make_handlers(ledger=ledger, terminal_manager=terminal_mgr)
+
+    query = SimpleNamespace(
+        answer=AsyncMock(),
+        message=SimpleNamespace(
+            chat_id=7001,
+            message_id=99,
+            chat=SimpleNamespace(id=7001),
+        ),
+    )
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=7001))
+
+    await handlers._handle_session_picker_callback(
+        update, query, conversation.id, ("review_session", run.id),
+    )
+
+    edit_kwargs = handlers._bot.edit_message_text.call_args.kwargs
+    keyboard = edit_kwargs["reply_markup"].inline_keyboard
+    callback_data = [
+        button.callback_data
+        for row in keyboard
+        for button in row
+    ]
+    labels = [
+        button.text
+        for row in keyboard
+        for button in row
+    ]
+
+    assert "从摘要新开" in labels
+    assert not any(":attach_session:" in data for data in callback_data)
+    assert not any(label == "接管现场" for label in labels)
+    terminal_mgr.attach_historical.assert_not_called()

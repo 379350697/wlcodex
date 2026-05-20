@@ -27,10 +27,6 @@ _DIAGNOSTIC_COMMANDS = frozenset({
     "/permission",
 })
 
-_EXPLICIT_NEW_PHRASES = frozenset({
-    "新任务", "另起一个", "重新开始", "重来", "新对话",
-})
-
 # States where follow-ups trigger immediate Codex re-evaluation.
 _IMMEDIATE_REVIEW_STATES = frozenset({
     "new", "analysis", "waiting_approval", "needs_user",
@@ -81,10 +77,9 @@ def classify_intent(text: str) -> str:
     """
     normalized = text.strip()
 
-    # Explicit new-conversation triggers.
+    # Explicit new-Workbench trigger. Natural-language phrases like "新任务"
+    # are normal text inside the current Workbench; only /new starts a new one.
     if normalized.startswith("/new"):
-        return "new_trigger"
-    if normalized in _EXPLICIT_NEW_PHRASES:
         return "new_trigger"
 
     # Diagnostic / inspection commands.
@@ -154,18 +149,19 @@ def route_message(
             intent=intent,
         )
 
-    # --- Terminal active conversation -> create new ---
+    # --- Terminal active conversation -> keep the Workbench ---
     if is_terminal:
         if workspace_busy:
             return _busy_decision(
                 active_conversation_state, blocking_task_id, blocking_run_id
             )
         return RouteDecision(
-            route="new_conversation",
+            route="append_active_conversation",
             reason=f"active_conversation_terminal_{active_conversation_state}",
-            new_conversation=True,
+            new_conversation=False,
             intent=intent,
             conversation_state=active_conversation_state,
+            delivery_policy="codex_immediate_review",
         )
 
     # --- Active non-terminal -> append ---

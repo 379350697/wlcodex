@@ -744,6 +744,142 @@ async def test_chief_engineer_uses_runtime_runner_without_renderer(
 
 
 @pytest.mark.asyncio
+async def test_terminal_state_followup_reuses_same_workbench(
+    tmp_path: Path,
+) -> None:
+    """A failed/passed internal run must not force a new Workbench."""
+
+    class RunnerSpy:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def start_chief_engineer(self, **kwargs: object) -> object:
+            self.calls.append(kwargs)
+            return object()
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", tmp_path, True),
+    ))
+    controller = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        claude_backend=FakeClaudeBackendForController(),
+        runtime_event_store=store,
+    )
+    runner = RunnerSpy()
+    controller.set_orchestration_runner(runner)
+
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="真人历史现场 smoke",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_FAILED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id="1",
+        correlation_id="failed-before-followup",
+        source=EventSource.ORCHESTRATOR,
+        actor="orchestrator",
+        visibility=Visibility.USER,
+        payload={"reason": "previous run failed"},
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+        orchestration_run_id=1,
+    ))
+
+    await controller.handle_conversation_text(
+        "近日金价发我",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    active = ledger.get_active_conversation(100)
+    assert active is not None
+    assert active.id == conversation.id
+    assert ledger.get_conversation(conversation.id).archived_at is None
+    assert len(runner.calls) == 1
+    assert runner.calls[0]["conversation"].id == conversation.id
+
+    closed = store._conn.execute(
+        """
+        SELECT 1 FROM runtime_events
+        WHERE conversation_id = ?
+          AND event_type = ?
+        """,
+        (conversation.id, EventType.CONVERSATION_CLOSED),
+    ).fetchone()
+    assert closed is None
+
+
+@pytest.mark.asyncio
+async def test_no_implementation_completion_records_pass_not_failed(
+    tmp_path: Path,
+) -> None:
+    """Reply-only/no-op Codex analysis must close cleanly, not as failed."""
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    backend = FakeCodexBackend()
+    backend._codex_responses = [
+        (
+            '{"summary":"default flow ok","needs_implementation":false,'
+            '"files_to_touch":[],"implementation_steps":[]}'
+        ),
+    ]
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", tmp_path, True),
+    ))
+    claude = FakeClaudeBackendForController()
+    controller = CommandController(
+        service,
+        backend,
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        claude_backend=claude,
+        runtime_event_store=store,
+    )
+    _attach_runtime_runner(
+        controller,
+        service=service,
+        backend=backend,
+        claude=claude,
+        ledger=ledger,
+        store=store,
+    )
+
+    await controller.handle_conversation_text(
+        "请按默认流程只回复：default flow ok",
+        {"chat_id": 100, "user_id": 200},
+    )
+    await _drain_runtime_runner(controller)
+
+    task = service.list_tasks()[0]
+    assert task.status is TaskStatus.DONE
+    assert task.last_error == ""
+    assert len(claude.calls) == 0
+
+    verification = store._conn.execute(
+        """
+        SELECT payload_json FROM runtime_events
+        WHERE conversation_id = ?
+          AND event_type = ?
+        """,
+        (ledger.get_active_conversation(100).id, EventType.VERIFICATION_DECISION_RECORDED),
+    ).fetchone()
+    assert verification is not None
+    assert '"decision": "pass"' in verification["payload_json"]
+
+
+@pytest.mark.asyncio
 async def test_chief_engineer_refuses_legacy_fallback_without_runtime_runner(
     tmp_path: Path,
 ) -> None:

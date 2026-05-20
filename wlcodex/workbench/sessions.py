@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import json
 
 
 class AgentSessionResumability(Enum):
@@ -52,12 +53,13 @@ class AgentSessionLibrary:
                 continue
             seen.add(dedup_key)
 
-            title = (
+            raw_title = (
                 run.completion_summary
                 or run.prompt_packet_summary
                 or run.role
                 or run.agent
             )
+            title = _human_title(raw_title)
             if not title.strip():
                 title = run.agent
 
@@ -105,3 +107,20 @@ def _build_user_label(resumability: AgentSessionResumability) -> str:
         return "可继续"
     else:
         return "可回顾"
+
+
+def _human_title(raw: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    if value.startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key in ("summary", "title", "message"):
+                summary = parsed.get(key)
+                if isinstance(summary, str) and summary.strip():
+                    return summary.strip()
+    return value

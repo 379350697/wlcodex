@@ -1185,6 +1185,37 @@ class OrchestrationRunner:
                                 reason,
                             )
                             continue
+                        if not last_verification_decision:
+                            analysis_only = (
+                                not claude_implementation_text
+                                and not verification_text
+                            )
+                            if analysis_only:
+                                last_verification_decision = "pass"
+                                self._emit_event(RuntimeEvent(
+                                    schema_version=1,
+                                    event_type=EventType.VERIFICATION_DECISION_RECORDED,
+                                    aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                                    aggregate_id=str(orchestration_run_id),
+                                    correlation_id=cid,
+                                    source=EventSource.ORCHESTRATOR,
+                                    actor="codex",
+                                    visibility=Visibility.OPERATOR,
+                                    payload={
+                                        "decision": "pass",
+                                        "reason": (
+                                            terminal_text
+                                            or codex_analysis_text
+                                            or "Codex determined no implementation needed."
+                                        )[:500],
+                                        "verify_round": 0,
+                                        "implicit": True,
+                                    },
+                                    occurred_at=now_iso(),
+                                    conversation_id=conversation.id,
+                                    orchestration_run_id=orchestration_run_id,
+                                    task_id=task_id,
+                                ))
                         self._ledger.set_task_status(task_id, TaskStatus.DONE)
                         # Emit verification.completed + run.completed
                         self._emit_event(RuntimeEvent(

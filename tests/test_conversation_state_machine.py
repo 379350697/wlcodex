@@ -89,12 +89,13 @@ def test_no_active_conversation_creates_new():
 
 
 @pytest.mark.parametrize("terminal_state", ["passed", "failed", "aborted", "done"])
-def test_terminal_conversation_creates_new(terminal_state):
-    """Any normal text after a terminal conversation starts a new one."""
+def test_terminal_conversation_stays_in_workbench(terminal_state):
+    """Normal text after a terminal run stays in the same Workbench."""
     decision = route_message("next task please", active_conversation_state=terminal_state)
-    assert decision.route == "new_conversation"
+    assert decision.route == "append_active_conversation"
     assert decision.reason == f"active_conversation_terminal_{terminal_state}"
-    assert decision.new_conversation is True
+    assert decision.new_conversation is False
+    assert decision.delivery_policy == "codex_immediate_review"
 
 
 def test_slash_new_always_creates_new():
@@ -109,11 +110,11 @@ def test_slash_new_always_creates_new():
 @pytest.mark.parametrize("trigger_phrase", [
     "新任务", "另起一个", "重新开始", "重来", "新对话",
 ])
-def test_explicit_new_phrases_create_new_conversation(trigger_phrase):
-    """Explicit start-over phrases create a new conversation."""
+def test_plain_language_new_phrases_do_not_create_workbench(trigger_phrase):
+    """Only /new creates a Workbench; natural phrases remain normal text."""
     decision = route_message(trigger_phrase, active_conversation_state="implementation")
-    assert decision.route == "new_conversation"
-    assert decision.new_conversation is True
+    assert decision.route == "append_active_conversation"
+    assert decision.new_conversation is False
 
 
 # ===========================================================================
@@ -276,9 +277,9 @@ def test_production_route_message_no_active_conversation():
     assert decision.reason == "no_active_conversation"
 
 
-@pytest.mark.parametrize("text", ["/new", "新任务", "另起一个", "重新开始"])
+@pytest.mark.parametrize("text", ["/new", "/new 测试"])
 def test_production_route_message_explicit_new_trigger(text):
-    """Production route_message: explicit new triggers always create new."""
+    """Production route_message: only /new creates a new Workbench."""
     decision = route_message(text, active_conversation_state="analysis")
     assert decision.route == "new_conversation"
     assert decision.new_conversation is True
@@ -292,12 +293,12 @@ def test_production_route_message_non_terminal_appends(state):
     assert decision.new_conversation is False
 
 
-def test_production_route_message_terminal_creates_new():
-    """Production route_message: terminal state creates new conversation."""
+def test_production_route_message_terminal_stays_in_workbench():
+    """Production route_message: terminal state keeps the active Workbench."""
     for state in ("passed", "failed", "aborted", "done"):
         decision = route_message("next task", active_conversation_state=state)
-        assert decision.route == "new_conversation"
-        assert decision.new_conversation is True
+        assert decision.route == "append_active_conversation"
+        assert decision.new_conversation is False
 
 
 @pytest.mark.parametrize("cmd", ["/status", "/trace", "/health", "/diff", "/help"])
@@ -370,8 +371,8 @@ def test_production_route_message_normal_text_during_analysis_is_immediate():
 def test_production_classify_intent_new():
     assert classify_intent("/new") == "new_trigger"
     assert classify_intent("/new 测试") == "new_trigger"
-    assert classify_intent("新任务") == "new_trigger"
-    assert classify_intent("重新开始") == "new_trigger"
+    assert classify_intent("新任务") == "normal_text"
+    assert classify_intent("重新开始") == "normal_text"
 
 
 def test_production_classify_intent_diagnostic():
@@ -439,10 +440,11 @@ def test_two_messages_same_chat_one_conversation():
     assert decision2.new_conversation is False
 
 
-def test_followup_after_passed_creates_new():
-    """After conversation passes, follow-up starts a new conversation."""
+def test_followup_after_passed_stays_in_workbench():
+    """After a run passes, follow-up starts more work inside the Workbench."""
     decision = route_message("next thing to fix", active_conversation_state="passed")
-    assert decision.route == "new_conversation"
+    assert decision.route == "append_active_conversation"
+    assert decision.new_conversation is False
 
 
 # ---------------------------------------------------------------------------

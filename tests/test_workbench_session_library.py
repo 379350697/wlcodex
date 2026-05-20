@@ -112,6 +112,25 @@ def test_session_library_falls_back_to_role_when_no_completion_summary():
     assert "implementation" in sessions[0].title.lower()
 
 
+def test_session_library_renders_codex_json_summary_as_user_text():
+    runs = [
+        _make_run(
+            id=9,
+            agent="codex",
+            completion_summary=(
+                '{"summary":"default flow ok","needs_implementation":false,'
+                '"files_to_touch":[],"implementation_steps":[]}'
+            ),
+            external_session_id="",
+        ),
+    ]
+
+    sessions = AgentSessionLibrary(FakeLedger(runs)).list_for_workbench(42)
+
+    assert sessions[0].title == "default flow ok"
+    assert "needs_implementation" not in sessions[0].title
+
+
 def test_session_library_falls_back_to_agent_name_when_everything_empty():
     runs = [
         _make_run(id=9, agent="codex", completion_summary="",
