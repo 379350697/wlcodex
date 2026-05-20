@@ -1668,3 +1668,89 @@ async def test_send_telegram_preview_waits_for_outbox_message_id(tmp_path):
     await outbox.process_all()
 
     assert await waiter == 4321
+
+
+# --- Product mode no-fragment integration test ---
+
+
+@pytest.mark.asyncio
+async def test_product_mode_does_not_send_token_fragments_during_stream():
+    """Product cockpit must never send single-token body messages.
+    Body is buffered until completion."""
+    from unittest.mock import patch
+
+    from wlcodex.interaction.events import InteractionEvent
+
+    sent = []
+    edited = []
+
+    async def send(chat_id, text, buttons=None):
+        sent.append((chat_id, text, buttons))
+        return len(sent)
+
+    async def edit(chat_id, message_id, text, buttons=None):
+        edited.append((chat_id, message_id, text, buttons))
+
+    async def typing(chat_id):
+        return None
+
+    # Build handlers using the _make_handlers helper from workbench tests
+    from types import SimpleNamespace
+
+    from wlcodex.telegram_app import WlCodexHandlers
+
+    class FakeRuntimeStore:
+        def __init__(self):
+            self.events = []
+
+        def append(self, event):
+            self.events.append(event)
+
+    class FakeLedger:
+        def get_active_conversation(self, chat_id):
+            return SimpleNamespace(id=42)
+
+        def record_telegram_update(self, **kwargs):
+            pass
+
+        def list_recent_agent_runs(self, conversation_id, limit=50):
+            return []
+
+    store = FakeRuntimeStore()
+    ledger = FakeLedger()
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(
+            telegram=SimpleNamespace(allowed_user_ids=frozenset({123})),
+            interaction=SimpleNamespace(profile="natural", edit_min_interval_seconds=0.0),
+            telegram_output=SimpleNamespace(
+                preview_send_timeout_seconds=2.0,
+                semantic_min_chars=20,
+                semantic_max_chars=80,
+                final_chunk_chars=200,
+                product_body_mode="final",
+                terminal_body_mode="semantic_blocks",
+            ),
+        ),
+        controller=SimpleNamespace(),
+        ledger=ledger,
+        approval_service=SimpleNamespace(),
+        bot=SimpleNamespace(),
+        runtime_event_store=store,
+    )
+    handlers.send_telegram = send
+    handlers.edit_telegram = edit
+    handlers.send_telegram_preview = send
+    handlers.edit_telegram_preview = edit
+    with patch.object(handlers, "_get_active_surface_mode", return_value="product"):
+        renderer = handlers.create_interaction_renderer()
+
+    await renderer.handle(InteractionEvent(event_type="run_started", chat_id=1, conversation_id=7, task_id=10))
+    for token in ["我", "查", "到", "的", "最新", "金价", "如下："]:
+        await renderer.handle(InteractionEvent(event_type="text_delta", chat_id=1, conversation_id=7, task_id=10, text=token))
+    await renderer.handle(InteractionEvent(event_type="run_completed", chat_id=1, conversation_id=7, task_id=10))
+
+    body_texts = [text for _, text, _ in sent if "我查到的最新金价如下：" in text]
+    tiny_texts = [text for _, text, _ in sent if text in {"我", "查", "到", "的"}]
+    assert len(body_texts) == 1
+    assert tiny_texts == []

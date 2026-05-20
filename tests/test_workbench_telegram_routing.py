@@ -1198,3 +1198,74 @@ async def test_review_summary_only_session_does_not_offer_attach_session(tmp_pat
     assert not any(":attach_session:" in data for data in callback_data)
     assert not any(label == "接管现场" for label in labels)
     terminal_mgr.attach_historical.assert_not_called()
+
+
+# --- Terminal readable output test ---
+
+
+@pytest.mark.asyncio
+async def test_terminal_mode_streams_semantic_blocks_not_token_fragments():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from wlcodex.interaction.events import InteractionEvent
+    from wlcodex.telegram_app import WlCodexHandlers
+
+    sent = []
+    edited = []
+
+    async def send(chat_id, text, buttons=None):
+        sent.append((chat_id, text, buttons))
+        return len(sent)
+
+    async def edit(chat_id, message_id, text, buttons=None):
+        edited.append((chat_id, message_id, text, buttons))
+
+    class FakeRuntimeStore:
+        def __init__(self):
+            self.events = []
+
+        def append(self, event):
+            self.events.append(event)
+
+    class FakeLedger:
+        def get_active_conversation(self, chat_id):
+            return SimpleNamespace(id=42)
+
+        def record_telegram_update(self, **kwargs):
+            pass
+
+    store = FakeRuntimeStore()
+    ledger = FakeLedger()
+
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(
+            telegram=SimpleNamespace(allowed_user_ids=frozenset({123})),
+            interaction=SimpleNamespace(profile="natural", edit_min_interval_seconds=0.0),
+            telegram_output=SimpleNamespace(
+                preview_send_timeout_seconds=2.0,
+                semantic_min_chars=10,
+                semantic_max_chars=30,
+                final_chunk_chars=200,
+                product_body_mode="final",
+                terminal_body_mode="semantic_blocks",
+            ),
+        ),
+        controller=SimpleNamespace(),
+        ledger=ledger,
+        approval_service=SimpleNamespace(),
+        bot=SimpleNamespace(),
+        runtime_event_store=store,
+    )
+    handlers.send_telegram = send
+    handlers.edit_telegram = edit
+    handlers.send_telegram_preview = send
+    handlers.edit_telegram_preview = edit
+    with patch.object(handlers, "_get_active_surface_mode", return_value="terminal"):
+        renderer = handlers.create_interaction_renderer()
+
+    await renderer.handle(InteractionEvent(event_type="run_started", chat_id=1, conversation_id=7, task_id=10))
+    await renderer.handle(InteractionEvent(event_type="text_delta", chat_id=1, conversation_id=7, task_id=10, text="第一段很长很长。\n\n第二段也很长很长。"))
+
+    assert any(text == "第一段很长很长。" for _, text, _ in sent)
+    assert not any(text == "第一段" for _, text, _ in sent)
