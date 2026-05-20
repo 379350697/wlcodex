@@ -183,6 +183,27 @@ class TestAgentRunProjection:
         row = _row(ledger._conn, "agent_runs", 10)
         assert row["status"] == "done"
 
+    def test_agent_terminal_activity_can_fill_missing_session_ref(self, tmp_path: Path):
+        """Late activity may repair a missing external_session_id without reviving the run."""
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.AGENT_RUN_STARTED, AggregateType.AGENT_RUN, "ar-tref",
+                            agent_run_id=12, event_id=1))
+        projector.apply(store.get_by_id(1))
+
+        store.append(_event(EventType.AGENT_RUN_COMPLETED, AggregateType.AGENT_RUN, "ar-tref",
+                            agent_run_id=12, event_id=2))
+        projector.apply(store.get_by_id(2))
+
+        store.append(_event(EventType.AGENT_RUN_ACTIVITY, AggregateType.AGENT_RUN, "ar-tref",
+                            agent_run_id=12, event_id=3,
+                            payload={"threadId": "thread-after-done"}))
+        projector.apply(store.get_by_id(3))
+
+        row = _row(ledger._conn, "agent_runs", 12)
+        assert row["status"] == "done"
+        assert row["external_session_id"] == "thread-after-done"
+
     def test_agent_terminal_not_overwritten_by_started(self, tmp_path: Path):
         """AC: a completed agent must not be revived by a late agent.run.started."""
         ledger, store, projector = _setup(tmp_path)
@@ -808,6 +829,29 @@ class TestAgentRunSessionIdProjection:
 
         row = _row(ledger._conn, "agent_runs", 3)
         assert row["external_session_id"] == "claude_activity_sess"
+
+    def test_activity_thread_id_projected_for_codex_runs(
+        self, tmp_path: Path
+    ):
+        """Codex activity events use threadId as the resumable session ref."""
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(EventType.AGENT_RUN_QUEUED, AggregateType.AGENT_RUN,
+                            "ar-codex-thread", agent_run_id=5, event_id=1,
+                            payload={"agent": "codex", "role": "analysis"}))
+        projector.apply(store.get_by_id(1))
+
+        store.append(_event(EventType.AGENT_RUN_STARTED, AggregateType.AGENT_RUN,
+                            "ar-codex-thread", agent_run_id=5, event_id=2))
+        projector.apply(store.get_by_id(2))
+
+        store.append(_event(EventType.AGENT_RUN_ACTIVITY, AggregateType.AGENT_RUN,
+                            "ar-codex-thread", agent_run_id=5, event_id=3,
+                            payload={"action": "turn_started", "threadId": "codex_thread_123"}))
+        projector.apply(store.get_by_id(3))
+
+        row = _row(ledger._conn, "agent_runs", 5)
+        assert row["external_session_id"] == "codex_thread_123"
 
     def test_completed_session_id_does_not_overwrite_existing_external_session(
         self, tmp_path: Path

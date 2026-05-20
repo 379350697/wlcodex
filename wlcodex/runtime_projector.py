@@ -273,6 +273,9 @@ class RuntimeProjector:
             EventType.AGENT_RUN_TIMED_OUT,
             EventType.AGENT_RUN_ORPHANED,
         ):
+            if etype in (EventType.AGENT_RUN_ACTIVITY, EventType.AGENT_RUN_HEARTBEAT):
+                self._project_session_id(event, agent_run_id)
+                self._conn.commit()
             return
 
         if etype == EventType.AGENT_RUN_STARTED:
@@ -521,11 +524,17 @@ class RuntimeProjector:
         """Write the best available session identifier from *event* payload
         into agent_runs.external_session_id.
 
-        Priority: external_session_id > session_id.
+        Priority: external_session_id > session_id > threadId/thread_id.
         Does NOT overwrite an already-set external_session_id.
         """
         payload = event.payload
-        ext_sid = str(payload.get("external_session_id") or payload.get("session_id") or "")
+        ext_sid = str(
+            payload.get("external_session_id")
+            or payload.get("session_id")
+            or payload.get("threadId")
+            or payload.get("thread_id")
+            or ""
+        )
         if not ext_sid:
             return
         self._conn.execute(
