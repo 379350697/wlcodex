@@ -55,10 +55,17 @@ async def _drain_runtime_runner(controller: CommandController) -> None:
     for _ in range(20):
         tasks = list(getattr(runner, "_tasks", set()))
         if not tasks:
-            return
+            break
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(0)
     assert not getattr(runner, "_tasks", set())
+    for _ in range(20):
+        tasks = list(getattr(controller, "_background_tasks", set()))
+        if not tasks:
+            return
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.sleep(0)
+    assert not getattr(controller, "_background_tasks", set())
 
 
 @pytest.fixture
@@ -244,7 +251,7 @@ async def test_new_conversation_command(ctrl: CommandController) -> None:
 async def test_codex_direct_creates_task(ctrl: CommandController) -> None:
     response = await ctrl.handle("/codex 分析 router.py", {"chat_id": 200, "user_id": 300})
 
-    assert "看一下" in response.text
+    assert "只交给 Codex" in response.text
     tasks = ctrl._service.list_tasks()
     assert len(tasks) >= 1
 
@@ -441,9 +448,21 @@ async def test_legacy_diff_command_with_id(ctrl: CommandController) -> None:
 async def test_help_shows_new_commands(ctrl: CommandController) -> None:
     response = await ctrl.handle("/help", {})
     assert "WLCodex" in response.text
-    assert "/new" in response.text
-    assert "/help" in response.text
+    assert "默认流程：Codex -> Claude -> Codex" in response.text
+    assert "当前视图：驾驶舱" in response.text
+    assert "[新任务]" in response.text
+    assert "[接管现场]" in response.text
     assert len(response.text.splitlines()) <= 14
+
+
+@pytest.mark.asyncio
+async def test_sessions_fallback_hides_internal_thread_ids(ctrl: CommandController) -> None:
+    ctrl._service.start_task("demo", "Investigate sessions", codex_thread_id="thread-secret")
+
+    response = await ctrl.handle("/sessions", {"chat_id": 500, "user_id": 600})
+
+    assert "thread-secret" not in response.text
+    assert "Thread ID" not in response.text
 
 
 @pytest.mark.asyncio
@@ -635,24 +654,27 @@ async def test_plain_greeting_replies_without_agent_loop(
 
 
 @pytest.mark.asyncio
-async def test_claude_command_runs_chief_engineer_gate(ctrl_with_claude: CommandController) -> None:
-    """/claude must not bypass Codex analysis and verification."""
+async def test_claude_command_runs_claude_only_gate(ctrl_with_claude: CommandController) -> None:
+    """/claude must bypass automatic Codex analysis and verification."""
     response = await ctrl_with_claude.handle(
         "/claude 修改 auth.py 添加空值检查",
         {"chat_id": 100, "user_id": 200},
     )
-    assert "已开始" in response.text
+    assert "让 Codex 验收" in response.text
     await _drain_runtime_runner(ctrl_with_claude)
     claude = ctrl_with_claude._claude
     assert hasattr(claude, "calls")
     assert len(claude.calls) == 1
-    assert "mode:" in claude.calls[0] or "user_goal:" in claude.calls[0]
-    assert len(ctrl_with_claude._backend.turns) >= 2  # Codex analysis + verification
+    active = ctrl_with_claude._ledger.get_active_conversation(100)
+    assert active is not None
+    assert ctrl_with_claude._ledger.list_orchestration_runs(active.id) == []
+    assert len(ctrl_with_claude._backend.turns) == 0
+    assert claude.calls[0] == "修改 auth.py 添加空值检查"
 
 
 @pytest.mark.asyncio
-async def test_claude_command_records_chief_engineer_runs(ctrl_with_claude: CommandController) -> None:
-    """/claude is routed through chief-engineer runs, including Claude agent_run."""
+async def test_claude_command_records_claude_direct_run(ctrl_with_claude: CommandController) -> None:
+    """/claude records a Claude direct run without chief-engineer orchestration."""
     await ctrl_with_claude.handle(
         "/claude 修改 README",
         {"chat_id": 100, "user_id": 200},
@@ -663,6 +685,11 @@ async def test_claude_command_records_chief_engineer_runs(ctrl_with_claude: Comm
     assert active.active_claude_run_id is not None
     assert active.active_claude_run_id > 0
     assert active.active_codex_task_id is not None
+    assert ctrl_with_claude._ledger.list_orchestration_runs(active.id) == []
+    agent_runs = ctrl_with_claude._ledger.list_agent_runs(active.id)
+    assert [(run.agent, run.role) for run in agent_runs] == [
+        ("claude", "implementation"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1034,22 +1061,22 @@ async def test_claude_direct_streaming_error_marks_agent_run_failed(tmp_path: Pa
     assert active is not None
     agent_runs = ledger.list_agent_runs(active.id)
     assert [(run.agent, run.role, run.status) for run in agent_runs] == [
-        ("codex", "analysis", AgentRunStatus.DONE.value),
         ("claude", "implementation", AgentRunStatus.FAILED.value),
     ]
+    assert backend.turns == []
 
 
 @pytest.mark.asyncio
-async def test_claude_command_does_not_emit_legacy_completion_buttons(
+async def test_claude_command_offers_explicit_codex_verification_action(
     ctrl_with_claude: CommandController,
 ) -> None:
-    """/claude should start the runtime runner, not return legacy completion buttons."""
+    """/claude should offer explicit Codex verification, not auto-run it."""
     response = await ctrl_with_claude.handle(
         "/claude 修改 auth.py",
         {"chat_id": 100, "user_id": 200},
     )
-    assert "已开始" in response.text
-    assert response.buttons == []
+    assert "让 Codex 验收" in response.text
+    assert response.buttons
     await _drain_runtime_runner(ctrl_with_claude)
 
 
@@ -1082,6 +1109,51 @@ async def test_conversation_callback_verify_action(ctrl_with_claude: CommandCont
     response = await ctrl_with_claude.handle_conversation_callback(cb)
     assert response.text
     assert "验收" in response.text or "Codex" in response.text
+
+
+@pytest.mark.asyncio
+async def test_verify_response_hides_internal_codex_thread_id(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", tmp_path, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+    )
+
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="verify hidden ids",
+        mode="claude_direct",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "hidden thread", telegram_chat_id=100)
+    task = service.set_task_thread(task.id, "thread-secret")
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    run = ledger.create_agent_run(
+        conversation_id=conversation.id,
+        agent="claude",
+        role="implementation",
+        hidden_task_id=task.id,
+        prompt_packet_summary="done",
+    )
+    ledger.update_agent_run_status(
+        run.id,
+        AgentRunStatus.DONE.value,
+        completion_summary="done",
+    )
+
+    response = await ctrl.handle("/verify", {"chat_id": 100, "user_id": 200})
+
+    assert "thread-secret" not in response.text
+    assert "线程：" not in response.text
 
 
 def test_encode_decode_conversation_callback_roundtrip() -> None:

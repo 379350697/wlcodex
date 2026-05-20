@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from dataclasses import replace
 
 from wlcodex.models import Task, TaskStatus
 from wlcodex.status import render_task_card, render_task_list
@@ -37,6 +38,21 @@ def test_render_task_card_is_compact() -> None:
     assert "running tests" in text
     assert "short summary" in text
     assert len(text) < 600
+
+
+def test_render_task_card_hides_internal_thread_and_turn_ids() -> None:
+    task = replace(
+        _task(42, TaskStatus.RUNNING, "Fix health timeout"),
+        codex_thread_id="thread-secret",
+        active_turn_id="turn-secret",
+    )
+
+    text = render_task_card(task)
+
+    assert "thread-secret" not in text
+    assert "turn-secret" not in text
+    assert "线程" not in text
+    assert "turn" not in text.lower()
 
 
 def test_render_task_list_limits_noise() -> None:

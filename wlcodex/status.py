@@ -65,10 +65,6 @@ def render_task_card(
         lines.append(f"待审批：{task.pending_approval_count}")
     if task.token_input or task.token_output:
         lines.append(f"Token：{task.token_input} 输入 / {task.token_output} 输出")
-    if task.active_turn_id:
-        lines.append(f"当前 turn：{task.active_turn_id}")
-    if task.codex_thread_id:
-        lines.append(f"线程：{task.codex_thread_id}")
     return "\n".join(lines)
 
 

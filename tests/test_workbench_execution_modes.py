@@ -22,7 +22,7 @@ from wlcodex.conversation_callback import VERIFY, ConversationCallback, decode_c
 from wlcodex.db import Ledger
 from wlcodex.inspection import TaskInspector
 from wlcodex.interaction.events import InteractionEvent
-from wlcodex.models import ConversationMode
+from wlcodex.models import ConversationMode, TaskStatus
 from wlcodex.orchestrator import OrchestrationProgress
 from wlcodex.runtime_events import RuntimeEvent
 from wlcodex.task_service import TaskService
@@ -361,6 +361,33 @@ async def test_claude_direct_actually_invokes_claude_subprocess(tmp_path: Path) 
     assert claude_runs[0].status == "done", (
         f"Claude agent run status is {claude_runs[0].status!r}, expected 'done'"
     )
+
+
+@pytest.mark.asyncio
+async def test_claude_direct_marks_hidden_task_done_and_releases_workspace(tmp_path: Path) -> None:
+    """A completed Claude-only run must not leave its hidden task blocking /task."""
+    claude = FakeClaudeBackend(enabled=True)
+    runner = FakeOrchestrationRunner()
+    ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
+
+    await ctrl.handle("/claude 只回复 ok", {"chat_id": 42, "user_id": 1})
+
+    import asyncio as _asyncio
+    await _asyncio.sleep(0.1)
+
+    convos = ctrl._ledger.list_conversations_by_chat(42)
+    assert convos
+    runs = ctrl._ledger.list_agent_runs(convos[0].id, limit=10)
+    claude_runs = [r for r in runs if r.agent == "claude"]
+    assert len(claude_runs) == 1
+    assert claude_runs[0].hidden_task_id is not None
+
+    hidden_task = ctrl._service.get_task(claude_runs[0].hidden_task_id)
+    assert hidden_task.status == TaskStatus.DONE
+    assert ctrl._service.blocker_for_workspace("wlcodex") is None
+
+    next_task = ctrl._service.reserve_task("wlcodex", "legacy smoke")
+    assert next_task.status == TaskStatus.QUEUED
 
 
 # ---------------------------------------------------------------------------

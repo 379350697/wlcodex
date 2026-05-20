@@ -26,20 +26,24 @@ logger = logging.getLogger(__name__)
 class OnsiteDecisionKind(Enum):
     AUTO_OPEN = "auto_open"
     START_CARD = "start_card"
+    SESSION_PICKER = "session_picker"
 
 
 @dataclass(frozen=True)
 class OnsiteDecision:
-    """Result of open_for_conversation: either a live session or a start-card.
+    """Result of open_for_conversation: a live session, start-card, or picker.
 
     When kind is AUTO_OPEN, session_ref holds the attached session.
     When kind is START_CARD, available_agents and return_action guide the
     user to the next step — never a dead end.
+    When kind is SESSION_PICKER, available_sessions holds the historical
+    sessions the user can choose from.
     """
 
     kind: OnsiteDecisionKind
     session_ref: TerminalSessionRef | None = None
     available_agents: tuple[str, ...] = ()
+    available_sessions: tuple = ()
     return_action: str = "回驾驶舱"
 
 
@@ -113,6 +117,43 @@ class TerminalSessionManager:
         )
         return detached
 
+    def attach_historical(
+        self, *, conversation_id: int, session: object
+    ) -> TerminalSessionRef:
+        """Attach a historical AgentSessionSummary as a terminal session ref.
+
+        SUMMARY_ONLY sessions cannot attach directly.
+        claude -> strategy "stream_json", codex -> strategy "app_server".
+        Reuses existing attached ref for the same agent/internal_ref.
+        """
+        from wlcodex.workbench.sessions import AgentSessionResumability
+
+        if getattr(session, "resumability", None) is AgentSessionResumability.SUMMARY_ONLY:
+            raise ValueError(
+                "Cannot attach a summary-only session. "
+                "Offer '从摘要新开' as the next action."
+            )
+
+        agent = session.agent
+        internal_ref = session.internal_ref
+        strategy = "stream_json" if agent == "claude" else "app_server"
+
+        # Reuse existing attached ref for same agent/internal_ref.
+        for s in reversed(self._sessions.get(conversation_id, [])):
+            if (
+                s.agent == agent
+                and s.external_session_id == internal_ref
+                and s.status == "attached"
+            ):
+                return s
+
+        return self.attach(
+            conversation_id=conversation_id,
+            agent=agent,
+            strategy=strategy,
+            external_session_id=internal_ref,
+        )
+
     async def send_input(self, ref: TerminalSessionRef, text: str):
         """Send user input text to the agent adapter for this session."""
         adapter = self._adapters.get(ref.agent)
@@ -136,14 +177,17 @@ class TerminalSessionManager:
     # ── Onsite open decision (Onsite) ─────────────────────────────────────
 
     def open_for_conversation(
-        self, conversation_id: int, preferred_agent: str = ""
+        self,
+        conversation_id: int,
+        preferred_agent: str = "",
+        historical_sessions: tuple = (),
     ) -> OnsiteDecision:
         """Try to open Onsite for *conversation_id*.
 
-        * If an attached session exists (preferred agent first), return
-          AUTO_OPEN with that session ref.
-        * Otherwise return START_CARD with available agents so the user
-          always has a next action.
+        Decision order (Repair Plan Task 4):
+        1. attached session -> AUTO_OPEN
+        2. historical resumable sessions -> SESSION_PICKER
+        3. no sessions -> START_CARD
         """
         sessions = self._sessions.get(conversation_id, [])
 
@@ -151,31 +195,36 @@ class TerminalSessionManager:
         attached: list[TerminalSessionRef] = [
             s for s in sessions if s.status == "attached"
         ]
-        if not attached:
-            agents = tuple(self._adapters.keys()) if self._adapters else ("claude", "codex")
-            return OnsiteDecision(
-                kind=OnsiteDecisionKind.START_CARD,
-                available_agents=agents,
-                return_action="回驾驶舱",
-            )
-
-        # Prefer the requested agent.
-        if preferred_agent:
-            for s in attached:
-                if s.agent == preferred_agent:
-                    return OnsiteDecision(
-                        kind=OnsiteDecisionKind.AUTO_OPEN, session_ref=s
-                    )
-            # Preferred agent not found → fall back to any attached.
+        if attached:
+            # Prefer the requested agent.
+            if preferred_agent:
+                for s in attached:
+                    if s.agent == preferred_agent:
+                        return OnsiteDecision(
+                            kind=OnsiteDecisionKind.AUTO_OPEN, session_ref=s
+                        )
+                return OnsiteDecision(
+                    kind=OnsiteDecisionKind.AUTO_OPEN,
+                    session_ref=attached[-1],
+                )
             return OnsiteDecision(
                 kind=OnsiteDecisionKind.AUTO_OPEN,
                 session_ref=attached[-1],
             )
 
-        # No preference → latest attached.
+        # No attached session — check historical sessions.
+        if historical_sessions:
+            return OnsiteDecision(
+                kind=OnsiteDecisionKind.SESSION_PICKER,
+                available_sessions=historical_sessions,
+                return_action="回驾驶舱",
+            )
+
+        agents = tuple(self._adapters.keys()) if self._adapters else ("claude", "codex")
         return OnsiteDecision(
-            kind=OnsiteDecisionKind.AUTO_OPEN,
-            session_ref=attached[-1],
+            kind=OnsiteDecisionKind.START_CARD,
+            available_agents=agents,
+            return_action="回驾驶舱",
         )
 
     # ── frame recording + tail (Onsite) ───────────────────────────────────

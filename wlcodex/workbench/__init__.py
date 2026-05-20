@@ -7,7 +7,8 @@ Onsite (接管现场) — and three execution modes: orchestrated
 
 from .models import ExecutionMode, ViewMode, WorkbenchRoute, WorkbenchState
 from .routing import route_plain_text
-from .rendering import render_view_header, render_view_switch_notice
+from .rendering import render_view_header, render_view_switch_notice, render_session_library
+from .sessions import AgentSessionLibrary, AgentSessionResumability, AgentSessionSummary
 from . import events
 
 __all__ = [
@@ -18,5 +19,9 @@ __all__ = [
     "route_plain_text",
     "render_view_header",
     "render_view_switch_notice",
+    "render_session_library",
+    "AgentSessionLibrary",
+    "AgentSessionResumability",
+    "AgentSessionSummary",
     "events",
 ]

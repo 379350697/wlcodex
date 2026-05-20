@@ -1,5 +1,6 @@
 """Telegram handler registration and auth guard tests."""
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -829,9 +830,10 @@ async def test_legacy_profile_conversation_text_uses_ack() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_cmd_routes_to_runtime_runner_without_direct_streaming() -> None:
-    """The /claude entrypoint must not stream Claude output directly."""
+async def test_claude_cmd_routes_to_claude_direct_streaming_without_chief_engineer() -> None:
+    """/claude must stay Claude-only and must not start chief-engineer runs."""
     from wlcodex.controller import CommandController
+    from wlcodex.agent_backend import AgentStreamEvent
 
     received_events: list[object] = []
 
@@ -839,13 +841,13 @@ async def test_claude_cmd_routes_to_runtime_runner_without_direct_streaming() ->
         async def handle(self, event):
             received_events.append(event)
 
-    class ErrorClaude:
+    class StreamingClaude:
         enabled = True
-        direct_stream_called = False
+        stream_calls = 0
 
         async def send_streaming(self, request):
-            self.direct_stream_called = True
-            raise AssertionError("/claude must not call Claude directly")
+            self.stream_calls += 1
+            yield AgentStreamEvent(delta="Claude direct output", event_type="text")
 
     class FakeRunner:
         def __init__(self) -> None:
@@ -896,7 +898,7 @@ async def test_claude_cmd_routes_to_runtime_runner_without_direct_streaming() ->
         def update_conversation_summary(self, *a):
             pass
 
-    claude = ErrorClaude()
+    claude = StreamingClaude()
     runner = FakeRunner()
     controller = CommandController(
         task_service=FakeTaskService(),
@@ -910,28 +912,27 @@ async def test_claude_cmd_routes_to_runtime_runner_without_direct_streaming() ->
 
     response = await controller.handle("/claude fix bug", {"chat_id": 456, "user_id": 123})
     assert response.already_rendered
+    await asyncio.gather(*list(controller._background_tasks), return_exceptions=True)
 
-    assert runner.calls
-    assert runner.calls[0]["task_id"] == 99
-    assert runner.calls[0]["orchestration_run_id"] == 20
-    assert runner.calls[0]["codex_analysis_run_id"] == 10
-    assert not claude.direct_stream_called
+    assert not runner.calls
+    assert claude.stream_calls == 1
     event_types = [e.event_type for e in received_events]
     assert "run_started" in event_types
 
 
 @pytest.mark.asyncio
-async def test_claude_cmd_starts_runtime_runner_without_renderer() -> None:
-    """/claude must still use the runtime runner when Telegram rendering is static."""
+async def test_claude_cmd_starts_claude_direct_without_renderer() -> None:
+    """/claude static replies still run Claude directly and do not start Codex."""
     from wlcodex.controller import CommandController
+    from wlcodex.agent_backend import AgentResult
 
     class MixedClaude:
         enabled = True
-        direct_stream_called = False
+        send_calls = 0
 
-        async def send_streaming(self, request):
-            self.direct_stream_called = True
-            raise AssertionError("/claude must not call Claude directly")
+        async def send(self, request):
+            self.send_calls += 1
+            return AgentResult(text="done", exit_code=0)
 
     class FakeTaskService:
         def get_workspace(self, alias):
@@ -960,7 +961,13 @@ async def test_claude_cmd_starts_runtime_runner_without_renderer() -> None:
         def update_agent_run_status(self, *a, **kw):
             pass
 
+        def update_conversation_summary(self, *a):
+            pass
+
         def set_conversation_active_task(self, *a):
+            pass
+
+        def set_conversation_active_claude_run(self, *a):
             pass
 
     class FakeRunner:
@@ -983,6 +990,7 @@ async def test_claude_cmd_starts_runtime_runner_without_renderer() -> None:
 
     response = await controller.handle("/claude fix bug", {"chat_id": 456, "user_id": 123})
     assert not response.already_rendered
-    assert "已开始" in response.text
-    assert runner.calls
-    assert not claude.direct_stream_called
+    assert "让 Codex 验收" in response.text
+    await asyncio.gather(*list(controller._background_tasks), return_exceptions=True)
+    assert not runner.calls
+    assert claude.send_calls == 1

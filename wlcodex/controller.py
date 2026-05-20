@@ -418,12 +418,12 @@ class CommandController:
                         return ControllerResponse(render_session_list(convos))
                 # Fall back to task-based sessions
                 tasks = self._service.list_tasks(include_archived=True)
-                lines = ["Codex 会话：", f"{'ID':>4}  {'状态':<10}  {'Thread ID':<38}  标题"]
+                lines = ["Codex 会话：", f"{'ID':>4}  {'状态':<10}  标题"]
                 for task in tasks:
                     if task.codex_thread_id:
                         lines.append(
                             f"{task.id:>4}  {STATUS_LABELS.get(task.status, task.status.value):<10}  "
-                            f"{task.codex_thread_id:<38}  {task.title[:60]}"
+                            f"{task.title[:60]}"
                         )
                 return ControllerResponse("\n".join(lines))
 
@@ -1056,6 +1056,27 @@ class CommandController:
         except Exception:
             logger.debug("Failed to cancel active runs for reanalysis", exc_info=True)
 
+    def _execution_lane_decision(
+        self, active_run: object | None, incoming_kind: str
+    ) -> str:
+        """Return idle, append, explicit_choice, or onsite_input.
+
+        Rules (Repair Plan Task 2):
+        - Cockpit ordinary text + idle -> idle
+        - Cockpit ordinary text + active task/run -> append
+        - explicit /codex or /claude + active task/run -> explicit_choice
+        - Onsite text + selected session -> onsite_input
+        """
+        if incoming_kind == "onsite_text":
+            return "onsite_input"
+        if incoming_kind in ("codex_direct", "claude_direct"):
+            if active_run is not None:
+                return "explicit_choice"
+            return "idle"
+        if active_run is not None:
+            return "append"
+        return "idle"
+
     async def _handle_workspace_busy(
         self,
         decision: RouteDecision,
@@ -1117,12 +1138,8 @@ class CommandController:
             conversation_id=conv_id if conv_id else None,
         ))
         buttons = build_workspace_busy_buttons(conv_id)
-        task_ref = f"#{blocking_task_id}" if blocking_task_id else "当前"
         return ControllerResponse(
-            f"工作区正忙\n"
-            f"当前任务：{task_ref}\n"
-            f"状态：{decision.conversation_state or '未知'}\n\n"
-            f"请选择：",
+            "当前工作台正在执行。你可以追加到当前执行，等它结束，停止当前后执行，或新开工作台。",
             buttons=buttons,
         )
 
@@ -1312,6 +1329,7 @@ class CommandController:
             prompt_packet_summary=command.prompt[:200],
         )
         self._ledger.update_agent_run_status(claude_run.id, "running")
+        self._ledger.set_conversation_active_claude_run(active.id, claude_run.id)
 
         self._ledger.update_conversation_summary(
             active.id,
@@ -1409,28 +1427,79 @@ class CommandController:
         from wlcodex.agent_backend import AgentRequest
 
         try:
+            try:
+                self._ledger.set_task_status(
+                    task_id,
+                    TaskStatus.RUNNING,
+                    phase="claude_direct",
+                )
+                self._ledger.add_event(
+                    task_id,
+                    "claude_direct_started",
+                    {"agent_run_id": agent_run_id},
+                )
+            except Exception:
+                logger.debug("Unable to mark Claude direct task running", exc_info=True)
+
             request = AgentRequest(prompt=prompt, workspace_path=workspace_path)
+            result = None
+            had_error = False
+            error_text = ""
             if self._interaction_renderer is not None:
-                # Streaming path: forward deltas through the renderer
-                async for stream_event in self._claude.send_streaming(request):
-                    from wlcodex.interaction.events import InteractionEvent
-                    await self._interaction_renderer.handle(
-                        InteractionEvent(
-                            event_type="claude_delta",
-                            chat_id=chat_id,
-                            task_id=task_id,
-                            conversation_id=conversation_id,
-                            metadata={"delta": stream_event.delta,
-                                      "event_type": stream_event.event_type},
+                stream = self._claude.send_streaming(request)
+                if hasattr(stream, "__aiter__"):
+                    async for stream_event in stream:
+                        event_type = getattr(stream_event, "event_type", "")
+                        delta = getattr(stream_event, "delta", "")
+                        if event_type == "error":
+                            had_error = True
+                            error_text = delta or "Claude streaming returned error"
+                        from wlcodex.interaction.events import InteractionEvent
+                        await self._interaction_renderer.handle(
+                            InteractionEvent(
+                                event_type="claude_delta",
+                                chat_id=chat_id,
+                                task_id=task_id,
+                                conversation_id=conversation_id,
+                                metadata={"delta": delta, "event_type": event_type},
+                            )
                         )
-                    )
+                else:
+                    result = await stream
             else:
                 # Non-streaming path: call send() and capture result
                 result = await self._claude.send(request)
 
+            if had_error:
+                try:
+                    self._service.fail_task(task_id, error_text or "Claude direct failed")
+                except Exception:
+                    logger.debug("Unable to mark Claude direct task failed", exc_info=True)
+                self._ledger.update_agent_run_status(
+                    agent_run_id,
+                    "failed",
+                    completion_summary=error_text[:2000],
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.RUN_FAILED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(agent_run_id),
+                    correlation_id=correlation_id,
+                    source=EventSource.CONTROLLER,
+                    actor="claude",
+                    visibility=Visibility.OPERATOR,
+                    payload={"status": "failed", "reason": error_text[:500],
+                             "task_id": task_id},
+                    occurred_at=now_iso(),
+                    conversation_id=conversation_id,
+                    agent_run_id=agent_run_id,
+                ))
+                return
+
             # On success: mark agent run as done
             completion_summary = ""
-            if self._interaction_renderer is None:
+            if result is not None:
                 try:
                     completion_summary = result.text[:2000]
                 except Exception:
@@ -1440,6 +1509,20 @@ class CommandController:
                 "done",
                 completion_summary=completion_summary or "Claude 执行完成",
             )
+            try:
+                self._ledger.set_task_status(
+                    task_id,
+                    TaskStatus.DONE,
+                    phase="claude_direct",
+                    summary=completion_summary or "Claude 执行完成",
+                )
+                self._ledger.add_event(
+                    task_id,
+                    "claude_direct_completed",
+                    {"agent_run_id": agent_run_id},
+                )
+            except Exception:
+                logger.debug("Unable to mark Claude direct task done", exc_info=True)
 
             # Emit run.completed
             self._emit_event(RuntimeEvent(
@@ -1459,6 +1542,10 @@ class CommandController:
 
         except Exception as exc:
             logger.exception("Claude direct background task failed")
+            try:
+                self._service.fail_task(task_id, str(exc))
+            except Exception:
+                logger.debug("Failed to mark Claude direct task failed", exc_info=True)
             self._ledger.update_agent_run_status(
                 agent_run_id,
                 "failed",
@@ -1704,7 +1791,6 @@ class CommandController:
                     await self._backend.start_turn(task.codex_thread_id, packet.render())
                     verification_text = f"已向 Codex 发送验收请求。\n" \
                                         f"对话：{active.title}\n" \
-                                        f"线程：{task.codex_thread_id}\n" \
                                         f"变更文件：{len(changed_files)} 个\n" \
                                         f"验收证据：Codex 分析计划 + Claude 输出摘要 + diff"
                 else:

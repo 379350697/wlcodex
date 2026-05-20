@@ -795,10 +795,25 @@ class WlCodexHandlers:
     async def codex_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
-        response = await self._controller.handle(
-            update.effective_message.text, _ctx(update)
+        chat_id = update.effective_chat.id
+
+        if self._ledger is not None:
+            from wlcodex.workbench.sessions import AgentSessionLibrary
+            from wlcodex.workbench.rendering import render_session_library
+
+            active = self._ledger.get_active_conversation(chat_id)
+            if active is not None:
+                library = AgentSessionLibrary(self._ledger)
+                sessions = library.list_for_workbench(active.id)
+                text = render_session_library(sessions)
+                buttons = self._render_session_picker_buttons(chat_id, sessions)
+                await self.send_telegram(chat_id, text, buttons=buttons)
+                return
+
+        await self.send_telegram(
+            chat_id,
+            "当前还没有工作台。发送 /new 开始一个新的工作台。",
         )
-        await self.send_telegram(update.effective_chat.id, response.text)
 
     async def health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
@@ -972,6 +987,132 @@ class WlCodexHandlers:
             [{"text": "回驾驶舱",
               "callback_data": f"conv:{chat_id}:return_cockpit"}],
         ]
+
+    def _render_session_picker_buttons(
+        self, chat_id: int, sessions: list
+    ) -> list[list[dict[str, str]]]:
+        """Return inline keyboard buttons for the historical session picker."""
+        from wlcodex.workbench.sessions import AgentSessionResumability
+
+        buttons: list[list[dict[str, str]]] = []
+        for s in sessions:
+            agent_label = "Claude" if s.agent == "claude" else "Codex"
+            row = [
+                {"text": f"查看{agent_label}回顾",
+                 "callback_data": f"conv:{chat_id}:review_session:{s.source_run_id}"},
+            ]
+            if s.resumability is not AgentSessionResumability.SUMMARY_ONLY:
+                row.append({"text": "接管现场",
+                            "callback_data": f"conv:{chat_id}:attach_session:{s.source_run_id}"})
+                row.append({"text": "继续修改",
+                            "callback_data": f"conv:{chat_id}:resume_session:{s.source_run_id}"})
+            else:
+                row.append({"text": "从摘要新开",
+                            "callback_data": f"conv:{chat_id}:resume_from_summary:{s.source_run_id}"})
+            if s.agent == "claude" and s.status == "done":
+                row.append({"text": "让 Codex 验收",
+                            "callback_data": f"conv:{chat_id}:codex_verify_session:{s.source_run_id}"})
+            buttons.append(row)
+        buttons.append([{"text": "回驾驶舱",
+                         "callback_data": f"conv:{chat_id}:return_cockpit"}])
+        return buttons
+
+    async def _handle_session_picker_callback(
+        self, update: Update, query: object,
+        conversation_id: int, action: tuple[str, int],
+    ) -> None:
+        """Handle session picker button: review, attach, resume, verify."""
+        kind, source_run_id = action
+        chat_id = update.effective_chat.id
+
+        if self._ledger is None:
+            await self._safe_callback_answer(query, "系统未完全初始化。")
+            return
+
+        from wlcodex.workbench.sessions import AgentSessionLibrary
+
+        library = AgentSessionLibrary(self._ledger)
+        session = library.get_for_workbench(conversation_id, source_run_id)
+        if session is None:
+            await self._safe_callback_answer(query, "会话不存在或已被删除。")
+            return
+
+        agent_label = "Claude" if session.agent == "claude" else "Codex"
+
+        if kind == "review_session":
+            lines = [
+                f"{agent_label} 现场回顾", "",
+                f"摘要：{session.title}",
+                f"状态：{session.status}",
+                f"可继续状态：{session.user_label}",
+            ]
+            await self._safe_callback_answer(query, "已查看")
+            await self._safe_callback_edit(
+                update, query, "\n".join(lines),
+                buttons=[[
+                    {"text": "接管现场",
+                     "callback_data": f"conv:{chat_id}:attach_session:{source_run_id}"},
+                    {"text": "回驾驶舱",
+                     "callback_data": f"conv:{chat_id}:return_cockpit"},
+                ]],
+            )
+
+        elif kind == "attach_session":
+            if self._terminal_manager is None:
+                await self._safe_callback_answer(query, "现场接管未配置。")
+                return
+            try:
+                self._terminal_manager.attach_historical(
+                    conversation_id=conversation_id, session=session,
+                )
+                await self._safe_callback_answer(query, "已接入")
+                await self._safe_callback_edit(
+                    update, query,
+                    f"已进入接管现场，当前接入 {session.agent}。",
+                )
+            except ValueError as exc:
+                await self._safe_callback_answer(query, str(exc)[:200])
+
+        elif kind == "resume_session":
+            if self._terminal_manager is None:
+                await self._safe_callback_answer(query, "现场接管未配置。")
+                return
+            try:
+                self._terminal_manager.attach_historical(
+                    conversation_id=conversation_id, session=session,
+                )
+                await self._safe_callback_answer(query, "已接入，可直接发送消息继续。")
+                await self._safe_callback_edit(
+                    update, query,
+                    f"已接入 {session.agent} 历史现场。直接发送消息即可继续修改。",
+                )
+            except ValueError as exc:
+                await self._safe_callback_answer(query, str(exc)[:200])
+
+        elif kind == "resume_from_summary":
+            await self._safe_callback_answer(query, "已创建新现场")
+            await self._safe_callback_edit(
+                update, query,
+                f"已从摘要新开 {agent_label} 现场。\n"
+                f"标题：{session.title}\n\n"
+                f"将基于之前的摘要继续工作。",
+            )
+
+        elif kind == "codex_verify_session":
+            await self._safe_callback_answer(query, "已触发验收")
+            try:
+                response = await self._controller.handle(
+                    "/verify", {"chat_id": chat_id},
+                )
+                await self._safe_callback_edit(
+                    update, query, response.text, response.buttons,
+                )
+            except Exception as exc:
+                logger.exception("Codex verify from session picker failed")
+                await self._safe_callback_answer(query, f"验收触发失败：{exc}")
+
+        else:
+            await self._safe_callback_answer(query, f"未知的会话操作：{kind}")
 
     async def _handle_terminal_text(self, chat_id: int, text: str) -> None:
         """Route text to the terminal input path when in terminal mode.
@@ -1234,16 +1375,28 @@ class WlCodexHandlers:
                     f"已进入接管现场，当前接入 {agent}。"
                 )
             else:
-                # Start card with actionable buttons — never a dead end.
-                # Uses conv:{chat_id}:{action} so decode_conversation_callback
-                # succeeds (conversation_id may not exist yet; chat_id is the
-                # stable routing key).  Task 5 controller handles these actions.
-                await self.send_telegram(
-                    chat_id,
-                    "当前没有可接管的现场。\n\n"
-                    "你可以：",
-                    buttons=self._render_start_card_buttons(chat_id),
-                )
+                # Check for historical sessions before showing start card.
+                sessions = []
+                if conversation_id is not None and self._ledger is not None:
+                    try:
+                        from wlcodex.workbench.sessions import AgentSessionLibrary
+                        library = AgentSessionLibrary(self._ledger)
+                        sessions = library.list_for_workbench(conversation_id)
+                    except Exception:
+                        logger.debug("Failed to list historical sessions", exc_info=True)
+
+                if sessions:
+                    from wlcodex.workbench.rendering import render_session_library
+                    text = render_session_library(sessions)
+                    buttons = self._render_session_picker_buttons(chat_id, sessions)
+                    await self.send_telegram(chat_id, text, buttons=buttons)
+                else:
+                    await self.send_telegram(
+                        chat_id,
+                        "当前没有可接管的现场。\n\n"
+                        "你可以：",
+                        buttons=self._render_start_card_buttons(chat_id),
+                    )
 
     # --- New conversation handlers ---
 
@@ -1531,6 +1684,14 @@ class WlCodexHandlers:
             await self._safe_callback_answer(query, "无效的对话回调数据。")
             return
 
+        # Intercept session-picker actions before delegating to controller.
+        session_action = _parse_session_action(callback.action)
+        if session_action is not None:
+            await self._handle_session_picker_callback(
+                update, query, callback.conversation_id, session_action,
+            )
+            return
+
         try:
             response = await self._controller.handle_conversation_callback(callback)
             await self._safe_callback_answer(query, "完成")
@@ -1754,6 +1915,27 @@ class WlCodexHandlers:
 
 
 # --- Application builder ---
+
+
+def _parse_session_action(action: str) -> tuple[str, int] | None:
+    """Parse compound session action like 'review_session:123'.
+
+    Returns (kind, source_run_id) or None if not a session action.
+    Module-level helper used by WlCodexHandlers._conversation_callback_impl.
+    """
+    SESSION_KINDS = {
+        "review_session", "attach_session", "resume_session",
+        "resume_from_summary", "codex_verify_session",
+    }
+    for kind in SESSION_KINDS:
+        prefix = f"{kind}:"
+        if action.startswith(prefix):
+            try:
+                source_run_id = int(action[len(prefix):])
+                return (kind, source_run_id)
+            except ValueError:
+                return None
+    return None
 
 
 def build_application(
