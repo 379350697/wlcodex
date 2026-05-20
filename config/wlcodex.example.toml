@@ -106,6 +106,17 @@ streaming_enabled = true
 show_footer = false
 edit_min_interval_seconds = 1.0
 
+[telegram_output]
+preview_enabled = true
+preview_edit_min_interval_seconds = 2.0
+preview_send_timeout_seconds = 5.0
+product_body_mode = "final"
+terminal_body_mode = "semantic_blocks"
+semantic_min_chars = 900
+semantic_max_chars = 3200
+final_chunk_chars = 3900
+terminal_block_idle_seconds = 2.0
+
 [menu]
 # Register daily-menu commands with Telegram: 新工作台 状态 接管现场 变更 设置 帮助
 register_bot_commands = true

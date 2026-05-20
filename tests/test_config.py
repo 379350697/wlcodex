@@ -523,6 +523,47 @@ allow_write = true
     assert config.telegram.default_surface_mode == "product"
 
 
+def test_telegram_output_config_defaults(tmp_path):
+    from wlcodex.config import load_config
+
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+
+[codex]
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "wlcodex"
+path = "."
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.telegram_output.preview_enabled is True
+    assert config.telegram_output.product_body_mode == "final"
+    assert config.telegram_output.terminal_body_mode == "semantic_blocks"
+    assert config.telegram_output.semantic_min_chars == 900
+    assert config.telegram_output.semantic_max_chars == 3200
+    assert config.telegram_output.final_chunk_chars == 3900
+
+
 def test_terminal_default_agent_rejects_invalid_value(tmp_path: Path) -> None:
     """ConfigError must be raised when terminal.default_agent is not claude or codex."""
     config_path = tmp_path / "wlcodex.toml"

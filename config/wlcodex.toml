@@ -1,0 +1,106 @@
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [7024110327]
+private_chat_only = true
+
+[codex]
+binary = "codex"
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+approval_policy = "on-request"
+sandbox = "workspace-write"
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[backend]
+startup_timeout_seconds = 15
+request_timeout_seconds = 60
+codex_prompt_idle_timeout_seconds = 300
+codex_analysis_hard_timeout_seconds = 1200
+codex_verification_hard_timeout_seconds = 1200
+event_log_max_chars = 20000
+
+[claude]
+enabled = true
+binary = "/home/wl/.vscode/extensions/anthropic.claude-code-2.1.145-linux-x64/resources/native-binary/claude"
+startup_timeout_seconds = 15.0
+request_timeout_seconds = 3600.0
+stream_idle_timeout_seconds = 600.0
+model = "deepseek-v4-pro"
+effort = "max"
+permission_mode = "acceptEdits"
+
+[approval]
+callback_timeout_seconds = 3600
+allow_session_approval = true
+
+[conversation]
+enabled = true
+default_mode = "chief_engineer"
+default_workspace = "wlcodex"
+summary_max_tokens = 800
+
+[orchestration]
+enabled = true
+max_verify_rounds = 3
+auto_delegate_simple_edits = false
+
+[context_budget]
+codex_analysis_tokens = 2500
+codex_to_claude_tokens = 1500
+claude_to_codex_tokens = 2500
+conversation_summary_tokens = 800
+
+[streaming]
+enabled = true
+edit_min_interval_seconds = 1.0
+
+[interaction]
+profile = "natural"
+streaming_enabled = true
+show_footer = false
+edit_min_interval_seconds = 1.0
+
+[terminal]
+enabled = true
+default_agent = "claude"
+max_frame_chars = 3500
+redaction_enabled = true
+
+[telegram_output]
+preview_enabled = true
+preview_edit_min_interval_seconds = 2.0
+preview_send_timeout_seconds = 5.0
+product_body_mode = "final"
+terminal_body_mode = "semantic_blocks"
+semantic_min_chars = 900
+semantic_max_chars = 3200
+final_chunk_chars = 3900
+terminal_block_idle_seconds = 2.0
+
+[menu]
+register_bot_commands = true
+
+# Live Telegram smoke env vars (for real acceptance gate):
+#   WLCODEX_RUN_TELEGRAM_LIVE=1
+#   WLCODEX_TELEGRAM_BOT_TOKEN=...
+#   WLCODEX_TELEGRAM_ALLOWED_USER_ID=...
+# Optional before first real interaction:
+#   WLCODEX_LIVE_WORKSPACE_ALIAS=...
+#   WLCODEX_LIVE_SQLITE_PATH=...
+# Optional only for legacy diagnostic /task smoke:
+#   WLCODEX_TELEGRAM_CHAT_ID=...
+#   WLCODEX_LIVE_SMOKE_TASK_ID=...
+#   WLCODEX_LIVE_APPROVAL_REQUIRED=1  (after running approval smoke)
+
+[[workspaces]]
+alias = "wlcodex"
+path = "/media/wl/新加卷/codex/wlcodex"
+allow_write = true

@@ -138,6 +138,19 @@ class TerminalSurfaceConfig:
 
 
 @dataclass(frozen=True)
+class TelegramOutputConfig:
+    preview_enabled: bool = True
+    preview_edit_min_interval_seconds: float = 2.0
+    preview_send_timeout_seconds: float = 5.0
+    product_body_mode: str = "final"
+    terminal_body_mode: str = "semantic_blocks"
+    semantic_min_chars: int = 900
+    semantic_max_chars: int = 3200
+    final_chunk_chars: int = 3900
+    terminal_block_idle_seconds: float = 2.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     telegram: TelegramConfig
     codex: CodexConfig
@@ -155,6 +168,7 @@ class AppConfig:
     interaction: InteractionConfig = InteractionConfig()
     menu: MenuConfig = MenuConfig()
     terminal: TerminalSurfaceConfig = TerminalSurfaceConfig()
+    telegram_output: TelegramOutputConfig = TelegramOutputConfig()
 
     def workspace_by_alias(self, alias: str) -> WorkspaceConfig:
         for workspace in self.workspaces:
@@ -187,6 +201,7 @@ def load_config(path: Path) -> AppConfig:
     interaction_raw = data.get("interaction", {})
     menu_raw = data.get("menu", {})
     terminal_raw = data.get("terminal", {})
+    telegram_output_raw = data.get("telegram_output", {})
     terminal_default_agent = str(terminal_raw.get("default_agent", "claude"))
     if terminal_default_agent not in ("claude", "codex"):
         raise ConfigError(
@@ -310,6 +325,38 @@ def load_config(path: Path) -> AppConfig:
             default_agent=terminal_default_agent,
             max_frame_chars=int(terminal_raw.get("max_frame_chars", 3500)),
             redaction_enabled=bool(terminal_raw.get("redaction_enabled", True)),
+        ),
+        telegram_output=_telegram_output_config(telegram_output_raw),
+    )
+
+
+def _telegram_output_config(data: dict[str, object]) -> TelegramOutputConfig:
+    product_mode = str(data.get("product_body_mode", "final"))
+    terminal_mode = str(data.get("terminal_body_mode", "semantic_blocks"))
+    allowed = {"final", "semantic_blocks"}
+    if product_mode not in allowed:
+        raise ConfigError(
+            "telegram_output.product_body_mode must be final or semantic_blocks"
+        )
+    if terminal_mode not in allowed:
+        raise ConfigError(
+            "telegram_output.terminal_body_mode must be final or semantic_blocks"
+        )
+    return TelegramOutputConfig(
+        preview_enabled=bool(data.get("preview_enabled", True)),
+        preview_edit_min_interval_seconds=float(
+            data.get("preview_edit_min_interval_seconds", 2.0)
+        ),
+        preview_send_timeout_seconds=float(
+            data.get("preview_send_timeout_seconds", 5.0)
+        ),
+        product_body_mode=product_mode,
+        terminal_body_mode=terminal_mode,
+        semantic_min_chars=int(data.get("semantic_min_chars", 900)),
+        semantic_max_chars=int(data.get("semantic_max_chars", 3200)),
+        final_chunk_chars=int(data.get("final_chunk_chars", 3900)),
+        terminal_block_idle_seconds=float(
+            data.get("terminal_block_idle_seconds", 2.0)
         ),
     )
 
