@@ -510,6 +510,42 @@ async def test_start_card_callbacks_decode_via_conv_protocol():
     )
 
 
+@pytest.mark.asyncio
+async def test_return_cockpit_callback_switches_to_product_without_unknown_action():
+    controller = MagicMock()
+    controller.handle_conversation_callback = AsyncMock(
+        return_value=SimpleNamespace(text="未知的对话操作：return_cockpit", buttons=None)
+    )
+
+    ledger = MagicMock()
+    ledger.get_active_conversation = MagicMock(return_value=SimpleNamespace(id=99))
+    ledger.record_telegram_update = MagicMock()
+
+    handlers = _make_handlers(controller=controller, ledger=ledger)
+
+    query = MagicMock()
+    query.data = "conv:99:return_cockpit"
+    query.message = SimpleNamespace(
+        text="start card",
+        message_id=900,
+        chat=SimpleNamespace(id=555),
+    )
+    query.answer = AsyncMock()
+
+    update = _make_update("/terminal", chat_id=555)
+    update.callback_query = query
+
+    await handlers.callback_router(update, None)
+
+    controller.handle_conversation_callback.assert_not_called()
+    sent_texts = [
+        call.kwargs.get("text", "")
+        for call in handlers._bot.send_message.call_args_list
+    ]
+    assert any("已回到驾驶舱" in text for text in sent_texts)
+    assert not any("未知的对话操作" in text for text in sent_texts)
+
+
 # ── /product  → Cockpit return ─────────────────────────────────────
 
 
@@ -677,7 +713,7 @@ async def test_terminal_to_product_view_switch_records_event():
         if getattr(c.args[0], "event_type", "") == "conversation.mode.switched"
     ]
     assert len(mode_switch_calls) >= 1, (
-        f"No conversation.mode.switched event recorded for /product"
+        "No conversation.mode.switched event recorded for /product"
     )
 
 
@@ -758,7 +794,6 @@ async def test_settings_callback_all_buttons_route_to_controller():
     """Every settings card button must route to controller, never return
     '无效的设置回调数据。' (dead-end).  This proves settings card is
     closed-loop: each button produces a business outcome, not an error."""
-    from unittest.mock import ANY
 
     controller = MagicMock()
     controller.handle = AsyncMock(
@@ -901,7 +936,6 @@ async def test_settings_model_and_workspace_callbacks_route():
 async def test_start_card_buttons_identical_from_both_call_sites():
     """The _render_start_card_buttons helper must produce identical buttons
     whether called from _handle_terminal_text or _apply_mode_switch."""
-    from wlcodex.surfaces.terminal.models import TerminalSessionRef
 
     # --- Call site 1: _handle_terminal_text (no session) ---
     terminal_mgr_1 = MagicMock()

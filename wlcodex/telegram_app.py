@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from telegram import Update
-from telegram.error import NetworkError, TelegramError, TimedOut
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -543,7 +543,6 @@ class WlCodexHandlers:
             from wlcodex.runtime_events import (
                 AggregateType,
                 EventSource,
-                EventType,
                 RuntimeEvent,
                 Visibility,
                 now_iso,
@@ -1661,7 +1660,7 @@ class WlCodexHandlers:
                             "stream_json" if agent == "claude" else "app_server"
                         )
                         try:
-                            ref = self._terminal_manager.attach(
+                            self._terminal_manager.attach(
                                 conversation_id=conversation_id,
                                 agent=agent,
                                 strategy=strategy,
@@ -2024,6 +2023,16 @@ class WlCodexHandlers:
             await self._safe_callback_answer(query, "无效的对话回调数据。")
             return
 
+        if callback.action in {
+            "return_cockpit",
+            "start_claude_onsite",
+            "start_codex_onsite",
+        }:
+            await self._handle_start_card_callback(
+                update, query, callback.action,
+            )
+            return
+
         # Intercept session-picker actions before delegating to controller.
         session_action = _parse_session_action(callback.action)
         if session_action is not None:
@@ -2041,6 +2050,31 @@ class WlCodexHandlers:
         except Exception as exc:
             logger.exception("Conversation callback error")
             await self._safe_callback_answer(query, f"错误：{exc}")
+
+    async def _handle_start_card_callback(
+        self, update: Update, query: object, action: str
+    ) -> None:
+        from wlcodex.router import ModeSwitchCommand
+
+        if action == "return_cockpit":
+            await self._safe_callback_answer(query, "已回到驾驶舱")
+            await self._apply_mode_switch(
+                update, ModeSwitchCommand(mode="product"),
+            )
+            return
+
+        agent_by_action = {
+            "start_claude_onsite": "claude",
+            "start_codex_onsite": "codex",
+        }
+        agent = agent_by_action.get(action)
+        if agent is None:
+            await self._safe_callback_answer(query, f"未知的现场操作：{action}")
+            return
+        await self._safe_callback_answer(query, "正在进入现场")
+        await self._apply_mode_switch(
+            update, ModeSwitchCommand(mode="terminal", agent=agent),
+        )
 
     async def _workspace_busy_callback_impl(
         self, update: Update, query: object, data: str

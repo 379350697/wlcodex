@@ -151,6 +151,7 @@ class EventBridge:
                 TaskStatus.FAILED,
                 TaskStatus.ABORTED,
             ):
+                self._sync_direct_agent_run_status(task_after)
                 await self._forward_terminal_event(task_after)
                 await drain_workspace(
                     self._service, self._backend, task_after.workspace_alias
@@ -344,3 +345,115 @@ class EventBridge:
                 metadata={"has_diff": bool(task.changed_file_count)},
             )
         )
+
+    def _sync_direct_agent_run_status(self, task: object) -> None:
+        task_id = getattr(task, "id", None)
+        if task_id is None or self._service.is_orchestration_managed_task(int(task_id)):
+            return
+        status_by_task = {
+            TaskStatus.DONE: "done",
+            TaskStatus.FAILED: "failed",
+            TaskStatus.ABORTED: "aborted",
+        }
+        agent_status = status_by_task.get(getattr(task, "status", None))
+        if agent_status is None:
+            return
+
+        rows = self._ledger._conn.execute(
+            """
+            SELECT id, status FROM agent_runs
+            WHERE hidden_task_id = ?
+            ORDER BY id ASC
+            """,
+            (int(task_id),),
+        ).fetchall()
+        for row in rows:
+            if row["status"] in {"done", "failed", "aborted"}:
+                continue
+            summary = (
+                getattr(task, "last_error", "")
+                if agent_status in {"failed", "aborted"}
+                else getattr(task, "last_summary", "")
+            )
+            self._ledger.update_agent_run_status(
+                int(row["id"]),
+                agent_status,
+                completion_summary=str(summary)[:2000],
+            )
+            self._append_direct_agent_terminal_event(
+                task,
+                agent_run_id=int(row["id"]),
+                agent_status=agent_status,
+                summary=str(summary)[:2000],
+            )
+
+    def _append_direct_agent_terminal_event(
+        self,
+        task: object,
+        *,
+        agent_run_id: int,
+        agent_status: str,
+        summary: str,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        task_id = int(getattr(task, "id"))
+        context = self._runtime_context_for_task(task_id)
+        if context is None:
+            return
+        from wlcodex.runtime_events import (
+            SCHEMA_VERSION,
+            AggregateType,
+            EventSource,
+            EventType,
+            RuntimeEvent,
+            Visibility,
+            now_iso,
+        )
+
+        event_type = (
+            EventType.AGENT_RUN_COMPLETED
+            if agent_status == "done"
+            else EventType.AGENT_RUN_FAILED
+        )
+        last_id = self._runtime_causation_by_agent_run.get(agent_run_id)
+        if last_id is None:
+            row = self._runtime_store._conn.execute(
+                """
+                SELECT id FROM runtime_events
+                WHERE agent_run_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (agent_run_id,),
+            ).fetchone()
+            if row is not None:
+                last_id = int(row["id"])
+        stored = self._runtime_store.append(
+            RuntimeEvent(
+                schema_version=SCHEMA_VERSION,
+                event_type=event_type,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id=str(agent_run_id),
+                correlation_id=str(context["correlation_id"]),
+                causation_id=last_id,
+                source=EventSource.CODEX,
+                actor="codex",
+                visibility=Visibility.OPERATOR,
+                payload={
+                    "agent": "codex",
+                    "role": "implementation",
+                    "summary": summary,
+                    "completion_summary": summary,
+                },
+                occurred_at=now_iso(),
+                conversation_id=int(context["conversation_id"]),
+                orchestration_run_id=(
+                    int(context["orchestration_run_id"])
+                    if context["orchestration_run_id"] is not None else None
+                ),
+                agent_run_id=agent_run_id,
+                task_id=task_id,
+            )
+        )
+        self._runtime_causation_by_agent_run[agent_run_id] = stored.id

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import subprocess
 import uuid
 from collections.abc import Callable
-from typing import Any
 
-from wlcodex.agent_backend import AgentRequest, AgentStreamEvent
-from wlcodex.claude_backend import record_claude_usage_event
+from wlcodex.agent_backend import AgentRequest
 from wlcodex.codex_runtime_source import CodexRuntimeSource
 from wlcodex.context_packets import ContextBudget, approx_tokens, trim_to_budget
 from wlcodex.interaction.events import InteractionEvent
@@ -46,6 +45,23 @@ def _accepts_keyword(func: object, name: str) -> bool:
         or parameter.name == name
         for parameter in signature.parameters.values()
     )
+
+
+def _visible_analysis_reply(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key in ("summary", "message", "title"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return stripped
 
 
 class _TaskBoundCodexBackend:
@@ -1199,7 +1215,8 @@ class OrchestrationRunner:
                                 reply_text = (
                                     terminal_text
                                     or codex_analysis_text
-                                ).strip()
+                                )
+                                reply_text = _visible_analysis_reply(reply_text)
                                 if reply_text:
                                     await self._emit_text_delta(
                                         chat_id,

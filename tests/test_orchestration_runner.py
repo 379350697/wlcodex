@@ -14,12 +14,7 @@ from wlcodex.interaction.events import InteractionEvent
 from wlcodex.models import AgentRunStatus, OrchestrationStatus, TaskStatus
 from wlcodex.orchestrator import OrchestrationProgress
 from wlcodex.runtime_events import (
-    AggregateType,
-    EventSource,
     EventType,
-    RuntimeEvent,
-    Visibility,
-    now_iso,
 )
 from wlcodex.orchestration_runner import OrchestrationRunner
 from wlcodex.task_service import TaskService
@@ -53,7 +48,6 @@ class RuntimeAwareClaude:
 
     async def send_streaming(self, _request: object):
         from wlcodex.claude_stream_parser import ClaudeStreamEvent
-        from wlcodex.runtime_events import EventType
 
         assert self.current_source is not None
         self.current_source.emit(ClaudeStreamEvent(
@@ -77,7 +71,6 @@ class RuntimeSourceAwareOrchestrator:
         _prompt: str,
         conversation_context: dict[str, Any] | None = None,
     ):
-        from wlcodex.agent_backend import AgentRequest
 
         yield OrchestrationProgress(
             phase=OrchestrationProgress.ANALYSIS_STARTED,
@@ -451,6 +444,39 @@ class ReplyOnlyStreamingOrchestrator:
         )
 
 
+class JsonReplyOnlyStreamingOrchestrator:
+    async def run_streaming(
+        self,
+        _prompt: str,
+        conversation_context: dict[str, Any] | None = None,
+    ):
+        payload = (
+            '{"summary":"wlcodex telegram live ok",'
+            '"needs_implementation":false,'
+            '"files_to_touch":[],'
+            '"implementation_steps":[]}'
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_STARTED,
+            text="analysis start",
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_COMPLETE,
+            text=payload,
+            full_text=payload,
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.COMPLETE,
+            text=payload,
+            full_text=payload,
+            agent="codex",
+            result_status="passed",
+            round_num=0,
+        )
+
+
 @pytest.mark.asyncio
 async def test_orchestration_runner_records_passed_background_result(
     tmp_path: Path,
@@ -664,6 +690,56 @@ async def test_orchestration_runner_delivers_reply_only_answer_with_runtime_prog
 
 
 @pytest.mark.asyncio
+async def test_orchestration_runner_delivers_json_reply_summary_only(
+    tmp_path: Path,
+) -> None:
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    renderer._runtime_progress = object()
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="真人历史现场 smoke 3",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task(
+        "wlcodex", "请用中文只回复：wlcodex telegram live ok",
+        telegram_chat_id=100,
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "reply only json")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=lambda _codex, _claude: JsonReplyOnlyStreamingOrchestrator(),
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="请用中文只回复：wlcodex telegram live ok",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+    )
+    await background_task
+
+    visible_text = "\n".join(
+        event.text for event in renderer.events if event.event_type == "text_delta"
+    )
+    assert "wlcodex telegram live ok" in visible_text
+    assert "needs_implementation" not in visible_text
+    assert "files_to_touch" not in visible_text
+
+
+@pytest.mark.asyncio
 async def test_orchestration_runner_records_workflow_overhead_usage_events(
     tmp_path: Path,
 ) -> None:
@@ -784,7 +860,6 @@ async def test_runtime_events_emitted_for_full_chief_engineer_loop(
 ) -> None:
     """Every phase transition and agent lifecycle emits runtime events."""
     from wlcodex.runtime_event_store import RuntimeEventStore
-    from wlcodex.runtime_events import EventType
 
     ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
     store = RuntimeEventStore(ledger._conn)
@@ -852,7 +927,6 @@ async def test_claude_agent_run_created_before_claude_streams(
 ) -> None:
     """Claude agent_run must be created with 'running' status before Claude emits deltas."""
     from wlcodex.runtime_event_store import RuntimeEventStore
-    from wlcodex.runtime_events import EventType
 
     ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
     store = RuntimeEventStore(ledger._conn)
@@ -926,7 +1000,6 @@ async def test_verification_retry_not_marked_as_completed(
 ) -> None:
     """verification.retry.requested must be emitted for retry, NOT verification.completed."""
     from wlcodex.runtime_event_store import RuntimeEventStore
-    from wlcodex.runtime_events import EventType
 
     # An orchestrator that always retries verification then passes on round 2
     class RetryThenPassOrchestrator:
@@ -1051,7 +1124,6 @@ async def test_runner_blocks_run_completed_after_recorded_retry_decision(
     tmp_path: Path,
 ) -> None:
     from wlcodex.runtime_event_store import RuntimeEventStore
-    from wlcodex.runtime_events import EventType
 
     ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
     store = RuntimeEventStore(ledger._conn)
@@ -1106,7 +1178,6 @@ async def test_correlation_id_links_all_events_in_user_request(
 ) -> None:
     """Every event in a chief-engineer run shares the same correlation_id."""
     from wlcodex.runtime_event_store import RuntimeEventStore
-    from wlcodex.runtime_events import EventType
 
     ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
     store = RuntimeEventStore(ledger._conn)
@@ -1223,7 +1294,6 @@ async def test_runner_wires_claude_runtime_source_into_live_backend(
     tmp_path: Path,
 ) -> None:
     from wlcodex.runtime_event_store import RuntimeEventStore
-    from wlcodex.runtime_events import EventType
 
     ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
     store = RuntimeEventStore(ledger._conn)
@@ -1275,7 +1345,6 @@ async def test_runner_wires_codex_runtime_source_for_analysis_turn(
     tmp_path: Path,
 ) -> None:
     from wlcodex.runtime_event_store import RuntimeEventStore
-    from wlcodex.runtime_events import EventType
 
     ledger, service, _backend, renderer, workspace = _build_runtime(tmp_path)
     store = RuntimeEventStore(ledger._conn)

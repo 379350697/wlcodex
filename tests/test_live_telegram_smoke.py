@@ -9,6 +9,7 @@ NEVER prints bot_token or any other secret to logs, stdout, or reports.
 
 import os
 from pathlib import Path
+import json
 import sqlite3
 
 import pytest
@@ -56,6 +57,38 @@ def _live_conversation_id(conn: sqlite3.Connection) -> int | None:
             """
         ).fetchone()
     return int(row["id"]) if row is not None else None
+
+
+def _live_delivery_payloads(
+    conn: sqlite3.Connection, conversation_id: int
+) -> list[dict[str, object]]:
+    conversation = conn.execute(
+        "SELECT chat_id, created_at FROM conversation_sessions WHERE id = ?",
+        (conversation_id,),
+    ).fetchone()
+    assert conversation is not None, f"conversation #{conversation_id} not found"
+
+    # Delivery events are currently emitted by the Telegram outbox without a
+    # conversation_id, so bind the smoke gate to the selected live conversation
+    # by using its start time and Telegram chat id.
+    rows = conn.execute(
+        """
+        SELECT payload_json
+        FROM runtime_events
+        WHERE event_type IN ('telegram.delivery.enqueued', 'telegram.message.sent', 'telegram.message.edited')
+          AND occurred_at >= ?
+        ORDER BY id DESC
+        LIMIT 160
+        """,
+        (conversation["created_at"],),
+    ).fetchall()
+
+    payloads: list[dict[str, object]] = []
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        if payload.get("chat_id") == conversation["chat_id"]:
+            payloads.append(payload)
+    return payloads
 
 
 def test_live_telegram_preflight_env_is_configured() -> None:
@@ -126,33 +159,37 @@ def test_live_telegram_workbench_has_runtime_event_evidence() -> None:
 
 
 def test_live_telegram_output_is_not_fragment_spam() -> None:
-    import json
-
     db_path = _sqlite_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """
-        SELECT event_type, payload_json
-        FROM runtime_events
-        WHERE event_type IN ('telegram.delivery.enqueued', 'telegram.message.sent', 'telegram.message.edited')
-        ORDER BY id DESC
-        LIMIT 80
-        """
-    ).fetchall()
+
+    conversation_id = _live_conversation_id(conn)
+    if conversation_id is None:
+        pytest.skip("post-interaction smoke requires a real /new + plain text Workbench")
 
     previews = []
     tiny_fragments = []
-    for row in rows:
-        payload = json.loads(row["payload_json"])
-        text = payload.get("text_preview", "")
+    internal_payloads = []
+    for payload in _live_delivery_payloads(conn, conversation_id):
+        text = str(payload.get("text_preview", ""))
         if "正在" in text or "运行" in text:
             previews.append(text)
         if text in {"我", "查", "到", "的"}:
             tiny_fragments.append(text)
+        if any(
+            key in text
+            for key in {
+                "needs_implementation",
+                "files_to_touch",
+                "implementation_steps",
+                "prohibited_changes",
+            }
+        ):
+            internal_payloads.append(text)
 
     assert previews
     assert tiny_fragments == []
+    assert internal_payloads == []
 
 
 def test_live_telegram_approval_evidence_when_required() -> None:

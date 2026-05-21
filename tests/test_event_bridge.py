@@ -40,6 +40,7 @@ def _bridge(
     ledger: Ledger,
     send_telegram=_send_telegram,
     edit_telegram=_edit_telegram,
+    runtime_event_store=None,
 ) -> EventBridge:
     return EventBridge(
         task_service=service,
@@ -48,6 +49,7 @@ def _bridge(
         send_telegram=send_telegram,
         edit_telegram=edit_telegram,
         approval_service=ApprovalSpy(),
+        runtime_event_store=runtime_event_store,
     )
 
 
@@ -743,6 +745,63 @@ async def test_event_bridge_maps_codex_backend_events_to_runtime_events(
     assert events[0].conversation_id == conversation.id
     assert events[0].task_id == task.id
     assert events[0].payload["input_tokens"] == 7
+
+
+@pytest.mark.asyncio
+async def test_direct_codex_turn_completion_marks_agent_run_done(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.runtime_diagnostics import find_non_terminal_agent_runs
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run direct probe",
+        codex_thread_id="thread-direct",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="direct",
+        mode="codex_direct",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        "implementation",
+        hidden_task_id=task.id,
+        external_session_id="thread-direct",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+
+    bridge = _bridge(service, IdleBackend(), ledger, runtime_event_store=store)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-direct", "turnId": "turn-direct"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-direct", "status": "completed"},
+    ))
+
+    assert ledger.get_task(task.id).status.value == "done"
+    assert ledger.get_agent_run(agent_run.id).status == "done"
+    events = store.list_by_agent_run(agent_run.id)
+    event_types = [event.event_type for event in events]
+    assert EventType.AGENT_RUN_COMPLETED in event_types
+    assert find_non_terminal_agent_runs(store) == []
 
 
 @pytest.mark.asyncio
