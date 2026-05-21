@@ -164,10 +164,9 @@ class InteractionRenderer:
             if state in ("cancelled", "aborted") or "interrupted" in (event.text or ""):
                 await self._output_manager.interrupt(self._output_key(event))
             else:
-                text = self._profile.error_text(event.text or event.summary)
-                await self._output_manager.complete(
+                await self._output_manager.fail(
                     self._output_key(event),
-                    buttons=[[{"text": "重试", "callback_data": "retry"}]],
+                    error_summary=event.text or event.summary or "",
                 )
             return
         session = self._sessions.get(key)
@@ -188,10 +187,15 @@ class InteractionRenderer:
                 )
 
     async def _handle_runtime_progress(self, event: InteractionEvent) -> None:
-        if self._runtime_progress is None:
-            return
         state = event.metadata.get("runtime_state")
         if state is None:
+            return
+        if self._output_manager is not None:
+            text = _runtime_progress_text(state)
+            if text:
+                await self._output_manager.update_status(self._output_key(event), text)
+            return
+        if self._runtime_progress is None:
             return
         await self._runtime_progress.update_progress(
             state,
@@ -200,10 +204,15 @@ class InteractionRenderer:
         )
 
     async def _handle_runtime_heartbeat(self, event: InteractionEvent) -> None:
-        if self._runtime_progress is None:
-            return
         state = event.metadata.get("runtime_state")
         if state is None:
+            return
+        if self._output_manager is not None:
+            text = _runtime_progress_text(state)
+            if text:
+                await self._output_manager.update_status(self._output_key(event), text)
+            return
+        if self._runtime_progress is None:
             return
         await self._runtime_progress.update_progress(
             state,
@@ -212,10 +221,15 @@ class InteractionRenderer:
         )
 
     async def _handle_runtime_final(self, event: InteractionEvent) -> None:
-        if self._runtime_progress is None:
-            return
         state = event.metadata.get("runtime_state")
         if state is None:
+            return
+        if self._output_manager is not None:
+            text = _runtime_final_text(state)
+            if text:
+                await self._output_manager.update_status(self._output_key(event), text)
+            return
+        if self._runtime_progress is None:
             return
         buttons = event.buttons if event.buttons else None
         await self._runtime_progress.finish(
@@ -233,3 +247,35 @@ class InteractionRenderer:
     def _key(self, event: InteractionEvent) -> tuple[int, int]:
         task_key = event.task_id if event.task_id is not None else 0
         return (event.chat_id, task_key)
+
+
+def _runtime_progress_text(state) -> str:
+    """Convert a RuntimeRunState to a short status line for the preview bubble."""
+    from wlcodex.interaction.runtime_renderer import KNOWN_PHASES, _time_ago
+
+    phase_label = KNOWN_PHASES.get(state.phase, state.phase) if hasattr(state, "phase") else ""
+    active = getattr(state, "active_agent", "")
+    if active and phase_label:
+        agent_label = "Claude" if active == "claude" else "Codex" if active == "codex" else active
+        return f"{phase_label} ({agent_label})"
+    if phase_label:
+        return phase_label
+    if active:
+        agent_label = "Claude" if active == "claude" else "Codex" if active == "codex" else active
+        return f"{agent_label} 正在运行"
+    return ""
+
+
+def _runtime_final_text(state) -> str:
+    """Convert a RuntimeRunState to a final status text."""
+    from wlcodex.interaction.runtime_renderer import KNOWN_PHASES
+
+    phase_label = KNOWN_PHASES.get(state.phase, "") if hasattr(state, "phase") else ""
+    if phase_label in ("运行完成", "运行失败", "运行已取消"):
+        return phase_label
+    error = getattr(state, "error_summary", "")
+    if phase_label and error:
+        return f"{phase_label}: {error[:200]}"
+    if phase_label:
+        return phase_label
+    return "运行完成"

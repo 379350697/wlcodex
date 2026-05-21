@@ -50,13 +50,17 @@ class SemanticChunker:
         return chunks
 
     def final_chunks(self, *, number_parts: bool = False) -> list[str]:
-        old_max = self.policy.max_chars
-        # Temporarily override policy for final output
-        object.__setattr__(self.policy, "max_chars", self.policy.final_max_chars)
-        object.__setattr__(self.policy, "min_chars", 1)
-        chunks = self.ready_chunks(force=True)
-        object.__setattr__(self.policy, "max_chars", old_max)
-        object.__setattr__(self.policy, "min_chars", self.policy.min_chars)
+        # Use a temporary policy with final chunk size
+        saved_policy = self.policy
+        self.policy = ChunkPolicy(
+            min_chars=1,
+            max_chars=self.policy.final_max_chars,
+            final_max_chars=self.policy.final_max_chars,
+        )
+        try:
+            chunks = self.ready_chunks(force=True)
+        finally:
+            self.policy = saved_policy
         if number_parts and len(chunks) > 1:
             total = len(chunks)
             return [f"{idx}/{total}\n{chunk}" for idx, chunk in enumerate(chunks, 1)]
@@ -196,7 +200,8 @@ class TelegramOutputManager:
             surface=surface,
             chunker=SemanticChunker(self._policy),
         )
-        session.preview_message_id = await self._transport.send_preview(key.chat_id, text)
+        msg_id = await self._transport.send_preview(key.chat_id, text)
+        session.preview_message_id = msg_id if msg_id > 0 else None
         self.sessions[key] = session
 
     async def update_status(self, key: OutputRunKey, text: str) -> None:
@@ -218,7 +223,7 @@ class TelegramOutputManager:
             for chunk in session.chunker.ready_chunks(force=False):
                 await self._transport.send_body(key.chat_id, chunk)
 
-    async def complete(self, key: OutputRunKey, buttons=None) -> None:
+    async def complete(self, key: OutputRunKey, buttons=None, *, status_text: str = "运行完成") -> None:
         session = self.sessions.get(key)
         if session is None:
             return
@@ -228,12 +233,26 @@ class TelegramOutputManager:
                 chunk_buttons = buttons if idx == len(chunks) - 1 else None
                 await self._transport.send_body(key.chat_id, chunk, chunk_buttons)
         elif buttons:
-            await self._transport.send_body(key.chat_id, "运行完成", buttons)
+            await self._transport.send_body(key.chat_id, status_text, buttons)
         if session.preview_message_id is not None:
             await self._transport.edit_preview(
                 key.chat_id,
                 session.preview_message_id,
-                "运行完成",
+                status_text,
+            )
+        session.is_closed = True
+        self.sessions.pop(key, None)
+
+    async def fail(self, key: OutputRunKey, *, error_summary: str = "") -> None:
+        session = self.sessions.get(key)
+        if session is None:
+            return
+        if session.preview_message_id is not None:
+            status = f"运行失败: {error_summary[:200]}" if error_summary else "运行失败"
+            await self._transport.edit_preview(
+                key.chat_id,
+                session.preview_message_id,
+                status,
             )
         session.is_closed = True
         self.sessions.pop(key, None)
