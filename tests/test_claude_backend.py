@@ -86,12 +86,20 @@ async def test_claude_send_passes_current_permission_mode(tmp_path: Path) -> Non
     fake_claude.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
     fake_claude.chmod(0o755)
 
+    from wlcodex.claude_binary import ClaudeCliCapabilities
+
     permission_state = ClaudePermissionState("plan")
     backend = ClaudeBackend(
         ClaudeConfig(enabled=True, binary=str(fake_claude), permission_mode="acceptEdits"),
         permission_state=permission_state,
     )
     permission_state.set("允许编辑")
+    backend._cli_capabilities = ClaudeCliCapabilities(
+        print_prompt=True,
+        permission_mode=True,
+        model=True,
+        effort=True,
+    )
 
     result = await backend.send(AgentRequest(
         prompt="hello",
@@ -113,6 +121,8 @@ async def test_claude_send_normalizes_deepseek4pro_alias_for_cli(tmp_path: Path)
     fake_claude.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
     fake_claude.chmod(0o755)
 
+    from wlcodex.claude_binary import ClaudeCliCapabilities
+
     backend = ClaudeBackend(
         ClaudeConfig(
             enabled=True,
@@ -120,6 +130,12 @@ async def test_claude_send_normalizes_deepseek4pro_alias_for_cli(tmp_path: Path)
             model="deepseek4pro",
             effort="max",
         )
+    )
+    backend._cli_capabilities = ClaudeCliCapabilities(
+        print_prompt=True,
+        permission_mode=True,
+        model=True,
+        effort=True,
     )
 
     result = await backend.send(AgentRequest(
@@ -239,6 +255,8 @@ async def test_claude_streaming_uses_stream_json_and_refreshes_idle_timeout_on_e
     )
     fake_claude.chmod(0o755)
 
+    from wlcodex.claude_binary import ClaudeCliCapabilities
+
     backend = ClaudeBackend(
         ClaudeConfig(
             enabled=True,
@@ -247,6 +265,16 @@ async def test_claude_streaming_uses_stream_json_and_refreshes_idle_timeout_on_e
             stream_idle_timeout_seconds=0.06,
         )
     )
+    backend._cli_capabilities = ClaudeCliCapabilities(
+        print_prompt=True,
+        output_format=True,
+        stream_json_output=True,
+        include_partial_messages=True,
+        permission_mode=True,
+        model=True,
+        effort=True,
+    )
+    backend._hook_events_supported = False
 
     events = [
         event
@@ -1171,3 +1199,81 @@ async def test_streaming_does_not_emit_lifecycle_without_runtime_source(
     # Backward compat: only the raw line as text event
     text_events = [e for e in events if e.event_type == "text"]
     assert len(text_events) >= 1
+
+
+# ============================================================================
+# Capability-aware argument tests (Task 4)
+# ============================================================================
+
+
+def test_prompt_args_skip_unsupported_optional_flags() -> None:
+    from wlcodex.claude_binary import ClaudeCliCapabilities
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            model="deepseek-v4-pro",
+            effort="max",
+        )
+    )
+    backend._cli_capabilities = ClaudeCliCapabilities.minimal()
+    backend._hook_events_supported = False
+
+    args = backend._prompt_args("hello", stream_json=True)
+
+    assert args == ["-p", "hello"]
+
+
+def test_prompt_args_include_supported_optional_flags() -> None:
+    from wlcodex.claude_binary import ClaudeCliCapabilities
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            model="deepseek-v4-pro",
+            effort="max",
+        )
+    )
+    backend._cli_capabilities = ClaudeCliCapabilities(
+        print_prompt=True,
+        output_format=True,
+        stream_json_output=True,
+        include_partial_messages=True,
+        include_hook_events=True,
+        input_stream_json=True,
+        permission_mode=True,
+        model=True,
+        effort=True,
+        resume=True,
+    )
+    backend._hook_events_supported = True
+
+    args = backend._prompt_args("hello", stream_json=True)
+
+    assert "--permission-mode" in args
+    assert "--model" in args
+    assert "--effort" in args
+    assert "--output-format" in args
+    assert "stream-json" in args
+    assert "--include-partial-messages" in args
+    assert "--include-hook-events" in args
+
+
+@pytest.mark.asyncio
+async def test_send_terminal_input_fails_clearly_when_resume_unsupported(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.claude_binary import ClaudeCliCapabilities
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+
+    backend = ClaudeBackend(ClaudeConfig(enabled=True, binary=str(fake_claude)))
+    backend._cli_capabilities = ClaudeCliCapabilities.minimal()
+
+    with pytest.raises(RuntimeError, match="does not support --resume"):
+        await backend.send_terminal_input("session-1", "continue")

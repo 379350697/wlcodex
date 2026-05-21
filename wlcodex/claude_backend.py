@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from wlcodex.agent_backend import AgentRequest, AgentResult, AgentStreamEvent
+from wlcodex.claude_binary import ClaudeCliCapabilities, probe_claude_capabilities
 from wlcodex.claude_permissions import (
     ClaudePermissionState,
     normalize_claude_permission_mode,
@@ -88,6 +89,7 @@ class ClaudeBackend:
             config.permission_mode
         )
         self._runtime_source = runtime_source
+        self._cli_capabilities: ClaudeCliCapabilities | None = None
         self._hook_events_supported: bool | None = None
         self._last_session_id: str = ""
 
@@ -109,6 +111,8 @@ class ClaudeBackend:
     async def send(self, request: AgentRequest) -> AgentResult:
         if not self._config.enabled:
             return AgentResult(text="Claude Code is not enabled.", exit_code=1)
+
+        await self._probe_cli_capabilities()
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -167,8 +171,7 @@ class ClaudeBackend:
             yield AgentStreamEvent(delta="Claude Code is not enabled.", event_type="error")
             return
 
-        # Probe hook-events capability once (cached after first call).
-        await self._probe_hook_events()
+        await self._probe_cli_capabilities()
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -450,18 +453,25 @@ class ClaudeBackend:
         if not self._config.enabled:
             raise RuntimeError("Claude backend is not enabled.")
 
-        resume_args = [
-            "--resume", session_id,
-            "-p", text,
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--permission-mode",
-            normalize_claude_permission_mode(self.permission_mode),
-        ]
-        if self._config.model:
+        capabilities = await self._probe_cli_capabilities()
+        if not capabilities.resume:
+            raise RuntimeError(
+                "Claude CLI does not support --resume; update Claude Code or run a new Claude task first."
+            )
+
+        resume_args = ["--resume", session_id, "-p", text]
+        if capabilities.output_format and capabilities.stream_json_output:
+            resume_args.extend(["--output-format", "stream-json", "--verbose"])
+            if capabilities.include_partial_messages:
+                resume_args.append("--include-partial-messages")
+        if capabilities.permission_mode:
+            resume_args.extend([
+                "--permission-mode",
+                normalize_claude_permission_mode(self.permission_mode),
+            ])
+        if self._config.model and capabilities.model:
             resume_args.extend(["--model", normalize_claude_model_name(self._config.model)])
-        if self._config.effort:
+        if self._config.effort and capabilities.effort:
             resume_args.extend(["--effort", self._config.effort])
 
         try:
@@ -505,53 +515,57 @@ class ClaudeBackend:
         return _ClaudeHealth(self._config.enabled, self._config.binary)
 
     def _prompt_args(self, prompt: str, *, stream_json: bool = False) -> list[str]:
-        args = [
-            "-p",
-            prompt,
-            "--permission-mode",
-            normalize_claude_permission_mode(self.permission_mode),
-        ]
-        if self._config.model:
+        capabilities = self._capabilities_for_args()
+        args = ["-p", prompt]
+        if capabilities.permission_mode:
+            args.extend([
+                "--permission-mode",
+                normalize_claude_permission_mode(self.permission_mode),
+            ])
+        if self._config.model and capabilities.model:
             args.extend(["--model", normalize_claude_model_name(self._config.model)])
-        if self._config.effort:
+        if self._config.effort and capabilities.effort:
             args.extend(["--effort", self._config.effort])
-        if stream_json:
+        if stream_json and capabilities.output_format and capabilities.stream_json_output:
             args.extend([
                 "--output-format",
                 "stream-json",
                 "--verbose",
-                "--include-partial-messages",
             ])
-            if self._hook_events_supported:
+            if capabilities.include_partial_messages:
+                args.append("--include-partial-messages")
+            if self._hook_events_supported and capabilities.include_hook_events:
                 args.append("--include-hook-events")
         return args
 
-    async def _probe_hook_events(self) -> bool:
-        """Check whether the Claude binary supports ``--include-hook-events``.
+    async def _probe_cli_capabilities(self) -> ClaudeCliCapabilities:
+        if self._cli_capabilities is None:
+            self._cli_capabilities = await probe_claude_capabilities(
+                self._config.binary,
+            )
+            self._hook_events_supported = self._cli_capabilities.include_hook_events
+        return self._cli_capabilities
 
-        Runs ``claude --help`` with a short timeout.  The result is cached on
-        ``_hook_events_supported`` so the probe only runs once.
-        """
+    def _capabilities_for_args(self) -> ClaudeCliCapabilities:
+        return self._cli_capabilities or ClaudeCliCapabilities(
+            print_prompt=True,
+            output_format=True,
+            stream_json_output=True,
+            include_partial_messages=True,
+            include_hook_events=bool(self._hook_events_supported),
+            input_stream_json=True,
+            permission_mode=True,
+            model=True,
+            effort=True,
+            resume=True,
+        )
+
+    async def _probe_hook_events(self) -> bool:
         if self._hook_events_supported is not None:
             return self._hook_events_supported
 
-        supported = False
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                self._config.binary,
-                "--help",
-                env=_sanitized_env(),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=5.0,
-            )
-            help_text = stdout.decode("utf-8", errors="replace")
-            supported = "--include-hook-events" in help_text
-        except Exception:
-            logger.debug("Hook-events capability probe failed", exc_info=True)
-
+        capabilities = await self._probe_cli_capabilities()
+        supported = capabilities.include_hook_events
         self._hook_events_supported = supported
 
         if not supported and self._runtime_source is not None:
