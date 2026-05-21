@@ -375,8 +375,8 @@ class AppServerCodexBackend:
         sandbox: str = "workspace-write",
         request_timeout_seconds: float = 60.0,
         codex_prompt_idle_timeout_seconds: float = 300.0,
-        codex_analysis_hard_timeout_seconds: float = 1200.0,
-        codex_verification_hard_timeout_seconds: float = 1200.0,
+        codex_analysis_hard_timeout_seconds: float = 3600.0,
+        codex_verification_hard_timeout_seconds: float = 3600.0,
     ) -> None:
         self.endpoint = endpoint
         self.approval_policy = approval_policy
@@ -824,6 +824,7 @@ class AppServerCodexBackend:
         )
         turn_ended = False
         timeout_reason = "request"
+        approval_wait_started: float | None = None
 
         def _event_turn_id(event: BackendEvent) -> str:
             turn = event.payload.get("turn")
@@ -854,27 +855,53 @@ class AppServerCodexBackend:
                 return event_turn_id == turn_id
             return str(event.payload.get("threadId", "")) == thread_id
 
+        def _pause_for_approval() -> None:
+            nonlocal approval_wait_started, idle_deadline
+            if approval_wait_started is None:
+                approval_wait_started = loop.time()
+            idle_deadline = None
+
+        def _resume_after_approval() -> None:
+            nonlocal approval_wait_started, hard_deadline, idle_deadline
+            if approval_wait_started is None:
+                return
+            now = loop.time()
+            hard_deadline += now - approval_wait_started
+            approval_wait_started = None
+            if idle_timeout_seconds is not None:
+                idle_deadline = now + idle_timeout_seconds
+
         turn_error: str | None = None
         try:
             while True:
                 now = loop.time()
-                if now >= hard_deadline:
+                waiting_for_approval = approval_wait_started is not None
+                if not waiting_for_approval and now >= hard_deadline:
                     timeout_reason = "hard"
                     break
-                next_deadline = hard_deadline
-                if idle_deadline is not None:
-                    next_deadline = min(next_deadline, idle_deadline)
-                remaining = next_deadline - now
-                if remaining <= 0:
-                    timeout_reason = (
-                        "idle"
-                        if idle_deadline is not None
-                        and next_deadline == idle_deadline
-                        else "hard"
-                    )
-                    break
+                remaining: float | None
+                if waiting_for_approval:
+                    remaining = None
+                else:
+                    next_deadline = hard_deadline
+                    if idle_deadline is not None:
+                        next_deadline = min(next_deadline, idle_deadline)
+                    remaining = next_deadline - now
+                    if remaining <= 0:
+                        timeout_reason = (
+                            "idle"
+                            if idle_deadline is not None
+                            and next_deadline == idle_deadline
+                            else "hard"
+                        )
+                        break
                 try:
-                    event = await asyncio.wait_for(prompt_events.get(), timeout=remaining)
+                    if remaining is None:
+                        event = await prompt_events.get()
+                    else:
+                        event = await asyncio.wait_for(
+                            prompt_events.get(), timeout=remaining
+                        )
                 except TimeoutError:
                     now = loop.time()
                     timeout_reason = (
@@ -891,10 +918,15 @@ class AppServerCodexBackend:
                     if event.event_type == "approval_requested":
                         event_thread_id = str(event.payload.get("threadId", ""))
                         if event_thread_id == thread_id:
-                            idle_deadline = None  # waiting for human — pause idle
+                            _pause_for_approval()
                     continue
 
-                if idle_timeout_seconds is not None:
+                if event.event_type != "approval_requested":
+                    if approval_wait_started is not None:
+                        _resume_after_approval()
+                    elif idle_timeout_seconds is not None:
+                        idle_deadline = loop.time() + idle_timeout_seconds
+                elif idle_timeout_seconds is not None:
                     idle_deadline = loop.time() + idle_timeout_seconds
 
                 if event.event_type == "agent_message_delta":
@@ -902,9 +934,7 @@ class AppServerCodexBackend:
                     if isinstance(delta, str):
                         deltas.append(delta)
                 elif event.event_type == "approval_requested":
-                    # Codex is waiting for human approval — pause idle timeout.
-                    # The hard_deadline still protects against infinite hangs.
-                    idle_deadline = None
+                    _pause_for_approval()
                 elif event.event_type == "turn_completed":
                     status = _event_turn_status(event)
                     if status in ("failed", "interrupted", "cancelled", "canceled"):

@@ -274,10 +274,10 @@ def load_config(path: Path) -> AppConfig:
                 backend_raw.get("codex_prompt_idle_timeout_seconds", 300)
             ),
             codex_analysis_hard_timeout_seconds=float(
-                backend_raw.get("codex_analysis_hard_timeout_seconds", 1200)
+                backend_raw.get("codex_analysis_hard_timeout_seconds", 3600)
             ),
             codex_verification_hard_timeout_seconds=float(
-                backend_raw.get("codex_verification_hard_timeout_seconds", 1200)
+                backend_raw.get("codex_verification_hard_timeout_seconds", 3600)
             ),
             event_log_max_chars=int(
                 backend_raw.get("event_log_max_chars", 20000)

@@ -265,7 +265,7 @@ async def test_approve_session_resolves_pending_command_batch(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_expired_approval_unlocks_backend_before_local_expire(
+async def test_late_approval_still_resolves_backend(
     tmp_path: Path,
 ) -> None:
     ledger = Ledger.open(tmp_path / "db.sqlite3")
@@ -282,17 +282,17 @@ async def test_expired_approval_unlocks_backend_before_local_expire(
 
     msg = await svc.resolve_callback(cb, backend, ledger)
 
-    assert "已过期" in msg
+    assert "已处理" in msg
     assert backend._approval_resolutions == [
-        ("req-expired", {"decision": "cancel"})
+        ("req-expired", {"decision": "accept"})
     ]
-    assert ledger.get_approval(approval.id).status == ApprovalStatus.EXPIRED
+    assert ledger.get_approval(approval.id).status == ApprovalStatus.APPROVED
     assert ledger.get_task(task.id).pending_approval_count == 0
     assert ledger.get_task(task.id).status == TaskStatus.RUNNING
 
 
 @pytest.mark.asyncio
-async def test_expired_approval_stays_pending_when_backend_unlock_fails(
+async def test_late_approval_stays_pending_when_backend_resolution_fails(
     tmp_path: Path,
 ) -> None:
     ledger = Ledger.open(tmp_path / "db.sqlite3")
@@ -308,7 +308,7 @@ async def test_expired_approval_stays_pending_when_backend_unlock_fails(
 
     msg = await svc.resolve_callback(cb, FailingBackend(), ledger)
 
-    assert "后端解锁失败" in msg
+    assert "发送到后端失败" in msg
     assert ledger.get_approval(approval.id).status == ApprovalStatus.PENDING
     assert ledger.get_task(task.id).pending_approval_count == 1
     assert ledger.get_task(task.id).status == TaskStatus.WAITING_APPROVAL

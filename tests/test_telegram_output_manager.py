@@ -184,6 +184,31 @@ async def test_failure_falls_back_to_body_when_preview_message_id_missing():
 
 
 @pytest.mark.asyncio
+async def test_failure_flushes_buffered_body_before_status_update():
+    transport = FakeTransport()
+    manager = TelegramOutputManager(
+        transport=transport,
+        semantic_min_chars=20,
+        semantic_max_chars=80,
+        final_chunk_chars=200,
+    )
+    key = OutputRunKey(chat_id=1, conversation_id=7, run_id="task-10")
+
+    await manager.start(key, surface=OutputSurface.PRODUCT, text="正在处理")
+    await manager.append_text(
+        key,
+        "结论：需要用户确认。\n涉及文件：runtime.py\n实施步骤：先修诊断。\n验收标准：真人可读。",
+    )
+    await manager.fail(key, error_summary="需要用户输入以继续。")
+
+    bodies = [item for item in transport.sent if item[0] == "body"]
+    assert len(bodies) == 1
+    assert "结论：需要用户确认" in bodies[0][2]
+    assert "实施步骤" in bodies[0][2]
+    assert transport.edited[-1][2] == "运行失败: 需要用户输入以继续。"
+
+
+@pytest.mark.asyncio
 async def test_interrupt_falls_back_to_body_when_preview_message_id_missing():
     transport = MissingPreviewTransport()
     manager = TelegramOutputManager(transport=transport)

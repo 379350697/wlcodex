@@ -1185,7 +1185,12 @@ class OrchestrationRunner:
                         orchestration_run_id=orchestration_run_id,
                         task_id=task_id,
                     ))
-                    await self._emit_failed(chat_id, task_id, progress.text)
+                    await self._emit_failed(
+                        chat_id,
+                        task_id,
+                        conversation.id,
+                        progress.text,
+                    )
                 elif progress.phase == OrchestrationProgress.COMPLETE:
                     terminal_sent = True
                     orch_result_status = progress.result_status or "passed"
@@ -1229,6 +1234,7 @@ class OrchestrationRunner:
                             await self._emit_failed(
                                 chat_id,
                                 task_id,
+                                conversation.id,
                                 reason,
                             )
                             continue
@@ -1300,6 +1306,19 @@ class OrchestrationRunner:
                         )
                     elif orch_result_status == "needs_user":
                         self._ledger.set_task_status(task_id, TaskStatus.FAILED)
+                        needs_user_text = (
+                            progress.full_text
+                            or terminal_text
+                            or progress.text
+                            or "需要用户输入以继续。"
+                        ).strip()
+                        if needs_user_text:
+                            await self._emit_text_delta(
+                                chat_id,
+                                task_id,
+                                conversation.id,
+                                needs_user_text,
+                            )
                         self._emit_event(RuntimeEvent(
                             schema_version=1,
                             event_type=EventType.RUN_FAILED,
@@ -1318,7 +1337,8 @@ class OrchestrationRunner:
                         await self._emit_failed(
                             chat_id,
                             task_id,
-                            progress.text or "需要用户输入以继续。",
+                            conversation.id,
+                            "需要用户输入以继续。",
                         )
                     else:
                         self._ledger.set_task_status(task_id, TaskStatus.FAILED)
@@ -1340,6 +1360,7 @@ class OrchestrationRunner:
                         await self._emit_failed(
                             chat_id,
                             task_id,
+                            conversation.id,
                             progress.text or "编排未通过验收。",
                         )
         except Exception as exc:
@@ -1375,7 +1396,7 @@ class OrchestrationRunner:
                 orchestration_run_id=orchestration_run_id,
                 task_id=task_id,
             ))
-            await self._emit_failed(chat_id, task_id, str(exc))
+            await self._emit_failed(chat_id, task_id, conversation.id, str(exc))
 
         if not codex_analysis_text and orch_result_status == "failed":
             codex_analysis_text = terminal_text
@@ -1492,15 +1513,27 @@ class OrchestrationRunner:
             )
         )
 
-    async def _emit_failed(self, chat_id: int, task_id: int, text: str) -> None:
+    async def _emit_failed(
+        self,
+        chat_id: int,
+        task_id: int,
+        conversation_id: int,
+        text: str,
+        runtime_state: RuntimeRunState | None = None,
+    ) -> None:
         if self._interaction_renderer is None:
             return
+        metadata = {}
+        if runtime_state is not None:
+            metadata["runtime_state"] = runtime_state
         await self._interaction_renderer.handle(
             InteractionEvent(
                 event_type="run_failed",
                 chat_id=chat_id,
                 task_id=task_id,
+                conversation_id=conversation_id,
                 text=text,
+                metadata=metadata,
             )
         )
 

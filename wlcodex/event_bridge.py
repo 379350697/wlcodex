@@ -62,8 +62,8 @@ class EventBridge:
     async def run(self) -> None:
         """Run the event loop until cancelled.
 
-        Processes backend events, periodically expires stale approvals
-        so the Codex app-server is never stuck waiting on an expired hold,
+        Processes backend events, periodically gives the approval service a
+        chance to handle stale approval bookkeeping without ending live holds,
         and runs the task liveness watchdog when configured.
         """
         self._running = True
@@ -113,7 +113,7 @@ class EventBridge:
                 logger.exception("Task watchdog scan failed")
 
     async def _expire_stale(self) -> None:
-        """Expire any pending approvals past the callback timeout."""
+        """Run non-terminal stale approval maintenance."""
         try:
             await self._approval_service.expire_stale_approvals(
                 self._ledger, self._backend

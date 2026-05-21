@@ -28,20 +28,24 @@ startup_timeout_seconds = 15
 # JSON-RPC request timeout for individual app-server calls.
 request_timeout_seconds = 60
 # Codex analysis/verification turn liveness.  Idle timeout is sliding and
-# refreshes on matching stream/status/tool/approval events; hard timeout is
-# the total cap for a planning or verification turn.
+# refreshes on matching stream/status/tool/approval events; hard timeout caps
+# active planning/verification runtime and excludes human approval wait.
 codex_prompt_idle_timeout_seconds = 300
-codex_analysis_hard_timeout_seconds = 1200
-codex_verification_hard_timeout_seconds = 1200
+codex_analysis_hard_timeout_seconds = 3600
+codex_verification_hard_timeout_seconds = 3600
 event_log_max_chars = 20000
 
 [approval]
+# Soft age for stale-approval bookkeeping; late callbacks still resolve when
+# the task/backend request is alive.
 callback_timeout_seconds = 3600
 allow_session_approval = true
 
 [task]
 max_running_seconds = 7200
 max_queued_seconds = 1800
+# Waiting approvals are not failed by this timeout; keep for compatibility and
+# future soft reminders.
 max_waiting_approval_seconds = 3600
 watchdog_interval_seconds = 60
 backend_dead_grace_seconds = 120

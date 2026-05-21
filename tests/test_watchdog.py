@@ -101,6 +101,24 @@ def test_watchdog_marks_stale_running_task_timeout() -> None:
     assert ledger.timeouts[0][3] == 7200
 
 
+def test_watchdog_does_not_timeout_waiting_approval_tasks() -> None:
+    ledger = LedgerSpy([_task(1, TaskStatus.WAITING_APPROVAL, 9999)])
+    watchdog = TaskWatchdog(
+        ledger=ledger,
+        backend=Backend(Health(True)),
+        config=TaskLivenessConfig(
+            max_running_seconds=7200,
+            max_queued_seconds=1800,
+            max_waiting_approval_seconds=3600,
+            backend_dead_grace_seconds=120,
+        ),
+    )
+
+    watchdog.scan_once()
+
+    assert ledger.timeouts == []
+
+
 def test_watchdog_timeout_event_explains_runtime_clock(tmp_path: Path) -> None:
     db = Ledger.open(tmp_path / "db.sqlite3")
     db.migrate()

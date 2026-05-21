@@ -378,6 +378,9 @@ class TelegramOutputManager:
         if session is None:
             return
         self._cancel_idle_flush(session)
+        chunks = session.chunker.final_chunks(number_parts=True)
+        for chunk in chunks:
+            await self._transport.send_body(key.chat_id, chunk)
         status = f"运行失败: {error_summary[:200]}" if error_summary else "运行失败"
         if session.preview_message_id is not None:
             await self.update_status(key, status, force=True)

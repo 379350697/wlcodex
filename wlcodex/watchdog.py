@@ -243,5 +243,5 @@ class TaskWatchdog:
         if status == TaskStatus.QUEUED:
             return self._config.max_queued_seconds
         if status == TaskStatus.WAITING_APPROVAL:
-            return self._config.max_waiting_approval_seconds
+            return None
         return None

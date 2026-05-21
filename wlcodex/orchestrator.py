@@ -190,37 +190,24 @@ def _analysis_says_no_implementation_needed(text: str) -> bool:
 
 
 def _parse_last_complete_json(text: str) -> dict[str, object] | None:
-    """Parse concatenated JSON objects, returning the last complete one.
-
-    Codex may output multiple JSON objects like {..}{..}...{..}.
-    We scan for balanced braces to find the last complete object.
-    """
+    """Parse embedded/concatenated JSON objects, returning the last complete one."""
     if not text:
         return None
+    decoder = json.JSONDecoder()
     best: dict[str, object] | None = None
     i = 0
     while i < len(text):
-        if text[i] != "{":
-            i += 1
+        start = text.find("{", i)
+        if start < 0:
+            break
+        try:
+            candidate, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            i = start + 1
             continue
-        depth = 0
-        start = i
-        while i < len(text):
-            ch = text[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        candidate = json.loads(text[start:i + 1])
-                    except json.JSONDecodeError:
-                        candidate = None
-                    if isinstance(candidate, dict):
-                        best = candidate
-                    break
-            i += 1
-        i += 1
+        if isinstance(candidate, dict):
+            best = candidate
+        i = max(end, start + 1)
     return best
 
 

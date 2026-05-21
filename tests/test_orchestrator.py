@@ -1034,6 +1034,19 @@ def test_parse_last_complete_json_incomplete_last_object() -> None:
     assert result == {"summary": "first", "needs_implementation": False}
 
 
+def test_parse_last_complete_json_skips_unclosed_prose_brace() -> None:
+    from wlcodex.orchestrator import _parse_last_complete_json
+
+    result = _parse_last_complete_json(
+        '模板示例 {unfinished\n'
+        '{"summary":"final {inside} \\"quoted\\"","needs_implementation":true}'
+    )
+    assert result == {
+        "summary": 'final {inside} "quoted"',
+        "needs_implementation": True,
+    }
+
+
 def test_parse_last_complete_json_no_json() -> None:
     from wlcodex.orchestrator import _parse_last_complete_json
 

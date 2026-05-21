@@ -67,8 +67,8 @@ path = "/tmp/wlcodex"
     assert config.menu.register_bot_commands is True
     assert config.backend.request_timeout_seconds == 60
     assert config.backend.codex_prompt_idle_timeout_seconds == 300
-    assert config.backend.codex_analysis_hard_timeout_seconds == 1200
-    assert config.backend.codex_verification_hard_timeout_seconds == 1200
+    assert config.backend.codex_analysis_hard_timeout_seconds == 3600
+    assert config.backend.codex_verification_hard_timeout_seconds == 3600
 
 
 def test_load_config_reads_workspace_and_token_env(tmp_path: Path) -> None:

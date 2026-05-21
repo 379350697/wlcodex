@@ -477,6 +477,40 @@ class JsonReplyOnlyStreamingOrchestrator:
         )
 
 
+class NeedsUserFullTextStreamingOrchestrator:
+    async def run_streaming(
+        self,
+        _prompt: str,
+        conversation_context: dict[str, Any] | None = None,
+    ):
+        full = (
+            "诊断完成，需要用户确认。\n"
+            "结论：上一版部署生效，但残留诊断需要人工确认。\n"
+            "涉及文件：lightfee/runtime.py\n"
+            "实施步骤：1. 修复诊断分组；2. 重跑 smoke。\n"
+            "验收标准：Telegram 输出完整中文结论，不再只显示失败摘要。"
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_STARTED,
+            text="analysis start",
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.ANALYSIS_COMPLETE,
+            text="analysis done",
+            full_text="analysis full",
+            agent="codex",
+        )
+        yield OrchestrationProgress(
+            phase=OrchestrationProgress.COMPLETE,
+            text="需要用户输入。",
+            full_text=full,
+            agent="codex",
+            result_status="needs_user",
+            round_num=0,
+        )
+
+
 @pytest.mark.asyncio
 async def test_orchestration_runner_records_passed_background_result(
     tmp_path: Path,
@@ -582,6 +616,59 @@ async def test_orchestration_runner_humanizes_telegram_progress_without_raw_mode
     assert updated_run.last_codex_analysis == "RAW_CODEX_ANALYSIS_FULL"
     assert updated_run.last_claude_summary == "RAW_CLAUDE_IMPL_FULL"
     assert "RAW_VERIFY_RESULT_FULL" in updated_run.last_verification_result
+
+
+@pytest.mark.asyncio
+async def test_orchestration_runner_delivers_needs_user_full_text(
+    tmp_path: Path,
+) -> None:
+    ledger, service, backend, renderer, workspace = _build_runtime(tmp_path)
+    renderer._runtime_progress = object()
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="诊断需要确认",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "诊断任务", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "诊断任务")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=(
+            lambda _codex, _claude: NeedsUserFullTextStreamingOrchestrator()
+        ),
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="诊断任务",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+    )
+    await background_task
+
+    visible_text = "\n".join(
+        event.text for event in renderer.events if event.event_type == "text_delta"
+    )
+    assert "结论：上一版部署生效" in visible_text
+    assert "涉及文件：lightfee/runtime.py" in visible_text
+    assert "实施步骤" in visible_text
+    assert "验收标准" in visible_text
+    failed = [event for event in renderer.events if event.event_type == "run_failed"][-1]
+    assert failed.conversation_id == conversation.id
+    assert failed.text == "需要用户输入以继续。"
 
 
 @pytest.mark.asyncio

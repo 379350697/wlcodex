@@ -23,8 +23,8 @@ diff_max_chars = 3500
 startup_timeout_seconds = 15
 request_timeout_seconds = 60
 codex_prompt_idle_timeout_seconds = 300
-codex_analysis_hard_timeout_seconds = 1200
-codex_verification_hard_timeout_seconds = 1200
+codex_analysis_hard_timeout_seconds = 3600
+codex_verification_hard_timeout_seconds = 3600
 event_log_max_chars = 20000
 
 [claude]

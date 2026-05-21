@@ -89,20 +89,18 @@ class ApprovalService:
         if approval.status != ApprovalStatus.PENDING:
             return f"审批已处理（{approval.status.value}）：{approval.resolution or ''}"
 
-        # 4. Check expiry — must unlock the real Codex held request first,
-        #    then update local DB so the Codex turn is not stuck forever.
+        # 4. Callback age is a soft signal only.  A slow human approval
+        #    must still continue when the task and backend request are alive.
         now = datetime.now(timezone.utc)
         age = (now - approval.created_at).total_seconds()
         if age > self._callback_timeout:
-            unlocked = await self._send_backend_expiry(approval, backend, ledger)
-            if not unlocked:
-                ledger.set_approval_error(callback.approval_id, "expiry unlock failed")
-                return (
-                    f"审批 #{approval.id} 已过期，但后端解锁失败。"
-                    "已保持本地待处理状态。"
-                )
-            await self._resolve_locally_expired(approval, ledger)
-            return f"审批 #{approval.id} 已过期。"
+            logger.info(
+                "Resolving approval #%d after soft callback age %.0fs "
+                "(configured reminder %.0fs)",
+                approval.id,
+                age,
+                self._callback_timeout,
+            )
 
         # 4b. Check workspace writability for approving write actions
         if callback.action in ("approve_once", "approve_session"):
@@ -339,34 +337,8 @@ class ApprovalService:
     async def expire_stale_approvals(
         self, ledger: Ledger, backend: object
     ) -> int:
-        """Scan all pending approvals and expire those past the callback timeout.
-
-        Sends backend cancel/decline before local resolution for each
-        expired approval.  Returns the number of approvals expired.
-        """
-        now = datetime.now(timezone.utc)
-        expired_count = 0
-
-        tasks = ledger.list_tasks(limit=100, include_archived=False)
-        for task in tasks:
-            pending = ledger.pending_approvals(task.id)
-            for approval in pending:
-                age = (now - approval.created_at).total_seconds()
-                if age > self._callback_timeout:
-                    unlocked = await self._send_backend_expiry(
-                        approval, backend, ledger
-                    )
-                    if not unlocked:
-                        ledger.set_approval_error(
-                            approval.id, "expiry unlock failed"
-                        )
-                        continue
-                    await self._resolve_locally_expired(approval, ledger)
-                    expired_count += 1
-
-        if expired_count:
-            logger.info("Expired %d stale approval(s)", expired_count)
-        return expired_count
+        """Keep pending approvals resumable; callback timeout is non-terminal."""
+        return 0
 
 
 def _uses_legacy_review_decision(approval: object) -> bool:

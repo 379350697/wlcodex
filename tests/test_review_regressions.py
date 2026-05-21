@@ -463,10 +463,10 @@ async def test_resolve_callback_rejects_terminal_task_failed(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_resolve_callback_expired_approval_shows_clear_message(
+async def test_resolve_callback_late_approval_still_continues(
     tmp_path: Path,
 ) -> None:
-    """Expired approval must show '已过期' not silently fail."""
+    """Late approval must still resolve when the task and backend are alive."""
     from datetime import datetime, timedelta, timezone
     from wlcodex.approval import (
         ApprovalCallback,
@@ -501,5 +501,12 @@ async def test_resolve_callback_expired_approval_shows_clear_message(
     svc = ApprovalService(callback_timeout_seconds=3600)
     cb = ApprovalCallback(approval_id=approval_row.id, action="approve_once")
 
-    msg = await svc.resolve_callback(cb, FakeCodexBackend(), ledger)
-    assert "已过期" in msg
+    backend = FakeCodexBackend()
+    msg = await svc.resolve_callback(cb, backend, ledger)
+
+    assert "已处理" in msg
+    assert backend._approval_resolutions == [
+        ("req-3", {"decision": "accept"})
+    ]
+    assert ledger.get_approval(approval_row.id).status.value == "approved"
+    assert ledger.get_task(task.id).status == TaskStatus.RUNNING
