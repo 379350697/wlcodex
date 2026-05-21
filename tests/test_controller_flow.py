@@ -1685,6 +1685,73 @@ async def test_switch_unknown_workspace_mentions_workspaces(ctrl: CommandControl
 
 
 @pytest.mark.asyncio
+async def test_exec_mode_command_updates_active_workbench_mode(
+    ctrl: CommandController,
+) -> None:
+    conversation = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Mode Demo",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+
+    response = await ctrl.handle(
+        "/exec_mode codex_direct",
+        {"chat_id": 100, "user_id": 7},
+    )
+
+    assert "已切换执行模式" in response.text
+    assert "Codex 直聊" in response.text
+    assert ctrl._ledger.get_conversation(conversation.id).mode == "codex_direct"
+
+
+@pytest.mark.asyncio
+async def test_continue_callback_does_not_create_new_workbench(
+    ctrl: CommandController,
+) -> None:
+    from wlcodex.conversation_callback import CONTINUE, ConversationCallback
+
+    conversation = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Continue Demo",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation_id=conversation.id, action=CONTINUE)
+    )
+
+    assert "直接发消息" in response.text
+    assert ctrl._ledger.get_active_conversation(100).id == conversation.id
+    assert len(ctrl._ledger.list_conversations_by_chat(100, include_archived=True)) == 1
+
+
+@pytest.mark.asyncio
+async def test_status_callback_returns_current_workbench_status(
+    ctrl: CommandController,
+) -> None:
+    from wlcodex.conversation_callback import STATUS, ConversationCallback
+
+    conversation = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Status Demo",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation_id=conversation.id, action=STATUS)
+    )
+
+    assert "当前对话：Status Demo" in response.text
+    assert ctrl._ledger.get_active_conversation(100).id == conversation.id
+
+
+@pytest.mark.asyncio
 async def test_restore_workbench_callback_restores_archived_conversation(ctrl: CommandController) -> None:
     from wlcodex.conversation_callback import ConversationCallback
 

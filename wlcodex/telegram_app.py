@@ -43,6 +43,11 @@ def _is_message_not_modified_error(exc: Exception) -> bool:
     return "message is not modified" in str(exc).lower()
 
 
+def _trim_workbench_title(title: object, limit: int = 28) -> str:
+    text = str(title or "未命名工作台").strip() or "未命名工作台"
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 # Sentinel returned when a Telegram send fails due to a network error.
 SEND_FAILED = -1
 
@@ -852,7 +857,7 @@ class WlCodexHandlers:
             for session in sessions:
                 if session.archived_at is not None:
                     buttons.append([{
-                        "text": f"恢复 #{session.id}",
+                        "text": f"恢复 {_trim_workbench_title(session.title)}",
                         "callback_data": f"conv:{session.id}:restore_workbench",
                     }])
         await self.send_telegram(chat_id, response.text, buttons=buttons or None)

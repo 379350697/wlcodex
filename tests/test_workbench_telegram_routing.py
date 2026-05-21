@@ -892,6 +892,56 @@ async def test_settings_exec_mode_callbacks_use_correct_controller_command():
 
 
 @pytest.mark.asyncio
+async def test_workbench_history_restore_buttons_use_titles_not_ids():
+    """History restore buttons should be readable titles, not raw ids."""
+    from datetime import datetime, timezone
+
+    controller = MagicMock()
+    controller.handle = AsyncMock(
+        return_value=SimpleNamespace(text="工作台历史\n\n* Current（当前）\n  Old")
+    )
+    now = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+    ledger = MagicMock()
+    ledger.record_telegram_update = MagicMock()
+    ledger.list_conversations_by_chat = MagicMock(return_value=[
+        SimpleNamespace(
+            id=2,
+            title="Current",
+            mode="chief_engineer",
+            workspace_alias="wlcodex",
+            archived_at=None,
+            updated_at=now,
+        ),
+        SimpleNamespace(
+            id=1,
+            title="Old",
+            mode="chief_engineer",
+            workspace_alias="wlcodex",
+            archived_at=now,
+            updated_at=now,
+        ),
+    ])
+
+    handlers = _make_handlers(controller=controller, ledger=ledger)
+    sent: list[tuple[int, str, object]] = []
+
+    async def fake_send(chat_id, text, buttons=None):
+        sent.append((chat_id, text, buttons))
+        return 1001
+
+    handlers.send_telegram = fake_send
+
+    await handlers.workbenches(_make_update("/history"), None)
+
+    assert sent
+    buttons = sent[-1][2]
+    assert buttons == [[{
+        "text": "恢复 Old",
+        "callback_data": "conv:1:restore_workbench",
+    }]]
+
+
+@pytest.mark.asyncio
 async def test_settings_model_and_workspace_callbacks_route():
     """/model and /switch buttons must route to controller."""
     controller = MagicMock()

@@ -145,6 +145,11 @@ class ModelCommand:
 
 
 @dataclass(frozen=True)
+class ExecModeCommand:
+    mode_name: str
+
+
+@dataclass(frozen=True)
 class VerifyCommand:
     prompt: str = ""
 
@@ -219,6 +224,7 @@ ParsedCommand = (
     | StopCurrentCommand
     | SwitchWorkspaceCommand
     | ModelCommand
+    | ExecModeCommand
     | VerifyCommand
     | ModeSwitchCommand
     | TerminalSubCommand
@@ -322,6 +328,14 @@ def parse_command(text: str) -> ParsedCommand:
     if stripped.startswith("/model "):
         model_name = stripped.split(maxsplit=1)[1].strip()
         return ModelCommand(model_name=model_name)
+
+    if stripped == "/exec_mode":
+        raise ParseError("用法：/exec_mode <orchestrated|codex_direct|claude_direct>")
+    if stripped.startswith("/exec_mode "):
+        mode_name = stripped.split(maxsplit=1)[1].strip()
+        if not mode_name:
+            raise ParseError("用法：/exec_mode <orchestrated|codex_direct|claude_direct>")
+        return ExecModeCommand(mode_name=mode_name)
 
     if stripped == "/verify":
         return VerifyCommand()

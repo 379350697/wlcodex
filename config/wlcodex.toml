@@ -88,6 +88,13 @@ terminal_block_idle_seconds = 2.0
 [menu]
 register_bot_commands = true
 
+[workspace_discovery]
+enabled = true
+root = "/media/wl/新加卷/codex"
+include_git_only = true
+allow_write = true
+exclude = []
+
 # Live Telegram smoke env vars (for real acceptance gate):
 #   WLCODEX_RUN_TELEGRAM_LIVE=1
 #   WLCODEX_TELEGRAM_BOT_TOKEN=...

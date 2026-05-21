@@ -37,6 +37,7 @@ from wlcodex.conversation_callback import (
     NEW_CONVO,
     RESTORE_WORKBENCH,
     RETRY,
+    STATUS,
     VERIFY,
     ConversationCallback,
     decode_conversation_callback,
@@ -70,6 +71,7 @@ from wlcodex.router import (
     CodexDirectCommand,
     CodexSessionsCommand,
     DiffCommand,
+    ExecModeCommand,
     FilesCommand,
     HealthCommand,
     HelpCommand,
@@ -391,6 +393,9 @@ class CommandController:
 
             elif isinstance(command, ModelCommand):
                 return await self.handle_model(command, telegram_context)
+
+            elif isinstance(command, ExecModeCommand):
+                return await self.handle_exec_mode(command, telegram_context)
 
             elif isinstance(command, VerifyCommand):
                 return await self.handle_verify(command, telegram_context)
@@ -2028,6 +2033,57 @@ class CommandController:
                 return ControllerResponse(f"当前偏好模型：{current}\n使用 /model <name> 切换。")
             return ControllerResponse("当前未设置偏好模型。使用 /model <name> 切换。")
 
+    async def handle_exec_mode(
+        self, command: ExecModeCommand, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        active = self._ledger.get_active_conversation(chat_id)
+        if active is None:
+            return ControllerResponse("当前没有活跃工作台。请先发送 /new。")
+
+        mode_aliases = {
+            "orchestrated": ConversationMode.CHIEF_ENGINEER.value,
+            "chief_engineer": ConversationMode.CHIEF_ENGINEER.value,
+            "auto": ConversationMode.CHIEF_ENGINEER.value,
+            "codex": ConversationMode.CODEX_DIRECT.value,
+            "codex_direct": ConversationMode.CODEX_DIRECT.value,
+            "claude": ConversationMode.CLAUDE_DIRECT.value,
+            "claude_direct": ConversationMode.CLAUDE_DIRECT.value,
+        }
+        target_mode = mode_aliases.get(command.mode_name)
+        if target_mode is None:
+            return ControllerResponse(
+                "未知执行模式。可选：orchestrated、codex_direct、claude_direct。"
+            )
+
+        updated = self._ledger.set_active_conversation_mode(active.id, target_mode)
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.WORKBENCH_EXECUTION_MODE_SELECTED,
+            aggregate_type=AggregateType.CONVERSATION,
+            aggregate_id=str(updated.id),
+            correlation_id=self._new_correlation_id(),
+            source=EventSource.CONTROLLER,
+            actor="controller",
+            visibility=Visibility.USER,
+            payload={
+                "chat_id": updated.chat_id,
+                "conversation_id": updated.id,
+                "from_mode": active.mode,
+                "to_mode": updated.mode,
+            },
+            occurred_at=now_iso(),
+            conversation_id=updated.id,
+        ))
+        mode_label = MODE_LABELS.get(updated.mode, updated.mode)
+        return ControllerResponse(
+            f"已切换执行模式：{mode_label}\n"
+            "直接发消息会按这个模式继续当前工作台。"
+        )
+
     # --- Conversation callback handler ---
 
     async def handle_conversation_callback(
@@ -2065,8 +2121,13 @@ class CommandController:
                 )
             return ControllerResponse("没有找到可重试的编排运行。")
         elif callback.action == CONTINUE:
+            return ControllerResponse(
+                f"继续工作台「{convo.title}」。\n"
+                "直接发消息即可继续，不会新开工作台。"
+            )
+        elif callback.action == STATUS:
             return await self.handle(
-                "/new",
+                "/status",
                 {"chat_id": convo.chat_id, "user_id": convo.user_id},
             )
         elif callback.action == NEW_CONVO:

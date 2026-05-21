@@ -338,9 +338,12 @@ def test_render_workbench_history_marks_active_and_archived() -> None:
     text = render_workbench_history(sessions)
 
     assert "工作台历史" in text
-    assert "#2" in text and "当前" in text
-    assert "#1" in text and "已归档" in text
-    assert "lightfee" in text
+    assert "Current" in text and "当前" in text
+    assert "Old" in text
+    assert "#2" not in text
+    assert "#1" not in text
+    assert "lightfee" not in text
+    assert "总工程师" not in text
 
 
 def test_render_workspace_list_marks_active_workspace() -> None:

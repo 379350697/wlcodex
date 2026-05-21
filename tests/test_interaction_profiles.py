@@ -3,6 +3,8 @@ from wlcodex.interaction.errors import classify_user_error
 
 
 def test_natural_completion_buttons_are_small_and_deterministic() -> None:
+    from wlcodex.conversation_callback import CONTINUE, NEW_CONVO, STATUS
+
     buttons = natural_completion_buttons(
         conversation_id=7,
         has_diff=True,
@@ -10,9 +12,17 @@ def test_natural_completion_buttons_are_small_and_deterministic() -> None:
     )
 
     labels = [button["text"] for row in buttons for button in row]
+    callbacks = {
+        button["text"]: button["callback_data"]
+        for row in buttons
+        for button in row
+    }
 
     assert labels == ["继续", "查看 diff", "状态", "新工作台"]
     assert all("callback_data" in button for row in buttons for button in row)
+    assert callbacks["继续"] == f"conv:7:{CONTINUE}"
+    assert callbacks["状态"] == f"conv:7:{STATUS}"
+    assert callbacks["新工作台"] == f"conv:7:{NEW_CONVO}"
 
 
 def test_natural_completion_buttons_hide_diff_when_none() -> None:

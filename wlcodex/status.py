@@ -311,14 +311,10 @@ def render_workbench_history(sessions: Sequence[ConversationSession]) -> str:
 
     lines = ["工作台历史", ""]
     for session in sessions:
-        mode_label = MODE_LABELS.get(session.mode, session.mode)
-        state = "当前" if session.archived_at is None else "已归档"
-        updated = _format_dt(getattr(session, "updated_at", None))
         marker = "*" if session.archived_at is None else " "
+        suffix = "（当前）" if session.archived_at is None else ""
         lines.append(
-            f"{marker} #{session.id} [{mode_label}] "
-            f"{_trim(session.title, 60)} · {session.workspace_alias} · "
-            f"{state} · {updated}"
+            f"{marker} {_trim(session.title, 42)}{suffix}"
         )
     return "\n".join(lines)
 

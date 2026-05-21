@@ -4,6 +4,7 @@ from wlcodex.conversation_callback import (
     CONTINUE,
     DIFF,
     NEW_CONVO,
+    STATUS,
     encode_conversation_callback,
 )
 
@@ -30,7 +31,7 @@ def natural_completion_buttons(
     row.append(
         {
             "text": "状态",
-            "callback_data": encode_conversation_callback(conversation_id, CONTINUE),
+            "callback_data": encode_conversation_callback(conversation_id, STATUS),
         }
     )
     if include_new:

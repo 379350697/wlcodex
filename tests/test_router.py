@@ -155,3 +155,12 @@ def test_parse_workspaces_command() -> None:
     from wlcodex.router import WorkspaceListCommand, parse_command
 
     assert isinstance(parse_command("/workspaces"), WorkspaceListCommand)
+
+
+def test_parse_exec_mode_command() -> None:
+    from wlcodex.router import ExecModeCommand, parse_command
+
+    command = parse_command("/exec_mode codex_direct")
+
+    assert isinstance(command, ExecModeCommand)
+    assert command.mode_name == "codex_direct"
