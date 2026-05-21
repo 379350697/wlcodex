@@ -868,7 +868,11 @@ class WlCodexHandlers:
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
-        await self.send_telegram(update.effective_chat.id, response.text)
+        await self.send_telegram(
+            update.effective_chat.id,
+            response.text,
+            buttons=response.buttons or None,
+        )
 
     # --- Dual-surface mode command handlers ---
 
@@ -2030,7 +2034,10 @@ class WlCodexHandlers:
         elif sub == "model":
             controller_cmd = "/model"
         elif sub == "workspace":
-            controller_cmd = "/switch"
+            if len(parts) == 3 and parts[2].strip():
+                controller_cmd = f"/switch {parts[2].strip()}"
+            else:
+                controller_cmd = "/workspaces"
         else:
             await self._safe_callback_answer(query, "无效的设置回调数据。")
             return
@@ -2040,7 +2047,8 @@ class WlCodexHandlers:
                 controller_cmd,
                 _ctx(update),
             )
-            await self._safe_callback_answer(query, "已切换")
+            answer_text = "已打开" if controller_cmd == "/workspaces" else "已切换"
+            await self._safe_callback_answer(query, answer_text)
             await self._safe_callback_edit(
                 update, query, response.text, response.buttons
             )

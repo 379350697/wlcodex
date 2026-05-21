@@ -1666,6 +1666,13 @@ async def test_workspaces_command_lists_configured_workspaces(ctrl: CommandContr
 
     assert "可用工作区" in response.text
     assert "wlcodex" in response.text
+    flat_buttons = [button for row in response.buttons for button in row]
+    assert {
+        button["callback_data"] for button in flat_buttons
+    } == {
+        "settings:workspace:demo",
+        "settings:workspace:wlcodex",
+    }
 
 
 @pytest.mark.asyncio

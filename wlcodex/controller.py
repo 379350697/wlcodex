@@ -365,7 +365,10 @@ class CommandController:
                         active_alias = active.workspace_alias
                 workspaces = list(self._service._workspaces.values())
                 return ControllerResponse(
-                    render_workspace_list(workspaces, active_alias=active_alias)
+                    render_workspace_list(workspaces, active_alias=active_alias),
+                    buttons=self._workspace_selection_buttons(
+                        workspaces, active_alias=active_alias
+                    ),
                 )
 
             # --- New conversation commands ---
@@ -408,6 +411,21 @@ class CommandController:
             return ControllerResponse(f"错误：{exc}")
 
     # --- Conversation handlers ---
+
+    def _workspace_selection_buttons(
+        self, workspaces: list[object], *, active_alias: str = ""
+    ) -> list[list[dict[str, str]]]:
+        buttons: list[list[dict[str, str]]] = []
+        for workspace in workspaces:
+            alias = str(getattr(workspace, "alias", "")).strip()
+            if not alias:
+                continue
+            label = f"当前 {alias}" if alias == active_alias else f"切换 {alias}"
+            buttons.append([{
+                "text": label,
+                "callback_data": f"settings:workspace:{alias}",
+            }])
+        return buttons
 
     async def handle_conversation_text(
         self, text: str, telegram_context: dict[str, Any] | None = None

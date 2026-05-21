@@ -942,8 +942,40 @@ async def test_workbench_history_restore_buttons_use_titles_not_ids():
 
 
 @pytest.mark.asyncio
+async def test_workspaces_command_sends_selection_buttons():
+    """The /workspaces list must be actionable, not just readable text."""
+    controller = MagicMock()
+    controller.handle = AsyncMock(
+        return_value=SimpleNamespace(
+            text="可用工作区\n\n* demo",
+            buttons=[[{
+                "text": "切换 demo",
+                "callback_data": "settings:workspace:demo",
+            }]],
+        )
+    )
+
+    handlers = _make_handlers(controller=controller)
+    sent: list[tuple[int, str, object]] = []
+
+    async def fake_send(chat_id, text, buttons=None):
+        sent.append((chat_id, text, buttons))
+        return 1001
+
+    handlers.send_telegram = fake_send
+
+    await handlers.workspaces(_make_update("/workspaces"), None)
+
+    assert sent
+    assert sent[-1][2] == [[{
+        "text": "切换 demo",
+        "callback_data": "settings:workspace:demo",
+    }]]
+
+
+@pytest.mark.asyncio
 async def test_settings_model_and_workspace_callbacks_route():
-    """/model and /switch buttons must route to controller."""
+    """/model and workspace picker buttons must route to controller."""
     controller = MagicMock()
     controller.handle = AsyncMock(
         return_value=SimpleNamespace(text="ok", buttons=None)
@@ -953,7 +985,8 @@ async def test_settings_model_and_workspace_callbacks_route():
 
     cases = [
         ("settings:model", "/model"),
-        ("settings:workspace", "/switch"),
+        ("settings:workspace", "/workspaces"),
+        ("settings:workspace:demo", "/switch demo"),
     ]
 
     for cb_data, expected_cmd in cases:
