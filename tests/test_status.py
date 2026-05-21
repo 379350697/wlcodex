@@ -358,7 +358,24 @@ def test_render_workspace_list_marks_active_workspace() -> None:
 
     text = render_workspace_list(workspaces, active_alias="lightfee")
 
-    assert "可用工作区" in text
-    assert "wlcodex" in text
-    assert "lightfee" in text
-    assert "当前" in text
+    assert "选择工作区" in text
+    assert "当前工作区：lightfee" in text
+    assert "wlcodex" not in text
+    assert "/repo" not in text
+
+
+def test_render_workspace_list_without_active_workspace_stays_compact() -> None:
+    from wlcodex.config import WorkspaceConfig
+    from wlcodex.status import render_workspace_list
+    from pathlib import Path
+
+    workspaces = [
+        WorkspaceConfig("wlcodex", Path("/repo/wlcodex"), True),
+        WorkspaceConfig("lightfee", Path("/repo/LightFee"), True),
+    ]
+
+    text = render_workspace_list(workspaces)
+
+    assert text == "选择工作区"
+    assert "wlcodex" not in text
+    assert "lightfee" not in text

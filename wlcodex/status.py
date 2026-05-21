@@ -325,15 +325,9 @@ def render_workspace_list(
     if not workspaces:
         return "当前没有可用工作区。请检查配置。"
 
-    lines = ["可用工作区", ""]
-    for workspace in workspaces:
-        alias = str(getattr(workspace, "alias", ""))
-        path = str(getattr(workspace, "path", ""))
-        writable = "可写" if bool(getattr(workspace, "allow_write", False)) else "只读"
-        current = " · 当前" if alias == active_alias else ""
-        marker = "*" if alias == active_alias else " "
-        lines.append(f"{marker} {alias}  {path}  {writable}{current}")
-    return "\n".join(lines)
+    if active_alias:
+        return f"选择工作区\n当前工作区：{active_alias}"
+    return "选择工作区"
 
 
 def _format_dt(value: object) -> str:

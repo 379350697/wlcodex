@@ -947,7 +947,7 @@ async def test_workspaces_command_sends_selection_buttons():
     controller = MagicMock()
     controller.handle = AsyncMock(
         return_value=SimpleNamespace(
-            text="可用工作区\n\n* demo",
+            text="选择工作区",
             buttons=[[{
                 "text": "切换 demo",
                 "callback_data": "settings:workspace:demo",
@@ -967,6 +967,7 @@ async def test_workspaces_command_sends_selection_buttons():
     await handlers.workspaces(_make_update("/workspaces"), None)
 
     assert sent
+    assert sent[-1][1] == "选择工作区"
     assert sent[-1][2] == [[{
         "text": "切换 demo",
         "callback_data": "settings:workspace:demo",

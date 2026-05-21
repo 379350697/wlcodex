@@ -1664,9 +1664,11 @@ async def test_workbenches_command_lists_archived_conversations(ctrl: CommandCon
 async def test_workspaces_command_lists_configured_workspaces(ctrl: CommandController) -> None:
     response = await ctrl.handle("/workspaces", {"chat_id": 100, "user_id": 7})
 
-    assert "可用工作区" in response.text
-    assert "wlcodex" in response.text
+    assert response.text == "选择工作区"
+    assert "demo" not in response.text
+    assert "wlcodex" not in response.text
     flat_buttons = [button for row in response.buttons for button in row]
+    assert {button["text"] for button in flat_buttons} == {"切换 demo", "切换 wlcodex"}
     assert {
         button["callback_data"] for button in flat_buttons
     } == {
