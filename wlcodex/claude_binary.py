@@ -11,6 +11,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+_CLAUDE_ENV_DENY_LIST: tuple[str, ...] = (
+    "WLCODEX_TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_API_TOKEN",
+    "TELEGRAM_API_ID",
+    "TELEGRAM_API_HASH",
+    "WLC_CHAT_ID",
+    "WLCODEX_CHAT_ID",
+)
+
+_CLAUDE_ENV_DENY_SUBSTRINGS: tuple[str, ...] = (
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_API_TOKEN",
+)
+
+
 @dataclass(frozen=True)
 class ClaudeBinaryResolution:
     binary: str
@@ -31,6 +47,7 @@ class ClaudeCliCapabilities:
     model: bool = False
     effort: bool = False
     resume: bool = False
+    probe_error: str = ""
 
     @classmethod
     def minimal(cls) -> "ClaudeCliCapabilities":
@@ -130,11 +147,13 @@ async def probe_claude_capabilities(
     binary: str,
     *,
     timeout_seconds: float = 5.0,
+    env: Mapping[str, str] | None = None,
 ) -> ClaudeCliCapabilities:
     try:
         proc = await asyncio.create_subprocess_exec(
             binary,
             "--help",
+            env=sanitized_claude_env(env),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -142,6 +161,8 @@ async def probe_claude_capabilities(
             proc.communicate(),
             timeout=timeout_seconds,
         )
+    except FileNotFoundError:
+        return ClaudeCliCapabilities(probe_error="binary_not_found")
     except Exception:
         return ClaudeCliCapabilities.minimal()
 
@@ -152,6 +173,21 @@ async def probe_claude_capabilities(
         text += "\n" + stderr.decode("utf-8", errors="replace")
     caps = parse_claude_help(text)
     return caps if caps.print_prompt else ClaudeCliCapabilities.minimal()
+
+
+def sanitized_claude_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return a Claude subprocess environment without Telegram delivery secrets."""
+    source = env if env is not None else os.environ
+    result = dict(source)
+    for key in list(result.keys()):
+        if key in _CLAUDE_ENV_DENY_LIST:
+            del result[key]
+            continue
+        for sub in _CLAUDE_ENV_DENY_SUBSTRINGS:
+            if sub in key:
+                del result[key]
+                break
+    return result
 
 
 def _resolve_command_or_path(value: str, env: Mapping[str, str]) -> str:

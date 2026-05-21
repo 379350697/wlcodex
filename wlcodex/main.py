@@ -367,12 +367,26 @@ def main() -> None:
     claude_backend = None
     if config.claude.enabled:
         resolution = resolve_claude_binary(config.claude.binary)
+        binary_resolution_error = ""
         if resolution.warning:
             logger.warning("Claude binary resolution warning: %s", resolution.warning)
         if not resolution.binary:
+            attempted = (
+                "WLCODEX_CLAUDE_BINARY",
+                *(
+                    item
+                    for item in resolution.attempted
+                    if item != "WLCODEX_CLAUDE_BINARY"
+                ),
+            )
+            binary_resolution_error = (
+                "Claude binary not found.\n"
+                f"Tried: {', '.join(attempted)}.\n"
+                "Set WLCODEX_CLAUDE_BINARY or install Claude Code CLI."
+            )
             logger.error(
                 "Claude binary not found. Tried: %s",
-                ", ".join(resolution.attempted),
+                ", ".join(attempted),
             )
         claude_backend = ClaudeBackend(ClaudeConfig(
             enabled=config.claude.enabled,
@@ -383,6 +397,7 @@ def main() -> None:
             permission_mode=claude_permission_mode,
             model=config.claude.model,
             effort=config.claude.effort,
+            binary_resolution_error=binary_resolution_error,
         ), permission_state=claude_permission_state)
         logger.info(
             "Claude backend enabled (binary: %s, source: %s, model: %s, effort: %s, permission: %s)",

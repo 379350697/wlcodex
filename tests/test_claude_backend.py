@@ -1277,3 +1277,102 @@ async def test_send_terminal_input_fails_clearly_when_resume_unsupported(
 
     with pytest.raises(RuntimeError, match="does not support --resume"):
         await backend.send_terminal_input("session-1", "continue")
+
+
+@pytest.mark.asyncio
+async def test_send_returns_actionable_binary_resolution_error() -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.agent_backend import AgentRequest
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            binary="auto",
+            binary_resolution_error=(
+                "Claude binary not found.\n"
+                "Tried: WLCODEX_CLAUDE_BINARY, configured binary, PATH claude, VS Code extension scan.\n"
+                "Set WLCODEX_CLAUDE_BINARY or install Claude Code CLI."
+            ),
+        )
+    )
+
+    result = await backend.send(AgentRequest(prompt="hello"))
+
+    assert result.exit_code == 1
+    assert "Claude binary not found." in result.text
+    assert "Tried:" in result.text
+    assert "WLCODEX_CLAUDE_BINARY" in result.text
+
+
+@pytest.mark.asyncio
+async def test_send_terminal_input_reports_missing_binary_before_resume_guard(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    backend = ClaudeBackend(
+        ClaudeConfig(enabled=True, binary=str(tmp_path / "missing-claude"))
+    )
+
+    with pytest.raises(RuntimeError, match="Claude binary not found"):
+        await backend.send_terminal_input("session-1", "continue")
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_capability_missing_when_hook_events_unsupported(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.agent_backend import AgentRequest
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+    from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        "if '--help' in sys.argv:\n"
+        "    print('Usage: claude')\n"
+        "    print('  -p, --print')\n"
+        "    print('  --output-format <format> stream-json')\n"
+        "    print('  --include-partial-messages')\n"
+        "    sys.exit(0)\n"
+        "print(json.dumps({'type': 'result', 'subtype': 'success'}), flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    source = ClaudeRuntimeSource(
+        store=store,
+        correlation_id="corr-capability",
+        agent_run_id=77,
+    )
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            binary=str(fake_claude),
+            request_timeout_seconds=1.0,
+            stream_idle_timeout_seconds=1.0,
+        ),
+        runtime_source=source,
+    )
+
+    _events = [
+        event
+        async for event in backend.send_streaming(AgentRequest(prompt="test"))
+    ]
+
+    stored = store.list_by_agent_run(77)
+    capability_events = [
+        event
+        for event in stored
+        if event.event_type == EventType.RUNTIME_CAPABILITY_MISSING
+    ]
+    assert len(capability_events) == 1
+    assert capability_events[0].payload["capability"] == "include-hook-events"

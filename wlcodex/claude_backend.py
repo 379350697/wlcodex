@@ -20,7 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from wlcodex.agent_backend import AgentRequest, AgentResult, AgentStreamEvent
-from wlcodex.claude_binary import ClaudeCliCapabilities, probe_claude_capabilities
+from wlcodex.claude_binary import (
+    ClaudeCliCapabilities,
+    probe_claude_capabilities,
+    sanitized_claude_env,
+)
 from wlcodex.claude_permissions import (
     ClaudePermissionState,
     normalize_claude_permission_mode,
@@ -33,35 +37,9 @@ logger = logging.getLogger(__name__)
 # Environment variable names (exact or prefix) stripped from Claude
 # subprocess environments.  Claude must never see Telegram delivery
 # credentials or any direct-messaging secrets.
-_CLAUDE_ENV_DENY_LIST: tuple[str, ...] = (
-    "WLCODEX_TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_API_TOKEN",
-    "TELEGRAM_API_ID",
-    "TELEGRAM_API_HASH",
-    "WLC_CHAT_ID",
-    "WLCODEX_CHAT_ID",
-)
-
-# Env var name substrings that trigger redaction.
-_CLAUDE_ENV_DENY_SUBSTRINGS: tuple[str, ...] = (
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_API_TOKEN",
-)
-
-
 def _sanitized_env() -> dict[str, str]:
     """Return a copy of ``os.environ`` with Telegram delivery secrets removed."""
-    env = dict(os.environ)
-    for key in list(env.keys()):
-        if key in _CLAUDE_ENV_DENY_LIST:
-            del env[key]
-            continue
-        for sub in _CLAUDE_ENV_DENY_SUBSTRINGS:
-            if sub in key:
-                del env[key]
-                break
-    return env
+    return sanitized_claude_env()
 
 
 @dataclass
@@ -75,6 +53,7 @@ class ClaudeConfig:
     permission_mode: str = "acceptEdits"
     model: str = "deepseek-v4-pro"
     effort: str = "max"
+    binary_resolution_error: str = ""
 
 
 class ClaudeBackend:
@@ -91,6 +70,7 @@ class ClaudeBackend:
         self._runtime_source = runtime_source
         self._cli_capabilities: ClaudeCliCapabilities | None = None
         self._hook_events_supported: bool | None = None
+        self._missing_capabilities_emitted: set[str] = set()
         self._last_session_id: str = ""
 
     @property
@@ -112,7 +92,18 @@ class ClaudeBackend:
         if not self._config.enabled:
             return AgentResult(text="Claude Code is not enabled.", exit_code=1)
 
-        await self._probe_cli_capabilities()
+        if self._config.binary_resolution_error:
+            return AgentResult(
+                text=self._binary_not_found_message(),
+                exit_code=1,
+            )
+
+        capabilities = await self._probe_cli_capabilities()
+        if capabilities.probe_error == "binary_not_found":
+            return AgentResult(
+                text=self._binary_not_found_message(),
+                exit_code=1,
+            )
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -156,7 +147,7 @@ class ClaudeBackend:
 
         except FileNotFoundError:
             return AgentResult(
-                text=f"Claude binary not found: {self._config.binary}",
+                text=self._binary_not_found_message(),
                 exit_code=1,
             )
         except Exception as exc:
@@ -171,7 +162,30 @@ class ClaudeBackend:
             yield AgentStreamEvent(delta="Claude Code is not enabled.", event_type="error")
             return
 
-        await self._probe_cli_capabilities()
+        if self._config.binary_resolution_error:
+            _emit_runtime_lifecycle(
+                self._runtime_source,
+                EventType.AGENT_RUN_FAILED,
+                payload={"reason": "binary_not_found", "binary": self._config.binary},
+            )
+            yield AgentStreamEvent(
+                delta=self._binary_not_found_message(),
+                event_type="error",
+            )
+            return
+
+        capabilities = await self._probe_cli_capabilities()
+        if capabilities.probe_error == "binary_not_found":
+            _emit_runtime_lifecycle(
+                self._runtime_source,
+                EventType.AGENT_RUN_FAILED,
+                payload={"reason": "binary_not_found", "binary": self._config.binary},
+            )
+            yield AgentStreamEvent(
+                delta=self._binary_not_found_message(),
+                event_type="error",
+            )
+            return
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -418,7 +432,7 @@ class ClaudeBackend:
                 },
             )
             yield AgentStreamEvent(
-                delta=f"Claude binary not found: {self._config.binary}",
+                delta=self._binary_not_found_message(),
                 event_type="error",
             )
         except Exception as exc:
@@ -452,8 +466,12 @@ class ClaudeBackend:
             )
         if not self._config.enabled:
             raise RuntimeError("Claude backend is not enabled.")
+        if self._config.binary_resolution_error:
+            raise RuntimeError(self._binary_not_found_message())
 
         capabilities = await self._probe_cli_capabilities()
+        if capabilities.probe_error == "binary_not_found":
+            raise RuntimeError(self._binary_not_found_message())
         if not capabilities.resume:
             raise RuntimeError(
                 "Claude CLI does not support --resume; update Claude Code or run a new Claude task first."
@@ -544,6 +562,8 @@ class ClaudeBackend:
                 self._config.binary,
             )
             self._hook_events_supported = self._cli_capabilities.include_hook_events
+        if not self._cli_capabilities.include_hook_events:
+            self._emit_capability_missing_once("include-hook-events")
         return self._cli_capabilities
 
     def _capabilities_for_args(self) -> ClaudeCliCapabilities:
@@ -562,23 +582,39 @@ class ClaudeBackend:
 
     async def _probe_hook_events(self) -> bool:
         if self._hook_events_supported is not None:
+            if not self._hook_events_supported:
+                self._emit_capability_missing_once("include-hook-events")
             return self._hook_events_supported
 
         capabilities = await self._probe_cli_capabilities()
         supported = capabilities.include_hook_events
         self._hook_events_supported = supported
 
-        if not supported and self._runtime_source is not None:
-            try:
-                from wlcodex.claude_runtime_source import ClaudeRuntimeSource
-                if isinstance(self._runtime_source, ClaudeRuntimeSource):
-                    self._runtime_source.emit_capability_missing(
-                        "include-hook-events"
-                    )
-            except Exception:
-                logger.debug("Failed to emit capability missing event", exc_info=True)
+        if not supported:
+            self._emit_capability_missing_once("include-hook-events")
 
         return supported
+
+    def _emit_capability_missing_once(self, capability: str) -> None:
+        if capability in self._missing_capabilities_emitted:
+            return
+        if self._runtime_source is None:
+            return
+        try:
+            from wlcodex.claude_runtime_source import ClaudeRuntimeSource
+            if isinstance(self._runtime_source, ClaudeRuntimeSource):
+                self._runtime_source.emit_capability_missing(capability)
+                self._missing_capabilities_emitted.add(capability)
+        except Exception:
+            logger.debug("Failed to emit capability missing event", exc_info=True)
+
+    def _binary_not_found_message(self) -> str:
+        if self._config.binary_resolution_error:
+            return self._config.binary_resolution_error
+        return (
+            f"Claude binary not found: {self._config.binary}\n"
+            "Set WLCODEX_CLAUDE_BINARY or install Claude Code CLI."
+        )
 
 
 def _emit_runtime(runtime_source: object | None, parsed: ClaudeStreamEvent) -> None:

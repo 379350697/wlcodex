@@ -7,6 +7,7 @@ import pytest
 from wlcodex.claude_binary import (
     ClaudeCliCapabilities,
     parse_claude_help,
+    probe_claude_capabilities,
     resolve_claude_binary,
 )
 
@@ -149,3 +150,56 @@ def test_parse_minimal_help_disables_optional_flags() -> None:
     assert caps.model is False
     assert caps.effort is False
     assert caps.resume is False
+
+
+@pytest.mark.asyncio
+async def test_probe_claude_capabilities_strips_telegram_secrets(
+    tmp_path: Path,
+) -> None:
+    fake_claude = tmp_path / "fake-claude"
+    marker = tmp_path / "env-marker.txt"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "leaked = [\n"
+        "    key for key in os.environ\n"
+        "    if key in {'WLCODEX_TELEGRAM_BOT_TOKEN', 'TELEGRAM_API_HASH', 'WLC_CHAT_ID'}\n"
+        "    or 'TELEGRAM_BOT_TOKEN' in key\n"
+        "    or 'TELEGRAM_API_TOKEN' in key\n"
+        "]\n"
+        "Path(os.environ['WLCODEX_PROBE_MARKER_FILE']).write_text(\n"
+        "    '\\n'.join(sorted(leaked)) or 'clean', encoding='utf-8'\n"
+        ")\n"
+        "print('Usage: claude')\n"
+        "print('  -p, --print')\n"
+        "print('  --model <model>')\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    caps = await probe_claude_capabilities(
+        str(fake_claude),
+        env={
+            "WLCODEX_TELEGRAM_BOT_TOKEN": "secret-token",
+            "TELEGRAM_API_HASH": "secret-hash",
+            "WLC_CHAT_ID": "123",
+            "CUSTOM_TELEGRAM_BOT_TOKEN": "custom-secret",
+            "WLCODEX_PROBE_MARKER_FILE": str(marker),
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+
+    assert marker.read_text(encoding="utf-8") == "clean"
+    assert caps.print_prompt is True
+    assert caps.model is True
+
+
+@pytest.mark.asyncio
+async def test_probe_claude_capabilities_marks_missing_binary(
+    tmp_path: Path,
+) -> None:
+    caps = await probe_claude_capabilities(str(tmp_path / "missing-claude"))
+
+    assert caps.print_prompt is False
+    assert caps.probe_error == "binary_not_found"
