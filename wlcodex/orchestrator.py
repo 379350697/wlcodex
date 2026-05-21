@@ -204,6 +204,83 @@ def _is_reply_only_request(text: str) -> bool:
     return any(marker in lowered or marker in text for marker in markers)
 
 
+def _is_read_only_diagnostic_request(text: str) -> bool:
+    """Return true for observability/status questions that should not mutate."""
+    lowered = text.lower()
+    mutation_markers = (
+        "修复",
+        "修改",
+        "改代码",
+        "实现",
+        "落地",
+        "提交",
+        "推送",
+        "重启",
+        "重新部署",
+        "部署最新",
+        "部署到",
+        "回滚",
+        "删除",
+        "创建",
+        "补测试",
+        "fix",
+        "implement",
+        "modify",
+        "change code",
+        "restart",
+        "redeploy",
+        "rollback",
+        "delete",
+    )
+    if any(marker in lowered or marker in text for marker in mutation_markers):
+        return False
+
+    read_markers = (
+        "看下",
+        "看看",
+        "查一下",
+        "查询",
+        "检查",
+        "确认",
+        "判断",
+        "是否",
+        "有没有",
+        "有改善",
+        "有生效",
+        "生效吗",
+        "日志",
+        "状态",
+        "指标",
+        "最近",
+        "上一版",
+        "check",
+        "inspect",
+        "query",
+        "whether",
+        "logs",
+        "status",
+    )
+    scope_markers = (
+        "云服务器",
+        "服务器",
+        "部署",
+        "版本",
+        "更新",
+        "日志",
+        "指标",
+        "ready",
+        "local l2",
+        "service",
+        "journal",
+        "runtime",
+        "health",
+    )
+    return (
+        any(marker in lowered or marker in text for marker in read_markers)
+        and any(marker in lowered or marker in text for marker in scope_markers)
+    )
+
+
 def _collect_workspace_evidence(workspace_path: str) -> tuple[list[str], str, str]:
     """Collect changed files, diff stat, and test info from workspace.
 
@@ -517,7 +594,10 @@ class ChiefEngineerOrchestrator:
             return result
 
         # Check if Codex says no implementation needed
-        if _is_reply_only_request(user_goal):
+        if (
+            _is_reply_only_request(user_goal)
+            or _is_read_only_diagnostic_request(user_goal)
+        ):
             result.status = "passed"
             result.verification_summary = analysis
             return result
@@ -819,7 +899,10 @@ class ChiefEngineerOrchestrator:
         )
 
         # Check if Codex says no implementation needed
-        if _is_reply_only_request(user_goal):
+        if (
+            _is_reply_only_request(user_goal)
+            or _is_read_only_diagnostic_request(user_goal)
+        ):
             result.status = "passed"
             result.verification_summary = analysis
             yield OrchestrationProgress(

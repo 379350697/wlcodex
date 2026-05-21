@@ -146,6 +146,31 @@ async def test_orchestrator_does_not_implement_reply_only_probe() -> None:
     assert claude.prompts == []
 
 
+@pytest.mark.asyncio
+async def test_orchestrator_does_not_implement_read_only_ops_diagnostic() -> None:
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = [
+        (
+            "结论：下午部署已经生效，local L2 ready 有改善。\n"
+            '{"summary":"后续可以修复残留指标",'
+            '"needs_implementation":true,'
+            '"files_to_touch":["lightfee/runtime.py"],'
+            '"implementation_steps":["补充诊断"]}'
+        )
+    ]
+    claude = FakeClaudeWithSend()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude)
+    result = await orchestrator.run(
+        "云服务器日志：请看下上一版部署后最近 local l2 ready 有改善吗，下午更新有生效吗"
+    )
+
+    assert result.status == "passed"
+    assert result.verify_round == 0
+    assert len(codex.prompts) == 1
+    assert claude.prompts == []
+
+
 def test_verification_decision_parse_pass() -> None:
     d = VerificationDecision.parse("decision: pass\nsummary: All checks passed")
     assert d.decision == "pass"
@@ -600,6 +625,40 @@ async def test_run_streaming_does_not_implement_reply_only_probe() -> None:
     events = []
     async for progress in orchestrator.run_streaming(
         "请用中文只回复：wlcodex telegram live ok"
+    ):
+        events.append(progress)
+
+    assert len(codex.prompts) == 1
+    assert claude.prompts == []
+    assert not any(
+        event.phase == OrchestrationProgress.IMPL_DELTA for event in events
+    )
+    complete_events = [
+        event for event in events
+        if event.phase == OrchestrationProgress.COMPLETE
+    ]
+    assert complete_events[0].result_status == "passed"
+    assert complete_events[0].round_num == 0
+
+
+@pytest.mark.asyncio
+async def test_run_streaming_does_not_implement_read_only_ops_diagnostic() -> None:
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = [
+        (
+            "结论：下午部署已经生效，local L2 ready 有改善。\n"
+            '{"summary":"后续可以修复残留指标",'
+            '"needs_implementation":true,'
+            '"files_to_touch":["lightfee/runtime.py"],'
+            '"implementation_steps":["补充诊断"]}'
+        )
+    ]
+    claude = FakeClaudeStreaming()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude)
+    events = []
+    async for progress in orchestrator.run_streaming(
+        "云服务器日志：请看下上一版部署后最近 local l2 ready 有改善吗，下午更新有生效吗"
     ):
         events.append(progress)
 
