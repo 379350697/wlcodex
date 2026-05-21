@@ -1714,6 +1714,78 @@ async def test_restore_workbench_callback_restores_archived_conversation(ctrl: C
     assert ledger.get_conversation(current.id).archived_at is not None
 
 
+@pytest.mark.asyncio
+async def test_restore_workbench_records_activation_and_returns_to_product(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", Path("/tmp/wlcodex"), True),
+    ))
+    controller = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        runtime_event_store=store,
+    )
+    old = ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Old terminal workbench",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ledger.archive_conversation(old.id)
+    current = ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Current",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.CONVERSATION_MODE_SWITCHED,
+        aggregate_type=AggregateType.CONVERSATION,
+        aggregate_id=str(old.id),
+        correlation_id="old-terminal-mode",
+        source=EventSource.TELEGRAM,
+        actor="user",
+        visibility=Visibility.USER,
+        payload={
+            "chat_id": 100,
+            "conversation_id": old.id,
+            "from_mode": "product",
+            "to_mode": "terminal",
+            "active_agent": "codex",
+        },
+        occurred_at=now_iso(),
+        conversation_id=old.id,
+    ))
+
+    from wlcodex.conversation_callback import ConversationCallback
+
+    response = await controller.handle_conversation_callback(
+        ConversationCallback(conversation_id=old.id, action="restore_workbench")
+    )
+
+    assert "已恢复工作台" in response.text
+    old_events = store.list_by_conversation(old.id)
+    current_events = store.list_by_conversation(current.id)
+    old_event_types = [event.event_type for event in old_events]
+    current_event_types = [event.event_type for event in current_events]
+    assert EventType.CONVERSATION_ACTIVATED in old_event_types
+    assert EventType.CONVERSATION_CLOSED in current_event_types
+    mode_events = [
+        event for event in old_events
+        if event.event_type == EventType.CONVERSATION_MODE_SWITCHED
+    ]
+    assert mode_events[-1].payload["to_mode"] == "product"
+
+
 # ---------------------------------------------------------------------------
 # Workbench history and workspace switching integration tests
 # ---------------------------------------------------------------------------
@@ -1740,20 +1812,32 @@ async def test_new_new_history_restore_status_flow(ctrl: CommandController) -> N
 
 @pytest.mark.asyncio
 async def test_sessions_remains_current_workbench_scoped(ctrl: CommandController) -> None:
-    """Verify /sessions does not leak into global Workbench history."""
+    """Verify /sessions stays Agent-session scoped, not Workbench history."""
     first = ctrl._ledger.create_conversation(
         chat_id=100, user_id=7, title="First",
         mode="chief_engineer", workspace_alias="wlcodex",
     )
+    ctrl._ledger.create_agent_run(
+        conversation_id=first.id,
+        agent="codex",
+        role="analysis",
+        prompt_packet_summary="First hidden run",
+    )
     ctrl._ledger.archive_conversation(first.id)
-    ctrl._ledger.create_conversation(
+    second = ctrl._ledger.create_conversation(
         chat_id=100, user_id=7, title="Second",
         mode="chief_engineer", workspace_alias="wlcodex",
+    )
+    ctrl._ledger.create_agent_run(
+        conversation_id=second.id,
+        agent="claude",
+        role="implementation",
+        prompt_packet_summary="Second visible run",
     )
 
     response = await ctrl.handle("/sessions", {"chat_id": 100, "user_id": 7})
 
-    # /sessions must only show active (not archived) Workbenches — it stays
-    # scoped to the current Workbench's context, not global history
+    assert "历史现场" in response.text
+    assert "工作台列表" not in response.text
     assert "First" not in response.text
-    assert "Second" in response.text
+    assert "Second visible run" in response.text

@@ -89,7 +89,6 @@ from wlcodex.status import (
     MODE_LABELS,
     render_conversation_help,
     render_conversation_status,
-    render_session_list,
     render_workbench_history,
     render_workspace_list,
 )
@@ -331,11 +330,17 @@ class CommandController:
             elif isinstance(command, CodexSessionsCommand):
                 if self._ledger is not None and telegram_context:
                     chat_id = telegram_context.get("chat_id", 0)
-                    convos = self._ledger.list_conversations_by_chat(chat_id)
-                    if convos:
-                        return ControllerResponse(render_session_list(convos))
+                    active = self._ledger.get_active_conversation(chat_id)
+                    if active is not None:
+                        from wlcodex.workbench.rendering import render_session_library
+                        from wlcodex.workbench.sessions import AgentSessionLibrary
+
+                        sessions = AgentSessionLibrary(self._ledger).list_for_workbench(
+                            active.id
+                        )
+                        return ControllerResponse(render_session_library(sessions))
                 return ControllerResponse(
-                    "当前还没有历史现场。发送 /new 开始新的工作台。"
+                    "当前还没有工作台。发送 /new 开始一个新的工作台。"
                 )
 
             elif isinstance(command, WorkbenchHistoryCommand):
@@ -1777,9 +1782,12 @@ class CommandController:
         if self._ledger is None:
             return ControllerResponse("系统未完全初始化。请检查配置。")
         try:
+            target = self._ledger.get_conversation(conversation_id)
+            previous_active = self._ledger.get_active_conversation(target.chat_id)
             restored = self._ledger.restore_conversation(conversation_id)
         except KeyError:
             return ControllerResponse("工作台不存在或已被删除。")
+        self._record_workbench_restore_events(restored, previous_active)
         try:
             self._service.get_workspace(restored.workspace_alias)
             workspace_note = f"工作区：{restored.workspace_alias}"
@@ -1793,6 +1801,87 @@ class CommandController:
             f"{workspace_note}\n\n"
             "直接发消息会继续这个工作台。"
         )
+
+    def _record_workbench_restore_events(
+        self, restored: object, previous_active: object | None
+    ) -> None:
+        correlation_id = self._new_correlation_id()
+        if previous_active is not None and previous_active.id != restored.id:
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.CONVERSATION_CLOSED,
+                aggregate_type=AggregateType.CONVERSATION,
+                aggregate_id=str(previous_active.id),
+                correlation_id=correlation_id,
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.USER,
+                payload={
+                    "chat_id": previous_active.chat_id,
+                    "conversation_id": previous_active.id,
+                    "reason": "workbench_restore",
+                    "activated_conversation_id": restored.id,
+                },
+                occurred_at=now_iso(),
+                conversation_id=previous_active.id,
+            ))
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.CONVERSATION_ACTIVATED,
+            aggregate_type=AggregateType.CONVERSATION,
+            aggregate_id=str(restored.id),
+            correlation_id=correlation_id,
+            source=EventSource.CONTROLLER,
+            actor="controller",
+            visibility=Visibility.USER,
+            payload={
+                "chat_id": restored.chat_id,
+                "conversation_id": restored.id,
+                "previous_conversation_id": (
+                    previous_active.id if previous_active is not None else None
+                ),
+                "workspace_alias": restored.workspace_alias,
+                "mode": restored.mode,
+            },
+            occurred_at=now_iso(),
+            conversation_id=restored.id,
+        ))
+        previous_surface_mode = self._latest_surface_mode(restored.id)
+        if previous_surface_mode is not None and previous_surface_mode != "product":
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.CONVERSATION_MODE_SWITCHED,
+                aggregate_type=AggregateType.CONVERSATION,
+                aggregate_id=str(restored.id),
+                correlation_id=correlation_id,
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.USER,
+                payload={
+                    "chat_id": restored.chat_id,
+                    "conversation_id": restored.id,
+                    "from_mode": previous_surface_mode,
+                    "to_mode": "product",
+                    "reason": "workbench_restore",
+                },
+                occurred_at=now_iso(),
+                conversation_id=restored.id,
+            ))
+
+    def _latest_surface_mode(self, conversation_id: int) -> str | None:
+        if self._store is None:
+            return None
+        try:
+            events = self._store.list_recent_for_conversation(conversation_id, limit=200)
+        except Exception:
+            logger.debug("Failed to read latest surface mode", exc_info=True)
+            return None
+        for event in reversed(events):
+            if event.event_type != EventType.CONVERSATION_MODE_SWITCHED:
+                continue
+            mode = event.payload.get("to_mode")
+            return mode if isinstance(mode, str) else None
+        return None
 
     async def handle_stop_current(
         self, ctx: dict[str, Any] | None = None
