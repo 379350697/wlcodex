@@ -1627,3 +1627,133 @@ async def test_orchestrator_exception_marks_runs_as_failed(tmp_path: Path) -> No
     analysis_runs = [r for r in agent_runs if r.agent == "codex" and r.role == "analysis"]
     assert len(analysis_runs) >= 1
     assert analysis_runs[0].status == AgentRunStatus.FAILED.value
+
+
+# ---------------------------------------------------------------------------
+# Workbench history and workspace switching
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_workbenches_command_lists_archived_conversations(ctrl: CommandController) -> None:
+    ledger = ctrl._ledger
+    first = ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="First",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ledger.archive_conversation(first.id)
+    ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Second",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+
+    response = await ctrl.handle("/workbenches", {"chat_id": 100, "user_id": 7})
+
+    assert "工作台历史" in response.text
+    assert "First" in response.text
+    assert "Second" in response.text
+
+
+@pytest.mark.asyncio
+async def test_workspaces_command_lists_configured_workspaces(ctrl: CommandController) -> None:
+    response = await ctrl.handle("/workspaces", {"chat_id": 100, "user_id": 7})
+
+    assert "可用工作区" in response.text
+    assert "wlcodex" in response.text
+
+
+@pytest.mark.asyncio
+async def test_switch_unknown_workspace_mentions_workspaces(ctrl: CommandController) -> None:
+    conversation = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Demo",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+
+    response = await ctrl.handle("/switch missing", {"chat_id": 100, "user_id": 7})
+
+    assert conversation.id
+    assert "/workspaces" in response.text
+
+
+@pytest.mark.asyncio
+async def test_restore_workbench_callback_restores_archived_conversation(ctrl: CommandController) -> None:
+    from wlcodex.conversation_callback import ConversationCallback
+
+    ledger = ctrl._ledger
+    old = ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Old",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ledger.archive_conversation(old.id)
+    current = ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Current",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation_id=old.id, action="restore_workbench")
+    )
+
+    assert "已恢复工作台" in response.text
+    assert ledger.get_conversation(old.id).archived_at is None
+    assert ledger.get_conversation(current.id).archived_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Workbench history and workspace switching integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_new_new_history_restore_status_flow(ctrl: CommandController) -> None:
+    await ctrl.handle("/new First", {"chat_id": 100, "user_id": 7})
+    first = ctrl._ledger.get_active_conversation(100)
+    await ctrl.handle("/new Second", {"chat_id": 100, "user_id": 7})
+
+    history = await ctrl.handle("/history", {"chat_id": 100, "user_id": 7})
+    assert "First" in history.text
+    assert "Second" in history.text
+
+    from wlcodex.conversation_callback import ConversationCallback
+    await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation_id=first.id, action="restore_workbench")
+    )
+
+    status = await ctrl.handle("/status", {"chat_id": 100, "user_id": 7})
+    assert "First" in status.text
+
+
+@pytest.mark.asyncio
+async def test_sessions_remains_current_workbench_scoped(ctrl: CommandController) -> None:
+    """Verify /sessions does not leak into global Workbench history."""
+    first = ctrl._ledger.create_conversation(
+        chat_id=100, user_id=7, title="First",
+        mode="chief_engineer", workspace_alias="wlcodex",
+    )
+    ctrl._ledger.archive_conversation(first.id)
+    ctrl._ledger.create_conversation(
+        chat_id=100, user_id=7, title="Second",
+        mode="chief_engineer", workspace_alias="wlcodex",
+    )
+
+    response = await ctrl.handle("/sessions", {"chat_id": 100, "user_id": 7})
+
+    # /sessions must only show active (not archived) Workbenches — it stays
+    # scoped to the current Workbench's context, not global history
+    assert "First" not in response.text
+    assert "Second" in response.text

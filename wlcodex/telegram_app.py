@@ -835,6 +835,36 @@ class WlCodexHandlers:
         response = await self._controller.handle("/health", _ctx(update))
         await self.send_telegram(update.effective_chat.id, response.text)
 
+    # --- Workbench history and workspace commands ---
+
+    async def workbenches(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        chat_id = update.effective_chat.id
+        buttons: list[list[dict[str, str]]] = []
+        if self._ledger is not None:
+            sessions = self._ledger.list_conversations_by_chat(
+                chat_id, include_archived=True
+            )
+            for session in sessions:
+                if session.archived_at is not None:
+                    buttons.append([{
+                        "text": f"恢复 #{session.id}",
+                        "callback_data": f"conv:{session.id}:restore_workbench",
+                    }])
+        await self.send_telegram(chat_id, response.text, buttons=buttons or None)
+
+    async def workspaces(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        response = await self._controller.handle(
+            update.effective_message.text, _ctx(update)
+        )
+        await self.send_telegram(update.effective_chat.id, response.text)
+
     # --- Dual-surface mode command handlers ---
 
     async def mode_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2327,6 +2357,11 @@ def build_application(
     application.add_handler(CommandHandler("codex_sessions", handlers.codex_sessions))
     application.add_handler(CommandHandler("sessions", handlers.codex_sessions))
     application.add_handler(CommandHandler("health", handlers.health))
+
+    # Workbench history and workspace commands
+    application.add_handler(CommandHandler("workbenches", handlers.workbenches))
+    application.add_handler(CommandHandler("history", handlers.workbenches))
+    application.add_handler(CommandHandler("workspaces", handlers.workspaces))
 
     # Dual-surface mode commands
     application.add_handler(CommandHandler("mode", handlers.mode_cmd))

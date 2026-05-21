@@ -16,6 +16,9 @@ VERIFY = "verify"
 RETRY = "retry"
 CONTINUE = "continue"
 NEW_CONVO = "new"
+RESTORE_WORKBENCH = "restore_workbench"
+WORKBENCH_STATUS = "workbench_status"
+WORKBENCH_SESSIONS = "workbench_sessions"
 
 
 @dataclass(frozen=True)

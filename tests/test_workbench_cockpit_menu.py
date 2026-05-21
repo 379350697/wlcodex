@@ -9,7 +9,10 @@ from wlcodex.menu import build_bot_commands
 
 # ── Menu shape ──────────────────────────────────────────────────────────
 
-EXPECTED_NATURAL_MENU = ["new", "status", "terminal", "diff", "settings", "help"]
+EXPECTED_NATURAL_MENU = [
+    "new", "status", "terminal", "history", "workspaces",
+    "diff", "settings", "help",
+]
 
 HIDDEN_FROM_NATURAL = [
     "codex",
@@ -44,8 +47,8 @@ FORBIDDEN_HELP_PHRASES = [
 ]
 
 
-def test_natural_menu_has_exactly_six_daily_actions():
-    """The natural menu exposes only cockpit daily actions."""
+def test_natural_menu_has_exactly_eight_daily_actions():
+    """The natural menu exposes cockpit daily actions including history and workspaces."""
     commands = build_bot_commands(profile="natural")
     names = [cmd[0] for cmd in commands]
     assert names == EXPECTED_NATURAL_MENU

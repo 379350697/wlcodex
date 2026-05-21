@@ -93,6 +93,8 @@ def render_help() -> str:
   /stop — 停止当前运行
   /status — 查看当前工作台
   /sessions — 查看历史现场
+  /history — 查看历史工作台
+  /workspaces — 查看可用工作区
   /switch <工作区> — 切换工作区
   /model — 切换或查看当前模型
   /claude_mode — 切换 Claude 权限模式
@@ -286,6 +288,8 @@ def render_conversation_help(profile: str = "natural") -> str:
   • /stop — 停止当前运行
   • /status — 查看当前对话状态
   • /sessions — 查看历史现场
+  • /history — 查看历史工作台
+  • /workspaces — 查看可用工作区
   • /switch <workspace> — 切换工作区
   • /model — 切换或查看当前模型
   • /claude_mode — 切换 Claude 权限模式
@@ -299,6 +303,48 @@ def render_conversation_help(profile: str = "natural") -> str:
   • 只允许白名单用户
   • 每个工作区同一时间只允许一个写执行
   • 状态和日志永远不会回灌到 Codex 上下文"""
+
+
+def render_workbench_history(sessions: Sequence[ConversationSession]) -> str:
+    if not sessions:
+        return "还没有历史工作台。发送 /new 开始新的工作台。"
+
+    lines = ["工作台历史", ""]
+    for session in sessions:
+        mode_label = MODE_LABELS.get(session.mode, session.mode)
+        state = "当前" if session.archived_at is None else "已归档"
+        updated = _format_dt(getattr(session, "updated_at", None))
+        marker = "*" if session.archived_at is None else " "
+        lines.append(
+            f"{marker} #{session.id} [{mode_label}] "
+            f"{_trim(session.title, 60)} · {session.workspace_alias} · "
+            f"{state} · {updated}"
+        )
+    return "\n".join(lines)
+
+
+def render_workspace_list(
+    workspaces: Sequence[object], *, active_alias: str = ""
+) -> str:
+    if not workspaces:
+        return "当前没有可用工作区。请检查配置。"
+
+    lines = ["可用工作区", ""]
+    for workspace in workspaces:
+        alias = str(getattr(workspace, "alias", ""))
+        path = str(getattr(workspace, "path", ""))
+        writable = "可写" if bool(getattr(workspace, "allow_write", False)) else "只读"
+        current = " · 当前" if alias == active_alias else ""
+        marker = "*" if alias == active_alias else " "
+        lines.append(f"{marker} {alias}  {path}  {writable}{current}")
+    return "\n".join(lines)
+
+
+def _format_dt(value: object) -> str:
+    if value is None:
+        return "未知时间"
+    text = str(value)
+    return text.replace("T", " ")[:16]
 
 
 def render_session_list(sessions: Sequence[ConversationSession]) -> str:

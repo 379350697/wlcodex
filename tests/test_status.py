@@ -308,3 +308,54 @@ def test_status_command_must_not_use_format_status_display():
     assert "#" not in response.text, (
         f"/status output must not contain internal IDs. Got: {response.text[:200]}"
     )
+
+
+def test_render_workbench_history_marks_active_and_archived() -> None:
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from wlcodex.status import render_workbench_history
+
+    now = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+    sessions = [
+        SimpleNamespace(
+            id=2,
+            title="Current",
+            mode="chief_engineer",
+            workspace_alias="wlcodex",
+            archived_at=None,
+            updated_at=now,
+        ),
+        SimpleNamespace(
+            id=1,
+            title="Old",
+            mode="codex_direct",
+            workspace_alias="lightfee",
+            archived_at=now,
+            updated_at=now,
+        ),
+    ]
+
+    text = render_workbench_history(sessions)
+
+    assert "工作台历史" in text
+    assert "#2" in text and "当前" in text
+    assert "#1" in text and "已归档" in text
+    assert "lightfee" in text
+
+
+def test_render_workspace_list_marks_active_workspace() -> None:
+    from wlcodex.config import WorkspaceConfig
+    from wlcodex.status import render_workspace_list
+    from pathlib import Path
+
+    workspaces = [
+        WorkspaceConfig("wlcodex", Path("/repo/wlcodex"), True),
+        WorkspaceConfig("lightfee", Path("/repo/LightFee"), True),
+    ]
+
+    text = render_workspace_list(workspaces, active_alias="lightfee")
+
+    assert "可用工作区" in text
+    assert "wlcodex" in text
+    assert "lightfee" in text
+    assert "当前" in text

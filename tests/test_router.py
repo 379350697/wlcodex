@@ -142,3 +142,16 @@ def test_parse_claude_permission_command_with_chinese_mode() -> None:
 def test_parse_rejects_continue_no_prompt() -> None:
     with pytest.raises(ParseError, match="用法"):
         parse_command("/continue 42")
+
+
+def test_parse_workbenches_command() -> None:
+    from wlcodex.router import WorkbenchHistoryCommand, parse_command
+
+    assert isinstance(parse_command("/workbenches"), WorkbenchHistoryCommand)
+    assert isinstance(parse_command("/history"), WorkbenchHistoryCommand)
+
+
+def test_parse_workspaces_command() -> None:
+    from wlcodex.router import WorkspaceListCommand, parse_command
+
+    assert isinstance(parse_command("/workspaces"), WorkspaceListCommand)

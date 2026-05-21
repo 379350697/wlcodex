@@ -35,6 +35,7 @@ from wlcodex.conversation_callback import (
     CONTINUE,
     DIFF,
     NEW_CONVO,
+    RESTORE_WORKBENCH,
     RETRY,
     VERIFY,
     ConversationCallback,
@@ -80,6 +81,8 @@ from wlcodex.router import (
     SwitchWorkspaceCommand,
     TraceCommand,
     VerifyCommand,
+    WorkbenchHistoryCommand,
+    WorkspaceListCommand,
     parse_command,
 )
 from wlcodex.status import (
@@ -87,6 +90,8 @@ from wlcodex.status import (
     render_conversation_help,
     render_conversation_status,
     render_session_list,
+    render_workbench_history,
+    render_workspace_list,
 )
 from wlcodex.models import ConversationMode
 from wlcodex.status import (
@@ -331,6 +336,29 @@ class CommandController:
                         return ControllerResponse(render_session_list(convos))
                 return ControllerResponse(
                     "当前还没有历史现场。发送 /new 开始新的工作台。"
+                )
+
+            elif isinstance(command, WorkbenchHistoryCommand):
+                if self._ledger is not None and telegram_context:
+                    chat_id = telegram_context.get("chat_id", 0)
+                    sessions = self._ledger.list_conversations_by_chat(
+                        chat_id, include_archived=True
+                    )
+                    return ControllerResponse(render_workbench_history(sessions))
+                return ControllerResponse(
+                    "还没有历史工作台。发送 /new 开始新的工作台。"
+                )
+
+            elif isinstance(command, WorkspaceListCommand):
+                active_alias = ""
+                if self._ledger is not None and telegram_context:
+                    chat_id = telegram_context.get("chat_id", 0)
+                    active = self._ledger.get_active_conversation(chat_id)
+                    if active is not None:
+                        active_alias = active.workspace_alias
+                workspaces = list(self._service._workspaces.values())
+                return ControllerResponse(
+                    render_workspace_list(workspaces, active_alias=active_alias)
                 )
 
             # --- New conversation commands ---
@@ -1745,6 +1773,27 @@ class CommandController:
             f"{verification_text}"
         )
 
+    async def _handle_restore_workbench(self, conversation_id: int) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+        try:
+            restored = self._ledger.restore_conversation(conversation_id)
+        except KeyError:
+            return ControllerResponse("工作台不存在或已被删除。")
+        try:
+            self._service.get_workspace(restored.workspace_alias)
+            workspace_note = f"工作区：{restored.workspace_alias}"
+        except Exception:
+            workspace_note = (
+                f"工作区：{restored.workspace_alias}（当前配置不存在，"
+                "请先添加该 workspace 后再执行任务）"
+            )
+        return ControllerResponse(
+            f"已恢复工作台 #{restored.id}：「{restored.title}」\n"
+            f"{workspace_note}\n\n"
+            "直接发消息会继续这个工作台。"
+        )
+
     async def handle_stop_current(
         self, ctx: dict[str, Any] | None = None
     ) -> ControllerResponse:
@@ -1807,7 +1856,9 @@ class CommandController:
         try:
             self._service.get_workspace(command.workspace_alias)
         except Exception:
-            return ControllerResponse(f"工作区 '{command.workspace_alias}' 不存在。")
+            return ControllerResponse(
+                f"工作区 '{command.workspace_alias}' 不存在。发送 /workspaces 查看可用工作区。"
+            )
 
         updated = self._ledger.set_conversation_workspace(
             active.id, command.workspace_alias
@@ -1898,6 +1949,9 @@ class CommandController:
             convo = self._ledger.get_conversation(callback.conversation_id)
         except KeyError:
             return ControllerResponse("对话不存在或已被删除。")
+
+        if callback.action == RESTORE_WORKBENCH:
+            return await self._handle_restore_workbench(callback.conversation_id)
 
         if callback.action == DIFF:
             return await self.handle(

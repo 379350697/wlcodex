@@ -155,6 +155,16 @@ class SettingsCommand:
 
 
 @dataclass(frozen=True)
+class WorkbenchHistoryCommand:
+    pass
+
+
+@dataclass(frozen=True)
+class WorkspaceListCommand:
+    pass
+
+
+@dataclass(frozen=True)
 class ModeSwitchCommand:
     """Parsed surface mode switch command.
 
@@ -213,6 +223,8 @@ ParsedCommand = (
     | ModeSwitchCommand
     | TerminalSubCommand
     | SettingsCommand
+    | WorkbenchHistoryCommand
+    | WorkspaceListCommand
 )
 
 
@@ -245,6 +257,10 @@ def parse_command(text: str) -> ParsedCommand:
         return TraceCommand(limit=max(1, min(limit, 100)))
     if stripped == "/codex-sessions" or stripped == "/sessions":
         return CodexSessionsCommand()
+    if stripped == "/workbenches" or stripped == "/history":
+        return WorkbenchHistoryCommand()
+    if stripped == "/workspaces":
+        return WorkspaceListCommand()
 
     # Dual-surface mode commands
     if stripped == "/mode":

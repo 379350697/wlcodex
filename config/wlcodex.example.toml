@@ -123,7 +123,29 @@ terminal_block_idle_seconds = 2.0
 # Register daily-menu commands with Telegram: 新工作台 状态 接管现场 变更 设置 帮助
 register_bot_commands = true
 
+# Workspace discovery — optional automatic detection of project directories.
+# When enabled, immediate child directories of root that contain .git are
+# added as workspaces. Explicit [[workspaces]] entries override discovered
+# aliases. Discovery is bounded to immediate children only — no recursion.
+[workspace_discovery]
+enabled = false
+root = "/media/wl/新加卷/codex"
+include_git_only = true
+allow_write = true
+exclude = []
+
 [[workspaces]]
 alias = "wlcodex"
 path = "/media/wl/新加卷/codex/wlcodex"
 allow_write = true
+
+# Additional workspace example entries:
+# [[workspaces]]
+# alias = "lightfee"
+# path = "/media/wl/新加卷/codex/LightFee"
+# allow_write = true
+#
+# [[workspaces]]
+# alias = "finance"
+# path = "/media/wl/新加卷/codex/Finance"
+# allow_write = true

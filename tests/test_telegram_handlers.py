@@ -68,9 +68,13 @@ allow_write = true
                 registered.update(handler.commands)
 
     required = {
-        "start", "help", "task", "tasks", "status", "continue", "steer",
+        "start", "help", "settings", "task", "tasks", "status", "trace", "continue", "steer",
         "tail", "events", "diff", "files", "pause", "abort", "archive",
-        "fork", "codex_sessions", "health",
+        "fork", "codex_sessions", "sessions", "health",
+        "mode", "product", "terminal",
+        "new", "codex", "claude", "auto", "stop", "switch", "model",
+        "claude_mode", "claude_permission", "verify",
+        "workbenches", "history", "workspaces",
     }
     missing = required - registered
     assert not missing, f"Missing handler registrations: {missing}"

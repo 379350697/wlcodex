@@ -511,3 +511,56 @@ def test_list_recent_agent_runs_with_more_than_50_runs_finds_latest(tmp_path: Pa
     # The 50th-oldest should NOT be in results (only 50 most recent)
     for r in recent:
         assert r.external_session_id != "old_session_1"
+
+
+def test_list_conversations_by_chat_can_include_archived(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    first = ledger.create_conversation(
+        chat_id=10,
+        user_id=1,
+        title="First",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    second = ledger.create_conversation(
+        chat_id=10,
+        user_id=1,
+        title="Second",
+        mode="chief_engineer",
+        workspace_alias="lightfee",
+    )
+    ledger.archive_conversation(first.id)
+
+    active_only = ledger.list_conversations_by_chat(10)
+    with_archived = ledger.list_conversations_by_chat(10, include_archived=True)
+
+    assert [c.id for c in active_only] == [second.id]
+    assert {c.id for c in with_archived} == {first.id, second.id}
+
+
+def test_restore_conversation_archives_other_active_workbench(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    old = ledger.create_conversation(
+        chat_id=10,
+        user_id=1,
+        title="Old",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ledger.archive_conversation(old.id)
+    current = ledger.create_conversation(
+        chat_id=10,
+        user_id=1,
+        title="Current",
+        mode="chief_engineer",
+        workspace_alias="lightfee",
+    )
+
+    restored = ledger.restore_conversation(old.id)
+
+    assert restored.id == old.id
+    assert restored.archived_at is None
+    assert ledger.get_conversation(current.id).archived_at is not None
+    assert ledger.get_active_conversation(10).id == old.id

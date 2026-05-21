@@ -1089,18 +1089,51 @@ class Ledger:
         return [_conversation(row) for row in rows]
 
     def list_conversations_by_chat(
-        self, chat_id: int, limit: int = 20
+        self, chat_id: int, limit: int = 20, include_archived: bool = False
     ) -> list[ConversationSession]:
-        rows = self._conn.execute(
-            """
-            SELECT * FROM conversation_sessions
-            WHERE chat_id = ? AND archived_at IS NULL
-            ORDER BY updated_at DESC, id DESC
-            LIMIT ?
-            """,
-            (chat_id, limit),
-        ).fetchall()
+        if include_archived:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM conversation_sessions
+                WHERE chat_id = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM conversation_sessions
+                WHERE chat_id = ? AND archived_at IS NULL
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ).fetchall()
         return [_conversation(row) for row in rows]
+
+    def restore_conversation(self, conversation_id: int) -> ConversationSession:
+        conversation = self.get_conversation(conversation_id)
+        now = _now()
+        self._conn.execute(
+            """
+            UPDATE conversation_sessions
+            SET archived_at = ?, updated_at = ?
+            WHERE chat_id = ? AND id != ? AND archived_at IS NULL
+            """,
+            (now, now, conversation.chat_id, conversation_id),
+        )
+        self._conn.execute(
+            """
+            UPDATE conversation_sessions
+            SET archived_at = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, conversation_id),
+        )
+        self._conn.commit()
+        return self.get_conversation(conversation_id)
 
     def set_conversation_active_task(
         self, conversation_id: int, task_id: int

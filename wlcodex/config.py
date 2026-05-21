@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import tomllib
@@ -138,6 +139,15 @@ class TerminalSurfaceConfig:
 
 
 @dataclass(frozen=True)
+class WorkspaceDiscoveryConfig:
+    enabled: bool = False
+    root: Path | None = None
+    include_git_only: bool = True
+    allow_write: bool = True
+    exclude: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TelegramOutputConfig:
     preview_enabled: bool = True
     preview_edit_min_interval_seconds: float = 2.0
@@ -169,6 +179,7 @@ class AppConfig:
     menu: MenuConfig = MenuConfig()
     terminal: TerminalSurfaceConfig = TerminalSurfaceConfig()
     telegram_output: TelegramOutputConfig = TelegramOutputConfig()
+    workspace_discovery: WorkspaceDiscoveryConfig = WorkspaceDiscoveryConfig()
 
     def workspace_by_alias(self, alias: str) -> WorkspaceConfig:
         for workspace in self.workspaces:
@@ -179,7 +190,14 @@ class AppConfig:
 
 def load_config(path: Path) -> AppConfig:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
-    workspaces = tuple(_workspace(item) for item in data.get("workspaces", []))
+    discovery = _workspace_discovery(data.get("workspace_discovery", {}))
+    explicit_workspaces = tuple(_workspace(item) for item in data.get("workspaces", []))
+    discovered_workspaces = _discover_workspaces(discovery)
+
+    explicit_aliases = {w.alias for w in explicit_workspaces}
+    workspaces = explicit_workspaces + tuple(
+        w for w in discovered_workspaces if w.alias not in explicit_aliases
+    )
     aliases = [workspace.alias for workspace in workspaces]
     if len(aliases) != len(set(aliases)):
         raise ConfigError("duplicate workspace alias")
@@ -327,6 +345,7 @@ def load_config(path: Path) -> AppConfig:
             redaction_enabled=bool(terminal_raw.get("redaction_enabled", True)),
         ),
         telegram_output=_telegram_output_config(telegram_output_raw),
+        workspace_discovery=discovery,
     )
 
 
@@ -386,3 +405,61 @@ def _workspace(data: dict[str, object]) -> WorkspaceConfig:
         path=Path(str(data["path"])),
         allow_write=bool(data.get("allow_write", True)),
     )
+
+
+def _workspace_discovery(raw: dict) -> WorkspaceDiscoveryConfig:
+    root_value = raw.get("root")
+    return WorkspaceDiscoveryConfig(
+        enabled=bool(raw.get("enabled", False)),
+        root=Path(str(root_value)) if root_value else None,
+        include_git_only=bool(raw.get("include_git_only", True)),
+        allow_write=bool(raw.get("allow_write", True)),
+        exclude=tuple(str(item) for item in raw.get("exclude", [])),
+    )
+
+
+def _workspace_alias_from_dir(name: str) -> str:
+    chars: list[str] = []
+    previous_dash = False
+    for char in name.lower():
+        if char.isalnum():
+            chars.append(char)
+            previous_dash = False
+        elif not previous_dash:
+            chars.append("-")
+            previous_dash = True
+    alias = "".join(chars).strip("-")
+    if not alias:
+        raise ConfigError(f"cannot derive workspace alias from directory: {name}")
+    return alias
+
+
+def _discover_workspaces(discovery: WorkspaceDiscoveryConfig) -> tuple[WorkspaceConfig, ...]:
+    if not discovery.enabled:
+        return ()
+    if discovery.root is None:
+        raise ConfigError("workspace_discovery.root is required when discovery is enabled")
+    if not discovery.root.exists():
+        logging.getLogger(__name__).warning(
+            "workspace_discovery.root does not exist: %s — discovery skipped",
+            discovery.root,
+        )
+        return ()
+    excluded = set(discovery.exclude)
+    discovered: list[WorkspaceConfig] = []
+    seen: set[str] = set()
+    for child in sorted(discovery.root.iterdir(), key=lambda p: p.name.lower()):
+        if child.name in excluded:
+            continue
+        if not child.is_dir() or child.is_symlink():
+            continue
+        if discovery.include_git_only and not (child / ".git").exists():
+            continue
+        alias = _workspace_alias_from_dir(child.name)
+        if alias in seen:
+            raise ConfigError(f"duplicate discovered workspace alias: {alias}")
+        seen.add(alias)
+        discovered.append(
+            WorkspaceConfig(alias=alias, path=child, allow_write=discovery.allow_write)
+        )
+    return tuple(discovered)
