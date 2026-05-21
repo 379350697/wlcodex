@@ -443,26 +443,28 @@ def main() -> None:
         and config.interaction.streaming_enabled
     ):
         interaction_renderer = handlers.create_interaction_renderer()
-        # Wire runtime progress manager for deterministic progress messages
-        from wlcodex.interaction.runtime_renderer import RuntimeProgressManager
-        from wlcodex.interaction.transport import TelegramTransport
+        if not interaction_renderer.has_runtime_status_surface():
+            # Wire legacy progress only when the readable output manager does not
+            # already own the Telegram status bubble.
+            from wlcodex.interaction.runtime_renderer import RuntimeProgressManager
+            from wlcodex.interaction.transport import TelegramTransport
 
-        async def _noop_typing(_chat_id: int) -> object:
-            return None
+            async def _noop_typing(_chat_id: int) -> object:
+                return None
 
-        runtime_progress = RuntimeProgressManager(
-            transport=TelegramTransport(
-                handlers.send_telegram,
-                handlers.edit_telegram,
-                _noop_typing,
-                outbox=telegram_outbox,
-            ),
-            verbosity=1,
-            min_edit_interval=float(
-                getattr(config.interaction, "edit_min_interval_seconds", 2.0)
-            ),
-        )
-        interaction_renderer._runtime_progress = runtime_progress
+            runtime_progress = RuntimeProgressManager(
+                transport=TelegramTransport(
+                    handlers.send_telegram,
+                    handlers.edit_telegram,
+                    _noop_typing,
+                    outbox=telegram_outbox,
+                ),
+                verbosity=1,
+                min_edit_interval=float(
+                    getattr(config.interaction, "edit_min_interval_seconds", 2.0)
+                ),
+            )
+            interaction_renderer._runtime_progress = runtime_progress
     controller.set_interaction_renderer(interaction_renderer)
     if claude_backend is not None:
         controller.set_orchestration_runner(

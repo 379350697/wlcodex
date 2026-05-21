@@ -486,7 +486,7 @@ def test_outbox_send_wait_returns_real_message_id(tmp_path: Path) -> None:
     assert _run(scenario()) == 1234
 
 
-def test_outbox_send_wait_times_out_without_processor(tmp_path: Path) -> None:
+def test_outbox_send_wait_returns_minus_one_without_processor(tmp_path: Path) -> None:
     from wlcodex.db import Ledger
     from wlcodex.runtime_event_store import RuntimeEventStore
     from wlcodex.telegram_outbox import TelegramOutbox
@@ -500,18 +500,54 @@ def test_outbox_send_wait_times_out_without_processor(tmp_path: Path) -> None:
         return 1234
 
     async def scenario():
-        try:
-            await outbox.enqueue_send_wait(
-                chat_id=1,
-                text="preview",
-                send_fn=fake_send,
-                timeout_seconds=0.01,
-            )
-        except asyncio.TimeoutError:
-            return "timeout"
-        return "no-timeout"
+        return await outbox.enqueue_send_wait(
+            chat_id=1,
+            text="preview",
+            send_fn=fake_send,
+            timeout_seconds=0.01,
+        )
 
-    assert _run(scenario()) == "timeout"
+    assert _run(scenario()) == -1
+
+
+def test_outbox_send_wait_handles_identical_preview_texts_concurrently(tmp_path: Path) -> None:
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.telegram_outbox import TelegramOutbox
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    outbox = TelegramOutbox(store=store)
+    next_message_id = 100
+
+    async def fake_send(chat_id, text, buttons=None):
+        nonlocal next_message_id
+        next_message_id += 1
+        return next_message_id
+
+    async def scenario():
+        first = asyncio.create_task(
+            outbox.enqueue_send_wait(
+                chat_id=1,
+                text="Codex 正在处理",
+                send_fn=fake_send,
+                timeout_seconds=0.2,
+            )
+        )
+        second = asyncio.create_task(
+            outbox.enqueue_send_wait(
+                chat_id=1,
+                text="Codex 正在处理",
+                send_fn=fake_send,
+                timeout_seconds=0.2,
+            )
+        )
+        await asyncio.sleep(0)
+        await outbox.process_all()
+        return await asyncio.gather(first, second)
+
+    assert _run(scenario()) == [101, 102]
 
 
 def test_approval_superseded_respects_time_ordering(tmp_path: Path) -> None:

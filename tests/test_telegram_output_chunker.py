@@ -56,3 +56,24 @@ def test_chunker_flushes_final_chunks_with_part_numbers():
     assert len(chunks) >= 2
     assert chunks[0].startswith("1/")
     assert chunks[-1].startswith(f"{len(chunks)}/")
+
+
+def test_chunker_hard_split_keeps_each_code_fence_chunk_balanced():
+    chunker = SemanticChunker(ChunkPolicy(min_chars=1, max_chars=40, final_max_chars=40))
+    chunker.append("```python\n" + ("x = 1\n" * 20) + "```")
+
+    chunks = chunker.final_chunks(number_parts=True)
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.count("```") % 2 == 0
+
+
+def test_chunker_prefers_whitespace_before_hard_split():
+    chunker = SemanticChunker(ChunkPolicy(min_chars=10, max_chars=24))
+    chunker.append("alpha beta gamma delta epsilon")
+
+    chunks = chunker.ready_chunks(force=False)
+
+    assert chunks == ["alpha beta gamma delta"]
+    assert chunker.buffer == "epsilon"

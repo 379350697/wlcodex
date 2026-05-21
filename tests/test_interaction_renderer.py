@@ -330,3 +330,131 @@ async def test_interrupt_closes_old_output_session_before_new_run():
     assert any("已打断" in edit[2] for edit in fake.edited)
     assert any("新输出" in sent[1] for sent in fake.sent)
     assert not any("旧输出新输出" in sent[1] for sent in fake.sent)
+
+
+def test_renderer_status_surface_owner_tracks_preview_configuration() -> None:
+    from types import SimpleNamespace
+
+    fake = FakeTransport()
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(preview_enabled=True),
+    )
+    assert renderer.has_runtime_status_surface() is True
+
+    disabled = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(preview_enabled=False),
+    )
+    assert disabled.has_runtime_status_surface() is False
+    disabled._runtime_progress = object()
+    assert disabled.has_runtime_status_surface() is True
+
+
+@pytest.mark.asyncio
+async def test_preview_disabled_keeps_body_policy_without_preview_message():
+    from types import SimpleNamespace
+
+    fake = FakeTransport()
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(
+            preview_enabled=False,
+            semantic_min_chars=20,
+            semantic_max_chars=80,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+
+    await renderer.handle(InteractionEvent(event_type="run_started", chat_id=1, conversation_id=7, task_id=10))
+    await renderer.handle(InteractionEvent(event_type="text_delta", chat_id=1, conversation_id=7, task_id=10, text="最终正文。"))
+    assert fake.sent == []
+    assert fake.typing_count == 1
+
+    await renderer.handle(InteractionEvent(event_type="run_completed", chat_id=1, conversation_id=7, task_id=10))
+
+    assert any(message[1] == "最终正文。" for message in fake.sent)
+
+
+@pytest.mark.asyncio
+async def test_runtime_final_closes_output_session_and_flushes_body():
+    from types import SimpleNamespace
+    from wlcodex.interaction.runtime_renderer import RuntimeRunState
+
+    fake = FakeTransport()
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(
+            preview_enabled=True,
+            semantic_min_chars=20,
+            semantic_max_chars=80,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+
+    await renderer.handle(InteractionEvent(event_type="run_started", chat_id=1, conversation_id=7, task_id=10))
+    await renderer.handle(InteractionEvent(event_type="text_delta", chat_id=1, conversation_id=7, task_id=10, text="最终正文。"))
+    await renderer.handle(
+        InteractionEvent(
+            event_type="runtime_final",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            metadata={"runtime_state": RuntimeRunState(phase="completed", is_terminal=True)},
+        )
+    )
+
+    assert any(message[1] == "最终正文。" for message in fake.sent)
+    assert any(edit[2] == "运行完成" for edit in fake.edited)
+
+
+@pytest.mark.asyncio
+async def test_run_failed_treats_runtime_state_cancelled_as_interrupt():
+    from types import SimpleNamespace
+    from wlcodex.interaction.runtime_renderer import RuntimeRunState
+
+    fake = FakeTransport()
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(
+            preview_enabled=True,
+            semantic_min_chars=20,
+            semantic_max_chars=80,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+
+    await renderer.handle(InteractionEvent(event_type="run_started", chat_id=1, conversation_id=7, task_id=10))
+    await renderer.handle(
+        InteractionEvent(
+            event_type="run_failed",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            metadata={"runtime_state": RuntimeRunState(phase="cancelled")},
+        )
+    )
+
+    assert any(edit[2] == "已打断" for edit in fake.edited)

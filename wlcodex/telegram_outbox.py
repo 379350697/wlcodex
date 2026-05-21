@@ -100,6 +100,7 @@ class TelegramOutbox:
         self._pending: dict[str, DeliveryRequest] = {}
         self._processing = False
         self._waiters: dict[str, asyncio.Future[int]] = {}
+        self._waitable_send_sequence = 0
 
     # ------------------------------------------------------------------
     # Enqueue
@@ -114,9 +115,10 @@ class TelegramOutbox:
         send_fn: Any = None,
         edit_fn: Any = None,
         correlation_id: str = "",
+        delivery_id: str | None = None,
     ) -> str:
         """Enqueue a send operation. Returns the delivery_id."""
-        delivery_id = make_delivery_id("send", chat_id, text)
+        delivery_id = delivery_id or make_delivery_id("send", chat_id, text)
         req = DeliveryRequest(
             operation="send",
             chat_id=chat_id,
@@ -189,19 +191,27 @@ class TelegramOutbox:
         correlation_id: str = "",
         timeout_seconds: float = 5.0,
     ) -> int:
-        delivery_id = self.enqueue_send(
+        self._waitable_send_sequence += 1
+        delivery_id = (
+            f"{make_delivery_id('send', chat_id, text)}"
+            f"-wait-{self._waitable_send_sequence}"
+        )
+        self.enqueue_send(
             chat_id,
             text,
             buttons,
             send_fn=send_fn,
             edit_fn=edit_fn,
             correlation_id=correlation_id,
+            delivery_id=delivery_id,
         )
         loop = asyncio.get_running_loop()
         future: asyncio.Future[int] = loop.create_future()
         self._waiters[delivery_id] = future
         try:
             return await asyncio.wait_for(future, timeout=timeout_seconds)
+        except TimeoutError:
+            return -1
         finally:
             self._waiters.pop(delivery_id, None)
 

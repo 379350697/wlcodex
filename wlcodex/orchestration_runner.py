@@ -431,6 +431,11 @@ class OrchestrationRunner:
         )
 
     def _uses_runtime_progress(self) -> bool:
+        if self._interaction_renderer is not None and hasattr(
+            self._interaction_renderer,
+            "has_runtime_status_surface",
+        ):
+            return bool(self._interaction_renderer.has_runtime_status_surface())
         return bool(
             self._interaction_renderer is not None
             and getattr(self._interaction_renderer, "_runtime_progress", None)

@@ -46,6 +46,23 @@ class InteractionRenderer:
             semantic_min_chars=getattr(telegram_output_config, "semantic_min_chars", 900),
             semantic_max_chars=getattr(telegram_output_config, "semantic_max_chars", 3200),
             final_chunk_chars=getattr(telegram_output_config, "final_chunk_chars", 3900),
+            preview_enabled=getattr(telegram_output_config, "preview_enabled", True),
+            preview_edit_min_interval_seconds=getattr(
+                telegram_output_config,
+                "preview_edit_min_interval_seconds",
+                2.0,
+            ),
+            product_body_mode=getattr(telegram_output_config, "product_body_mode", "final"),
+            terminal_body_mode=getattr(
+                telegram_output_config,
+                "terminal_body_mode",
+                "semantic_blocks",
+            ),
+            terminal_block_idle_seconds=getattr(
+                telegram_output_config,
+                "terminal_block_idle_seconds",
+                2.0,
+            ),
         ) if telegram_output_config is not None else None
 
     def _output_key(self, event: InteractionEvent) -> OutputRunKey:
@@ -55,6 +72,30 @@ class InteractionRenderer:
             conversation_id=event.conversation_id or 0,
             run_id=run_id,
         )
+
+    def has_runtime_status_surface(self) -> bool:
+        return self._output_manager_owns_status() or self._runtime_progress is not None
+
+    def _output_manager_owns_status(self) -> bool:
+        return bool(
+            self._output_manager is not None
+            and self._output_manager.preview_enabled
+        )
+
+    async def _ensure_output_session(self, event: InteractionEvent) -> OutputRunKey:
+        if self._output_manager is None:
+            raise RuntimeError("output manager is not configured")
+        key = self._output_key(event)
+        if key in self._output_manager.sessions:
+            return key
+        surface = (
+            OutputSurface.TERMINAL
+            if self._surface_resolver(event.chat_id) == "terminal"
+            else OutputSurface.PRODUCT
+        )
+        text = self._profile.started_text(event) or "正在处理"
+        await self._output_manager.start(key, surface=surface, text=text)
+        return key
 
     async def handle(self, event: InteractionEvent) -> None:
         try:
@@ -87,14 +128,11 @@ class InteractionRenderer:
     async def _handle_started(self, event: InteractionEvent) -> None:
         key = self._key(event)
         if self._output_manager is not None:
-            ok = self._output_key(event)
-            surface = OutputSurface.TERMINAL if self._surface_resolver(event.chat_id) == "terminal" else OutputSurface.PRODUCT
-            text = self._profile.started_text(event) or "正在处理"
-            await self._output_manager.start(
-                ok,
-                surface=surface,
-                text=text,
-            )
+            if not self._output_manager_owns_status():
+                typing_task = await self._transport.typing(event.chat_id)
+                if typing_task is not None:
+                    self._typing_tasks[key] = typing_task
+            await self._ensure_output_session(event)
             return
         typing_task = await self._transport.typing(event.chat_id)
         if typing_task is not None:
@@ -107,7 +145,8 @@ class InteractionRenderer:
         if not event.text:
             return
         if self._output_manager is not None:
-            await self._output_manager.append_text(self._output_key(event), event.text)
+            key = await self._ensure_output_session(event)
+            await self._output_manager.append_text(key, event.text)
             return
         key = self._key(event)
         session = self._sessions.get(key)
@@ -137,7 +176,8 @@ class InteractionRenderer:
                 has_diff=bool(event.metadata.get("has_diff", False)),
             )
             await self._output_manager.complete(self._output_key(event), buttons=buttons)
-            return
+            if self._output_manager_owns_status() or self._runtime_progress is None:
+                return
         session = self._sessions.get(key)
         if session is not None:
             conversation_id = event.conversation_id or session.conversation_id
@@ -161,14 +201,17 @@ class InteractionRenderer:
         self._cancel_typing(key)
         if self._output_manager is not None:
             state = event.metadata.get("runtime_state")
-            if state in ("cancelled", "aborted") or "interrupted" in (event.text or ""):
+            state_value = getattr(state, "phase", state)
+            event_text = (event.text or "").lower()
+            if state_value in ("cancelled", "aborted") or "interrupted" in event_text:
                 await self._output_manager.interrupt(self._output_key(event))
             else:
                 await self._output_manager.fail(
                     self._output_key(event),
                     error_summary=event.text or event.summary or "",
                 )
-            return
+            if self._output_manager_owns_status() or self._runtime_progress is None:
+                return
         session = self._sessions.get(key)
         text = self._profile.error_text(event.text or event.summary)
         if session is None:
@@ -190,7 +233,7 @@ class InteractionRenderer:
         state = event.metadata.get("runtime_state")
         if state is None:
             return
-        if self._output_manager is not None:
+        if self._output_manager_owns_status():
             text = _runtime_progress_text(state)
             if text:
                 await self._output_manager.update_status(self._output_key(event), text)
@@ -207,7 +250,7 @@ class InteractionRenderer:
         state = event.metadata.get("runtime_state")
         if state is None:
             return
-        if self._output_manager is not None:
+        if self._output_manager_owns_status():
             text = _runtime_progress_text(state)
             if text:
                 await self._output_manager.update_status(self._output_key(event), text)
@@ -226,9 +269,26 @@ class InteractionRenderer:
             return
         if self._output_manager is not None:
             text = _runtime_final_text(state)
-            if text:
-                await self._output_manager.update_status(self._output_key(event), text)
-            return
+            phase = getattr(state, "phase", "")
+            key = self._output_key(event)
+            if phase in ("cancelled", "aborted"):
+                await self._output_manager.interrupt(key)
+            elif phase == "failed":
+                await self._output_manager.fail(
+                    key,
+                    error_summary=getattr(state, "error_summary", ""),
+                )
+            elif getattr(state, "is_terminal", False) or phase == "completed":
+                buttons = event.buttons if event.buttons else None
+                await self._output_manager.complete(
+                    key,
+                    buttons=buttons,
+                    status_text=text or "运行完成",
+                )
+            elif self._output_manager_owns_status() and text:
+                await self._output_manager.update_status(key, text)
+            if self._output_manager_owns_status() or self._runtime_progress is None:
+                return
         if self._runtime_progress is None:
             return
         buttons = event.buttons if event.buttons else None
@@ -270,10 +330,13 @@ def _runtime_final_text(state) -> str:
     """Convert a RuntimeRunState to a final status text."""
     from wlcodex.interaction.runtime_renderer import KNOWN_PHASES
 
+    error = getattr(state, "error_summary", "")
+    phase = getattr(state, "phase", "")
+    if phase == "failed" and error:
+        return f"运行失败: {error[:200]}"
     phase_label = KNOWN_PHASES.get(state.phase, "") if hasattr(state, "phase") else ""
     if phase_label in ("运行完成", "运行失败", "运行已取消"):
         return phase_label
-    error = getattr(state, "error_summary", "")
     if phase_label and error:
         return f"{phase_label}: {error[:200]}"
     if phase_label:
