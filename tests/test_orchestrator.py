@@ -148,6 +148,11 @@ async def test_orchestrator_does_not_implement_reply_only_probe() -> None:
 
 @pytest.mark.asyncio
 async def test_orchestrator_does_not_implement_read_only_ops_diagnostic() -> None:
+    """Read-only diagnostic + needs_implementation:true → needs_user, not passed.
+
+    Codex must still NOT enter Claude, but the result must surface the fix
+    list to the user instead of silently marking "passed".
+    """
     codex = FakeCodexWithSendPrompt()
     codex._responses = [
         (
@@ -165,10 +170,15 @@ async def test_orchestrator_does_not_implement_read_only_ops_diagnostic() -> Non
         "云服务器日志：请看下上一版部署后最近 local l2 ready 有改善吗，下午更新有生效吗"
     )
 
-    assert result.status == "passed"
+    assert result.status == "needs_user"
     assert result.verify_round == 0
     assert len(codex.prompts) == 1
     assert claude.prompts == []
+    # Verification summary must be human-readable — no raw JSON keys
+    assert "诊断完成" in result.verification_summary
+    assert "需要你确认" in result.verification_summary
+    assert '"summary"' not in result.verification_summary
+    assert '"needs_implementation"' not in result.verification_summary
 
 
 def test_verification_decision_parse_pass() -> None:
@@ -643,6 +653,7 @@ async def test_run_streaming_does_not_implement_reply_only_probe() -> None:
 
 @pytest.mark.asyncio
 async def test_run_streaming_does_not_implement_read_only_ops_diagnostic() -> None:
+    """Streaming: read-only diagnostic + needs_implementation:true → needs_user."""
     codex = FakeCodexWithSendPrompt()
     codex._responses = [
         (
@@ -671,8 +682,13 @@ async def test_run_streaming_does_not_implement_read_only_ops_diagnostic() -> No
         event for event in events
         if event.phase == OrchestrationProgress.COMPLETE
     ]
-    assert complete_events[0].result_status == "passed"
+    assert complete_events[0].result_status == "needs_user"
     assert complete_events[0].round_num == 0
+    # full_text must be human-readable, no raw JSON
+    full = complete_events[0].full_text or ""
+    assert "诊断完成" in full
+    assert "需要你确认" in full
+    assert '"summary"' not in full
 
 
 @pytest.mark.asyncio
@@ -881,3 +897,204 @@ def test_claude_handoff_packet_includes_implementation_instruction() -> None:
     assert "实施阶段" in rendered or "implementation" in rendered.lower()
     assert "立即" in rendered or "immediately" in rendered.lower() or "不要输出计划" in rendered
     assert "diff" in rendered.lower() or "文件变更" in rendered or "实际" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Problem 1 regression: read-only diagnostic short-circuit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_only_diagnostic_needs_impl_false_still_passes() -> None:
+    """Read-only diagnostic + needs_implementation:false → passed (correct)."""
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = [
+        '{"summary":"一切正常","needs_implementation":false,'
+        '"files_to_touch":[],"implementation_steps":[],"acceptance_criteria":[]}'
+    ]
+    claude = FakeClaudeWithSend()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude)
+    result = await orchestrator.run(
+        "云服务器：检查下服务状态是否正常"
+    )
+
+    assert result.status == "passed"
+    assert result.verify_round == 0
+    assert claude.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_read_only_diagnostic_needs_impl_true_becomes_needs_user() -> None:
+    """Read-only diagnostic + needs_implementation:true → needs_user, never Claude."""
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = [
+        '{"summary":"部署未生效",'
+        '"needs_implementation":true,'
+        '"files_to_touch":["deploy.sh"],'
+        '"implementation_steps":["重新部署"],'
+        '"acceptance_criteria":["服务版本号更新"]}'
+    ]
+    claude = FakeClaudeWithSend()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude)
+    result = await orchestrator.run(
+        "云服务器日志：查一下最近部署有没有生效"
+    )
+
+    assert result.status == "needs_user"
+    assert result.verify_round == 0
+    assert claude.prompts == []
+    # No raw JSON in user-facing text
+    summary = result.verification_summary
+    assert '"summary"' not in summary
+    assert '"needs_implementation"' not in summary
+    assert '{' not in summary
+    assert "诊断完成" in summary
+    assert "需要你确认" in summary
+    assert "部署未生效" in summary
+    assert "deploy.sh" in summary
+    assert "重新部署" in summary
+
+
+@pytest.mark.asyncio
+async def test_normal_implementation_needs_impl_true_still_enters_claude() -> None:
+    """Normal chief-engineer task + needs_implementation:true → enters Claude."""
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = [
+        '{"summary":"需要修复登录bug",'
+        '"needs_implementation":true,'
+        '"files_to_touch":["auth.py"],'
+        '"implementation_steps":["添加null检查"]}',
+        "decision: pass\nsummary: verified",
+    ]
+    claude = FakeClaudeWithSend()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude, max_verify_rounds=1)
+    result = await orchestrator.run("修复登录 bug")
+
+    assert result.status == "passed"
+    assert result.verify_round == 1
+    assert claude.prompts != []
+
+
+@pytest.mark.asyncio
+async def test_reply_only_still_works_as_before() -> None:
+    """Reply-only probe must still return exact text, no side effects."""
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = ["wlcodex telegram live ok"]
+    claude = FakeClaudeWithSend()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude)
+    result = await orchestrator.run("请用中文只回复：wlcodex telegram live ok")
+
+    assert result.status == "passed"
+    assert result.verify_round == 0
+    assert claude.prompts == []
+
+
+# ---------------------------------------------------------------------------
+# Problem 2 regression: concatenated JSON parsing and human-readable output
+# ---------------------------------------------------------------------------
+
+
+def test_parse_last_complete_json_single_object() -> None:
+    from wlcodex.orchestrator import _parse_last_complete_json
+
+    result = _parse_last_complete_json(
+        '{"summary":"ok","needs_implementation":false}'
+    )
+    assert result == {"summary": "ok", "needs_implementation": False}
+
+
+def test_parse_last_complete_json_concatenated() -> None:
+    from wlcodex.orchestrator import _parse_last_complete_json
+
+    result = _parse_last_complete_json(
+        '{"summary":"first"}{"summary":"second","needs_implementation":true}'
+    )
+    assert result == {"summary": "second", "needs_implementation": True}
+
+
+def test_parse_last_complete_json_trailing_text() -> None:
+    from wlcodex.orchestrator import _parse_last_complete_json
+
+    result = _parse_last_complete_json(
+        '{"summary":"a"}\n一些中文说明\n{"summary":"final","needs_implementation":true}后面的文字'
+    )
+    assert result == {"summary": "final", "needs_implementation": True}
+
+
+def test_parse_last_complete_json_incomplete_last_object() -> None:
+    from wlcodex.orchestrator import _parse_last_complete_json
+
+    result = _parse_last_complete_json(
+        '{"summary":"first","needs_implementation":false}{"summary":"incomplete"'
+    )
+    assert result == {"summary": "first", "needs_implementation": False}
+
+
+def test_parse_last_complete_json_no_json() -> None:
+    from wlcodex.orchestrator import _parse_last_complete_json
+
+    result = _parse_last_complete_json("只是中文文本，没有JSON")
+    assert result is None
+
+
+def test_visible_analysis_reply_extracts_summary_from_concatenated_json() -> None:
+    from wlcodex.orchestration_runner import _visible_analysis_reply
+
+    reply = _visible_analysis_reply(
+        '{"summary":"中间分析"}{"summary":"最终结论：部署已生效，还需要修复残留指标"}'
+    )
+    assert "最终结论" in reply
+    assert "中间分析" not in reply
+    assert '{' not in reply
+    assert '"summary"' not in reply
+
+
+def test_visible_analysis_reply_handles_plain_text() -> None:
+    from wlcodex.orchestration_runner import _visible_analysis_reply
+
+    reply = _visible_analysis_reply("部署正常，无需修改。")
+    assert reply == "部署正常，无需修改。"
+
+
+def test_visible_analysis_reply_never_shows_json_keys() -> None:
+    from wlcodex.orchestration_runner import _visible_analysis_reply
+
+    for text in [
+        '{"summary":"正常","needs_implementation":false}',
+        '{"summary":"需要修复","needs_implementation":true,"files_to_touch":["a.py"]}',
+        'prose{"summary":"最终","needs_implementation":true}',
+    ]:
+        reply = _visible_analysis_reply(text)
+        assert '"needs_implementation"' not in reply
+        assert '"files_to_touch"' not in reply
+        assert '"implementation_steps"' not in reply
+
+
+def test_render_diagnostic_needs_implementation_produces_no_raw_json() -> None:
+    from wlcodex.orchestrator import _render_diagnostic_needs_implementation
+
+    rendered = _render_diagnostic_needs_implementation(
+        '{"summary":"需要重启服务",'
+        '"needs_implementation":true,'
+        '"files_to_touch":["deploy.sh","config.toml"],'
+        '"implementation_steps":["SSH到服务器","执行重启"],'
+        '"acceptance_criteria":["服务恢复","日志无报错"]}'
+    )
+
+    assert "诊断完成" in rendered
+    assert "需要你确认" in rendered
+    assert "需要重启服务" in rendered
+    assert "deploy.sh" in rendered
+    assert "config.toml" in rendered
+    assert "SSH到服务器" in rendered
+    assert "执行重启" in rendered
+    assert "服务恢复" in rendered
+    assert "日志无报错" in rendered
+    # No raw JSON
+    assert '"summary"' not in rendered
+    assert '"needs_implementation"' not in rendered
+    assert '{' not in rendered

@@ -311,19 +311,20 @@ class InteractionRenderer:
 
 def _runtime_progress_text(state) -> str:
     """Convert a RuntimeRunState to a short status line for the preview bubble."""
-    from wlcodex.interaction.runtime_renderer import KNOWN_PHASES, _time_ago
+    from wlcodex.interaction.runtime_renderer import KNOWN_PHASES
 
-    phase_label = KNOWN_PHASES.get(state.phase, state.phase) if hasattr(state, "phase") else ""
-    active = getattr(state, "active_agent", "")
-    if active and phase_label:
-        agent_label = "Claude" if active == "claude" else "Codex" if active == "codex" else active
-        return f"{phase_label} ({agent_label})"
-    if phase_label:
-        return phase_label
-    if active:
-        agent_label = "Claude" if active == "claude" else "Codex" if active == "codex" else active
-        return f"{agent_label} 正在运行"
-    return ""
+    phase = getattr(state, "phase", "")
+    phase_label = KNOWN_PHASES.get(phase, phase)
+
+    if not phase_label:
+        return ""
+
+    status = getattr(state, "agent_status", "")
+
+    if status == "waiting_for_approval":
+        return "等待审批"
+
+    return phase_label
 
 
 def _runtime_final_text(state) -> str:
@@ -332,13 +333,12 @@ def _runtime_final_text(state) -> str:
 
     error = getattr(state, "error_summary", "")
     phase = getattr(state, "phase", "")
-    if phase == "failed" and error:
-        return f"运行失败: {error[:200]}"
-    phase_label = KNOWN_PHASES.get(state.phase, "") if hasattr(state, "phase") else ""
-    if phase_label in ("运行完成", "运行失败", "运行已取消"):
-        return phase_label
-    if phase_label and error:
-        return f"{phase_label}: {error[:200]}"
-    if phase_label:
-        return phase_label
-    return "运行完成"
+    if phase == "failed":
+        brief = (error or "未知错误")[:200].split("\n")[0].strip()
+        return f"运行失败: {brief}" if brief else "运行失败，请重试"
+    if phase == "cancelled":
+        return "运行已取消"
+    if phase == "completed":
+        return "运行完成"
+    phase_label = KNOWN_PHASES.get(phase, phase) if hasattr(state, "phase") else ""
+    return phase_label or "运行完成"

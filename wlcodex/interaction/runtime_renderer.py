@@ -19,13 +19,21 @@ from wlcodex.interaction.transport import TelegramTransport
 
 KNOWN_PHASES = {
     "queued": "排队中",
-    "running_analysis": "Codex 正在拆解需求",
-    "running_implementation": "Claude 开始实施",
-    "running_verification": "Codex 正在验收",
-    "retrying_implementation": "Claude 重新实施",
+    "running_analysis": "正在分析需求",
+    "running_implementation": "正在实施代码",
+    "running_verification": "正在验收结果",
+    "retrying_implementation": "正在重新实施",
     "completed": "运行完成",
     "failed": "运行失败",
     "cancelled": "运行已取消",
+}
+
+_NEXT_STEP = {
+    "queued": "稍等片刻，即将开始处理",
+    "running_analysis": "分析完成后将进入代码实施",
+    "running_implementation": "代码写完后将自动验收",
+    "running_verification": "验收通过后返回结果",
+    "retrying_implementation": "修复后将再次验收",
 }
 
 
@@ -80,6 +88,12 @@ class RuntimeRenderer:
         if phase_line:
             lines.append(phase_line)
 
+        # Next-step hint (verbosity 1+)
+        if self.verbosity >= 1:
+            next_step = _NEXT_STEP.get(state.phase, "")
+            if next_step and not state.is_terminal:
+                lines.append(next_step)
+
         # Detail lines (verbosity 2 only)
         if self.verbosity >= 2:
             detail = self._detail_lines(state)
@@ -98,14 +112,16 @@ class RuntimeRenderer:
     def final_text(self, state: RuntimeRunState) -> str:
         """Final summary when a run reaches a terminal state."""
         if state.phase == "completed":
-            base = "运行完成 ✓"
+            base = "运行完成"
         elif state.phase == "failed":
             reason = state.error_summary or "未知错误"
-            base = f"运行失败: {reason}"
+            # Keep error summary brief, strip internal details
+            brief = reason[:200].split("\n")[0].strip()
+            base = f"运行失败\n{brief}" if brief else "运行失败，请重试"
         elif state.phase == "cancelled":
             base = "运行已取消"
         else:
-            base = f"执行结束 ({self._phase_label(state.phase)})"
+            base = "执行结束"
 
         if self.verbosity >= 1 and state.total_tokens > 0:
             base += f"\n消耗 {state.total_tokens} tokens"
@@ -127,14 +143,14 @@ class RuntimeRenderer:
         if state.is_terminal or state.phase in ("completed", "failed", "cancelled"):
             return ""
 
-        # Use known phase label
         label = self._phase_label(state.phase)
         if not label:
             return ""
 
-        # Add agent context
-        if state.active_agent == "claude" and state.agent_status == "waiting_for_approval":
-            return f"{label}（等待审批）"
+        # Add approval signal
+        if state.agent_status == "waiting_for_approval":
+            short = self._phase_label(state.phase).replace("正在", "")
+            return f"等待审批 — {short}"
         return label
 
     def _detail_lines(self, state: RuntimeRunState) -> list[str]:

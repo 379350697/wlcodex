@@ -392,3 +392,114 @@ def test_parse_help_command() -> None:
     from wlcodex.router import HelpCommand
     cmd = parse_command("/help")
     assert isinstance(cmd, HelpCommand)
+
+
+# ---------------------------------------------------------------------------
+# Problem 3 regression: approval terminal task + expiry handling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_callback_rejects_terminal_task(tmp_path: Path) -> None:
+    """Approval on a DONE task must say '已结束/已失效' not '已处理'."""
+    from wlcodex.approval import (
+        ApprovalCallback,
+        ApprovalService,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+
+    task = ledger.create_task("demo", "/tmp/demo", "Fix bug", "thread-1", None)
+    ledger.set_task_status(task.id, TaskStatus.DONE)
+
+    approval = ledger.create_approval(
+        task_id=task.id,
+        codex_request_id="req-1",
+        codex_item_id="item-1",
+        codex_turn_id="turn-1",
+        kind="command",
+        summary="Run: rm -rf /tmp",
+    )
+
+    svc = ApprovalService(callback_timeout_seconds=3600)
+    cb = ApprovalCallback(approval_id=approval.id, action="approve_once")
+
+    msg = await svc.resolve_callback(cb, FakeCodexBackend(), ledger)
+    assert "已结束" in msg or "已失效" in msg
+    # Must NOT say it was processed
+    assert "已处理" not in msg
+
+
+@pytest.mark.asyncio
+async def test_resolve_callback_rejects_terminal_task_failed(tmp_path: Path) -> None:
+    """Approval on a FAILED task must clearly state the task has ended."""
+    from wlcodex.approval import (
+        ApprovalCallback,
+        ApprovalService,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+
+    task = ledger.create_task("demo", "/tmp/demo", "Fix bug", "thread-2", None)
+    ledger.set_task_status(task.id, TaskStatus.FAILED)
+
+    approval = ledger.create_approval(
+        task_id=task.id,
+        codex_request_id="req-2",
+        codex_item_id="item-2",
+        codex_turn_id="turn-2",
+        kind="command",
+        summary="Run: restart service",
+    )
+
+    svc = ApprovalService(callback_timeout_seconds=3600)
+    cb = ApprovalCallback(approval_id=approval.id, action="approve_once")
+
+    msg = await svc.resolve_callback(cb, FakeCodexBackend(), ledger)
+    assert "已结束" in msg or "已失效" in msg
+    assert "已处理" not in msg
+
+
+@pytest.mark.asyncio
+async def test_resolve_callback_expired_approval_shows_clear_message(
+    tmp_path: Path,
+) -> None:
+    """Expired approval must show '已过期' not silently fail."""
+    from datetime import datetime, timedelta, timezone
+    from wlcodex.approval import (
+        ApprovalCallback,
+        ApprovalService,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+
+    task = ledger.create_task("demo", "/tmp/demo", "Fix bug", "thread-3", None)
+    ledger.set_task_status(task.id, TaskStatus.WAITING_APPROVAL)
+
+    # Create an approval with an old created_at (simulate expiry)
+    approval_row = ledger.create_approval(
+        task_id=task.id,
+        codex_request_id="req-3",
+        codex_item_id="item-3",
+        codex_turn_id="turn-3",
+        kind="command",
+        summary="Run: deploy",
+    )
+    # Override created_at to be in the past
+    ledger._conn.execute(
+        "UPDATE approval_requests SET created_at = ? WHERE id = ?",
+        (
+            (datetime.now(timezone.utc) - timedelta(seconds=7200)).isoformat(),
+            approval_row.id,
+        ),
+    )
+    ledger._conn.commit()
+
+    svc = ApprovalService(callback_timeout_seconds=3600)
+    cb = ApprovalCallback(approval_id=approval_row.id, action="approve_once")
+
+    msg = await svc.resolve_callback(cb, FakeCodexBackend(), ledger)
+    assert "已过期" in msg

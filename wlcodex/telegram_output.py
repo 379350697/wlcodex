@@ -198,6 +198,43 @@ def _rfind_sentence_boundary(text: str, limit: int) -> int:
     return -1
 
 
+def _idle_buffer_ready(text: str) -> bool:
+    """Check whether idle buffer is at a readable boundary worth sending.
+
+    Idle flush must not send single words, half sentences, broken links,
+    or unclosed code fences as permanent messages.  Only flush when the
+    buffer ends at a natural boundary and has enough content to stand alone.
+    """
+    if not text:
+        return False
+    stripped = text.rstrip()
+    if not stripped:
+        return False
+    # Always safe to flush when buffer is long enough
+    if len(stripped) >= 2000:
+        return True
+    # Too short to be a meaningful standalone message
+    if len(stripped) < 120:
+        return False
+    # Chinese sentence endings
+    if stripped.endswith(('。', '！', '？', '；', '」', '）', ')', '"', '"', "'", "'")):
+        return True
+    # English sentence endings (plain punctuation, no trailing whitespace)
+    if stripped.endswith(('.', '!', '?')):
+        return True
+    # Code fence closed (triple backtick at end)
+    if stripped.endswith('```'):
+        return True
+    # Check raw text for paragraph / line boundaries (before rstrip)
+    # Paragraph break
+    if text.endswith('\n\n'):
+        return True
+    # Line break (e.g. list items) with sufficient content
+    if text.endswith('\n') and len(stripped) >= 200:
+        return True
+    return False
+
+
 def _rfind_whitespace_boundary(text: str, limit: int) -> int:
     search_region = text[:limit]
     for i in range(len(search_region) - 1, 0, -1):
@@ -399,7 +436,8 @@ class TelegramOutputManager:
                 or self.body_mode_for(session.surface) != "semantic_blocks"
             ):
                 return
-            await self._flush_body_chunks(session, force=True)
+            if _idle_buffer_ready(session.chunker.buffer):
+                await self._flush_body_chunks(session, force=True)
             session.idle_flush_task = None
         except asyncio.CancelledError:
             return

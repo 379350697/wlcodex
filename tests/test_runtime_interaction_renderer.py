@@ -98,12 +98,12 @@ class TestRuntimeRendererPure:
     def test_v1_phase_analysis(self) -> None:
         r = RuntimeRenderer(verbosity=1)
         state = _state(phase="running_analysis", active_agent="codex")
-        assert "拆解需求" in r.progress_text(state)
+        assert "分析需求" in r.progress_text(state)
 
     def test_v1_phase_implementation(self) -> None:
         r = RuntimeRenderer(verbosity=1)
         state = _state(phase="running_implementation", active_agent="claude")
-        assert "开始实施" in r.progress_text(state)
+        assert "实施代码" in r.progress_text(state)
 
     def test_v1_phase_verification(self) -> None:
         r = RuntimeRenderer(verbosity=1)
@@ -246,6 +246,36 @@ class TestRuntimeRendererPure:
         assert "thinking" not in text.lower()
         assert "streaming" not in text.lower()
 
+    # -- no raw agent ids in user-visible text --------------------------
+
+    def test_progress_never_contains_raw_agent_ids(self) -> None:
+        """User-visible progress must not leak internal agent ids like claude/codex."""
+        r = RuntimeRenderer(verbosity=1)
+        for phase in [
+            "running_analysis", "running_implementation",
+            "running_verification", "retrying_implementation",
+        ]:
+            for agent in ("claude", "codex", "Claude", "Codex"):
+                state = _state(phase=phase, active_agent=agent)
+                text = r.progress_text(state)
+                assert "claude" not in text.lower(), f"agent id leaked in progress: {text}"
+                assert "codex" not in text.lower(), f"agent id leaked in progress: {text}"
+
+    def test_final_never_contains_raw_agent_ids(self) -> None:
+        """User-visible final text must not leak internal agent ids."""
+        r = RuntimeRenderer(verbosity=1)
+        state = _state(phase="completed", active_agent="claude", is_terminal=True)
+        text = r.final_text(state)
+        assert "claude" not in text.lower()
+        assert "codex" not in text.lower()
+
+    def test_approval_never_contains_raw_agent_ids(self) -> None:
+        """User-visible approval text must not leak internal agent ids."""
+        r = RuntimeRenderer(verbosity=0)
+        text = r.approval_text("command", "rm -rf /tmp")
+        assert "claude" not in text.lower()
+        assert "codex" not in text.lower()
+
     # -- unknown phase --------------------------------------------------
 
     def test_unknown_phase_renders_as_is(self) -> None:
@@ -282,7 +312,7 @@ class TestRuntimeProgressManager:
         await mgr.update_progress(state, chat_id=123)
 
         assert len(fake.sent) == 1
-        assert "开始实施" in fake.sent[0][1]
+        assert "实施代码" in fake.sent[0][1]
         assert fake.edited == []
 
     @pytest.mark.asyncio
@@ -533,7 +563,7 @@ class TestInteractionRendererRuntimeEvents:
         ))
 
         assert len(fake.sent) == 1
-        assert "拆解需求" in fake.sent[0][1]
+        assert "分析需求" in fake.sent[0][1]
 
     @pytest.mark.asyncio
     async def test_runtime_progress_noop_when_manager_none(self) -> None:
@@ -595,7 +625,7 @@ class TestInteractionRendererRuntimeEvents:
         ))
 
         assert len(fake.sent) == 1
-        assert "开始实施" in fake.sent[0][1]
+        assert "实施代码" in fake.sent[0][1]
 
     @pytest.mark.asyncio
     async def test_existing_events_still_work_with_runtime_manager(self) -> None:

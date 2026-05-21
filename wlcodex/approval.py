@@ -70,11 +70,26 @@ class ApprovalService:
         except KeyError:
             return "审批不存在。"
 
-        # 2. Check pending
+        # 2. Check task status — terminal tasks cannot have approvals resolved
+        from wlcodex.models import TaskStatus
+        task = ledger.get_task(approval.task_id)
+        if task.status in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.ABORTED):
+            # Cancel the stale pending approval locally so it is not
+            # accidentally retried.  The task is already done.
+            ledger.resolve_approval(
+                callback.approval_id, ApprovalStatus.CANCELLED, "task_terminal"
+            )
+            ledger.decrement_pending_approvals(approval.task_id)
+            return (
+                f"任务已结束（{task.status.value}），审批 #{approval.id} 已失效。"
+                "如需继续，请重新发起任务。"
+            )
+
+        # 3. Check pending
         if approval.status != ApprovalStatus.PENDING:
             return f"审批已处理（{approval.status.value}）：{approval.resolution or ''}"
 
-        # 3. Check expiry — must unlock the real Codex held request first,
+        # 4. Check expiry — must unlock the real Codex held request first,
         #    then update local DB so the Codex turn is not stuck forever.
         now = datetime.now(timezone.utc)
         age = (now - approval.created_at).total_seconds()
@@ -89,7 +104,7 @@ class ApprovalService:
             await self._resolve_locally_expired(approval, ledger)
             return f"审批 #{approval.id} 已过期。"
 
-        # 3b. Check workspace writability for approving write actions
+        # 4b. Check workspace writability for approving write actions
         if callback.action in ("approve_once", "approve_session"):
             task = ledger.get_task(approval.task_id)
             ws = self._workspaces.get(task.workspace_alias)
@@ -99,7 +114,7 @@ class ApprovalService:
                     f"审批 #{approval.id} 未处理。"
                 )
 
-        # 4. Build schema response
+        # 5. Build schema response
         requested_permissions = {}
         if approval.kind == ApprovalKind.PERMISSIONS:
             try:
@@ -113,7 +128,7 @@ class ApprovalService:
             requested_permissions=requested_permissions,
         )
 
-        # 5. Send backend response FIRST (so we don't lose the approval
+        # 6. Send backend response FIRST (so we don't lose the approval
         #    if local state update fails)
         try:
             await backend.resolve_approval(approval.codex_request_id, response)
@@ -122,7 +137,7 @@ class ApprovalService:
             ledger.set_approval_error(callback.approval_id, str(exc))
             return f"审批已在本地记录，但发送到后端失败：{exc}"
 
-        # 6. Resolve local row (only after backend send succeeded)
+        # 7. Resolve local row (only after backend send succeeded)
         resolution = callback.action
         if callback.action == "approve_once":
             ledger.resolve_approval(
@@ -154,7 +169,7 @@ class ApprovalService:
                             "Failed to interrupt turn after permissions cancel: %s", exc
                         )
 
-        # 7. Decrement pending count
+        # 8. Decrement pending count
         ledger.decrement_pending_approvals(approval.task_id)
         batch_count = 0
         if (
@@ -168,7 +183,7 @@ class ApprovalService:
                 ledger=ledger,
             )
 
-        # 8. Move task back to running if waiting and no pending remain
+        # 9. Move task back to running if waiting and no pending remain
         from wlcodex.models import TaskStatus
         task = ledger.get_task(approval.task_id)
         if task.status == TaskStatus.WAITING_APPROVAL:

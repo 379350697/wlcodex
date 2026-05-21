@@ -886,6 +886,12 @@ class AppServerCodexBackend:
                     )
                     break
                 if not _event_matches_turn(event):
+                    # Approval requests may not carry turnId — match by threadId
+                    # or disable idle timeout for any approval event on this thread.
+                    if event.event_type == "approval_requested":
+                        event_thread_id = str(event.payload.get("threadId", ""))
+                        if event_thread_id == thread_id:
+                            idle_deadline = None  # waiting for human — pause idle
                     continue
 
                 if idle_timeout_seconds is not None:
@@ -895,6 +901,10 @@ class AppServerCodexBackend:
                     delta = event.payload.get("delta", "")
                     if isinstance(delta, str):
                         deltas.append(delta)
+                elif event.event_type == "approval_requested":
+                    # Codex is waiting for human approval — pause idle timeout.
+                    # The hard_deadline still protects against infinite hangs.
+                    idle_deadline = None
                 elif event.event_type == "turn_completed":
                     status = _event_turn_status(event)
                     if status in ("failed", "interrupted", "cancelled", "canceled"):

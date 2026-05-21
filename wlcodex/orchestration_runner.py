@@ -21,6 +21,7 @@ from wlcodex.orchestrator import (
     VerificationDecision,
     _detect_claude_direct_delivery_drift,
     _detect_verification_delivery_drift,
+    _parse_last_complete_json,
 )
 from wlcodex.runtime_events import (
     AggregateType,
@@ -48,19 +49,44 @@ def _accepts_keyword(func: object, name: str) -> bool:
 
 
 def _visible_analysis_reply(text: str) -> str:
+    """Extract a human-readable reply from Codex analysis text.
+
+    Handles concatenated JSON objects (Codex may emit multiple {..}{..}).
+    Returns natural-language Chinese — never raw JSON keys.
+    """
     stripped = text.strip()
     if not stripped:
         return ""
+
+    # Try the last complete JSON object first (most likely the final conclusion).
+    parsed = _parse_last_complete_json(stripped)
+    if isinstance(parsed, dict):
+        summary = str(parsed.get("summary", "")).strip()
+        if summary:
+            return summary
+        # Fallback: look for any string field with content
+        for key in ("message", "title", "conclusion", "result"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    # If the text starts with JSON, strip the JSON prefix and use the prose.
     if stripped.startswith("{"):
-        try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict):
-            for key in ("summary", "message", "title"):
-                value = parsed.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
+        # Try to find the end of the last JSON object
+        depth = 0
+        last_close = -1
+        for i, ch in enumerate(stripped):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    last_close = i
+        if last_close > 0:
+            after_json = stripped[last_close + 1:].strip()
+            if after_json and not after_json.startswith("{"):
+                return after_json
+
     return stripped
 
 

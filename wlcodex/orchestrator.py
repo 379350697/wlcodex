@@ -189,6 +189,103 @@ def _analysis_says_no_implementation_needed(text: str) -> bool:
     return any(marker in lowered or marker in text for marker in markers)
 
 
+def _parse_last_complete_json(text: str) -> dict[str, object] | None:
+    """Parse concatenated JSON objects, returning the last complete one.
+
+    Codex may output multiple JSON objects like {..}{..}...{..}.
+    We scan for balanced braces to find the last complete object.
+    """
+    if not text:
+        return None
+    best: dict[str, object] | None = None
+    i = 0
+    while i < len(text):
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        start = i
+        while i < len(text):
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        candidate = json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        candidate = None
+                    if isinstance(candidate, dict):
+                        best = candidate
+                    break
+            i += 1
+        i += 1
+    return best
+
+
+def _analysis_needs_implementation(text: str) -> bool:
+    """Return true when Codex analysis JSON has needs_implementation:true."""
+    parsed = _parse_last_complete_json(text)
+    if isinstance(parsed, dict) and parsed.get("needs_implementation") is True:
+        return True
+    return False
+
+
+def _render_diagnostic_needs_implementation(text: str) -> str:
+    """Render a human-readable message for diagnostic that found issues needing fix.
+
+    Extracts summary, steps, files, and acceptance criteria from the last
+    complete JSON object in the analysis text.  Returns Chinese prose — never
+    raw JSON keys.
+    """
+    parsed = _parse_last_complete_json(text)
+    summary = ""
+    steps: list[str] = []
+    files: list[str] = []
+    criteria: list[str] = []
+
+    if isinstance(parsed, dict):
+        summary = str(parsed.get("summary", "")).strip()
+        raw_steps = parsed.get("implementation_steps")
+        raw_files = parsed.get("files_to_touch")
+        raw_criteria = parsed.get("acceptance_criteria")
+        if isinstance(raw_steps, list):
+            steps = [str(s).strip() for s in raw_steps if str(s).strip()]
+        if isinstance(raw_files, list):
+            files = [str(f).strip() for f in raw_files if str(f).strip()]
+        if isinstance(raw_criteria, list):
+            criteria = [str(c).strip() for c in raw_criteria if str(c).strip()]
+
+    lines: list[str] = []
+    lines.append("诊断完成，但发现需要修复的问题。")
+    lines.append("")
+    if summary:
+        lines.append(f"结论：{summary}")
+        lines.append("")
+
+    if files:
+        lines.append("涉及文件：")
+        for f in files:
+            lines.append(f"  - {f}")
+        lines.append("")
+
+    if steps:
+        lines.append("实施步骤：")
+        for i, step in enumerate(steps, 1):
+            lines.append(f"  {i}. {step}")
+        lines.append("")
+
+    if criteria:
+        lines.append("验收标准：")
+        for i, c in enumerate(criteria, 1):
+            lines.append(f"  {i}. {c}")
+        lines.append("")
+
+    lines.append("以上修复未自动执行。需要你确认是否开始实施。")
+    return "\n".join(lines)
+
+
 def _is_reply_only_request(text: str) -> bool:
     lowered = text.lower()
     markers = (
@@ -593,13 +690,24 @@ class ChiefEngineerOrchestrator:
             result.verification_summary = f"Codex analysis failed: {exc}"
             return result
 
-        # Check if Codex says no implementation needed
-        if (
-            _is_reply_only_request(user_goal)
-            or _is_read_only_diagnostic_request(user_goal)
-        ):
+        # Reply-only requests: always pass through with exact reply text
+        if _is_reply_only_request(user_goal):
             result.status = "passed"
             result.verification_summary = analysis
+            return result
+
+        # Read-only diagnostic: analyse but never auto-enter Claude.
+        # If Codex finds issues needing implementation, surface them as
+        # needs_user instead of silently passing.
+        if _is_read_only_diagnostic_request(user_goal):
+            if _analysis_needs_implementation(analysis):
+                result.status = "needs_user"
+                result.verification_summary = _render_diagnostic_needs_implementation(
+                    analysis
+                )
+            else:
+                result.status = "passed"
+                result.verification_summary = analysis
             return result
 
         if _analysis_says_no_implementation_needed(analysis):
@@ -898,11 +1006,8 @@ class ChiefEngineerOrchestrator:
             agent="codex",
         )
 
-        # Check if Codex says no implementation needed
-        if (
-            _is_reply_only_request(user_goal)
-            or _is_read_only_diagnostic_request(user_goal)
-        ):
+        # Reply-only requests: always pass through with exact reply text
+        if _is_reply_only_request(user_goal):
             result.status = "passed"
             result.verification_summary = analysis
             yield OrchestrationProgress(
@@ -912,6 +1017,33 @@ class ChiefEngineerOrchestrator:
                 agent="codex",
                 result_status="passed",
             )
+            return
+
+        # Read-only diagnostic: analyse but never auto-enter Claude.
+        # If Codex finds issues needing implementation, surface them as
+        # needs_user instead of silently passing.
+        if _is_read_only_diagnostic_request(user_goal):
+            if _analysis_needs_implementation(analysis):
+                result.status = "needs_user"
+                user_msg = _render_diagnostic_needs_implementation(analysis)
+                result.verification_summary = user_msg
+                yield OrchestrationProgress(
+                    phase=OrchestrationProgress.COMPLETE,
+                    text=user_msg[:200],
+                    full_text=user_msg,
+                    agent="codex",
+                    result_status="needs_user",
+                )
+            else:
+                result.status = "passed"
+                result.verification_summary = analysis
+                yield OrchestrationProgress(
+                    phase=OrchestrationProgress.COMPLETE,
+                    text="",
+                    full_text=analysis,
+                    agent="codex",
+                    result_status="passed",
+                )
             return
 
         if _analysis_says_no_implementation_needed(analysis):
