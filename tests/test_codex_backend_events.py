@@ -330,6 +330,53 @@ async def test_app_server_send_codex_analysis_prompt_uses_planning_overrides() -
 
 
 @pytest.mark.asyncio
+async def test_app_server_send_codex_analysis_prompt_inherits_high_trust_policy() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        approval_policy="never",
+        sandbox="danger-full-access",
+        request_timeout_seconds=0.3,
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    class RecordingClient:
+        async def request(
+            self, method: str, params: dict[str, object] | None = None
+        ) -> dict[str, object]:
+            requests.append((method, params or {}))
+            if method == "thread/start":
+                return {"threadId": "analysis-thread"}
+            if method == "turn/start":
+                backend._emit(BackendEvent("agent_message_delta", {
+                    "threadId": "analysis-thread",
+                    "turnId": "analysis-turn",
+                    "delta": "{\"summary\":\"ok\"}",
+                }))
+                backend._emit(BackendEvent("turn_completed", {
+                    "threadId": "analysis-thread",
+                    "turnId": "analysis-turn",
+                }))
+                return {"turnId": "analysis-turn"}
+            raise AssertionError(method)
+
+    backend._client = RecordingClient()
+
+    result = await backend.send_codex_prompt(
+        "/tmp/demo",
+        "prompt",
+        interaction_mode="analysis",
+    )
+
+    assert result == "{\"summary\":\"ok\"}"
+    _, thread_params = requests[0]
+    _, turn_params = requests[1]
+    assert thread_params["approvalPolicy"] == "never"
+    assert thread_params["sandbox"] == "danger-full-access"
+    assert turn_params["approvalPolicy"] == "never"
+    assert turn_params["sandboxPolicy"] == {"type": "dangerFullAccess"}
+
+
+@pytest.mark.asyncio
 async def test_app_server_send_codex_prompt_interrupts_and_fails_on_timeout() -> None:
     backend = AppServerCodexBackend(
         endpoint="ws://127.0.0.1:17431",

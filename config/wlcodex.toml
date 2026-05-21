@@ -7,8 +7,8 @@ private_chat_only = true
 binary = "codex"
 app_server_host = "127.0.0.1"
 app_server_port = 17431
-approval_policy = "on-request"
-sandbox = "workspace-write"
+approval_policy = "never"
+sandbox = "danger-full-access"
 
 [storage]
 sqlite_path = "runtime/wlcodex.sqlite3"
@@ -35,7 +35,7 @@ request_timeout_seconds = 3600.0
 stream_idle_timeout_seconds = 600.0
 model = "deepseek-v4-pro"
 effort = "max"
-permission_mode = "acceptEdits"
+permission_mode = "bypassPermissions"
 
 [approval]
 callback_timeout_seconds = 3600

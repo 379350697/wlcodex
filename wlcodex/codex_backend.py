@@ -67,11 +67,24 @@ def _planning_developer_instructions(interaction_mode: str) -> str:
     )
 
 
-def _planning_turn_options(interaction_mode: str) -> dict[str, object]:
+def _planning_sandbox_policy(sandbox: str) -> dict[str, object]:
+    if sandbox == "danger-full-access":
+        return {"type": "dangerFullAccess"}
+    if sandbox == "read-only":
+        return {"type": "readOnly", "networkAccess": False}
+    return dict(_CHIEF_ENGINEER_SANDBOX_POLICY)
+
+
+def _planning_turn_options(
+    interaction_mode: str,
+    *,
+    approval_policy: str = "on-request",
+    sandbox: str = "workspace-write",
+) -> dict[str, object]:
     options: dict[str, object] = {
         "effort": "xhigh",
-        "approval_policy": "on-request",
-        "sandbox_policy": _CHIEF_ENGINEER_SANDBOX_POLICY,
+        "approval_policy": approval_policy,
+        "sandbox_policy": _planning_sandbox_policy(sandbox),
         "model": "gpt-5.5",
         "summary": "none",
         "personality": "pragmatic",
@@ -666,8 +679,8 @@ class AppServerCodexBackend:
             "thread/start",
             build_thread_start_params(
                 workspace_path,
-                "on-request",
-                "workspace-write",
+                self.approval_policy,
+                self.sandbox,
                 developer_instructions=_planning_developer_instructions(
                     interaction_mode
                 ),
@@ -698,7 +711,11 @@ class AppServerCodexBackend:
             build_turn_start_params(
                 thread_id,
                 prompt,
-                **_planning_turn_options(interaction_mode),
+                **_planning_turn_options(
+                    interaction_mode,
+                    approval_policy=self.approval_policy,
+                    sandbox=self.sandbox,
+                ),
             ),
         )
         return parse_turn_response(result)
