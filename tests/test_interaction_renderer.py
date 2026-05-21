@@ -300,6 +300,111 @@ async def test_terminal_renderer_sends_semantic_blocks_while_running():
 
 
 @pytest.mark.asyncio
+async def test_runtime_progress_starts_preview_session_without_run_started():
+    from types import SimpleNamespace
+
+    from wlcodex.interaction.runtime_renderer import RuntimeRunState
+
+    fake = FakeTransport()
+
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(
+            preview_enabled=True,
+            preview_edit_min_interval_seconds=0.0,
+            semantic_min_chars=20,
+            semantic_max_chars=80,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+
+    await renderer.handle(
+        InteractionEvent(
+            event_type="runtime_progress",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            metadata={
+                "runtime_state": RuntimeRunState(
+                    phase="running_analysis",
+                    active_agent="codex",
+                    agent_status="running",
+                )
+            },
+        )
+    )
+
+    assert fake.sent
+    assert "分析需求" in fake.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_runtime_heartbeat_edits_preview_with_activity_hint():
+    from types import SimpleNamespace
+
+    from wlcodex.interaction.runtime_renderer import RuntimeRunState
+
+    fake = FakeTransport()
+
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(
+            preview_enabled=True,
+            preview_edit_min_interval_seconds=0.0,
+            semantic_min_chars=20,
+            semantic_max_chars=80,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+
+    await renderer.handle(
+        InteractionEvent(
+            event_type="runtime_progress",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            metadata={
+                "runtime_state": RuntimeRunState(
+                    phase="running_verification",
+                    active_agent="codex",
+                    agent_status="running",
+                )
+            },
+        )
+    )
+    await renderer.handle(
+        InteractionEvent(
+            event_type="runtime_heartbeat",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            metadata={
+                "runtime_state": RuntimeRunState(
+                    phase="running_verification",
+                    active_agent="codex",
+                    agent_status="running",
+                    last_activity_at="2026-05-22T01:00:00+08:00",
+                )
+            },
+        )
+    )
+
+    assert any("还在执行" in edit[2] for edit in fake.edited)
+
+
+@pytest.mark.asyncio
 async def test_interrupt_closes_old_output_session_before_new_run():
     from types import SimpleNamespace
 

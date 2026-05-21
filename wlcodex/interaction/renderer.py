@@ -82,7 +82,12 @@ class InteractionRenderer:
             and self._output_manager.preview_enabled
         )
 
-    async def _ensure_output_session(self, event: InteractionEvent) -> OutputRunKey:
+    async def _ensure_output_session(
+        self,
+        event: InteractionEvent,
+        *,
+        initial_status: str | None = None,
+    ) -> OutputRunKey:
         if self._output_manager is None:
             raise RuntimeError("output manager is not configured")
         key = self._output_key(event)
@@ -93,7 +98,7 @@ class InteractionRenderer:
             if self._surface_resolver(event.chat_id) == "terminal"
             else OutputSurface.PRODUCT
         )
-        text = self._profile.started_text(event) or "正在处理"
+        text = initial_status or self._profile.started_text(event) or "正在处理"
         await self._output_manager.start(key, surface=surface, text=text)
         return key
 
@@ -236,7 +241,11 @@ class InteractionRenderer:
         if self._output_manager_owns_status():
             text = _runtime_progress_text(state)
             if text:
-                await self._output_manager.update_status(self._output_key(event), text)
+                key = self._output_key(event)
+                if key not in self._output_manager.sessions:
+                    await self._ensure_output_session(event, initial_status=text)
+                else:
+                    await self._output_manager.update_status(key, text)
             return
         if self._runtime_progress is None:
             return
@@ -251,9 +260,13 @@ class InteractionRenderer:
         if state is None:
             return
         if self._output_manager_owns_status():
-            text = _runtime_progress_text(state)
+            text = _runtime_heartbeat_text(state)
             if text:
-                await self._output_manager.update_status(self._output_key(event), text)
+                key = self._output_key(event)
+                if key not in self._output_manager.sessions:
+                    await self._ensure_output_session(event, initial_status=text)
+                else:
+                    await self._output_manager.update_status(key, text)
             return
         if self._runtime_progress is None:
             return
@@ -325,6 +338,17 @@ def _runtime_progress_text(state) -> str:
         return "等待审批"
 
     return phase_label
+
+
+def _runtime_heartbeat_text(state) -> str:
+    """Convert a RuntimeRunState to an activity heartbeat status."""
+    from wlcodex.interaction.runtime_renderer import RuntimeRenderer
+
+    progress = _runtime_progress_text(state)
+    heartbeat = RuntimeRenderer(verbosity=1).heartbeat_text(state)
+    if progress and heartbeat:
+        return f"{progress}\n{heartbeat}"
+    return heartbeat or progress
 
 
 def _runtime_final_text(state) -> str:

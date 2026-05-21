@@ -899,8 +899,10 @@ class ChiefEngineerOrchestrator:
             if len(forbidden) > 8:
                 preview = f"{preview}, +{len(forbidden) - 8} more"
             raise RuntimeError(
-                "Codex 总工程师轮修改了实现文件，已停止闭环："
-                f"{preview}。请把这些代码/测试/配置改动交给 Claude 执行。"
+                "Codex 总工程师轮期间工作区出现非授权实现文件变更，已停止闭环："
+                f"{preview}。可能是 Codex 越界写入，也可能是同一工作区内"
+                "其他并发修改污染了验收快照；请把这些代码/测试/配置改动"
+                "交给 Claude 执行或隔离到独立 worktree 后重试。"
             )
         return result
 

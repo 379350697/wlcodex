@@ -415,6 +415,178 @@ class TestUsageEventProjection:
         assert row["token_input"] == 300
         assert row["token_output"] == 150
 
+    def test_codex_derived_skipped_when_exact_row_exists(self, tmp_path: Path):
+        """AC: codex derived usage event skipped when matching exact row exists."""
+        ledger, store, projector = _setup(tmp_path)
+
+        # Pre-populate an exact usage row (simulating TaskService path)
+        ledger.record_usage_event(
+            agent="codex",
+            role="analysis",
+            source="exact",
+            input_tokens=1500,
+            output_tokens=800,
+            cached_input_tokens=300,
+            reasoning_output_tokens=100,
+            total_tokens=2400,
+            conversation_id=1,
+            orchestration_run_id=5,
+            agent_run_id=10,
+            task_id=20,
+            external_thread_id="thread-1",
+            external_turn_id="turn-1",
+        )
+
+        # Now simulate the RuntimeProjector receiving the same usage via
+        # MODEL_USAGE_UPDATED.  The actor is "codex", payload has no
+        # explicit source → source defaults to "derived".
+        store.append(_event(
+            EventType.MODEL_USAGE_UPDATED, AggregateType.AGENT_RUN,
+            "ar-10", agent_run_id=10, orchestration_run_id=5,
+            conversation_id=1, task_id=20,
+            actor="codex",
+            payload={
+                "input_tokens": 1500, "output_tokens": 800,
+                "cached_input_tokens": 300, "reasoning_output_tokens": 100,
+                "total_tokens": 2400,
+            },
+            event_id=1,
+        ))
+        projector.apply(store.get_by_id(1))
+
+        # Must still be only 1 codex row (the original exact one)
+        rows = ledger._conn.execute(
+            "SELECT * FROM usage_events WHERE agent = 'codex'"
+        ).fetchall()
+        assert len(rows) == 1, f"Expected 1 codex row, got {len(rows)}"
+        assert rows[0]["source"] == "exact"
+
+    def test_codex_derived_inserted_when_no_exact_row_exists(self, tmp_path: Path):
+        """AC: codex derived usage row still inserted when no matching exact row."""
+        ledger, store, projector = _setup(tmp_path)
+
+        store.append(_event(
+            EventType.MODEL_USAGE_UPDATED, AggregateType.AGENT_RUN,
+            "ar-20", agent_run_id=20, orchestration_run_id=7,
+            conversation_id=2, task_id=30,
+            actor="codex",
+            payload={
+                "input_tokens": 500, "output_tokens": 300,
+                "total_tokens": 800,
+            },
+            event_id=1,
+        ))
+        projector.apply(store.get_by_id(1))
+
+        rows = ledger._conn.execute(
+            "SELECT * FROM usage_events WHERE agent = 'codex'"
+        ).fetchall()
+        assert len(rows) == 1, f"Expected 1 derived codex row, got {len(rows)}"
+        assert rows[0]["source"] == "derived"
+
+    def test_codex_derived_dedup_still_updates_agent_run_tokens(self, tmp_path: Path):
+        """AC: dedup skips usage_events insert but still updates agent_runs tokens."""
+        ledger, store, projector = _setup(tmp_path)
+
+        # Create agent run
+        store.append(_event(EventType.AGENT_RUN_STARTED, AggregateType.AGENT_RUN,
+                            "ar-30", agent_run_id=30, event_id=1))
+        projector.apply(store.get_by_id(1))
+
+        # Pre-populate exact row
+        ledger.record_usage_event(
+            agent="codex", role="analysis", source="exact",
+            input_tokens=1000, output_tokens=600, total_tokens=1600,
+            conversation_id=1, orchestration_run_id=5, agent_run_id=30,
+            task_id=40,
+        )
+
+        # Projector receives the same usage
+        store.append(_event(
+            EventType.MODEL_USAGE_UPDATED, AggregateType.AGENT_RUN,
+            "ar-30", agent_run_id=30, orchestration_run_id=5,
+            conversation_id=1, task_id=40,
+            actor="codex",
+            payload={
+                "input_tokens": 1000, "output_tokens": 600,
+                "total_tokens": 1600,
+            },
+            event_id=2,
+        ))
+        projector.apply(store.get_by_id(2))
+
+        # usage_events: still 1 row only
+        rows = ledger._conn.execute(
+            "SELECT * FROM usage_events WHERE agent = 'codex'"
+        ).fetchall()
+        assert len(rows) == 1
+
+        # agent_runs: tokens must still accumulate
+        row = _row(ledger._conn, "agent_runs", 30)
+        assert row["token_input"] == 1000
+        assert row["token_output"] == 600
+
+    def test_claude_derived_exact_not_affected_by_codex_dedup(self, tmp_path: Path):
+        """AC: Claude usage events (agent='claude') are never deduped by this logic."""
+        ledger, store, projector = _setup(tmp_path)
+
+        # Pre-populate a claude exact row
+        ledger.record_usage_event(
+            agent="claude", role="implementation", source="exact",
+            input_tokens=2000, output_tokens=1000, total_tokens=3000,
+            conversation_id=1, orchestration_run_id=5, agent_run_id=50,
+            task_id=60,
+        )
+
+        # Same usage via projector (actor='claude')
+        store.append(_event(
+            EventType.MODEL_USAGE_UPDATED, AggregateType.AGENT_RUN,
+            "ar-50", agent_run_id=50, orchestration_run_id=5,
+            conversation_id=1, task_id=60,
+            actor="claude",
+            payload={
+                "input_tokens": 2000, "output_tokens": 1000,
+                "total_tokens": 3000,
+            },
+            event_id=1,
+        ))
+        projector.apply(store.get_by_id(1))
+
+        # Both rows must exist — dedup only applies to codex
+        rows = ledger._conn.execute(
+            "SELECT * FROM usage_events WHERE agent = 'claude'"
+        ).fetchall()
+        assert len(rows) == 2, f"Expected 2 claude rows, got {len(rows)}"
+
+    def test_codex_exact_no_dedup_when_token_values_differ(self, tmp_path: Path):
+        """AC: codex derived row still inserted when token values don't match exact."""
+        ledger, store, projector = _setup(tmp_path)
+
+        ledger.record_usage_event(
+            agent="codex", role="analysis", source="exact",
+            input_tokens=100, output_tokens=50, total_tokens=150,
+            conversation_id=1, orchestration_run_id=5, agent_run_id=70,
+            task_id=80,
+        )
+
+        store.append(_event(
+            EventType.MODEL_USAGE_UPDATED, AggregateType.AGENT_RUN,
+            "ar-70", agent_run_id=70, orchestration_run_id=5,
+            conversation_id=1, task_id=80,
+            actor="codex",
+            payload={
+                "input_tokens": 200, "output_tokens": 100,
+                "total_tokens": 300,
+            },
+            event_id=1,
+        ))
+        projector.apply(store.get_by_id(1))
+
+        rows = ledger._conn.execute(
+            "SELECT * FROM usage_events WHERE agent = 'codex'"
+        ).fetchall()
+        assert len(rows) == 2, f"Expected 2 codex rows (different tokens), got {len(rows)}"
+
 
 # ---------------------------------------------------------------------------
 # Approval projection

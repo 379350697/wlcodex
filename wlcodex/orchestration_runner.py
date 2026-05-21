@@ -101,6 +101,7 @@ class _TaskBoundCodexBackend:
         correlation_id: str = "",
         conversation_id: int | None = None,
         orchestration_run_id: int | None = None,
+        runtime_activity_callback: Callable[[RuntimeEvent, str], None] | None = None,
     ) -> None:
         self._backend = backend
         self._service = service
@@ -111,6 +112,8 @@ class _TaskBoundCodexBackend:
         self._orchestration_run_id = orchestration_run_id
         self._runtime_source: CodexRuntimeSource | None = None
         self._last_runtime_event_id: int | None = None
+        self._runtime_role = ""
+        self._runtime_activity_callback = runtime_activity_callback
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._backend, name)
@@ -159,6 +162,8 @@ class _TaskBoundCodexBackend:
                 ):
                     stored = self._store.append(runtime_event)
                     self._last_runtime_event_id = stored.id
+                    if self._runtime_activity_callback is not None:
+                        self._runtime_activity_callback(stored, self._runtime_role)
 
             self._backend.set_runtime_event_callback(_runtime_callback)
             runtime_wired = True
@@ -525,6 +530,63 @@ class OrchestrationRunner:
         correlation_id: str = "",
     ) -> None:
         cid = correlation_id or str(uuid.uuid4())
+        codex_heartbeat_last_at = 0.0
+
+        def _codex_runtime_activity(event: RuntimeEvent, role: str) -> None:
+            nonlocal codex_heartbeat_last_at
+            if self._interaction_renderer is None:
+                return
+            active_event_types = {
+                EventType.MODEL_USAGE_UPDATED,
+                EventType.COMMAND_STARTED,
+                EventType.COMMAND_COMPLETED,
+                EventType.TOOL_CALL_STARTED,
+                EventType.TOOL_CALL_COMPLETED,
+                EventType.APPROVAL_REQUESTED,
+            }
+            if event.event_type not in active_event_types:
+                return
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            if event.event_type == EventType.MODEL_USAGE_UPDATED and (
+                now - codex_heartbeat_last_at < 10.0
+            ):
+                return
+            codex_heartbeat_last_at = now
+            phase = (
+                "running_verification"
+                if role == "verification"
+                else "running_analysis"
+            )
+            total_tokens = _runtime_total_tokens(event.payload)
+            state = self._build_runtime_state(
+                phase,
+                active_agent="codex",
+                agent_status="running",
+            )
+            state.last_activity_at = event.occurred_at
+            state.last_event_type = event.event_type
+            state.total_tokens = total_tokens
+
+            async def _send_runtime_heartbeat() -> None:
+                try:
+                    await self._interaction_renderer.handle(
+                        InteractionEvent(
+                            event_type="runtime_heartbeat",
+                            chat_id=chat_id,
+                            task_id=task_id,
+                            conversation_id=conversation.id,
+                            metadata={"runtime_state": state},
+                        )
+                    )
+                except Exception:
+                    logger.debug("Failed to render Codex runtime heartbeat", exc_info=True)
+
+            loop.create_task(
+                _send_runtime_heartbeat(),
+                name=f"codex-runtime-heartbeat-{task_id}",
+            )
+
         codex = _TaskBoundCodexBackend(
             self._codex,
             self._service,
@@ -533,6 +595,7 @@ class OrchestrationRunner:
             correlation_id=cid,
             conversation_id=conversation.id,
             orchestration_run_id=orchestration_run_id,
+            runtime_activity_callback=_codex_runtime_activity,
         )
         codex.set_runtime_context(
             agent_run_id=codex_analysis_run_id,
@@ -1549,3 +1612,22 @@ def _workspace_has_changes(workspace_path: str) -> bool:
     except Exception:
         return False
     return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _runtime_total_tokens(payload: dict[str, object]) -> int:
+    total = payload.get("totalTokens")
+    if isinstance(total, int):
+        return total
+    nested_total = payload.get("total")
+    if isinstance(nested_total, dict):
+        nested_value = nested_total.get("totalTokens")
+        if isinstance(nested_value, int):
+            return nested_value
+    input_tokens = payload.get("inputTokens")
+    output_tokens = payload.get("outputTokens")
+    total_count = 0
+    if isinstance(input_tokens, int):
+        total_count += input_tokens
+    if isinstance(output_tokens, int):
+        total_count += output_tokens
+    return total_count

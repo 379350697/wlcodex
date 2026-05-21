@@ -1473,6 +1473,14 @@ async def test_runner_wires_codex_runtime_source_for_analysis_turn(
     assert usage_events
     assert usage_events[0].actor == "codex"
     assert usage_events[0].agent_run_id == codex_run.id
+    heartbeats = [
+        event for event in renderer.events
+        if event.event_type == "runtime_heartbeat"
+    ]
+    assert heartbeats
+    state = heartbeats[0].metadata["runtime_state"]
+    assert state.phase == "running_analysis"
+    assert state.active_agent == "codex"
     assert usage_events[0].payload["input_tokens"] == 21
 
 

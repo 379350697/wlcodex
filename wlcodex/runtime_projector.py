@@ -596,6 +596,45 @@ class RuntimeProjector:
             total = input_tokens + output_tokens
         latency = _payload_int(payload, "latency_ms", "latencyMs")
 
+        agent = str(payload.get("agent", event.actor))
+        source = str(payload.get("source", "derived"))
+
+        # Dedup: when codex agent with source='derived', skip insert if an
+        # exact/estimated row with matching scope + token values already exists.
+        # This prevents double-counting from the TaskService (exact) +
+        # RuntimeProjector (derived) dual-path writes for the same request.
+        if agent == "codex" and source == "derived":
+            existing = self._conn.execute(
+                """SELECT 1 FROM usage_events
+                   WHERE agent = 'codex'
+                     AND source IN ('exact', 'estimated')
+                     AND (conversation_id IS ? OR (conversation_id IS NULL AND ? IS NULL))
+                     AND (orchestration_run_id IS ? OR (orchestration_run_id IS NULL AND ? IS NULL))
+                     AND (agent_run_id IS ? OR (agent_run_id IS NULL AND ? IS NULL))
+                     AND (task_id IS ? OR (task_id IS NULL AND ? IS NULL))
+                     AND input_tokens = ?
+                     AND output_tokens = ?
+                     AND total_tokens = ?
+                   LIMIT 1""",
+                (
+                    event.conversation_id, event.conversation_id,
+                    event.orchestration_run_id, event.orchestration_run_id,
+                    event.agent_run_id, event.agent_run_id,
+                    event.task_id, event.task_id,
+                    input_tokens, output_tokens, total,
+                ),
+            ).fetchone()
+            if existing is not None:
+                # Still update agent_runs token totals (only path that does).
+                if event.agent_run_id is not None:
+                    self._conn.execute(
+                        "UPDATE agent_runs SET token_input = token_input + ?, "
+                        "token_output = token_output + ?, updated_at = ? WHERE id = ?",
+                        (input_tokens, output_tokens, _now(), event.agent_run_id),
+                    )
+                    self._conn.commit()
+                return
+
         self._conn.execute(
             """
             INSERT INTO usage_events (
@@ -616,7 +655,7 @@ class RuntimeProjector:
                 event.orchestration_run_id,
                 event.agent_run_id,
                 event.task_id,
-                str(payload.get("agent", event.actor)),
+                agent,
                 str(payload.get("role", "")),
                 str(payload.get("phase", "")),
                 str(payload.get("request_kind", "")),
@@ -626,7 +665,7 @@ class RuntimeProjector:
                 str(payload.get("external_turn_id", "")),
                 str(payload.get("external_session_id", "")),
                 str(payload.get("status", "")),
-                str(payload.get("source", "derived")),
+                source,
                 input_tokens,
                 cached,
                 output_tokens,
