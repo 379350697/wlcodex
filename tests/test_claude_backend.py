@@ -53,7 +53,7 @@ def test_claude_health_when_enabled_but_no_binary() -> None:
 def test_claude_config_defaults() -> None:
     config = ClaudeConfig()
     assert config.enabled is False
-    assert config.binary == "claude"
+    assert config.binary == "auto"
     assert config.startup_timeout_seconds == 15.0
     assert config.request_timeout_seconds == 3600.0
     assert config.stream_idle_timeout_seconds == 600.0

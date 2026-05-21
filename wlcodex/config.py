@@ -93,7 +93,7 @@ class OrchestrationConfig:
 @dataclass(frozen=True)
 class ClaudeConfig:
     enabled: bool = False
-    binary: str = "claude"
+    binary: str = "auto"
     startup_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 3600.0
     stream_idle_timeout_seconds: float = 600.0
@@ -296,7 +296,7 @@ def load_config(path: Path) -> AppConfig:
         ),
         claude=ClaudeConfig(
             enabled=bool(claude_raw.get("enabled", False)),
-            binary=str(claude_raw.get("binary", "claude")),
+            binary=str(claude_raw.get("binary", "auto")),
             startup_timeout_seconds=float(claude_raw.get("startup_timeout_seconds", 15.0)),
             request_timeout_seconds=float(claude_raw.get("request_timeout_seconds", 3600.0)),
             stream_idle_timeout_seconds=float(

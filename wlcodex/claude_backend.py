@@ -66,7 +66,7 @@ def _sanitized_env() -> dict[str, str]:
 @dataclass
 class ClaudeConfig:
     enabled: bool = False
-    binary: str = "claude"
+    binary: str = "auto"
     startup_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 3600.0
     stream_idle_timeout_seconds: float = 600.0

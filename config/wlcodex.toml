@@ -29,7 +29,7 @@ event_log_max_chars = 20000
 
 [claude]
 enabled = true
-binary = "/home/wl/.vscode/extensions/anthropic.claude-code-2.1.145-linux-x64/resources/native-binary/claude"
+binary = "auto"
 startup_timeout_seconds = 15.0
 request_timeout_seconds = 3600.0
 stream_idle_timeout_seconds = 600.0

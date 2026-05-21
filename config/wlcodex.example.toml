@@ -76,7 +76,9 @@ auto_delegate_simple_edits = false
 # When disabled, the default Codex -> Claude -> Codex workflow falls back to
 # Codex-only; the user can still use 只问 Codex.
 enabled = false
-binary = "claude"
+binary = "auto"
+# Optional override for operators:
+#   WLCODEX_CLAUDE_BINARY=/absolute/path/to/claude
 startup_timeout_seconds = 15.0
 request_timeout_seconds = 3600.0
 stream_idle_timeout_seconds = 600.0
