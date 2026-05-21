@@ -15,8 +15,9 @@ def test_all_primary_commands_in_order() -> None:
     names = [cmd[0] for cmd in commands]
     assert names == [
         "new", "codex", "claude", "auto", "stop",
-        "status", "sessions", "switch", "model", "claude_mode",
-        "diff", "files", "verify", "health", "help",
+        "status", "sessions", "history", "workspaces", "switch",
+        "model", "claude_mode", "diff", "files", "verify",
+        "health", "help",
     ]
 
 
@@ -34,7 +35,10 @@ def test_natural_bot_commands_are_compact() -> None:
     commands = build_bot_commands(profile="natural")
     names = [cmd[0] for cmd in commands]
 
-    assert names == ["new", "status", "terminal", "diff", "settings", "help"]
+    assert names == [
+        "new", "status", "terminal", "history", "workspaces",
+        "diff", "settings", "help",
+    ]
 
 
 def test_legacy_bot_commands_keep_operator_routes() -> None:
