@@ -695,6 +695,7 @@ def _write_test_config_with_path(
     *,
     terminal_enabled: bool = False,
     claude_enabled: bool = False,
+    claude_binary: str = "claude",
 ) -> None:
     path.parent.mkdir(exist_ok=True)
     terminal_block = ""
@@ -702,7 +703,11 @@ def _write_test_config_with_path(
         terminal_block = "[terminal]\nenabled = true\ndefault_agent = \"codex\"\n"
     claude_block = ""
     if claude_enabled:
-        claude_block = "[claude]\nenabled = true\nbinary = \"claude\"\n"
+        claude_block = (
+            "[claude]\n"
+            "enabled = true\n"
+            f"binary = \"{claude_binary}\"\n"
+        )
     path.write_text(
         f"""
 [telegram]
@@ -738,3 +743,83 @@ allow_write = true
 """,
         encoding="utf-8",
     )
+
+
+def test_main_resolves_auto_claude_binary_before_backend_construction(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import asyncio as _asyncio
+    import os as _os
+    import sys as _sys
+    from asyncio import base_events as _base_events
+    from unittest.mock import MagicMock
+
+    import wlcodex.main as main_mod
+    from wlcodex.claude_binary import ClaudeBinaryResolution
+
+    captured = {}
+
+    class FakeClaudeBackend:
+        def __init__(self, config, permission_state=None):
+            captured["binary"] = config.binary
+            captured["config"] = config
+
+    def _make_fake_handlers():
+        fake = MagicMock()
+        fake.send_telegram = MagicMock()
+        fake.edit_telegram = MagicMock()
+        fake.create_interaction_renderer = MagicMock(return_value=None)
+        return fake
+
+    config_path = tmp_path / "test_auto_claude.toml"
+    sqlite_path = tmp_path / "wlcodex_auto.sqlite3"
+    task_dir = tmp_path / "tasks_auto"
+    task_dir.mkdir(exist_ok=True)
+    _write_test_config_with_path(
+        config_path,
+        sqlite_path,
+        task_dir,
+        terminal_enabled=True,
+        claude_enabled=True,
+        claude_binary="auto",
+    )
+
+    def fake_resolve(configured_binary: str) -> ClaudeBinaryResolution:
+        captured["configured_binary"] = configured_binary
+        return ClaudeBinaryResolution(
+            binary=str(tmp_path / "resolved-claude"),
+            source="test",
+        )
+
+    def fake_build(cfg, token, ctrl, lgr, appr, runtime_event_store=None,
+                   outbox=None, terminal_manager=None,
+                   execution_scheduler=None):
+        fake_app = MagicMock()
+        fake_app.bot = MagicMock()
+        fake_app.updater = MagicMock()
+        fake_app.updater.running = False
+        return fake_app, _make_fake_handlers()
+
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_claude_binary",
+        fake_resolve,
+        raising=False,
+    )
+    monkeypatch.setattr(main_mod, "ClaudeBackend", FakeClaudeBackend)
+    monkeypatch.setattr(main_mod, "build_application", fake_build)
+    monkeypatch.setattr(
+        _base_events.BaseEventLoop,
+        "run_until_complete",
+        lambda self, future: None,
+    )
+    monkeypatch.setattr(_asyncio, "new_event_loop", lambda: MagicMock())
+    monkeypatch.setattr(_asyncio, "set_event_loop", lambda loop: None)
+    monkeypatch.setattr(_sys, "argv", ["main.py", "--fake-backend", "--config", str(config_path)])
+    monkeypatch.setenv("WLCODEX_TELEGRAM_BOT_TOKEN", "test-main-composition-token")
+
+    main_mod.main()
+
+    assert captured["configured_binary"] == "auto"
+    assert captured["binary"] == str(tmp_path / "resolved-claude")

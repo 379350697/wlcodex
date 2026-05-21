@@ -9,6 +9,7 @@ from pathlib import Path
 from wlcodex.app_server_process import AppServerProcess, AppServerProcessConfig
 from wlcodex.approval import ApprovalService
 from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+from wlcodex.claude_binary import resolve_claude_binary
 from wlcodex.claude_permissions import (
     RUNTIME_CLAUDE_PERMISSION_MODE_KEY,
     ClaudePermissionState,
@@ -365,9 +366,17 @@ def main() -> None:
     # Claude backend (adapter for Claude Code subprocess)
     claude_backend = None
     if config.claude.enabled:
+        resolution = resolve_claude_binary(config.claude.binary)
+        if resolution.warning:
+            logger.warning("Claude binary resolution warning: %s", resolution.warning)
+        if not resolution.binary:
+            logger.error(
+                "Claude binary not found. Tried: %s",
+                ", ".join(resolution.attempted),
+            )
         claude_backend = ClaudeBackend(ClaudeConfig(
             enabled=config.claude.enabled,
-            binary=config.claude.binary,
+            binary=resolution.binary or config.claude.binary,
             startup_timeout_seconds=config.claude.startup_timeout_seconds,
             request_timeout_seconds=config.claude.request_timeout_seconds,
             stream_idle_timeout_seconds=config.claude.stream_idle_timeout_seconds,
@@ -376,8 +385,9 @@ def main() -> None:
             effort=config.claude.effort,
         ), permission_state=claude_permission_state)
         logger.info(
-            "Claude backend enabled (binary: %s, model: %s, effort: %s, permission: %s)",
-            config.claude.binary,
+            "Claude backend enabled (binary: %s, source: %s, model: %s, effort: %s, permission: %s)",
+            resolution.binary or config.claude.binary,
+            resolution.source,
             config.claude.model,
             config.claude.effort,
             claude_permission_label(claude_permission_mode),
