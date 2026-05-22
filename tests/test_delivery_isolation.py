@@ -166,6 +166,18 @@ def test_detect_verification_drift_ignores_no_match_audit_line() -> None:
     assert _detect_verification_delivery_drift(verify_text) == []
 
 
+def test_detect_verification_drift_ignores_no_occurrence_audit_line() -> None:
+    from wlcodex.orchestrator import _detect_verification_delivery_drift
+
+    verify_text = (
+        "Telegram 约束核查：本次 diff 中未出现 `Telegram`、"
+        "`api.telegram.org`、`sendMessage`、`editMessageText`、"
+        "`message_id`、`BOT_TOKEN` 等违规迹象。"
+    )
+
+    assert _detect_verification_delivery_drift(verify_text) == []
+
+
 def test_detect_verification_drift_flags_positive_delivery_claim() -> None:
     from wlcodex.orchestrator import _detect_verification_delivery_drift
 

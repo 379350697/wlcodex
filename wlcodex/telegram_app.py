@@ -697,11 +697,12 @@ class WlCodexHandlers:
         await self.send_telegram(
             update.effective_chat.id,
             "⚙️ 设置\n\n"
-            "默认流程：Codex → Claude → Codex\n"
+            "普通消息：Codex 只读分析\n"
+            "/auto：Codex → Claude → Codex\n"
             "当前视图：驾驶舱\n\n"
             "你可以调整：",
             buttons=[
-                [{"text": "默认流程（Codex → Claude → Codex）",
+                [{"text": "完整流程（/auto：Codex → Claude → Codex）",
                   "callback_data": "settings:exec_mode:orchestrated"}],
                 [{"text": "只问 Codex",
                   "callback_data": "settings:exec_mode:codex_direct"}],

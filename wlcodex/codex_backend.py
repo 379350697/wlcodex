@@ -416,6 +416,7 @@ class FakeCodexBackend:
         *,
         on_thread_created: Callable[[str], None] | None = None,
         interaction_mode: str = "general",
+        thread_id: str | None = None,
     ) -> str:
         """Send a prompt to Codex and return the response text synchronously.
 
@@ -424,10 +425,13 @@ class FakeCodexBackend:
         """
         self._codex_call_count += 1
         # Record turn like real backend does
-        thread_id = await self.create_thread(workspace_path)
+        thread_id = thread_id or await self.create_thread(workspace_path)
         if on_thread_created is not None:
             on_thread_created(thread_id)
-        await self.start_turn(thread_id, prompt)
+        if thread_id in self.threads:
+            await self.continue_turn(thread_id, prompt)
+        else:
+            await self.start_turn(thread_id, prompt)
         if self._codex_call_count <= len(self._codex_responses):
             return self._codex_responses[self._codex_call_count - 1]
         return (
@@ -902,6 +906,7 @@ class AppServerCodexBackend:
         *,
         on_thread_created: Callable[[str], None] | None = None,
         interaction_mode: str = "general",
+        thread_id: str | None = None,
     ) -> str:
         """Send prompt to Codex and block until its turn completes. Returns response text.
 
@@ -913,10 +918,14 @@ class AppServerCodexBackend:
         """
         prompt_events = self._subscribe_events()
         try:
-            thread_id = await self._create_prompt_thread(
-                workspace_path,
-                interaction_mode,
-            )
+            if thread_id:
+                client = await self._ensure_client()
+                await client.request("thread/resume", {"threadId": thread_id})
+            else:
+                thread_id = await self._create_prompt_thread(
+                    workspace_path,
+                    interaction_mode,
+                )
             if on_thread_created is not None:
                 on_thread_created(thread_id)
             turn_id = await self._start_prompt_turn(

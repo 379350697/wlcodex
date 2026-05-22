@@ -960,6 +960,30 @@ async def test_read_only_diagnostic_needs_impl_true_becomes_needs_user() -> None
 
 
 @pytest.mark.asyncio
+async def test_followup_version_question_needs_impl_true_becomes_needs_user() -> None:
+    """Question-like follow-ups must never silently enter Claude implementation."""
+    codex = FakeCodexWithSendPrompt()
+    codex._responses = [
+        '{"summary":"云端代码是最新提交，但部署元数据漂移，运行态仍需修复",'
+        '"needs_implementation":true,'
+        '"files_to_touch":["scripts/verify_deploy_manifest.py"],'
+        '"implementation_steps":["修复部署元数据校验"],'
+        '"acceptance_criteria":["云端版本标记与 HEAD 一致"]}'
+    ]
+    claude = FakeClaudeWithSend()
+
+    orchestrator = ChiefEngineerOrchestrator(codex, claude)
+    result = await orchestrator.run(
+        "也就是云上部署跑得不是最新版的代码吗"
+    )
+
+    assert result.status == "needs_user"
+    assert result.verify_round == 0
+    assert claude.prompts == []
+    assert "以上修复未自动执行" in result.verification_summary
+
+
+@pytest.mark.asyncio
 async def test_normal_implementation_needs_impl_true_still_enters_claude() -> None:
     """Normal chief-engineer task + needs_implementation:true → enters Claude."""
     codex = FakeCodexWithSendPrompt()

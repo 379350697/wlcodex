@@ -619,19 +619,35 @@ class CommandController:
             conversation_id=active.id,
         ))
 
-        # --- Chief-engineer mode: full closed loop ---
-        claude_ready = self._claude is not None and getattr(self._claude, "enabled", False)
-        if active.mode == ConversationMode.CHIEF_ENGINEER.value and claude_ready:
-            from wlcodex.router import AutoModeCommand
-            cmd = AutoModeCommand(prompt=text)
-            return await self._handle_chief_engineer_impl(
-                cmd, active, telegram_context, correlation_id=cid
-            )
-
-        # --- Codex-direct or Claude-disabled: Codex analysis only ---
+        # --- Plain text: read-only Codex analysis by default.
+        # Full Codex -> Claude -> Codex orchestration is explicit via /auto.
         return await self._handle_codex_analysis_only(
             text, active, telegram_context, cid
         )
+
+    async def _start_codex_turn_for_conversation(
+        self,
+        *,
+        active: object,
+        task: object,
+        workspace_path: str,
+        prompt: str,
+    ) -> str:
+        thread_id = str(getattr(active, "codex_thread_id", "") or "")
+        if thread_id:
+            self._service.set_task_thread(task.id, thread_id)
+            continue_turn = getattr(self._backend, "continue_turn", None)
+            if callable(continue_turn):
+                await continue_turn(thread_id, prompt)
+            else:
+                await self._backend.start_turn(thread_id, prompt)
+            return thread_id
+
+        thread_id = await self._backend.create_thread(workspace_path)
+        self._service.set_task_thread(task.id, thread_id)
+        self._ledger.set_conversation_codex_thread(active.id, thread_id)
+        await self._backend.start_turn(thread_id, prompt)
+        return thread_id
 
     async def _handle_codex_analysis_only(
         self,
@@ -666,9 +682,12 @@ class CommandController:
         self._ledger.update_agent_run_status(agent_run.id, "running")
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
         try:
-            thread_id = await self._backend.create_thread(workspace_path)
-            self._service.set_task_thread(task.id, thread_id)
-            await self._backend.start_turn(thread_id, packet.render())
+            await self._start_codex_turn_for_conversation(
+                active=active,
+                task=task,
+                workspace_path=workspace_path,
+                prompt=packet.render(),
+            )
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
             self._ledger.update_agent_run_status(
@@ -797,14 +816,8 @@ class CommandController:
                 500,
             ),
         )
-        # Start fresh chief-engineer loop with updated context.
-        claude_ready = self._claude is not None and getattr(self._claude, "enabled", False)
-        if active.mode == ConversationMode.CHIEF_ENGINEER.value and claude_ready:
-            from wlcodex.router import AutoModeCommand
-            cmd = AutoModeCommand(prompt=text)
-            return await self._handle_chief_engineer_impl(
-                cmd, active, ctx, correlation_id=correlation_id,
-            )
+        # Plain text follow-ups remain read-only by default. Use /auto for
+        # explicit Codex -> Claude -> Codex implementation flow.
         return await self._handle_codex_analysis_only(
             text, active, ctx, correlation_id,
         )
@@ -1182,13 +1195,16 @@ class CommandController:
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
         try:
-            thread_id = await self._backend.create_thread(workspace_path)
-            self._service.set_task_thread(task.id, thread_id)
+            thread_id = await self._start_codex_turn_for_conversation(
+                active=active,
+                task=task,
+                workspace_path=workspace_path,
+                prompt=command.prompt,
+            )
             # Persist thread reference so /sessions shows this as resumable.
             self._ledger.update_agent_run_status(
                 agent_run.id, "running", external_session_id=thread_id,
             )
-            await self._backend.start_turn(thread_id, command.prompt)
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
             self._ledger.update_agent_run_status(
@@ -1411,7 +1427,21 @@ class CommandController:
             except Exception:
                 logger.debug("Unable to mark Claude direct task running", exc_info=True)
 
-            request = AgentRequest(prompt=prompt, workspace_path=workspace_path)
+            try:
+                conversation = self._ledger.get_conversation(conversation_id)
+                resume_session_id = conversation.claude_session_id
+            except Exception:
+                resume_session_id = ""
+            extra = (
+                {"resume_session_id": resume_session_id}
+                if resume_session_id
+                else {}
+            )
+            request = AgentRequest(
+                prompt=prompt,
+                workspace_path=workspace_path,
+                extra=extra,
+            )
             result = None
             had_error = False
             error_text = ""
@@ -1460,6 +1490,10 @@ class CommandController:
                     completion_summary=error_text[:2000],
                     external_session_id=claude_session_id or None,
                 )
+                if claude_session_id:
+                    self._ledger.set_conversation_claude_session(
+                        conversation_id, claude_session_id
+                    )
                 self._emit_event(RuntimeEvent(
                     schema_version=1,
                     event_type=EventType.RUN_FAILED,
@@ -1490,6 +1524,10 @@ class CommandController:
                 completion_summary=completion_summary or "Claude 执行完成",
                 external_session_id=claude_session_id or None,
             )
+            if claude_session_id:
+                self._ledger.set_conversation_claude_session(
+                    conversation_id, claude_session_id
+                )
             try:
                 self._ledger.set_task_status(
                     task_id,
@@ -1611,8 +1649,8 @@ class CommandController:
     ) -> ControllerResponse:
         """Shared chief-engineer orchestration loop: Codex→Claude→Codex verify.
 
-        Called by both handle_auto_mode (/auto) and handle_conversation_text
-        (default plain-text in chief_engineer mode).
+        Called by handle_auto_mode (/auto). Plain text remains read-only Codex
+        analysis unless the user explicitly enters /auto.
 
         When the interaction renderer is available (natural profile + streaming
         enabled), uses the streaming orchestrator path so Claude deltas and
@@ -1684,6 +1722,8 @@ class CommandController:
             codex_analysis_run_id=codex_analysis_run.id,
             chat_id=chat_id,
             workspace_path=workspace_path,
+            codex_thread_id=getattr(active, "codex_thread_id", "") or "",
+            claude_session_id=getattr(active, "claude_session_id", "") or "",
             correlation_id=cid,
         )
         if self._interaction_renderer is not None:
@@ -2485,6 +2525,8 @@ class CommandController:
                 codex_analysis_run_id=codex_analysis_run.id,
                 chat_id=conv.chat_id,
                 workspace_path=workspace_path,
+                codex_thread_id=getattr(conv, "codex_thread_id", "") or "",
+                claude_session_id=getattr(conv, "claude_session_id", "") or "",
                 correlation_id=cid,
             )
 

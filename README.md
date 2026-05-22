@@ -7,11 +7,13 @@ for raw terminal-style live control.
 
 ## Remote Workbench
 
-**Default workflow**: Codex analysis → Claude implementation → Codex verification.
+**Plain text default**: Codex read-only analysis.
 
-Send a plain text message. WLCodex routes it through the default engineer
-workflow. The Cockpit shows progress, asks for decisions, and summarizes results.
-The Onsite shows live agent output when you need raw visibility.
+Send a plain text message for read-only Codex analysis, answers, review, and
+planning. Use `/auto` only when you explicitly want the full Codex analysis →
+Claude implementation → Codex verification workflow. The Cockpit shows progress,
+asks for decisions, and summarizes results. The Onsite shows live agent output
+when you need raw visibility.
 
 ### Product terminology
 
@@ -20,7 +22,7 @@ The Onsite shows live agent output when you need raw visibility.
 | Workbench | 工作台 | Remote Workbench |
 | Cockpit view | 驾驶舱 | Cockpit |
 | Onsite view | 现场 | Onsite / Live Worksite |
-| Default orchestrated | 默认流程：Codex -> Claude -> Codex | Default engineer workflow |
+| Auto orchestrated | /auto：Codex -> Claude -> Codex | Explicit engineer workflow |
 | Codex-only mode | 只问 Codex | Ask Codex only |
 | Claude-only mode | 只叫 Claude | Ask Claude only |
 | Open Onsite | 接管现场 | Open live worksite |
@@ -31,16 +33,23 @@ The Onsite shows live agent output when you need raw visibility.
 
 | Mode | Trigger | Behavior |
 |------|---------|----------|
-| Default orchestrated | plain text or `/auto` | Codex → Claude → Codex |
+| Plain text | no slash command | Codex read-only analysis |
+| Auto orchestrated | `/auto <prompt>` | Codex → Claude → Codex |
 | Codex-only | `/codex <prompt>` | Codex only, no Claude |
 | Claude-only | `/claude <prompt>` | Claude only, no automatic Codex analysis or verification |
 
-Codex-only is best for analysis, design, review, and verification.
+Codex-only sends the prompt directly to Codex without Claude or /auto gates.
 Claude-only is for direct hands-on implementation; Cockpit will offer a
 "让 Codex 验收" action after Claude-only work completes.
 
-After any direct run finishes, the next plain text message returns to the
-default orchestrated workflow.
+After any direct run finishes, the next plain text message returns to read-only
+Codex analysis. `/codex` and `/claude` remain direct single-agent paths; only
+`/auto` starts the full orchestrated workflow.
+
+`/new` is the Workbench session boundary. Until the next `/new`, Codex turns
+reuse the same Codex thread and Claude Code turns resume the same Claude session
+when the backend exposes a session id. This lets `/auto` execute from the
+context established by earlier plain-text analysis in the same Workbench.
 
 **Views** (how you see and steer the work):
 
@@ -158,9 +167,9 @@ export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
 |---------|-------------|
 | `/start` / `/help` | Show help |
 | `/health` | Backend health check |
-| plain text | Continue the active workbench; default is Codex → Claude → Codex |
+| plain text | Continue the active workbench with read-only Codex analysis |
 | `/new [title]` | Start a fresh workbench |
-| `/codex <prompt>` | Codex-only direct analysis |
+| `/codex <prompt>` | Codex-only direct work |
 | `/claude <prompt>` | Claude-only direct implementation |
 | `/auto <prompt>` | Full Codex → Claude → Codex orchestration |
 | `/status` | Show active workbench status |
@@ -230,8 +239,8 @@ journey:
    - Send `/sessions` → Should list historical agent sessions for the workbench
 
 Use `/codex <prompt>`, `/claude <prompt>`, or `/auto <prompt>` only when you
-want to force a specific execution mode. Plain text uses the default
-orchestrated workflow.
+want to force a specific execution mode. Plain text uses read-only Codex
+analysis; only `/auto` enters the orchestrated workflow.
 
 ### Human smoke pass criteria
 
@@ -264,7 +273,7 @@ interaction profile:
     controller.
 14. Switching between Cockpit and Onsite preserves the workbench — work does not
     restart and the active run is not lost.
-15. `/help` uses "驾驶舱", "接管现场", and "默认流程：Codex → Claude → Codex"; it
+15. `/help` uses "驾驶舱", "接管现场", and "/auto：Codex -> Claude -> Codex"; it
     does not expose configuration keys like `terminal.enabled`.
 
 The human smoke is considered passed only when the visible Telegram behavior and

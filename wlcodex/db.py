@@ -171,6 +171,8 @@ class Ledger:
                 active_claude_run_id INTEGER,
                 conversation_summary TEXT NOT NULL DEFAULT '',
                 current_model TEXT NOT NULL DEFAULT '',
+                codex_thread_id TEXT NOT NULL DEFAULT '',
+                claude_session_id TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 archived_at TEXT
@@ -374,6 +376,14 @@ class Ledger:
             "agent_runs", "completion_summary",
             "completion_summary TEXT NOT NULL DEFAULT ''",
         )
+        self._add_column_if_missing(
+            "conversation_sessions", "codex_thread_id",
+            "codex_thread_id TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "conversation_sessions", "claude_session_id",
+            "claude_session_id TEXT NOT NULL DEFAULT ''",
+        )
         # codex_request_id values are scoped to a task/thread by the app-server.
         # Older databases had a global unique index, which incorrectly dropped
         # approvals when different tasks reused ids like "0" or "1".
@@ -396,7 +406,7 @@ class Ledger:
         # Record schema version
         self._conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
-            ("schema_version", "4"),
+            ("schema_version", "5"),
         )
 
         self._conn.commit()
@@ -1072,6 +1082,26 @@ class Ledger:
         self._conn.commit()
         return self.get_conversation(conversation_id)
 
+    def set_conversation_codex_thread(
+        self, conversation_id: int, thread_id: str
+    ) -> ConversationSession:
+        self._conn.execute(
+            "UPDATE conversation_sessions SET codex_thread_id = ?, updated_at = ? WHERE id = ?",
+            (thread_id, _now(), conversation_id),
+        )
+        self._conn.commit()
+        return self.get_conversation(conversation_id)
+
+    def set_conversation_claude_session(
+        self, conversation_id: int, session_id: str
+    ) -> ConversationSession:
+        self._conn.execute(
+            "UPDATE conversation_sessions SET claude_session_id = ?, updated_at = ? WHERE id = ?",
+            (session_id, _now(), conversation_id),
+        )
+        self._conn.commit()
+        return self.get_conversation(conversation_id)
+
     def archive_conversation(self, conversation_id: int) -> ConversationSession:
         now = _now()
         self._conn.execute(
@@ -1737,6 +1767,8 @@ def _conversation(row: sqlite3.Row) -> ConversationSession:
         created_at=_dt(str(row["created_at"])),
         updated_at=_dt(str(row["updated_at"])),
         archived_at=_dt(str(row["archived_at"])) if row["archived_at"] else None,
+        codex_thread_id=str(row["codex_thread_id"] or ""),
+        claude_session_id=str(row["claude_session_id"] or ""),
     )
 
 

@@ -182,21 +182,16 @@ def _event(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Closed Loop 1: 普通文本 → 默认 Codex → Claude → Codex
+# Closed Loop 1: 普通文本 → 默认 Codex-only read-only analysis
 #
-#   AC #1: "Sending ordinary text in Cockpit starts the default
-#   Codex → Claude → Codex workflow."
+#   AC #1: "Sending ordinary text in Cockpit starts read-only Codex analysis.
+#   /auto is required for the Codex → Claude → Codex workflow."
 #
 #   Real chain (controller.py:817-824 + 1526-1613):
 #     1. handle_conversation_text → classify route → create conversation
 #        in CHIEF_ENGINEER mode
-#     2. If mode == CHIEF_ENGINEER and Claude ready →
-#        _handle_chief_engineer_impl
-#     3. _handle_chief_engineer_impl:
-#        a) create_orchestration_run(goal=prompt)
-#        b) create_agent_run(agent="codex", role="analysis")  ← Codex first
-#        c) update_agent_run_status → "running"
-#        d) start_chief_engineer on orchestrator runner
+#     2. Creates a Codex analysis-only task and agent_run
+#     3. Does not start chief-engineer orchestration unless /auto is used
 #
 #   The test must verify ALL of (a)-(d), not just (d).  Checking only
 #   runner.starts==1 is a semantic gap — it proves the orchestrator was
@@ -205,9 +200,9 @@ def _event(
 #   Ownership: Task 1 (routing) + Task 5 (execution modes / controller)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestClosedLoop1_OrchestratedWorkflow:
+class TestClosedLoop1_ReadOnlyPlainTextWorkflow:
     """Ordinary Cockpit text → conversation in CHIEF_ENGINEER mode →
-    orchestration_run + codex_analysis_run + orchestrator started."""
+    Codex analysis-only run; no Claude implementation."""
 
     @pytest.mark.asyncio
     async def test_plain_text_creates_chief_engineer_conversation(self, tmp_path: Path):
@@ -229,15 +224,10 @@ class TestClosedLoop1_OrchestratedWorkflow:
         )
 
     @pytest.mark.asyncio
-    async def test_chief_engineer_creates_orchestration_run_and_codex_analysis(
+    async def test_plain_text_creates_codex_analysis_without_orchestration(
         self, tmp_path: Path,
     ):
-        """Step 2: _handle_chief_engineer_impl must create BOTH an
-        orchestration_run record AND a Codex analysis agent_run (role=analysis).
-
-        This verifies the "Codex first" part of Codex → Claude → Codex.
-        Checking only orchestrator.start_chief_engineer would miss the
-        database records that prove Codex analysis was enqueued."""
+        """Step 2: plain text must enqueue Codex analysis, never Claude."""
         claude = FakeClaudeBackend(enabled=True)
         runner = FakeOrchestrationRunner()
         ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
@@ -250,14 +240,9 @@ class TestClosedLoop1_OrchestratedWorkflow:
         assert convos
         convo = convos[0]
 
-        # (a) orchestration_run created with the user's goal
         orch_runs = ctrl._ledger.list_orchestration_runs(convo.id, limit=5)
-        assert len(orch_runs) >= 1, (
-            "No orchestration_run created — Codex→Claude→Codex chain not set up"
-        )
-        assert orch_runs[0].goal == "重做远程终端手机体验"
+        assert orch_runs == []
 
-        # (b) agent_run created for Codex with role=analysis
         agent_runs = ctrl._ledger.list_agent_runs(convo.id, limit=10)
         codex_runs = [r for r in agent_runs if r.agent == "codex" and r.role == "analysis"]
         assert len(codex_runs) >= 1, (
@@ -267,20 +252,11 @@ class TestClosedLoop1_OrchestratedWorkflow:
             f"Codex analysis run should be 'running', got {codex_runs[0].status!r}"
         )
 
-        # (c) orchestrator was started with full context
-        assert len(runner.starts) == 1
-        start_args = runner.starts[0]
-        assert start_args.get("prompt") == "重做远程终端手机体验"
-        assert start_args.get("conversation").id == convo.id
-        assert start_args.get("codex_analysis_run_id") == codex_runs[0].id
-        assert "orchestration_run_id" in start_args
+        assert runner.starts == []
 
     @pytest.mark.asyncio
     async def test_workbench_routing_to_controller_chain(self, tmp_path: Path):
-        """Cross-boundary: WorkbenchState routing → controller → full chain.
-
-        Verifies that the routing layer's ORCHESTRATED_COCKPIT decision
-        leads to the same CHIEF_ENGINEER path as the raw text in Cockpit."""
+        """Cross-boundary: WorkbenchState routing → controller → read-only lane."""
         from wlcodex.models import ConversationMode
 
         claude = FakeClaudeBackend(enabled=True)
@@ -312,7 +288,7 @@ class TestClosedLoop1_OrchestratedWorkflow:
                           if r.agent == "codex" and r.role == "analysis"]
         assert len(codex_analysis) >= 1, "Codex analysis not set up"
 
-        assert len(runner.starts) == 1
+        assert runner.starts == []
 
 
 # ═══════════════════════════════════════════════════════════════════════════

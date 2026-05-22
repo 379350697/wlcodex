@@ -1,8 +1,8 @@
 """WLCodex Remote Workbench.
 
 One local workbench with two phone views — Cockpit (驾驶舱) and
-Onsite (接管现场) — and three execution modes: orchestrated
-(default Codex -> Claude -> Codex), Codex-direct, and Claude-direct.
+Onsite (接管现场) — plus explicit execution modes: plain-text Codex
+analysis, /auto orchestration, Codex-direct, and Claude-direct.
 """
 
 from .models import ExecutionMode, ViewMode, WorkbenchRoute, WorkbenchState

@@ -67,7 +67,7 @@ def render_health_card(
 def render_help() -> str:
     return """WLCodex — 远程工作台驾驶舱
 
-默认流程：Codex -> Claude -> Codex
+普通消息：Codex 只读分析；/auto：Codex -> Claude -> Codex
 
 驾驶舱与现场：
   /product — 回驾驶舱
@@ -83,7 +83,7 @@ def render_help() -> str:
   /mode — 查看当前模式
 
 对话模式 — 直接发消息开始：
-  • 默认交给总工程师（Codex 分析 + 验收）
+  • 普通消息 — Codex 只读分析
   • /codex <提示> — 直接和 Codex 对话
   • /claude <提示> — 直接叫 Claude Code 实施
   • /auto <提示> — 完整 Codex 分析 → Claude 实施 → Codex 验收
@@ -271,7 +271,8 @@ def render_conversation_help(profile: str = "natural") -> str:
             [
                 "WLCodex 已连接",
                 "",
-                "默认流程：Codex -> Claude -> Codex",
+                "普通消息：Codex 只读分析",
+                "/auto：Codex -> Claude -> Codex",
                 "当前视图：驾驶舱",
                 "工作区：当前项目",
                 "Codex：可用",
@@ -285,7 +286,7 @@ def render_conversation_help(profile: str = "natural") -> str:
         )
     return """WLCodex — 远程工作台驾驶舱
 
-默认流程：Codex -> Claude -> Codex
+普通消息：Codex 只读分析；/auto：Codex -> Claude -> Codex
 
 驾驶舱与现场：
   • /product — 回驾驶舱
@@ -301,7 +302,7 @@ def render_conversation_help(profile: str = "natural") -> str:
   • /mode — 查看当前模式
 
 对话模式：
-  • 直接发消息 — 默认交给 Codex 分析
+  • 直接发消息 — Codex 只读分析
   • /codex <prompt> — 直接和 Codex 对话
   • /claude <prompt> — 直接叫 Claude Code 实施
   • /auto <prompt> — 总工程师完整编排

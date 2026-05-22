@@ -102,6 +102,8 @@ class _TaskBoundCodexBackend:
         conversation_id: int | None = None,
         orchestration_run_id: int | None = None,
         runtime_activity_callback: Callable[[RuntimeEvent, str], None] | None = None,
+        codex_thread_id: str = "",
+        on_codex_thread_bound: Callable[[str], None] | None = None,
     ) -> None:
         self._backend = backend
         self._service = service
@@ -114,12 +116,17 @@ class _TaskBoundCodexBackend:
         self._last_runtime_event_id: int | None = None
         self._runtime_role = ""
         self._runtime_activity_callback = runtime_activity_callback
+        self._codex_thread_id = codex_thread_id
+        self._on_codex_thread_bound = on_codex_thread_bound
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._backend, name)
 
     def _bind_thread(self, thread_id: str) -> None:
+        self._codex_thread_id = thread_id
         self._service.set_task_thread(self._task_id, thread_id)
+        if self._on_codex_thread_bound is not None:
+            self._on_codex_thread_bound(thread_id)
 
     def set_runtime_context(self, *, agent_run_id: int, role: str) -> None:
         if self._store is None or not self._correlation_id:
@@ -146,6 +153,8 @@ class _TaskBoundCodexBackend:
             for key, value in kwargs.items()
             if _accepts_keyword(send_codex_prompt, key)
         }
+        if self._codex_thread_id and _accepts_keyword(send_codex_prompt, "thread_id"):
+            supported_kwargs["thread_id"] = self._codex_thread_id
         previous_callback = getattr(self._backend, "_runtime_event_callback", None)
         runtime_wired = False
         if self._runtime_source is not None and hasattr(
@@ -197,6 +206,8 @@ class _ClaudeRuntimeWrapper:
         task_id: int,
         ledger: object,
         prompt_packet_summary: str = "",
+        resume_session_id: str = "",
+        on_claude_session_bound: Callable[[str], None] | None = None,
     ) -> None:
         self._backend = backend
         self._store = store
@@ -208,6 +219,9 @@ class _ClaudeRuntimeWrapper:
         self._prompt_packet_summary = prompt_packet_summary
         self._agent_run_id: int | None = None
         self._events: list[RuntimeEvent] = []
+        self._resume_session_id = resume_session_id
+        self._latest_session_id = resume_session_id
+        self._on_claude_session_bound = on_claude_session_bound
 
     @property
     def enabled(self) -> bool:
@@ -220,6 +234,10 @@ class _ClaudeRuntimeWrapper:
     @property
     def activity_events(self) -> list[RuntimeEvent]:
         return list(self._events)
+
+    @property
+    def latest_session_id(self) -> str:
+        return self._latest_session_id
 
     def _configure_backend_runtime_source(self, agent_run_id: int) -> object | None:
         if self._store is None:
@@ -260,6 +278,7 @@ class _ClaudeRuntimeWrapper:
             conversation_id=self._conversation_id,
             agent="claude",
             role="implementation",
+            external_session_id=self._resume_session_id or None,
             prompt_packet_summary=self._prompt_packet_summary[:120],
         )
         self._agent_run_id = agent_run.id
@@ -296,12 +315,32 @@ class _ClaudeRuntimeWrapper:
 
         previous_runtime_source = getattr(self._backend, "_runtime_source", None)
         runtime_source = self._configure_backend_runtime_source(agent_run.id)
+        forward_request = request
+        if self._resume_session_id:
+            extra = dict(request.extra)
+            extra.setdefault("resume_session_id", self._resume_session_id)
+            forward_request = AgentRequest(
+                prompt=request.prompt,
+                workspace_path=request.workspace_path,
+                model=request.model,
+                extra=extra,
+            )
 
         error_text = ""
         had_error = False
         backend_exception = False
         try:
-            async for stream_event in self._backend.send_streaming(request):
+            async for stream_event in self._backend.send_streaming(forward_request):
+                session_id = getattr(stream_event, "session_id", "") or ""
+                if session_id and session_id != self._latest_session_id:
+                    self._latest_session_id = session_id
+                    self._ledger.update_agent_run_status(
+                        agent_run.id,
+                        "running",
+                        external_session_id=session_id,
+                    )
+                    if self._on_claude_session_bound is not None:
+                        self._on_claude_session_bound(session_id)
                 if stream_event.event_type == "error":
                     had_error = True
                     error_text = stream_event.delta
@@ -426,6 +465,8 @@ class OrchestrationRunner:
         codex_analysis_run_id: int,
         chat_id: int,
         workspace_path: str,
+        codex_thread_id: str = "",
+        claude_session_id: str = "",
         correlation_id: str = "",
     ) -> asyncio.Task[None]:
         task = asyncio.create_task(
@@ -437,6 +478,8 @@ class OrchestrationRunner:
                 codex_analysis_run_id=codex_analysis_run_id,
                 chat_id=chat_id,
                 workspace_path=workspace_path,
+                codex_thread_id=codex_thread_id,
+                claude_session_id=claude_session_id,
                 correlation_id=correlation_id or str(uuid.uuid4()),
             ),
             name=f"chief-engineer-{orchestration_run_id}",
@@ -538,6 +581,8 @@ class OrchestrationRunner:
         codex_analysis_run_id: int,
         chat_id: int,
         workspace_path: str,
+        codex_thread_id: str = "",
+        claude_session_id: str = "",
         correlation_id: str = "",
     ) -> None:
         cid = correlation_id or str(uuid.uuid4())
@@ -665,6 +710,12 @@ class OrchestrationRunner:
             conversation_id=conversation.id,
             orchestration_run_id=orchestration_run_id,
             runtime_activity_callback=_codex_runtime_activity,
+            codex_thread_id=codex_thread_id,
+            on_codex_thread_bound=(
+                lambda thread_id: self._ledger.set_conversation_codex_thread(
+                    conversation.id, thread_id
+                )
+            ),
         )
         codex.set_runtime_context(
             agent_run_id=codex_analysis_run_id,
@@ -682,6 +733,12 @@ class OrchestrationRunner:
             task_id=task_id,
             ledger=self._ledger,
             prompt_packet_summary=prompt[:120],
+            resume_session_id=claude_session_id,
+            on_claude_session_bound=(
+                lambda session_id: self._ledger.set_conversation_claude_session(
+                    conversation.id, session_id
+                )
+            ),
         )
         orch = self._orchestrator_factory(codex, claude_backend)
         # Inject pending user context from mid-implementation/verification follow-ups.

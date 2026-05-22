@@ -304,8 +304,8 @@ async def test_controller_starts_background_orchestration_and_returns(
     )
 
     response = await asyncio.wait_for(
-        controller.handle_conversation_text(
-            "实现一个需要多轮验收的小功能",
+        controller.handle(
+            "/auto 实现一个需要多轮验收的小功能",
             {"chat_id": 100, "user_id": 200},
         ),
         timeout=0.05,

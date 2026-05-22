@@ -185,6 +185,8 @@ class ConversationSession:
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None
+    codex_thread_id: str = ""
+    claude_session_id: str = ""
 
 
 @dataclass(frozen=True)

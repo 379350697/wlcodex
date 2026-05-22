@@ -104,11 +104,15 @@ class ClaudeBackend:
                 text=self._binary_not_found_message(),
                 exit_code=1,
             )
+        resume_session_id = str(request.extra.get("resume_session_id", "") or "")
 
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._config.binary,
-                *self._prompt_args(request.prompt),
+                *self._prompt_args(
+                    request.prompt,
+                    resume_session_id=resume_session_id,
+                ),
                 cwd=request.workspace_path or None,
                 env=_sanitized_env(),
                 stdout=asyncio.subprocess.PIPE,
@@ -143,6 +147,7 @@ class ClaudeBackend:
                 exit_code=exit_code,
                 token_input=len(request.prompt) // 4,
                 token_output=len(text) // 4,
+                session_id=resume_session_id or self._last_session_id,
             )
 
         except FileNotFoundError:
@@ -186,11 +191,16 @@ class ClaudeBackend:
                 event_type="error",
             )
             return
+        resume_session_id = str(request.extra.get("resume_session_id", "") or "")
 
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._config.binary,
-                *self._prompt_args(request.prompt, stream_json=True),
+                *self._prompt_args(
+                    request.prompt,
+                    stream_json=True,
+                    resume_session_id=resume_session_id,
+                ),
                 cwd=request.workspace_path or None,
                 env=_sanitized_env(),
                 stdout=asyncio.subprocess.PIPE,
@@ -532,9 +542,19 @@ class ClaudeBackend:
     def health(self) -> object:
         return _ClaudeHealth(self._config.enabled, self._config.binary)
 
-    def _prompt_args(self, prompt: str, *, stream_json: bool = False) -> list[str]:
+    def _prompt_args(
+        self,
+        prompt: str,
+        *,
+        stream_json: bool = False,
+        resume_session_id: str = "",
+    ) -> list[str]:
         capabilities = self._capabilities_for_args()
-        args = ["-p", prompt]
+        args = (
+            ["--resume", resume_session_id, "-p", prompt]
+            if resume_session_id
+            else ["-p", prompt]
+        )
         if capabilities.permission_mode:
             args.extend([
                 "--permission-mode",

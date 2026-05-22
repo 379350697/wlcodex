@@ -589,6 +589,17 @@ def test_prompt_args_no_stream_json_no_hook_events() -> None:
     assert "--output-format" not in args
 
 
+def test_prompt_args_resume_existing_session() -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    backend = ClaudeBackend(ClaudeConfig(enabled=True))
+
+    args = backend._prompt_args("continue", resume_session_id="sess-123")
+
+    assert args[:3] == ["--resume", "sess-123", "-p"]
+    assert args[3] == "continue"
+
+
 def test_to_agent_stream_event_text() -> None:
     from wlcodex.claude_backend import _to_agent_stream_event
     from wlcodex.claude_stream_parser import ClaudeStreamEvent

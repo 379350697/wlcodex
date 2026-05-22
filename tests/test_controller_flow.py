@@ -635,7 +635,8 @@ async def test_legacy_diff_command_with_id(ctrl: CommandController) -> None:
 async def test_help_shows_new_commands(ctrl: CommandController) -> None:
     response = await ctrl.handle("/help", {})
     assert "WLCodex" in response.text
-    assert "默认流程：Codex -> Claude -> Codex" in response.text
+    assert "普通消息：Codex 只读分析" in response.text
+    assert "/auto：Codex -> Claude -> Codex" in response.text
     assert "当前视图：驾驶舱" in response.text
     assert "[新工作台]" in response.text
     assert "[接管现场]" in response.text
@@ -1015,8 +1016,9 @@ async def test_terminal_state_followup_reuses_same_workbench(
     assert active is not None
     assert active.id == conversation.id
     assert ledger.get_conversation(conversation.id).archived_at is None
-    assert len(runner.calls) == 1
-    assert runner.calls[0]["conversation"].id == conversation.id
+    assert runner.calls == []
+    runs = ledger.list_agent_runs(conversation.id, limit=10)
+    assert [(run.agent, run.role) for run in runs] == [("codex", "analysis")]
 
     closed = store._conn.execute(
         """
@@ -1066,8 +1068,8 @@ async def test_no_implementation_completion_records_pass_not_failed(
         store=store,
     )
 
-    await controller.handle_conversation_text(
-        "请按默认流程只回复：default flow ok",
+    await controller.handle(
+        "/auto 请按 /auto 流程只回复：default flow ok",
         {"chat_id": 100, "user_id": 200},
     )
     await _drain_runtime_runner(controller)

@@ -3,7 +3,8 @@
 Coverage per acceptance criteria:
 - /codex runs Codex-only, never calls Claude
 - /claude runs Claude-only, no auto Codex analysis or verification
-- Default plain text still Codex -> Claude -> Codex
+- Plain text defaults to read-only Codex analysis
+- /auto runs Codex -> Claude -> Codex
 - Claude-only completion offers "让 Codex 验收" action
 """
 
@@ -40,11 +41,18 @@ class FakeClaudeBackend:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.interrupt_calls: list = []
         self.send_calls: list[AgentRequest] = []
+        self._session_counter = 0
 
     async def send(self, request: AgentRequest) -> AgentResult:
         """Simulate non-streaming Claude execution."""
         self.send_calls.append(request)
-        return AgentResult(text="claude completed", exit_code=0)
+        resume_id = str(request.extra.get("resume_session_id", ""))
+        if resume_id:
+            session_id = resume_id
+        else:
+            self._session_counter += 1
+            session_id = f"claude-session-{self._session_counter}"
+        return AgentResult(text="claude completed", exit_code=0, session_id=session_id)
 
     async def send_streaming(self, _request: object):
         """Minimal streaming stub."""
@@ -103,6 +111,13 @@ def build_controller(
     return ctrl
 
 
+def mark_active_task_done(ctrl: CommandController, chat_id: int) -> None:
+    active = ctrl._ledger.get_active_conversation(chat_id)
+    assert active is not None
+    assert active.active_codex_task_id is not None
+    ctrl._ledger.set_task_status(active.active_codex_task_id, TaskStatus.DONE)
+
+
 def has_verify_button(response_text: str, buttons: list[list[dict[str, str]]]) -> bool:
     """Return True if buttons include a VERIFY action (conv:...:verify)."""
     for row in buttons:
@@ -148,7 +163,7 @@ async def test_codex_direct_never_calls_claude(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_codex_direct_command_labels_mode(tmp_path: Path) -> None:
     """CodexDirect response includes mode labelling so user knows it is not
-    the default orchestrated flow."""
+    the /auto orchestrated flow."""
     claude = FakeClaudeBackend(enabled=True)
     ctrl = build_controller(tmp_path, claude=claude)
 
@@ -172,7 +187,7 @@ async def test_claude_direct_does_not_delegate_to_auto_mode(tmp_path: Path) -> N
     """``/claude <prompt>`` must NOT delegate to handle_auto_mode.
 
     The key bug: handle_claude_direct was calling handle_auto_mode which
-    always runs Codex → Claude → Codex.  Claude-only means Claude direct,
+    runs Codex → Claude → Codex.  Claude-only means Claude direct,
     no automatic Codex analysis, no automatic Codex verification.
     """
     claude = FakeClaudeBackend(enabled=True)
@@ -242,12 +257,12 @@ async def test_claude_direct_disabled_claude_shows_error(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# Test: Default plain text still Codex → Claude → Codex
+# Test: Plain text is read-only by default; /auto starts orchestration
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_conversation_text_defaults_to_orchestrated(tmp_path: Path) -> None:
-    """Ordinary text in chief-engineer mode starts the full orchestrated loop."""
+async def test_conversation_text_defaults_to_codex_only(tmp_path: Path) -> None:
+    """Ordinary text must not silently start Claude implementation."""
     claude = FakeClaudeBackend(enabled=True)
     runner = FakeOrchestrationRunner()
     ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
@@ -257,13 +272,12 @@ async def test_conversation_text_defaults_to_orchestrated(tmp_path: Path) -> Non
         {"chat_id": 42, "user_id": 1},
     )
 
-    assert len(runner.starts) == 1, (
-        f"Default text should trigger exactly 1 orchestrator start, got {len(runner.starts)}"
-    )
-    # Conversation mode must be chief_engineer.
+    assert runner.starts == []
     convos = ctrl._ledger.list_conversations_by_chat(42)
     assert convos
     assert convos[0].mode == ConversationMode.CHIEF_ENGINEER.value
+    runs = ctrl._ledger.list_agent_runs(convos[0].id, limit=10)
+    assert [(run.agent, run.role) for run in runs] == [("codex", "analysis")]
 
 
 @pytest.mark.asyncio
@@ -391,17 +405,14 @@ async def test_claude_direct_marks_hidden_task_done_and_releases_workspace(tmp_p
 
 
 # ---------------------------------------------------------------------------
-# Test: orchestration default flow is unchanged
+# Test: plain text remains read-only
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_default_orchestrated_flow_unchanged(tmp_path: Path) -> None:
-    """The default Codex → Claude → Codex pipeline remains intact.
-
-    Plain text without a leading slash command, in chief_engineer mode
-    with Claude available, triggers the orchestrator — analysis,
-    implementation, verification.
-    """
+async def test_plain_text_read_only_flow_reuses_chief_engineer_workbench(
+    tmp_path: Path,
+) -> None:
+    """Plain text keeps the workbench but does not start Claude orchestration."""
     claude = FakeClaudeBackend(enabled=True)
     runner = FakeOrchestrationRunner()
     ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
@@ -411,10 +422,102 @@ async def test_default_orchestrated_flow_unchanged(tmp_path: Path) -> None:
         {"chat_id": 99, "user_id": 2},
     )
 
-    assert len(runner.starts) == 1
-    start_args = runner.starts[0]
-    assert start_args.get("prompt") == "帮我修复 dark mode 颜色"
+    assert runner.starts == []
 
     convos = ctrl._ledger.list_conversations_by_chat(99)
     assert len(convos) == 1
     assert convos[0].mode == ConversationMode.CHIEF_ENGINEER.value
+    runs = ctrl._ledger.list_agent_runs(convos[0].id, limit=10)
+    assert [(run.agent, run.role) for run in runs] == [("codex", "analysis")]
+
+
+@pytest.mark.asyncio
+async def test_codex_thread_is_scoped_to_workbench_until_new(tmp_path: Path) -> None:
+    """All Codex interactions in one Workbench reuse the same Codex thread."""
+    claude = FakeClaudeBackend(enabled=True)
+    ctrl = build_controller(tmp_path, claude=claude)
+    ctx = {"chat_id": 42, "user_id": 1}
+
+    await ctrl.handle("/new", ctx)
+    await ctrl.handle_conversation_text("先分析登录问题", ctx)
+    first = ctrl._ledger.get_active_conversation(42)
+    assert first is not None
+    first_thread = first.codex_thread_id
+    assert first_thread
+    mark_active_task_done(ctrl, 42)
+
+    await ctrl.handle("/codex 继续按刚才的问题补充分析", ctx)
+    same = ctrl._ledger.get_active_conversation(42)
+    assert same is not None
+    assert same.id == first.id
+    assert same.codex_thread_id == first_thread
+
+    turn_threads = [thread_id for thread_id, _prompt in ctrl._backend.turns]
+    assert turn_threads[:2] == [first_thread, first_thread]
+    mark_active_task_done(ctrl, 42)
+
+    await ctrl.handle("/new", ctx)
+    await ctrl.handle_conversation_text("这是新工作台的问题", ctx)
+    fresh = ctrl._ledger.get_active_conversation(42)
+    assert fresh is not None
+    assert fresh.id != first.id
+    assert fresh.codex_thread_id
+    assert fresh.codex_thread_id != first_thread
+
+
+@pytest.mark.asyncio
+async def test_auto_reuses_workbench_codex_thread(tmp_path: Path) -> None:
+    """``/auto`` continues the Codex side of the current Workbench."""
+    claude = FakeClaudeBackend(enabled=True)
+    runner = FakeOrchestrationRunner()
+    ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
+    ctx = {"chat_id": 42, "user_id": 1}
+
+    await ctrl.handle("/new", ctx)
+    await ctrl.handle_conversation_text("先查清楚失败根因", ctx)
+    active = ctrl._ledger.get_active_conversation(42)
+    assert active is not None
+    codex_thread_id = active.codex_thread_id
+    assert codex_thread_id
+    mark_active_task_done(ctrl, 42)
+
+    await ctrl.handle("/auto 按刚才结论执行修复", ctx)
+
+    assert len(runner.starts) == 1
+    assert runner.starts[0]["conversation"].id == active.id
+    assert runner.starts[0]["codex_thread_id"] == codex_thread_id
+
+
+@pytest.mark.asyncio
+async def test_claude_session_is_scoped_to_workbench_until_new(tmp_path: Path) -> None:
+    """Claude direct runs resume the same Claude Code session until /new."""
+    claude = FakeClaudeBackend(enabled=True)
+    ctrl = build_controller(tmp_path, claude=claude)
+    ctx = {"chat_id": 42, "user_id": 1}
+
+    await ctrl.handle("/new", ctx)
+    await ctrl.handle("/claude 第一次改 README", ctx)
+    import asyncio as _asyncio
+    await _asyncio.sleep(0.1)
+    first = ctrl._ledger.get_active_conversation(42)
+    assert first is not None
+    first_session = first.claude_session_id
+    assert first_session
+
+    await ctrl.handle("/claude 继续刚才 Claude 的修改", ctx)
+    await _asyncio.sleep(0.1)
+    same = ctrl._ledger.get_active_conversation(42)
+    assert same is not None
+    assert same.id == first.id
+    assert same.claude_session_id == first_session
+    assert claude.send_calls[-1].extra["resume_session_id"] == first_session
+
+    await ctrl.handle("/new", ctx)
+    await ctrl.handle("/claude 新工作台不要继承旧 Claude 会话", ctx)
+    await _asyncio.sleep(0.1)
+    fresh = ctrl._ledger.get_active_conversation(42)
+    assert fresh is not None
+    assert fresh.id != first.id
+    assert fresh.claude_session_id
+    assert fresh.claude_session_id != first_session
+    assert "resume_session_id" not in claude.send_calls[-1].extra
