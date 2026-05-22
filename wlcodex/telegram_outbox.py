@@ -23,6 +23,7 @@ from wlcodex.runtime_events import (
     RuntimeEvent,
     Visibility,
     now_iso,
+    safe_text_preview,
 )
 
 logger = logging.getLogger(__name__)
@@ -337,7 +338,8 @@ class TelegramOutbox:
                 "operation": req.operation,
                 "chat_id": req.chat_id,
                 "message_id": req.message_id,
-                "text_preview": req.text[:200],
+                "text_preview": safe_text_preview(req.text),
+                "text_length": len(req.text),
             },
             correlation_id=correlation_id,
         )

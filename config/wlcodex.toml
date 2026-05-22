@@ -73,6 +73,11 @@ enabled = true
 default_agent = "claude"
 max_frame_chars = 3500
 redaction_enabled = true
+block_idle_seconds = 2.0
+
+[product]
+preview_enabled = true
+preview_edit_min_interval_seconds = 2.0
 
 [telegram_output]
 preview_enabled = true

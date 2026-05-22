@@ -341,7 +341,53 @@ async def test_runtime_progress_starts_preview_session_without_run_started():
     )
 
     assert fake.sent
-    assert "分析需求" in fake.sent[0][1]
+    # Cockpit renderer shows phase with agent name
+    assert "Codex" in fake.sent[0][1] or "分析" in fake.sent[0][1]
+    from types import SimpleNamespace
+
+    from wlcodex.interaction.runtime_renderer import RuntimeRunState
+
+    fake = FakeTransport()
+
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(
+            preview_enabled=True,
+            preview_edit_min_interval_seconds=0.0,
+            semantic_min_chars=20,
+            semantic_max_chars=80,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+    state = RuntimeRunState(
+        phase="running_verification",
+        active_agent="codex",
+        agent_status="running",
+    )
+    state.current_command = "pytest tests/ -q"
+    state.elapsed_seconds = 200
+    state.estimated_remaining = "约3-5分钟"
+
+    await renderer.handle(
+        InteractionEvent(
+            event_type="runtime_progress",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            metadata={"runtime_state": state},
+        )
+    )
+
+    assert fake.sent
+    assert "Codex正在执行：pytest tests/ -q" in fake.sent[0][1]
+    assert "已运行：3m20s" in fake.sent[0][1]
+    assert "预计还需：约3-5分钟" in fake.sent[0][1]
 
 
 @pytest.mark.asyncio
@@ -563,3 +609,57 @@ async def test_run_failed_treats_runtime_state_cancelled_as_interrupt():
     )
 
     assert any(edit[2] == "已打断" for edit in fake.edited)
+
+
+# ── SurfacePolicy integration ────────────────────────────────────────────────
+
+
+def test_interaction_renderer_accepts_surface_policy():
+    """InteractionRenderer must accept surface_policy and use it for output params."""
+    from types import SimpleNamespace
+    from wlcodex.surfaces.core.models import SurfacePolicy, TerminalPolicy, ProductPolicy
+
+    policy = SurfacePolicy(
+        terminal=TerminalPolicy(max_frame_chars=3500, redaction_enabled=True),
+        product=ProductPolicy(
+            body_mode="final",
+            semantic_min_chars=800,
+            semantic_max_chars=3000,
+            final_chunk_chars=4000,
+        ),
+    )
+    fake = FakeTransport()
+    renderer = InteractionRenderer(
+        transport=fake,
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_policy=policy,
+    )
+    # Verify output manager was created with policy-derived config
+    assert renderer._output_manager is not None
+    assert renderer._output_manager._policy.min_chars == 800
+    assert renderer._output_manager._policy.max_chars == 3000
+    assert renderer._output_manager._policy.final_max_chars == 4000
+
+
+def test_interaction_renderer_falls_back_to_telegram_output_config():
+    """When surface_policy is not provided, fall back to telegram_output_config."""
+    from types import SimpleNamespace
+
+    fake = FakeTransport()
+    renderer = InteractionRenderer(
+        transport=fake,
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        telegram_output_config=SimpleNamespace(
+            semantic_min_chars=777,
+            semantic_max_chars=2222,
+            final_chunk_chars=1111,
+            preview_enabled=True,
+            preview_edit_min_interval_seconds=2.0,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            terminal_block_idle_seconds=2.0,
+        ),
+    )
+    assert renderer._output_manager._policy.min_chars == 777

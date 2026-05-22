@@ -18,6 +18,7 @@ from wlcodex.runtime_events import (
     Visibility,
     now_iso,
     redact_payload,
+    safe_text_preview,
 )
 from wlcodex.runtime_event_store import RuntimeEventStore
 
@@ -394,3 +395,31 @@ def test_redact_payload_handles_empty() -> None:
 def test_redact_payload_handles_non_string_values() -> None:
     payload = {"count": 42, "active": True, "ratio": 3.14, "data": None}
     assert redact_payload(payload) == payload
+
+
+def test_safe_text_preview_redacts_common_secret_patterns() -> None:
+    text = "deploy password=abc123 token=secret123 api_key: sk-live-abc"
+
+    preview = safe_text_preview(text)
+
+    assert "abc123" not in preview
+    assert "secret123" not in preview
+    assert "sk-live-abc" not in preview
+    assert "<redacted>" in preview
+    assert len(preview) <= 200
+
+
+def test_redact_payload_content_redacts_textual_payload_fields() -> None:
+    payload = {
+        "text_preview": "deploy password=abc123 token=secret123",
+        "text": "deploy password=abc123 token=secret123",
+        "note": "plain status stays visible",
+    }
+
+    result = redact_payload(payload)
+
+    assert "abc123" not in result["text_preview"]
+    assert "secret123" not in result["text_preview"]
+    assert "abc123" not in result["text"]
+    assert "secret123" not in result["text"]
+    assert result["note"] == "plain status stays visible"

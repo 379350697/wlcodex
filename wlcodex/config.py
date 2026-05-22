@@ -136,6 +136,13 @@ class TerminalSurfaceConfig:
     default_agent: str = "claude"
     max_frame_chars: int = 3500
     redaction_enabled: bool = True
+    block_idle_seconds: float = 2.0
+
+
+@dataclass(frozen=True)
+class ProductSurfaceConfig:
+    preview_enabled: bool = True
+    preview_edit_min_interval_seconds: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -178,6 +185,7 @@ class AppConfig:
     interaction: InteractionConfig = InteractionConfig()
     menu: MenuConfig = MenuConfig()
     terminal: TerminalSurfaceConfig = TerminalSurfaceConfig()
+    product: ProductSurfaceConfig = ProductSurfaceConfig()
     telegram_output: TelegramOutputConfig = TelegramOutputConfig()
     workspace_discovery: WorkspaceDiscoveryConfig = WorkspaceDiscoveryConfig()
 
@@ -186,6 +194,32 @@ class AppConfig:
             if workspace.alias == alias:
                 return workspace
         raise ConfigError(f"unknown workspace alias: {alias}")
+
+    def surface_policy(self) -> "SurfacePolicy":
+        """Build a SurfacePolicy from this config."""
+        from wlcodex.surfaces.core.models import (
+            TerminalPolicy,
+            ProductPolicy,
+            SurfacePolicy,
+        )
+        return SurfacePolicy(
+            terminal=TerminalPolicy(
+                max_frame_chars=self.terminal.max_frame_chars,
+                redaction_enabled=self.terminal.redaction_enabled,
+                body_mode=self.telegram_output.terminal_body_mode,
+                block_idle_seconds=self.terminal.block_idle_seconds,
+                preview_enabled=self.telegram_output.preview_enabled,
+                preview_edit_min_interval_seconds=self.telegram_output.preview_edit_min_interval_seconds,
+            ),
+            product=ProductPolicy(
+                body_mode=self.telegram_output.product_body_mode,
+                preview_enabled=self.product.preview_enabled,
+                preview_edit_min_interval_seconds=self.product.preview_edit_min_interval_seconds,
+                semantic_min_chars=self.telegram_output.semantic_min_chars,
+                semantic_max_chars=self.telegram_output.semantic_max_chars,
+                final_chunk_chars=self.telegram_output.final_chunk_chars,
+            ),
+        )
 
 
 def load_config(path: Path) -> AppConfig:
@@ -219,6 +253,7 @@ def load_config(path: Path) -> AppConfig:
     interaction_raw = data.get("interaction", {})
     menu_raw = data.get("menu", {})
     terminal_raw = data.get("terminal", {})
+    product_raw = data.get("product", {})
     telegram_output_raw = data.get("telegram_output", {})
     terminal_default_agent = str(terminal_raw.get("default_agent", "claude"))
     if terminal_default_agent not in ("claude", "codex"):
@@ -343,6 +378,13 @@ def load_config(path: Path) -> AppConfig:
             default_agent=terminal_default_agent,
             max_frame_chars=int(terminal_raw.get("max_frame_chars", 3500)),
             redaction_enabled=bool(terminal_raw.get("redaction_enabled", True)),
+            block_idle_seconds=float(terminal_raw.get("block_idle_seconds", 2.0)),
+        ),
+        product=ProductSurfaceConfig(
+            preview_enabled=bool(product_raw.get("preview_enabled", True)),
+            preview_edit_min_interval_seconds=float(
+                product_raw.get("preview_edit_min_interval_seconds", 2.0)
+            ),
         ),
         telegram_output=_telegram_output_config(telegram_output_raw),
         workspace_discovery=discovery,

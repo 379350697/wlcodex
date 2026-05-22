@@ -63,6 +63,7 @@ from wlcodex.runtime_events import (
     RuntimeEvent,
     Visibility,
     now_iso,
+    safe_text_preview,
 )
 from wlcodex.router import (
     AutoModeCommand,
@@ -258,9 +259,11 @@ class CommandController:
                         latest_run = runs[0] if runs else None
                         orch_runs = self._ledger.list_orchestration_runs(active.id, limit=1)
                         orch_run = orch_runs[0] if orch_runs else None
+                        surface_mode = self._latest_surface_mode(active.id) or "product"
                         return ControllerResponse(
                             render_conversation_status(
-                                active, latest_run=latest_run, orch_run=orch_run
+                                active, latest_run=latest_run, orch_run=orch_run,
+                                surface_mode=surface_mode,
                             )
                         )
                 return ControllerResponse(
@@ -535,7 +538,11 @@ class CommandController:
             source=EventSource.TELEGRAM,
             actor="user",
             visibility=Visibility.USER,
-            payload={"text_preview": text[:200], "chat_id": chat_id},
+            payload={
+                "text_preview": safe_text_preview(text),
+                "text_length": len(text),
+                "chat_id": chat_id,
+            },
             occurred_at=now_iso(),
             conversation_id=conv_id if conv_id else None,
         ))
@@ -740,7 +747,8 @@ class CommandController:
             visibility=Visibility.USER,
             payload={
                 "chat_id": ctx.get("chat_id", 0) if ctx else 0,
-                "text_preview": text[:200],
+                "text_preview": safe_text_preview(text),
+                "text_length": len(text),
                 "conversation_state_at_append": decision.conversation_state,
                 "delivery_policy": delivery_policy,
             },
@@ -760,7 +768,8 @@ class CommandController:
                 actor="controller",
                 visibility=Visibility.OPERATOR,
                 payload={
-                    "text_preview": text[:200],
+                    "text_preview": safe_text_preview(text),
+                    "text_length": len(text),
                     "conversation_state": decision.conversation_state,
                 },
                 occurred_at=now_iso(),
@@ -1055,7 +1064,8 @@ class CommandController:
                 "blocking_run_id": blocking_run_id,
                 "blocking_state": decision.conversation_state,
                 "requested_route": decision.route,
-                "original_text_preview": original_text[:200],
+                "original_text_preview": safe_text_preview(original_text),
+                "original_text_length": len(original_text),
             },
             occurred_at=now_iso(),
             conversation_id=conv_id if conv_id else None,
@@ -1072,7 +1082,8 @@ class CommandController:
             payload={
                 "blocking_task_id": blocking_task_id,
                 "choices": ["append", "interrupt", "queue", "new_session", "cancel"],
-                "original_text_preview": original_text[:200],
+                "original_text_preview": safe_text_preview(original_text),
+                "original_text_length": len(original_text),
                 "agent_label": agent_label,
             },
             occurred_at=now_iso(),
@@ -1307,7 +1318,10 @@ class CommandController:
             source=EventSource.TELEGRAM,
             actor="user",
             visibility=Visibility.USER,
-            payload={"text_preview": command.prompt[:200]},
+            payload={
+                "text_preview": safe_text_preview(command.prompt),
+                "text_length": len(command.prompt),
+            },
             occurred_at=now_iso(),
             conversation_id=active.id,
         ))
@@ -1578,7 +1592,10 @@ class CommandController:
             source=EventSource.TELEGRAM,
             actor="user",
             visibility=Visibility.USER,
-            payload={"text_preview": command.prompt[:200]},
+            payload={
+                "text_preview": safe_text_preview(command.prompt),
+                "text_length": len(command.prompt),
+            },
             occurred_at=now_iso(),
             conversation_id=active.id,
         ))
@@ -2190,7 +2207,8 @@ class CommandController:
                 visibility=Visibility.OPERATOR,
                 payload={"decision": "append_to_current",
                          "conversation_id": conversation_id,
-                         "original_text_preview": original_text[:200]},
+                         "original_text_preview": safe_text_preview(original_text),
+                         "original_text_length": len(original_text)},
                 occurred_at=now_iso(),
                 conversation_id=conversation_id,
             ))
@@ -2207,7 +2225,8 @@ class CommandController:
                 visibility=Visibility.USER,
                 payload={
                     "conversation_id": conversation_id,
-                    "text_preview": original_text[:200],
+                    "text_preview": safe_text_preview(original_text),
+                    "text_length": len(original_text),
                     "conversation_state_at_append": "implementation",
                     "delivery_policy": "codex_phase_boundary_review",
                 },
@@ -2228,7 +2247,8 @@ class CommandController:
                 visibility=Visibility.OPERATOR,
                 payload={"decision": "interrupt_and_run_latest",
                          "conversation_id": conversation_id,
-                         "original_text_preview": original_text[:200]},
+                         "original_text_preview": safe_text_preview(original_text),
+                         "original_text_length": len(original_text)},
                 occurred_at=now_iso(),
                 conversation_id=conversation_id,
             ))
@@ -2255,7 +2275,8 @@ class CommandController:
                 visibility=Visibility.OPERATOR,
                 payload={"decision": "queue_new_task",
                          "conversation_id": conversation_id,
-                         "original_text_preview": original_text[:200]},
+                         "original_text_preview": safe_text_preview(original_text),
+                         "original_text_length": len(original_text)},
                 occurred_at=now_iso(),
                 conversation_id=conversation_id,
             ))
@@ -2289,7 +2310,8 @@ class CommandController:
                 visibility=Visibility.OPERATOR,
                 payload={"decision": "new_isolated_session",
                          "conversation_id": conversation_id,
-                         "original_text_preview": original_text[:200]},
+                         "original_text_preview": safe_text_preview(original_text),
+                         "original_text_length": len(original_text)},
                 occurred_at=now_iso(),
                 conversation_id=conversation_id,
             ))

@@ -36,6 +36,22 @@ _NEXT_STEP = {
     "retrying_implementation": "修复后将再次验收",
 }
 
+_PHASE_ACTIONS = {
+    "queued": "排队",
+    "running_analysis": "分析需求",
+    "running_implementation": "实现代码",
+    "running_verification": "验收结果",
+    "retrying_implementation": "重新实现",
+}
+
+_PHASE_ESTIMATES = {
+    "queued": "约1分钟内",
+    "running_analysis": "约2-6分钟",
+    "running_implementation": "约5-15分钟",
+    "running_verification": "约3-8分钟",
+    "retrying_implementation": "约2-8分钟",
+}
+
 
 @dataclass
 class RuntimeRunState:
@@ -53,6 +69,10 @@ class RuntimeRunState:
     tool_names: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
+    current_detail: str = ""
+    current_command: str = ""
+    elapsed_seconds: int | None = None
+    estimated_remaining: str = ""
     retry_count: int = 0
     total_tokens: int = 0
     error_summary: str = ""
@@ -88,10 +108,18 @@ class RuntimeRenderer:
         if phase_line:
             lines.append(phase_line)
 
-        # Next-step hint (verbosity 1+)
+        if self.verbosity >= 1 and not state.is_terminal:
+            elapsed_line = _elapsed_line(getattr(state, "elapsed_seconds", None))
+            if elapsed_line:
+                lines.append(elapsed_line)
+            estimate = _estimate_remaining(state)
+            if estimate:
+                lines.append(f"预计还需：{estimate}")
+
+        # Next-step hint (verbosity 2 only)
         if self.verbosity >= 1:
             next_step = _NEXT_STEP.get(state.phase, "")
-            if next_step and not state.is_terminal:
+            if self.verbosity >= 2 and next_step and not state.is_terminal:
                 lines.append(next_step)
 
         # Detail lines (verbosity 2 only)
@@ -151,7 +179,22 @@ class RuntimeRenderer:
         if state.agent_status == "waiting_for_approval":
             short = self._phase_label(state.phase).replace("正在", "")
             return f"等待审批 — {short}"
-        return label
+
+        agent = _agent_display(state.active_agent)
+        command = _compact_line(getattr(state, "current_command", ""))
+        if command:
+            prefix = f"{agent}正在执行" if agent else "正在执行"
+            return f"{prefix}：{command}"
+
+        if state.phase not in _PHASE_ACTIONS and state.phase not in KNOWN_PHASES:
+            return label
+
+        action = _PHASE_ACTIONS.get(state.phase, label.replace("正在", ""))
+        detail = _compact_line(getattr(state, "current_detail", ""))
+        prefix = f"{agent}正在{action}" if agent else label
+        if detail:
+            return f"{prefix}：{detail}"
+        return prefix
 
     def _detail_lines(self, state: RuntimeRunState) -> list[str]:
         """Verbosity-2 detail lines — tools, files, commands, retries, tokens."""
@@ -349,3 +392,55 @@ def _time_ago(iso_timestamp: str | None) -> str:
         return f"{hours} 小时前"
     except (ValueError, TypeError):
         return "未知"
+
+
+def _agent_display(agent: str) -> str:
+    normalized = str(agent or "").strip().lower()
+    if normalized == "codex":
+        return "Codex"
+    if normalized == "claude":
+        return "Claude"
+    return str(agent or "").strip()
+
+
+def _compact_line(text: str, *, limit: int = 80) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _elapsed_line(seconds: int | float | None) -> str:
+    if seconds is None:
+        return ""
+    try:
+        value = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return ""
+    return f"已运行：{_format_duration(value)}"
+
+
+def _format_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def _estimate_remaining(state: RuntimeRunState) -> str:
+    explicit = str(getattr(state, "estimated_remaining", "") or "").strip()
+    if explicit:
+        return explicit
+    command = str(getattr(state, "current_command", "") or "").strip().lower()
+    if command:
+        if "pytest tests/ -q" in command or "pytest tests/" in command:
+            return "约3-5分钟"
+        if "pytest" in command:
+            return "约1-3分钟"
+        if "gitnexus analyze" in command:
+            return "约10-30秒"
+        return "约1-5分钟"
+    return _PHASE_ESTIMATES.get(state.phase, "")

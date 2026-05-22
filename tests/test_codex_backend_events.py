@@ -1,6 +1,7 @@
 """Backend event translation tests."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -131,6 +132,154 @@ async def test_app_server_send_codex_prompt_reports_created_thread_before_turn()
     assert result == "ok"
     assert callbacks == ["target-thread"]
     assert start_seen == [["target-thread"]]
+    assert backend._event_subscribers == []
+
+
+@pytest.mark.asyncio
+async def test_app_server_connect_disables_transport_message_cap(monkeypatch) -> None:
+    import websockets
+
+    connect_calls: list[dict[str, object]] = []
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.messages: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def send(self, raw: str) -> None:
+            request = json.loads(raw)
+            if "id" not in request:
+                return
+            self.messages.put_nowait(json.dumps({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {},
+            }))
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> str:
+            item = await self.messages.get()
+            if item is None:
+                raise StopAsyncIteration
+            return item
+
+        async def close(self) -> None:
+            self.messages.put_nowait(None)
+
+    async def fake_connect(_endpoint: str, **kwargs: object) -> FakeWebSocket:
+        connect_calls.append(kwargs)
+        return FakeWebSocket()
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.1,
+    )
+
+    await backend._ensure_client()
+    await backend.close()
+
+    assert connect_calls
+    assert connect_calls[0]["max_size"] is None
+
+
+@pytest.mark.asyncio
+async def test_recv_loop_truncates_oversized_command_output_delta() -> None:
+    large_delta = "x" * (2 * 1024 * 1024 + 2048)
+    raw_message = json.dumps({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "itemId": "item-1",
+            "delta": large_delta,
+        },
+    })
+
+    class OneMessageWebSocket:
+        def __init__(self) -> None:
+            self.sent = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> str:
+            if self.sent:
+                raise StopAsyncIteration
+            self.sent = True
+            return raw_message
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+            self.closed = False
+
+        async def receive_message(self, message: dict[str, object]) -> None:
+            self.messages.append(message)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    backend = AppServerCodexBackend(endpoint="ws://127.0.0.1:17431")
+    client = RecordingClient()
+
+    await backend._recv_loop(OneMessageWebSocket(), client)
+
+    assert client.closed is False
+    params = client.messages[0]["params"]
+    assert isinstance(params, dict)
+    delta = params["delta"]
+    assert isinstance(delta, str)
+    assert len(delta) < len(large_delta)
+    assert "WLCodex truncated command output" in delta
+
+
+@pytest.mark.asyncio
+async def test_app_server_prompt_fails_immediately_when_receive_loop_breaks() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.1,
+        codex_prompt_idle_timeout_seconds=0.2,
+    )
+
+    class FailingWebSocket:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> str:
+            raise RuntimeError("frame with 1069393 bytes exceeds limit of 1048576 bytes")
+
+    class ClosingClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    closing_client = ClosingClient()
+
+    async def create_thread(_workspace_path: str) -> str:
+        return "target-thread"
+
+    async def start_turn(_thread_id: str, _prompt: str) -> str:
+        asyncio.create_task(backend._recv_loop(FailingWebSocket(), closing_client))
+        return "target-turn"
+
+    async def interrupt_turn(_thread_id: str, _turn_id: str) -> None:
+        raise AssertionError("transport failures should wake the prompt before idle timeout")
+
+    backend.create_thread = create_thread
+    backend.start_turn = start_turn
+    backend.interrupt_turn = interrupt_turn
+
+    with pytest.raises(RuntimeError, match="Codex backend transport disconnected"):
+        await backend.send_codex_prompt(
+            "/tmp/demo",
+            "prompt",
+        )
+
+    assert closing_client.closed is True
     assert backend._event_subscribers == []
 
 
@@ -326,6 +475,9 @@ async def test_app_server_send_codex_analysis_prompt_uses_planning_overrides() -
         "networkAccess": False,
         "writableRoots": [],
     }
+    instructions = str(thread_params["developerInstructions"])
+    assert "禁止 rg -S ." in instructions
+    assert "无边界全文搜索" in instructions
     assert "outputSchema" in turn_params
 
 

@@ -4,7 +4,20 @@ import pytest
 
 from wlcodex.surfaces.terminal.models import TerminalFrame, TerminalSessionRef
 from wlcodex.surfaces.terminal.renderer import render_terminal_frame
+from wlcodex.surfaces.terminal.renderer import (
+    render_onsite_header,
+    render_start_card,
+    render_tail_output,
+    render_pause_confirmation,
+    render_resume_confirmation,
+    render_detach_confirmation,
+    render_return_to_cockpit,
+    render_no_session_hint,
+    render_busy_selector,
+)
+from wlcodex.surfaces.terminal.redaction import redact_terminal_text, redact_and_cap_frame
 from wlcodex.surfaces.terminal.manager import TerminalSessionManager
+from wlcodex.surfaces.core.models import TerminalPolicy
 from wlcodex.surfaces.terminal.router import (
     TerminalCommand,
     TerminalCommandKind,
@@ -24,7 +37,7 @@ def test_terminal_frame_renders_agent_phase_prefix():
         sequence=7,
     )
     rendered = render_terminal_frame(frame)
-    assert rendered == "[claude:implementation] Running pytest -q"
+    assert rendered == "[Claude:implementation] Running pytest -q"
 
 
 def test_terminal_session_ref_keeps_strategy():
@@ -507,3 +520,195 @@ async def test_manager_integrates_with_codex_terminal_adapter():
     await manager.send_input(ref, "show diff")
 
     assert backend.received == [("codex_thread", "show diff")]
+
+
+# ── Terminal Renderer: onsite header, start card, tail ──────────────────────
+
+
+def test_render_onsite_header():
+    assert "现场" in render_onsite_header("claude", "implementation")
+    assert "Claude" in render_onsite_header("claude", "implementation")
+    assert "implementation" in render_onsite_header("claude", "implementation")
+
+
+def test_render_onsite_header_codex():
+    text = render_onsite_header("codex", "analysis")
+    assert "Codex" in text
+    assert "analysis" in text
+
+
+def test_render_start_card_default():
+    text = render_start_card()
+    assert "启动 Claude 现场" in text
+    assert "启动 Codex 现场" in text
+    assert "回驾驶舱" in text
+
+
+def test_render_start_card_custom_agents():
+    text = render_start_card(("claude",))
+    assert "启动 Claude 现场" in text
+    assert "Codex" not in text
+
+
+def test_render_start_card_no_dead_end():
+    text = render_start_card()
+    # Must always offer next steps
+    assert "启动" in text or "你可以" in text
+
+
+def test_render_tail_output_empty():
+    assert "暂无" in render_tail_output([])
+
+
+def test_render_tail_output_with_frames():
+    frames = [
+        TerminalFrame(conversation_id=1, agent="claude", phase="impl", text="line 1"),
+        TerminalFrame(conversation_id=1, agent="claude", phase="impl", text="line 2"),
+    ]
+    text = render_tail_output(frames)
+    assert "[Claude:impl]" in text
+    assert "line 1" in text
+    assert "line 2" in text
+
+
+def test_render_tail_output_limit():
+    frames = [
+        TerminalFrame(conversation_id=1, agent="codex", phase="analysis", text=f"output {i}")
+        for i in range(30)
+    ]
+    text = render_tail_output(frames, limit=5)
+    # Should only include last 5 frames
+    assert "output 29" in text
+    assert "output 25" in text
+    assert "output 24" not in text
+
+
+def test_render_pause_confirmation():
+    text = render_pause_confirmation()
+    assert "暂停" in text
+    assert "tail" in text
+
+
+def test_render_resume_confirmation():
+    assert "恢复" in render_resume_confirmation()
+
+
+def test_render_detach_confirmation():
+    text = render_detach_confirmation()
+    assert "离开" in text
+    assert "terminal" in text
+
+
+def test_render_return_to_cockpit():
+    assert "驾驶舱" in render_return_to_cockpit()
+
+
+def test_render_no_session_hint():
+    assert "没有" in render_no_session_hint()
+
+
+def test_render_busy_selector_with_agent():
+    text = render_busy_selector("codex")
+    assert "Codex" in text
+
+
+def test_render_busy_selector_no_agent():
+    text = render_busy_selector(None)
+    assert "运行" in text
+
+
+# ── Terminal Redaction and Capping ────────────────────────────────────────
+
+
+def test_redact_and_cap_frame_default():
+    text = "normal output"
+    assert redact_and_cap_frame(text) == "normal output"
+
+
+def test_redact_and_cap_frame_redacts_secrets():
+    text = "WLCODEX_TELEGRAM_BOT_TOKEN=abc123 ANTHROPIC_API_KEY=sk-xxx"
+    result = redact_and_cap_frame(text)
+    assert "abc123" not in result
+    assert "sk-xxx" not in result
+    assert "<redacted>" in result
+
+
+def test_redact_and_cap_frame_caps_oversized():
+    text = "x" * 5000
+    result = redact_and_cap_frame(text, max_chars=3900)
+    assert len(result) <= 3900
+    assert "截断" in result
+    assert "/terminal tail" in result
+
+
+def test_redact_and_cap_frame_preserves_short_text():
+    text = "short output"
+    result = redact_and_cap_frame(text, max_chars=3900)
+    assert result == "short output"
+
+
+def test_redact_and_cap_frame_redaction_can_be_disabled():
+    text = "TELEGRAM_BOT_TOKEN=secret123"
+    result = redact_and_cap_frame(text, redaction_enabled=False)
+    assert "secret123" in result
+
+
+def test_redact_terminal_text_from_renderer():
+    """Verify render_terminal_frame applies redaction by default."""
+    frame = TerminalFrame(
+        conversation_id=1,
+        agent="codex",
+        phase="analysis",
+        text="ANTHROPIC_API_KEY=sk-test-key output here",
+    )
+    result = render_terminal_frame(frame)
+    assert "sk-test-key" not in result
+    assert "<redacted>" in result
+
+
+def test_render_terminal_frame_caps_long_output():
+    """Verify render_terminal_frame caps output to max_frame_chars."""
+    frame = TerminalFrame(
+        conversation_id=1,
+        agent="codex",
+        phase="analysis",
+        text="x" * 5000,
+    )
+    policy = TerminalPolicy(max_frame_chars=3500, redaction_enabled=True)
+    result = render_terminal_frame(frame, policy=policy)
+    # Prefix like [Codex:analysis] adds ~20 chars
+    assert len(result) <= 3500 + 30  # margin for prefix
+    assert "截断" in result
+
+
+# ── Tail output total cap (blocking issue 2) ────────────────────────────────
+
+
+def test_render_tail_output_caps_total_to_max_total_chars():
+    """render_tail_output must cap total output to max_total_chars (Telegram limit)."""
+    # Build 20 frames each near 400 chars — total would be ~8000+
+    frames = [
+        TerminalFrame(
+            conversation_id=1, agent="codex", phase="analysis",
+            text="x" * 400,
+        )
+        for _ in range(20)
+    ]
+    text = render_tail_output(frames, max_total_chars=3900)
+    assert len(text) <= 3900, f"tail output len={len(text)} exceeds cap"
+
+
+def test_render_tail_output_keeps_recent_frames_when_capped():
+    """When total exceeds cap, older frames are dropped first."""
+    frames = [
+        TerminalFrame(
+            conversation_id=1, agent="claude", phase="impl",
+            text=f"frame_{i:04d}",
+        )
+        for i in range(50)
+    ]
+    text = render_tail_output(frames, max_total_chars=500)
+    # Most recent frame must be present
+    assert "frame_0049" in text
+    # Much older frame should be dropped
+    assert "frame_0000" not in text

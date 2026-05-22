@@ -33,6 +33,7 @@ class InteractionRenderer:
         runtime_progress: "RuntimeProgressManager | None" = None,
         surface_resolver=None,
         telegram_output_config=None,
+        surface_policy=None,
     ) -> None:
         self._transport = transport
         self._profile = profile
@@ -41,29 +42,52 @@ class InteractionRenderer:
         self._sessions: dict[tuple[int, int], _StreamSession] = {}
         self._typing_tasks: dict[tuple[int, int], object] = {}
         self._surface_resolver = surface_resolver or (lambda _chat_id: "product")
+        self._surface_policy = surface_policy
+
+        # Build TelegramOutputManager params from surface_policy when available,
+        # falling back to flat telegram_output_config for backwards compatibility.
+        if surface_policy is not None:
+            tp = surface_policy.terminal
+            pp = surface_policy.product
+            output_params = dict(
+                semantic_min_chars=pp.semantic_min_chars,
+                semantic_max_chars=pp.semantic_max_chars,
+                final_chunk_chars=pp.final_chunk_chars,
+                preview_enabled=pp.preview_enabled,
+                preview_edit_min_interval_seconds=pp.preview_edit_min_interval_seconds,
+                product_body_mode=pp.body_mode,
+                terminal_body_mode=tp.body_mode,
+                terminal_block_idle_seconds=tp.block_idle_seconds,
+            )
+        elif telegram_output_config is not None:
+            output_params = dict(
+                semantic_min_chars=getattr(telegram_output_config, "semantic_min_chars", 900),
+                semantic_max_chars=getattr(telegram_output_config, "semantic_max_chars", 3200),
+                final_chunk_chars=getattr(telegram_output_config, "final_chunk_chars", 3900),
+                preview_enabled=getattr(telegram_output_config, "preview_enabled", True),
+                preview_edit_min_interval_seconds=getattr(
+                    telegram_output_config,
+                    "preview_edit_min_interval_seconds",
+                    2.0,
+                ),
+                product_body_mode=getattr(telegram_output_config, "product_body_mode", "final"),
+                terminal_body_mode=getattr(
+                    telegram_output_config,
+                    "terminal_body_mode",
+                    "semantic_blocks",
+                ),
+                terminal_block_idle_seconds=getattr(
+                    telegram_output_config,
+                    "terminal_block_idle_seconds",
+                    2.0,
+                ),
+            )
+        else:
+            output_params = {}
+
         self._output_manager = TelegramOutputManager(
-            transport=transport,
-            semantic_min_chars=getattr(telegram_output_config, "semantic_min_chars", 900),
-            semantic_max_chars=getattr(telegram_output_config, "semantic_max_chars", 3200),
-            final_chunk_chars=getattr(telegram_output_config, "final_chunk_chars", 3900),
-            preview_enabled=getattr(telegram_output_config, "preview_enabled", True),
-            preview_edit_min_interval_seconds=getattr(
-                telegram_output_config,
-                "preview_edit_min_interval_seconds",
-                2.0,
-            ),
-            product_body_mode=getattr(telegram_output_config, "product_body_mode", "final"),
-            terminal_body_mode=getattr(
-                telegram_output_config,
-                "terminal_body_mode",
-                "semantic_blocks",
-            ),
-            terminal_block_idle_seconds=getattr(
-                telegram_output_config,
-                "terminal_block_idle_seconds",
-                2.0,
-            ),
-        ) if telegram_output_config is not None else None
+            transport=transport, **output_params,
+        ) if output_params else None
 
     def _output_key(self, event: InteractionEvent) -> OutputRunKey:
         run_id = str(event.task_id or event.thread_id or "chat")
@@ -239,7 +263,8 @@ class InteractionRenderer:
         if state is None:
             return
         if self._output_manager_owns_status():
-            text = _runtime_progress_text(state)
+            surface = self._surface_resolver(event.chat_id)
+            text = _runtime_progress_text_for_surface(state, surface)
             if text:
                 key = self._output_key(event)
                 if key not in self._output_manager.sessions:
@@ -260,7 +285,8 @@ class InteractionRenderer:
         if state is None:
             return
         if self._output_manager_owns_status():
-            text = _runtime_heartbeat_text(state)
+            surface = self._surface_resolver(event.chat_id)
+            text = _runtime_heartbeat_text_for_surface(state, surface)
             if text:
                 key = self._output_key(event)
                 if key not in self._output_manager.sessions:
@@ -281,16 +307,29 @@ class InteractionRenderer:
         if state is None:
             return
         if self._output_manager is not None:
-            text = _runtime_final_text(state)
+            surface = self._surface_resolver(event.chat_id)
+            if surface == "terminal":
+                text = _runtime_final_text(state)
+            else:
+                text = _runtime_final_text(state)
             phase = getattr(state, "phase", "")
             key = self._output_key(event)
             if phase in ("cancelled", "aborted"):
                 await self._output_manager.interrupt(key)
             elif phase == "failed":
-                await self._output_manager.fail(
-                    key,
-                    error_summary=getattr(state, "error_summary", ""),
-                )
+                if surface == "terminal":
+                    await self._output_manager.fail(
+                        key,
+                        error_summary=getattr(state, "error_summary", ""),
+                    )
+                else:
+                    # Pass raw error_summary; TelegramOutputManager.fail()
+                    # adds its own "运行失败: " prefix.  Do NOT pass
+                    # render_cockpit_failure() here — that would double-prefix.
+                    await self._output_manager.fail(
+                        key,
+                        error_summary=getattr(state, "error_summary", ""),
+                    )
             elif getattr(state, "is_terminal", False) or phase == "completed":
                 buttons = event.buttons if event.buttons else None
                 await self._output_manager.complete(
@@ -323,32 +362,66 @@ class InteractionRenderer:
 
 
 def _runtime_progress_text(state) -> str:
-    """Convert a RuntimeRunState to a short status line for the preview bubble."""
-    from wlcodex.interaction.runtime_renderer import KNOWN_PHASES
+    """Convert a RuntimeRunState to a short status line for the preview bubble.
 
-    phase = getattr(state, "phase", "")
-    phase_label = KNOWN_PHASES.get(phase, phase)
+    Uses cockpit renderer for product surface and onsite header for
+    terminal surface. When called without a surface, defaults to cockpit.
+    """
+    from wlcodex.surfaces.product.renderer import render_cockpit_status
 
-    if not phase_label:
-        return ""
+    return render_cockpit_status(state)
 
-    status = getattr(state, "agent_status", "")
 
-    if status == "waiting_for_approval":
-        return "等待审批"
+def _runtime_progress_text_for_surface(state, surface: str) -> str:
+    """Surface-aware progress text.
 
-    return phase_label
+    Product surface -> cockpit status card.
+    Terminal surface -> onsite header (compact, close-to-raw).
+    """
+    if surface == "terminal":
+        from wlcodex.surfaces.terminal.renderer import render_onsite_header
+        from wlcodex.interaction.runtime_renderer import RuntimeRenderer
+
+        agent = getattr(state, "active_agent", "")
+        phase = getattr(state, "phase", "")
+        if not phase:
+            return ""
+        # For terminal, show a compact onsite header, not the cockpit card
+        # The terminal body (semantic blocks) carries the actual output.
+        return render_onsite_header(agent, phase)
+
+    return _runtime_progress_text(state)
 
 
 def _runtime_heartbeat_text(state) -> str:
     """Convert a RuntimeRunState to an activity heartbeat status."""
     from wlcodex.interaction.runtime_renderer import RuntimeRenderer
 
-    progress = _runtime_progress_text(state)
-    heartbeat = RuntimeRenderer(verbosity=1).heartbeat_text(state)
+    renderer = RuntimeRenderer(verbosity=1)
+    progress = renderer.progress_text(state)
+    heartbeat = renderer.heartbeat_text(state)
     if progress and heartbeat:
         return f"{progress}\n{heartbeat}"
     return heartbeat or progress
+
+
+def _runtime_heartbeat_text_for_surface(state, surface: str) -> str:
+    """Surface-aware heartbeat text."""
+    if surface == "terminal":
+        from wlcodex.surfaces.terminal.renderer import render_onsite_header
+        from wlcodex.interaction.runtime_renderer import RuntimeRenderer
+
+        agent = getattr(state, "active_agent", "")
+        phase = getattr(state, "phase", "")
+        renderer = RuntimeRenderer(verbosity=1)
+        heartbeat = renderer.heartbeat_text(state)
+        if heartbeat:
+            return heartbeat
+        if phase:
+            return render_onsite_header(agent, phase)
+        return ""
+
+    return _runtime_heartbeat_text(state)
 
 
 def _runtime_final_text(state) -> str:

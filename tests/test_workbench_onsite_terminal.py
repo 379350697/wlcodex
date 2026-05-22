@@ -385,7 +385,8 @@ def test_render_terminal_frame_still_works_for_raw_output():
         sequence=1,
     )
     rendered = render_terminal_frame(frame)
-    assert rendered.startswith("[claude:implementation]")
+    # Agent labels are now display names (Claude/Codex)
+    assert rendered.startswith("[Claude:implementation]")
     assert "$ pytest -q" in rendered
 
 

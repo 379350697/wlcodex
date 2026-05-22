@@ -97,13 +97,18 @@ class AppServerProcess:
         import asyncio as _asyncio
         import websockets
 
+        from wlcodex.codex_backend import _WEBSOCKET_MAX_SIZE_BYTES
+
         deadline = time.monotonic() + self._config.startup_timeout_seconds
         last_error = None
         while time.monotonic() < deadline:
             if self._process is not None and self._process.poll() is not None:
                 return False
             try:
-                async with websockets.connect(self.endpoint):
+                async with websockets.connect(
+                    self.endpoint,
+                    max_size=_WEBSOCKET_MAX_SIZE_BYTES,
+                ):
                     return True
             except Exception as exc:
                 last_error = exc

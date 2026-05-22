@@ -23,9 +23,14 @@ from wlcodex.execution_scheduler import RunIntent
 from wlcodex.interaction.profiles import profile_from_name
 from wlcodex.interaction.renderer import InteractionRenderer
 from wlcodex.interaction.transport import TelegramTransport
+from wlcodex.runtime_events import safe_text_preview
 from wlcodex.streaming import StreamingRenderer
 
 logger = logging.getLogger(__name__)
+
+def _safe_preview(text: str) -> str:
+    """Return a short, redacted preview of *text* for event payloads."""
+    return safe_text_preview(text)
 
 
 def _is_telegram_network_error(exc: Exception) -> bool:
@@ -171,7 +176,8 @@ class WlCodexHandlers:
                     "user_id": user.id if user is not None else None,
                     "telegram_update_id": update.update_id,
                     "command": text.split(maxsplit=1)[0][:100],
-                    "text_preview": text[:500],
+                    "text_length": len(text),
+                    "text_preview": _safe_preview(text),
                 },
                 occurred_at=now_iso(),
                 conversation_id=conversation_id,
@@ -322,6 +328,7 @@ class WlCodexHandlers:
             min_interval_seconds=min_interval,
             surface_resolver=self._get_active_surface_mode if telegram_output else None,
             telegram_output_config=telegram_output,
+            surface_policy=self._config.surface_policy() if hasattr(self._config, "surface_policy") and callable(self._config.surface_policy) else None,
         )
 
     async def send_telegram_preview(self, chat_id: int, text: str) -> int:
@@ -563,8 +570,8 @@ class WlCodexHandlers:
             payload: dict[str, object] = {
                 "chat_id": chat_id,
                 "message_id": message_id,
-                "text_preview": text[:500],
                 "text_length": len(text),
+                "text_preview": _safe_preview(text),
             }
             if error:
                 payload["error"] = error[:1000]
@@ -962,26 +969,88 @@ class WlCodexHandlers:
 
         if isinstance(command, TerminalSubCommand):
             if command.subcommand == "tail":
-                await self.send_telegram(
-                    chat_id,
-                    "现场 tail 功能将在现场会话实现后可用。"
-                )
+                await self._handle_terminal_tail(chat_id)
             elif command.subcommand == "pause":
-                await self.send_telegram(
-                    chat_id,
-                    "现场推送已暂停。使用 /terminal tail 恢复查看。"
-                )
+                await self._handle_terminal_pause(chat_id)
             elif command.subcommand == "detach":
-                await self.send_telegram(
-                    chat_id,
-                    "已离开现场，现场会话仍在运行。使用 /terminal 重新接入。"
-                )
+                await self._handle_terminal_detach(chat_id)
             return
 
         await self.send_telegram(
             chat_id,
             "未知现场命令。用法：/terminal [claude|codex|agent claude|agent codex|tail|pause|detach|product]"
         )
+
+    async def _handle_terminal_tail(self, chat_id: int) -> None:
+        """Handle /terminal tail — show recent output from the attached session."""
+        from wlcodex.surfaces.terminal.renderer import render_tail_output
+        from wlcodex.surfaces.terminal.renderer import render_no_session_hint
+
+        if self._terminal_manager is None:
+            await self.send_telegram(chat_id, render_no_session_hint())
+            return
+
+        active = self._ledger.get_active_conversation(chat_id) if self._ledger else None
+        if active is None:
+            await self.send_telegram(chat_id, render_no_session_hint())
+            return
+
+        ref = self._terminal_manager.active_for_conversation(active.id)
+        if ref is None:
+            await self.send_telegram(chat_id, render_no_session_hint())
+            return
+
+        # Resume delivery if paused
+        if self._terminal_manager.is_delivery_paused(ref):
+            self._terminal_manager.resume_delivery(ref)
+
+        frames = self._terminal_manager.tail(ref)
+        text = render_tail_output(frames)
+        await self.send_telegram(chat_id, text)
+
+    async def _handle_terminal_pause(self, chat_id: int) -> None:
+        """Handle /terminal pause — pause phone push but keep session alive."""
+        from wlcodex.surfaces.terminal.renderer import render_pause_confirmation
+        from wlcodex.surfaces.terminal.renderer import render_no_session_hint
+
+        if self._terminal_manager is None:
+            await self.send_telegram(chat_id, render_no_session_hint())
+            return
+
+        active = self._ledger.get_active_conversation(chat_id) if self._ledger else None
+        if active is None:
+            await self.send_telegram(chat_id, render_no_session_hint())
+            return
+
+        ref = self._terminal_manager.active_for_conversation(active.id)
+        if ref is None:
+            await self.send_telegram(chat_id, render_no_session_hint())
+            return
+
+        self._terminal_manager.pause_delivery(ref)
+        await self.send_telegram(chat_id, render_pause_confirmation())
+
+    async def _handle_terminal_detach(self, chat_id: int) -> None:
+        """Handle /terminal detach — leave onsite view but keep session alive."""
+        from wlcodex.surfaces.terminal.renderer import render_detach_confirmation
+        from wlcodex.surfaces.terminal.renderer import render_no_session_hint
+
+        if self._terminal_manager is None:
+            await self.send_telegram(chat_id, render_no_session_hint())
+            return
+
+        active = self._ledger.get_active_conversation(chat_id) if self._ledger else None
+        if active is None:
+            await self.send_telegram(chat_id, render_no_session_hint())
+            return
+
+        ref = self._terminal_manager.active_for_conversation(active.id)
+        if ref is None:
+            await self.send_telegram(chat_id, render_no_session_hint())
+            return
+
+        self._terminal_manager.leave_view(ref)
+        await self.send_telegram(chat_id, render_detach_confirmation())
 
     def _find_external_session_id(self, conversation_id: int, agent: str) -> str | None:
         """Look up an existing external session id from agent_runs.
@@ -1578,8 +1647,8 @@ class WlCodexHandlers:
                                 "chat_id": chat_id,
                                 "conversation_id": conversation_id,
                                 "agent": session_ref.agent,
-                                "text_preview": text[:500],
                                 "text_length": len(text),
+                                "text_preview": _safe_preview(text),
                             },
                             occurred_at=now_iso(),
                             conversation_id=conversation_id,

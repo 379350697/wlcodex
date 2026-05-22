@@ -468,11 +468,22 @@ class OrchestrationRunner:
         agent_status: str = "",
         retry_count: int = 0,
         is_terminal: bool = False,
+        current_detail: str = "",
+        current_command: str = "",
+        elapsed_seconds: int | None = None,
+        estimated_remaining: str = "",
     ) -> RuntimeRunState:
         return RuntimeRunState(
             phase=phase,
             active_agent=active_agent,
             agent_status=agent_status,
+            current_detail=current_detail,
+            current_command=current_command,
+            elapsed_seconds=elapsed_seconds,
+            estimated_remaining=(
+                estimated_remaining
+                or _default_runtime_estimate(phase, current_command)
+            ),
             retry_count=retry_count,
             is_terminal=is_terminal,
         )
@@ -530,24 +541,74 @@ class OrchestrationRunner:
         correlation_id: str = "",
     ) -> None:
         cid = correlation_id or str(uuid.uuid4())
+        loop = asyncio.get_running_loop()
         codex_heartbeat_last_at = 0.0
+        claude_heartbeat_last_at = 0.0
+        phase_started_at: dict[str, float] = {"running_analysis": loop.time()}
+        codex_active_command = ""
+        codex_command_started_at: float | None = None
+
+        def _mark_phase_started(phase: str) -> None:
+            phase_started_at[phase] = loop.time()
+
+        def _elapsed_for_phase(
+            phase: str, *, command_started_at: float | None = None
+        ) -> int | None:
+            start = command_started_at or phase_started_at.get(phase)
+            if start is None:
+                return None
+            return max(0, int(loop.time() - start))
+
+        def _state_for_phase(
+            phase: str,
+            active_agent: str,
+            *,
+            agent_status: str = "running",
+            retry_count: int = 0,
+            current_command: str = "",
+            command_started_at: float | None = None,
+        ) -> RuntimeRunState:
+            return self._build_runtime_state(
+                phase,
+                active_agent=active_agent,
+                agent_status=agent_status,
+                retry_count=retry_count,
+                current_detail=prompt[:120],
+                current_command=current_command,
+                elapsed_seconds=_elapsed_for_phase(
+                    phase,
+                    command_started_at=command_started_at,
+                ),
+            )
 
         def _codex_runtime_activity(event: RuntimeEvent, role: str) -> None:
-            nonlocal codex_heartbeat_last_at
+            nonlocal codex_heartbeat_last_at, codex_active_command, codex_command_started_at
             if self._interaction_renderer is None:
                 return
             active_event_types = {
                 EventType.MODEL_USAGE_UPDATED,
                 EventType.COMMAND_STARTED,
+                EventType.COMMAND_OUTPUT_DELTA,
                 EventType.COMMAND_COMPLETED,
+                EventType.COMMAND_FAILED,
                 EventType.TOOL_CALL_STARTED,
                 EventType.TOOL_CALL_COMPLETED,
                 EventType.APPROVAL_REQUESTED,
             }
             if event.event_type not in active_event_types:
                 return
-            loop = asyncio.get_running_loop()
             now = loop.time()
+            display_command = codex_active_command
+            if event.event_type == EventType.COMMAND_STARTED:
+                display_command = str(event.payload.get("command", "") or "")
+                codex_active_command = display_command
+                codex_command_started_at = now
+            elif event.event_type in (EventType.COMMAND_COMPLETED, EventType.COMMAND_FAILED):
+                display_command = ""
+                codex_active_command = ""
+                codex_command_started_at = None
+            elif not display_command:
+                display_command = str(event.payload.get("command", "") or "")
             if event.event_type == EventType.MODEL_USAGE_UPDATED and (
                 now - codex_heartbeat_last_at < 10.0
             ):
@@ -563,6 +624,14 @@ class OrchestrationRunner:
                 phase,
                 active_agent="codex",
                 agent_status="running",
+                current_detail=prompt[:120],
+                current_command=display_command,
+                elapsed_seconds=_elapsed_for_phase(
+                    phase,
+                    command_started_at=codex_command_started_at
+                    if display_command
+                    else None,
+                ),
             )
             state.last_activity_at = event.occurred_at
             state.last_event_type = event.event_type
@@ -681,6 +750,7 @@ class OrchestrationRunner:
                         claude_implementation_text += progress.text
                         if not implementation_notice_sent:
                             implementation_notice_sent = True
+                            _mark_phase_started("running_implementation")
                             # Emit Claude agent.run.started if wrapper hasn't already
                             # (wrapper does this for real orchestrations; here as fallback
                             # for fake orchestrators used in tests)
@@ -742,6 +812,7 @@ class OrchestrationRunner:
                                 )
                             # Send runtime progress to renderer
                             if self._interaction_renderer is not None:
+                                claude_heartbeat_last_at = loop.time()
                                 await self._interaction_renderer.handle(
                                     InteractionEvent(
                                         event_type="runtime_progress",
@@ -749,13 +820,33 @@ class OrchestrationRunner:
                                         task_id=task_id,
                                         conversation_id=conversation.id,
                                         metadata={
-                                            "runtime_state": self._build_runtime_state(
-                                                "running_implementation", "claude", "running",
+                                            "runtime_state": _state_for_phase(
+                                                "running_implementation", "claude",
                                                 retry_count=(progress.round_num or 1) - 1,
                                             ),
                                         },
                                     )
                                 )
+                        elif (
+                            self._interaction_renderer is not None
+                            and self._uses_runtime_progress()
+                            and loop.time() - claude_heartbeat_last_at >= 10.0
+                        ):
+                            claude_heartbeat_last_at = loop.time()
+                            await self._interaction_renderer.handle(
+                                InteractionEvent(
+                                    event_type="runtime_heartbeat",
+                                    chat_id=chat_id,
+                                    task_id=task_id,
+                                    conversation_id=conversation.id,
+                                    metadata={
+                                        "runtime_state": _state_for_phase(
+                                            "running_implementation", "claude",
+                                            retry_count=(progress.round_num or 1) - 1,
+                                        ),
+                                    },
+                                )
+                            )
                 elif progress.phase in (
                     OrchestrationProgress.ANALYSIS_STARTED,
                     OrchestrationProgress.ANALYSIS_COMPLETE,
@@ -770,6 +861,9 @@ class OrchestrationRunner:
                         conversation_id=conversation.id,
                     )
                     if progress.phase == OrchestrationProgress.ANALYSIS_STARTED:
+                        _mark_phase_started("running_analysis")
+                        codex_active_command = ""
+                        codex_command_started_at = None
                         codex.set_runtime_context(
                             agent_run_id=codex_analysis_run_id,
                             role="analysis",
@@ -814,8 +908,8 @@ class OrchestrationRunner:
                                     task_id=task_id,
                                     conversation_id=conversation.id,
                                     metadata={
-                                        "runtime_state": self._build_runtime_state(
-                                            "running_analysis", "codex", "running",
+                                        "runtime_state": _state_for_phase(
+                                            "running_analysis", "codex",
                                         ),
                                     },
                                 )
@@ -918,14 +1012,17 @@ class OrchestrationRunner:
                                     task_id=task_id,
                                     conversation_id=conversation.id,
                                     metadata={
-                                        "runtime_state": self._build_runtime_state(
-                                            "running_implementation", "claude", "running",
+                                        "runtime_state": _state_for_phase(
+                                            "running_implementation", "claude",
                                             retry_count=(progress.round_num or 1) - 1,
                                         ),
                                     },
                                 )
                             )
                     elif progress.phase == OrchestrationProgress.VERIFY_STARTED:
+                        _mark_phase_started("running_verification")
+                        codex_active_command = ""
+                        codex_command_started_at = None
                         verify_round = progress.round_num or verify_round
                         verify_run = self._ledger.create_agent_run(
                             conversation_id=conversation.id,
@@ -1037,8 +1134,8 @@ class OrchestrationRunner:
                                     task_id=task_id,
                                     conversation_id=conversation.id,
                                     metadata={
-                                        "runtime_state": self._build_runtime_state(
-                                            "running_verification", "codex", "running",
+                                        "runtime_state": _state_for_phase(
+                                            "running_verification", "codex",
                                             retry_count=(progress.round_num or 1) - 1,
                                         ),
                                     },
@@ -1612,6 +1709,26 @@ def _workspace_has_changes(workspace_path: str) -> bool:
     except Exception:
         return False
     return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _default_runtime_estimate(phase: str, current_command: str = "") -> str:
+    command = str(current_command or "").strip().lower()
+    if command:
+        if "pytest tests/ -q" in command or "pytest tests/" in command:
+            return "约3-5分钟"
+        if "pytest" in command:
+            return "约1-3分钟"
+        if "gitnexus analyze" in command:
+            return "约10-30秒"
+        return "约1-5分钟"
+    estimates = {
+        "queued": "约1分钟内",
+        "running_analysis": "约2-6分钟",
+        "running_implementation": "约5-15分钟",
+        "running_verification": "约3-8分钟",
+        "retrying_implementation": "约2-8分钟",
+    }
+    return estimates.get(phase, "")
 
 
 def _runtime_total_tokens(payload: dict[str, object]) -> int:

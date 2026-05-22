@@ -564,6 +564,51 @@ allow_write = true
     assert config.telegram_output.final_chunk_chars == 3900
 
 
+def test_surface_policy_builds_from_config(tmp_path: Path) -> None:
+    """surface_policy() must return a valid SurfacePolicy with correct field names."""
+    from wlcodex.config import load_config
+
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+
+[codex]
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "wlcodex"
+path = "."
+allow_write = true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+    policy = config.surface_policy()
+    # Terminal policy fields (defaults from config, not model defaults)
+    assert policy.terminal.max_frame_chars == 3500
+    assert policy.terminal.redaction_enabled is True
+    assert policy.terminal.body_mode == "semantic_blocks"
+    # Product policy fields — verify the typo fix (semantic, not semaphore)
+    assert policy.product.semantic_min_chars == 900
+    assert policy.product.semantic_max_chars == 3200
+    assert policy.product.final_chunk_chars == 3900
+    assert policy.product.body_mode == "final"
+
+
 def test_terminal_default_agent_rejects_invalid_value(tmp_path: Path) -> None:
     """ConfigError must be raised when terminal.default_agent is not claude or codex."""
     config_path = tmp_path / "wlcodex.toml"

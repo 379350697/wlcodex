@@ -75,6 +75,10 @@ _DIRECT_TOKEN_ACCESS_PATTERNS: tuple[str, ...] = (
 
 _NEGATED_DELIVERY_REFERENCE_MARKERS: tuple[str, ...] = (
     "未发现",
+    "未匹配",
+    "未调用",
+    "未读取",
+    "未发送",
     "没有",
     "不会",
     "不要",
@@ -88,6 +92,8 @@ _NEGATED_DELIVERY_REFERENCE_MARKERS: tuple[str, ...] = (
     "did not",
     "does not",
     "do not",
+    "no match",
+    "not matched",
     "must not",
     "should not",
     "will not",

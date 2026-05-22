@@ -212,22 +212,46 @@ MODE_LABELS = {
     "claude_direct": "Claude 直聊",
 }
 
+SURFACE_MODE_LABELS = {
+    "product": "驾驶舱",
+    "terminal": "现场",
+}
+
 
 def render_conversation_status(
     session: ConversationSession,
     latest_run: AgentRun | None = None,
     orch_run: OrchestrationRun | None = None,
+    surface_mode: str | None = None,
+    terminal_agent: str | None = None,
+    active_phase: str | None = None,
+    active_command: str | None = None,
 ) -> str:
     lines = [
         f"当前对话：{_trim(session.title, 80)}",
         f"模式：{MODE_LABELS.get(session.mode, session.mode)}",
-        f"工作区：{session.workspace_alias}",
+        f"当前视图：{SURFACE_MODE_LABELS.get(surface_mode or 'product', '驾驶舱')}",
     ]
 
+    # Terminal agent line — only shown when in terminal mode
+    if surface_mode == "terminal" and terminal_agent:
+        agent_label = {"codex": "Codex", "claude": "Claude"}.get(terminal_agent, terminal_agent)
+        lines.append(f"现场 Agent：{agent_label}")
+
+    lines.append(f"工作区：{session.workspace_alias}")
+
     if orch_run:
-        lines.append(f"步骤：{orch_run.current_step or '分析中'}")
+        phase_label = _phase_cn(orch_run.current_step or "")
+        if phase_label:
+            lines.append(f"阶段：{phase_label}")
         if orch_run.verify_round > 0:
             lines.append(f"轮次：第 {orch_run.verify_round} 轮")
+
+    # Active phase and command summary from runtime state
+    if active_phase:
+        lines.append(f"当前阶段：{active_phase}")
+    if active_command:
+        lines.append(f"当前命令：{_trim(active_command, 60)}")
 
     if latest_run:
         if latest_run.agent:

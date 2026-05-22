@@ -5,12 +5,67 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+import json
 import logging
 import uuid
+
+import websockets.exceptions
 
 from wlcodex.jsonrpc import JsonRpcClient
 
 logger = logging.getLogger(__name__)
+
+# Disable the WebSocket library's whole-message cap.  Codex app-server can emit
+# large JSON-RPC notifications as one atomic message; WLCodex applies its own
+# notification truncation after decoding so size failures are observable.
+_WEBSOCKET_MAX_SIZE_BYTES: int | None = None
+
+# Maximum size for a single notification payload (bytes after JSON encoding).
+# Notifications exceeding this are truncated to prevent downstream memory/queue
+# bloat.  The truncated payload keeps all keys but replaces large string values
+# with an actionable summary placeholder.
+_MAX_NOTIFICATION_PAYLOAD_BYTES = 2 * 1024 * 1024
+
+
+def _truncate_notification_payload(
+    msg: dict, max_bytes: int = _MAX_NOTIFICATION_PAYLOAD_BYTES
+) -> dict:
+    """If a JSON-RPC notification payload exceeds *max_bytes*, truncate
+    large string values so downstream consumers are not overwhelmed.
+    Responses (messages with an "id" and no "method") are left intact.
+    """
+    if "method" not in msg:
+        return msg
+    params = msg.get("params")
+    if not isinstance(params, dict):
+        return msg
+    encoded = json.dumps(msg, ensure_ascii=False)
+    if len(encoded) <= max_bytes:
+        return msg
+    _truncate_large_strings(params, max_str=max_bytes // 10)
+    return msg
+
+
+def _truncate_large_strings(obj: object, max_str: int = 200_000) -> None:
+    if isinstance(obj, dict):
+        for k, v in list(obj.items()):
+            if isinstance(v, str) and len(v) > max_str:
+                obj[k] = (
+                    v[:max_str]
+                    + "\n[WLCodex truncated command output: "
+                    + f"original chars={len(v)}, kept chars={max_str}. "
+                    + "Narrow the command/search scope.]"
+                )
+            elif isinstance(v, dict):
+                _truncate_large_strings(v, max_str=max_str)
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, (dict, list)):
+                        _truncate_large_strings(item, max_str=max_str)
+    elif isinstance(obj, list):
+        for item in obj:
+            _truncate_large_strings(item, max_str=max_str)
+
 
 _PLANNING_THREAD_CONFIG: dict[str, object] = {
     "model": "gpt-5.5",
@@ -48,6 +103,11 @@ _CODEX_ANALYSIS_OUTPUT_SCHEMA: dict[str, object] = {
 
 
 def _planning_developer_instructions(interaction_mode: str) -> str:
+    _output_limit = (
+        "搜索和检索命令必须限制输出行数（如 rg --max-count 50, "
+        "grep -m 50, head -c 50000）；禁止无边界全文搜索，禁止 rg -S .、"
+        "cat 大文件、find / 等无限制扫描，避免单条响应超过 500 KB。"
+    )
     if interaction_mode == "verification":
         return (
             "你是 WLCodex 的 Codex 总工程师验收子流程。可以调用 skill、"
@@ -56,6 +116,7 @@ def _planning_developer_instructions(interaction_mode: str) -> str:
             "不要修改业务代码、测试代码、依赖锁或配置来完成实现补丁；发现实现"
             "问题时输出 retry/required_fix 交给 Claude 返工。验收结论必须使用 "
             "decision: pass/retry/stop/need_user 格式。"
+            + _output_limit
         )
     return (
         "你是 WLCodex 的 Codex 总工程师分析子流程。可以调用 skill、"
@@ -64,6 +125,7 @@ def _planning_developer_instructions(interaction_mode: str) -> str:
         "代码、测试代码、依赖锁或配置来完成实现补丁，不要运行由 Claude 实现"
         "阶段负责的改代码/跑实现测试闭环。输出交给 Claude 执行的结构化实现"
         "交接包。"
+        + _output_limit
     )
 
 
@@ -412,6 +474,7 @@ class AppServerCodexBackend:
         self._last_health_error: str | None = None
         self._ever_connected: bool = False
         self._runtime_event_callback: Callable[[BackendEvent], None] | None = None
+        self._closing = False
         # Terminal surface: track active turn per thread for steer_thread()
         self._active_turn_ids: dict[str, str] = {}
 
@@ -447,7 +510,10 @@ class AppServerCodexBackend:
         import asyncio
         import websockets
 
-        ws = await websockets.connect(self.endpoint)
+        ws = await websockets.connect(
+            self.endpoint,
+            max_size=_WEBSOCKET_MAX_SIZE_BYTES,
+        )
         self._websocket = ws
         self._ever_connected = True
 
@@ -478,11 +544,44 @@ class AppServerCodexBackend:
         try:
             async for raw in ws:
                 msg = json.loads(raw)
+                msg = _truncate_notification_payload(msg, _MAX_NOTIFICATION_PAYLOAD_BYTES)
                 await client.receive_message(msg)
-        except Exception:
+        except websockets.exceptions.ConnectionClosedOK:
+            logger.info("WebSocket closed normally (close=%s)", ws.close_code)
+            if not self._closing:
+                self._emit(BackendEvent("backend_error", {
+                    "message": "Codex backend WebSocket closed by remote",
+                    "detail": f"close_code={ws.close_code}",
+                    "kind": "websocket_remote_close",
+                }))
+            await client.close()
+            self._client = None
+        except websockets.exceptions.ConnectionClosedError as exc:
+            # Distinguish frame-size errors from other connection failures so
+            # the user sees an actionable message instead of a silent stall.
+            detail = str(exc)
+            kind = "websocket_receive_loop"
+            if "exceeds limit" in detail or "PayloadTooBig" in detail:
+                kind = "websocket_frame_too_large"
+            logger.exception("WebSocket connection closed with error: %s", exc)
+            message = f"Codex backend transport error: {exc}"
+            self._last_health_error = message
+            self._emit(BackendEvent("backend_error", {
+                "message": message,
+                "detail": detail,
+                "kind": kind,
+            }))
+            await client.close()
+            self._client = None
+        except Exception as exc:
             logger.exception("WebSocket receive loop error")
-            # Cancel pending requests and clear state so the next
-            # _ensure_client() call will reconnect.
+            message = f"Codex backend transport disconnected: {exc}"
+            self._last_health_error = message
+            self._emit(BackendEvent("backend_error", {
+                "message": message,
+                "detail": str(exc),
+                "kind": "websocket_receive_loop",
+            }))
             await client.close()
             self._client = None
         finally:
@@ -825,7 +924,7 @@ class AppServerCodexBackend:
                 prompt,
                 interaction_mode,
             )
-        except Exception:
+        except BaseException:
             self._unsubscribe_events(prompt_events)
             raise
 
@@ -928,6 +1027,13 @@ class AppServerCodexBackend:
                         if idle_deadline is not None and now >= idle_deadline
                         else "request"
                     )
+                    break
+                if event.event_type == "backend_error":
+                    turn_error = str(
+                        event.payload.get("message")
+                        or "Codex backend transport disconnected"
+                    )
+                    turn_ended = True
                     break
                 if not _event_matches_turn(event):
                     # Approval requests may not carry turnId — match by threadId
@@ -1081,6 +1187,7 @@ class AppServerCodexBackend:
             pass
 
     async def close(self) -> None:
+        self._closing = True
         if self._client:
             await self._client.close()
             self._client = None

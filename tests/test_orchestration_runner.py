@@ -141,6 +141,32 @@ class RuntimeAwareCodexBackend(FakeCodexBackend):
         return "decision: pass\nsummary: codex ok"
 
 
+class RuntimeCommandCodexBackend(FakeCodexBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self._runtime_event_callback = None
+
+    def set_runtime_event_callback(self, callback):
+        self._runtime_event_callback = callback
+
+    async def send_codex_prompt(self, workspace_path, prompt, **kwargs):
+        from wlcodex.codex_backend import BackendEvent
+
+        assert self._runtime_event_callback is not None
+        self._runtime_event_callback(BackendEvent("item_started", {
+            "item": {
+                "id": "cmd-1",
+                "type": "commandExecution",
+                "command": "pytest tests/ -q",
+            }
+        }))
+        self._runtime_event_callback(BackendEvent("token_usage_updated", {
+            "inputTokens": 21,
+            "outputTokens": 7,
+        }))
+        return "decision: pass\nsummary: codex ok"
+
+
 class RuntimeSourceAwareCodexOrchestrator:
     def __init__(self, codex: object, _claude: object) -> None:
         self._codex = codex
@@ -1482,6 +1508,61 @@ async def test_runner_wires_codex_runtime_source_for_analysis_turn(
     assert state.phase == "running_analysis"
     assert state.active_agent == "codex"
     assert usage_events[0].payload["input_tokens"] == 21
+
+
+@pytest.mark.asyncio
+async def test_runner_heartbeat_tracks_codex_command_status(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.runtime_event_store import RuntimeEventStore
+
+    ledger, service, _backend, renderer, workspace = _build_runtime(tmp_path)
+    store = RuntimeEventStore(ledger._conn)
+    backend = RuntimeCommandCodexBackend()
+    conversation = ledger.create_conversation(
+        chat_id=100, user_id=200, title="Codex command runtime", mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    task = service.reserve_task("wlcodex", "codex command runtime", telegram_chat_id=100)
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "codex command runtime")
+    codex_run = ledger.create_agent_run(conversation.id, "codex", "analysis")
+    ledger.update_agent_run_status(codex_run.id, "running")
+
+    runner = OrchestrationRunner(
+        task_service=service,
+        codex_backend=backend,
+        claude_backend=EnabledClaude(),
+        ledger=ledger,
+        interaction_renderer=renderer,
+        orchestrator_factory=RuntimeSourceAwareCodexOrchestrator,
+        runtime_event_store=store,
+    )
+
+    background_task = runner.start_chief_engineer(
+        prompt="codex command runtime",
+        conversation=conversation,
+        task_id=task.id,
+        orchestration_run_id=orch_run.id,
+        codex_analysis_run_id=codex_run.id,
+        chat_id=100,
+        workspace_path=str(workspace),
+        correlation_id="test-codex-command-runtime",
+    )
+    await background_task
+
+    heartbeats = [
+        event for event in renderer.events
+        if event.event_type == "runtime_heartbeat"
+    ]
+    command_states = [
+        event.metadata["runtime_state"] for event in heartbeats
+        if getattr(event.metadata["runtime_state"], "current_command", "")
+    ]
+    assert command_states
+    assert command_states[0].current_command == "pytest tests/ -q"
+    assert command_states[0].elapsed_seconds is not None
+    assert command_states[0].estimated_remaining
 
 
 # ============================================================================

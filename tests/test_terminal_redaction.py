@@ -2,7 +2,7 @@
 
 import pytest
 
-from wlcodex.surfaces.terminal.redaction import redact_terminal_text
+from wlcodex.surfaces.terminal.redaction import redact_terminal_text, redact_and_cap_frame
 
 
 # ── Known secret names ─────────────────────────────────────────────────────
@@ -102,3 +102,44 @@ def test_redact_only_on_key_equals_value_pattern():
     redacted = redact_terminal_text(line)
     assert "secret123" not in redacted
     assert "TELEGRAM_BOT_TOKEN=<redacted>" in redacted
+
+
+# ── redact_and_cap_frame ────────────────────────────────────────────────────
+
+
+def test_redact_and_cap_frame_no_change_for_short_text():
+    assert redact_and_cap_frame("hello world") == "hello world"
+
+
+def test_redact_and_cap_frame_redacts_secrets():
+    text = "TELEGRAM_BOT_TOKEN=secret123 output"
+    result = redact_and_cap_frame(text)
+    assert "secret123" not in result
+    assert "<redacted>" in result
+
+
+def test_redact_and_cap_frame_truncates_long_text():
+    text = "a" * 5000
+    result = redact_and_cap_frame(text, max_chars=3900)
+    assert len(result) <= 3900
+    assert "截断" in result
+    assert "/terminal tail" in result
+
+
+def test_redact_and_cap_frame_no_truncation_for_short_text():
+    text = "short text"
+    result = redact_and_cap_frame(text, max_chars=3900)
+    assert result == "short text"
+
+
+def test_redact_and_cap_frame_disabled_redaction():
+    text = "ANTHROPIC_API_KEY=sk-test-key output"
+    result = redact_and_cap_frame(text, redaction_enabled=False)
+    assert "sk-test-key" in result
+
+
+def test_redact_and_cap_frame_combined_redact_and_cap():
+    text = "TELEGRAM_BOT_TOKEN=abc123 " + "x" * 5000
+    result = redact_and_cap_frame(text, max_chars=3900)
+    assert "abc123" not in result
+    assert len(result) <= 3900

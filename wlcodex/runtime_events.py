@@ -6,6 +6,7 @@ Other lanes import from here; they never need raw SQL for runtime events.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -24,6 +25,7 @@ SCHEMA_VERSION = 1
 MAX_PAYLOAD_STRING_LENGTH = 10_000
 
 REDACTED_PLACEHOLDER = "[REDACTED]"
+CONTENT_REDACTED_PLACEHOLDER = "<redacted>"
 
 # Tokens/metrics that are counts — never redacted.
 _TOKEN_METRIC_SEGMENTS = frozenset({
@@ -34,6 +36,20 @@ _TOKEN_METRIC_SEGMENTS = frozenset({
 _KEY_SENSITIVE_MODIFIERS = frozenset({
     "api", "sign", "signing", "auth", "secret", "private", "master", "encrypt",
 })
+
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b("
+    r"(?:[A-Za-z0-9_]*_)?"
+    r"(?:password|passwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization|auth)"
+    r"(?:_[A-Za-z0-9_]*)?"
+    r")\s*([=:])\s*([\"']?)([^\s\"'`;,]+)",
+    re.IGNORECASE,
+)
+_BEARER_TOKEN_RE = re.compile(
+    r"\b(Bearer)\s+([A-Za-z0-9._~+/\-]+=*)",
+    re.IGNORECASE,
+)
+_SK_STYLE_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{6,}\b")
 
 
 # ---------------------------------------------------------------------------
@@ -297,13 +313,35 @@ def _is_sensitive_key(key: str) -> bool:
     return False
 
 
+def redact_text_content(value: str) -> str:
+    """Redact secret-like content embedded in a free-form string."""
+    value = _SECRET_ASSIGNMENT_RE.sub(
+        lambda m: (
+            f"{m.group(1)}{m.group(2)}"
+            f"{m.group(3)}{CONTENT_REDACTED_PLACEHOLDER}"
+        ),
+        value,
+    )
+    value = _BEARER_TOKEN_RE.sub(
+        rf"\1 {CONTENT_REDACTED_PLACEHOLDER}",
+        value,
+    )
+    return _SK_STYLE_SECRET_RE.sub(CONTENT_REDACTED_PLACEHOLDER, value)
+
+
+def safe_text_preview(text: str, *, max_len: int = 200) -> str:
+    """Return a short, content-redacted preview for runtime event payloads."""
+    return redact_text_content(text[: max_len * 2])[:max_len]
+
+
 def redact_payload(payload: dict[str, Any], *, max_str_len: int = MAX_PAYLOAD_STRING_LENGTH) -> dict[str, Any]:
     """Return a deep-copied payload with sensitive values redacted and
     string lengths capped.
 
-    Keys matching ``secret``, ``token``, ``auth``, ``header``,
-    ``password``, ``key``, ``credential``, or ``api_key`` (case-insensitive
-    substring match) are replaced with ``[REDACTED]``.
+    Keys matching sensitive names are replaced with ``[REDACTED]``.
+    Free-form string values also receive content-level redaction so fields
+    like ``text`` and ``text_preview`` cannot persist embedded passwords or
+    API keys by accident.
 
     String values longer than *max_str_len* are truncated and suffixed with
     ``...<truncated>``.
@@ -317,12 +355,12 @@ def redact_payload(payload: dict[str, Any], *, max_str_len: int = MAX_PAYLOAD_ST
         elif isinstance(v, list):
             result[k] = [
                 redact_payload(item, max_str_len=max_str_len) if isinstance(item, dict)
-                else _cap_string(item, max_str_len) if isinstance(item, str)
+                else _cap_string(redact_text_content(item), max_str_len) if isinstance(item, str)
                 else item
                 for item in v
             ]
         elif isinstance(v, str):
-            result[k] = _cap_string(v, max_str_len)
+            result[k] = _cap_string(redact_text_content(v), max_str_len)
         else:
             result[k] = v
     return result

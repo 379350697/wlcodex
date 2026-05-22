@@ -379,3 +379,79 @@ def test_render_workspace_list_without_active_workspace_stays_compact() -> None:
     assert text == "选择工作区"
     assert "wlcodex" not in text
     assert "lightfee" not in text
+
+
+# ═══════════════════════════════════════════════════════════════
+# Surface mode in /status
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_render_conversation_status_shows_surface_mode_product() -> None:
+    from types import SimpleNamespace
+    from wlcodex.status import render_conversation_status
+
+    session = SimpleNamespace(
+        id=1, title="测试对话", mode="chief_engineer",
+        workspace_alias="wlcodex", conversation_summary="测试",
+    )
+    text = render_conversation_status(session, surface_mode="product")
+
+    assert "当前视图：驾驶舱" in text
+    assert "模式：总工程师" in text
+
+
+def test_render_conversation_status_shows_surface_mode_terminal() -> None:
+    from types import SimpleNamespace
+    from wlcodex.status import render_conversation_status
+
+    session = SimpleNamespace(
+        id=1, title="测试对话", mode="chief_engineer",
+        workspace_alias="wlcodex", conversation_summary="测试",
+    )
+    text = render_conversation_status(session, surface_mode="terminal")
+
+    assert "当前视图：现场" in text
+    assert "模式：总工程师" in text
+
+
+def test_render_conversation_status_defaults_to_product() -> None:
+    from types import SimpleNamespace
+    from wlcodex.status import render_conversation_status
+
+    session = SimpleNamespace(
+        id=1, title="测试对话", mode="codex_direct",
+        workspace_alias="wlcodex", conversation_summary="",
+    )
+    text = render_conversation_status(session)
+
+    assert "当前视图：驾驶舱" in text
+    assert "模式：Codex 直聊" in text
+
+
+def test_render_conversation_status_shows_terminal_agent() -> None:
+    from types import SimpleNamespace
+    from wlcodex.status import render_conversation_status
+
+    session = SimpleNamespace(
+        id=1, title="测试对话", mode="chief_engineer",
+        workspace_alias="wlcodex", conversation_summary="测试",
+    )
+    text = render_conversation_status(
+        session, surface_mode="terminal", terminal_agent="claude")
+
+    assert "当前视图：现场" in text
+    assert "现场 Agent：Claude" in text
+
+
+def test_render_conversation_status_unknown_surface_mode_falls_back() -> None:
+    from types import SimpleNamespace
+    from wlcodex.status import render_conversation_status
+
+    session = SimpleNamespace(
+        id=1, title="测试对话", mode="claude_direct",
+        workspace_alias="wlcodex", conversation_summary="",
+    )
+    text = render_conversation_status(session, surface_mode="unknown")
+
+    assert "当前视图：驾驶舱" in text
+    assert "模式：Claude 直聊" in text

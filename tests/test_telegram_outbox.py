@@ -106,6 +106,31 @@ def test_outbox_enqueue_send_records_delivery_enqueued(tmp_path: Path) -> None:
     assert len(enqueued) >= 1
 
 
+def test_outbox_enqueued_event_keeps_only_safe_preview(tmp_path: Path) -> None:
+    """Delivery events must not persist the full Telegram message body."""
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.telegram_outbox import TelegramOutbox
+    from wlcodex.runtime_events import EventType
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    outbox = TelegramOutbox(store=store)
+    text = "deploy password=abc123 token=secret123"
+
+    outbox.enqueue_send(chat_id=1, text=text, correlation_id="safe-preview")
+
+    events = store.list_by_correlation("safe-preview")
+    enqueued = [e for e in events if e.event_type == EventType.TELEGRAM_DELIVERY_ENQUEUED]
+    assert len(enqueued) == 1
+    payload = enqueued[0].payload
+    assert "text" not in payload
+    assert payload["text_length"] == len(text)
+    assert "abc123" not in payload["text_preview"]
+    assert "secret123" not in payload["text_preview"]
+
+
 def test_outbox_records_message_is_not_modified_as_skipped(tmp_path: Path) -> None:
     """Outbox catches 'message is not modified' and records skipped_no_change."""
     from wlcodex.db import Ledger

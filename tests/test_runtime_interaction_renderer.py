@@ -100,10 +100,46 @@ class TestRuntimeRendererPure:
         state = _state(phase="running_analysis", active_agent="codex")
         assert "分析需求" in r.progress_text(state)
 
+    def test_v1_shows_agent_elapsed_and_eta_for_phase(self) -> None:
+        r = RuntimeRenderer(verbosity=1)
+        state = _state(phase="running_analysis", active_agent="codex")
+        state.current_detail = "给 /status 增加当前交互模式"
+        state.elapsed_seconds = 200
+        state.estimated_remaining = "约3-5分钟"
+
+        text = r.progress_text(state)
+
+        assert "Codex正在分析需求：给 /status 增加当前交互模式" in text
+        assert "已运行：3m20s" in text
+        assert "预计还需：约3-5分钟" in text
+
+    def test_v1_shows_current_command_elapsed_and_eta(self) -> None:
+        r = RuntimeRenderer(verbosity=1)
+        state = _state(phase="running_verification", active_agent="codex")
+        state.current_command = "pytest tests/ -q"
+        state.elapsed_seconds = 200
+        state.estimated_remaining = "约3-5分钟"
+
+        text = r.progress_text(state)
+
+        assert "Codex正在执行：pytest tests/ -q" in text
+        assert "已运行：3m20s" in text
+        assert "预计还需：约3-5分钟" in text
+
+    def test_v1_defaults_pytest_full_suite_eta_to_cockpit_range(self) -> None:
+        r = RuntimeRenderer(verbosity=1)
+        state = _state(phase="running_verification", active_agent="codex")
+        state.current_command = "pytest tests/ -q"
+        state.elapsed_seconds = 20
+
+        text = r.progress_text(state)
+
+        assert "预计还需：约3-5分钟" in text
+
     def test_v1_phase_implementation(self) -> None:
         r = RuntimeRenderer(verbosity=1)
         state = _state(phase="running_implementation", active_agent="claude")
-        assert "实施代码" in r.progress_text(state)
+        assert "实现代码" in r.progress_text(state)
 
     def test_v1_phase_verification(self) -> None:
         r = RuntimeRenderer(verbosity=1)
@@ -113,7 +149,7 @@ class TestRuntimeRendererPure:
     def test_v1_phase_retrying(self) -> None:
         r = RuntimeRenderer(verbosity=1)
         state = _state(phase="retrying_implementation", active_agent="claude")
-        assert "重新实施" in r.progress_text(state)
+        assert "重新实现" in r.progress_text(state)
 
     def test_v1_heartbeat_has_activity_time(self) -> None:
         r = RuntimeRenderer(verbosity=1)
@@ -248,18 +284,14 @@ class TestRuntimeRendererPure:
 
     # -- no raw agent ids in user-visible text --------------------------
 
-    def test_progress_never_contains_raw_agent_ids(self) -> None:
-        """User-visible progress must not leak internal agent ids like claude/codex."""
+    def test_progress_uses_human_agent_display_names(self) -> None:
+        """User-visible progress names the active assistant with display casing."""
         r = RuntimeRenderer(verbosity=1)
-        for phase in [
-            "running_analysis", "running_implementation",
-            "running_verification", "retrying_implementation",
-        ]:
-            for agent in ("claude", "codex", "Claude", "Codex"):
-                state = _state(phase=phase, active_agent=agent)
-                text = r.progress_text(state)
-                assert "claude" not in text.lower(), f"agent id leaked in progress: {text}"
-                assert "codex" not in text.lower(), f"agent id leaked in progress: {text}"
+        codex_text = r.progress_text(_state(phase="running_analysis", active_agent="codex"))
+        claude_text = r.progress_text(_state(phase="running_implementation", active_agent="claude"))
+
+        assert "Codex正在分析需求" in codex_text
+        assert "Claude正在实现代码" in claude_text
 
     def test_final_never_contains_raw_agent_ids(self) -> None:
         """User-visible final text must not leak internal agent ids."""
@@ -312,7 +344,7 @@ class TestRuntimeProgressManager:
         await mgr.update_progress(state, chat_id=123)
 
         assert len(fake.sent) == 1
-        assert "实施代码" in fake.sent[0][1]
+        assert "实现代码" in fake.sent[0][1]
         assert fake.edited == []
 
     @pytest.mark.asyncio
@@ -625,7 +657,7 @@ class TestInteractionRendererRuntimeEvents:
         ))
 
         assert len(fake.sent) == 1
-        assert "实施代码" in fake.sent[0][1]
+        assert "实现代码" in fake.sent[0][1]
 
     @pytest.mark.asyncio
     async def test_existing_events_still_work_with_runtime_manager(self) -> None:

@@ -1090,6 +1090,46 @@ async def test_no_implementation_completion_records_pass_not_failed(
 
 
 @pytest.mark.asyncio
+async def test_conversation_text_event_keeps_only_safe_preview(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", tmp_path, True),
+    ))
+    controller = CommandController(
+        service,
+        backend,
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        runtime_event_store=store,
+    )
+    text = "please implement this password=abc123 token=secret123"
+
+    await controller.handle_conversation_text(
+        text,
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    active = ledger.get_active_conversation(100)
+    assert active is not None
+    events = [
+        e for e in store.list_by_conversation(active.id)
+        if e.event_type == EventType.USER_MESSAGE_RECEIVED
+    ]
+    assert len(events) == 1
+    payload = events[0].payload
+    assert "text" not in payload
+    assert "original_text" not in payload
+    assert payload["text_length"] == len(text)
+    assert "abc123" not in payload["text_preview"]
+    assert "secret123" not in payload["text_preview"]
+
+
+@pytest.mark.asyncio
 async def test_chief_engineer_refuses_legacy_fallback_without_runtime_runner(
     tmp_path: Path,
 ) -> None:
@@ -1917,3 +1957,91 @@ async def test_sessions_remains_current_workbench_scoped(ctrl: CommandController
     assert "工作台列表" not in response.text
     assert "First" not in response.text
     assert "Second visible run" in response.text
+
+
+# ═══════════════════════════════════════════════════════════════
+# /status shows current interaction (surface) mode
+# ═══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_status_shows_terminal_surface_mode_after_switch(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="Terminal",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.CONVERSATION_MODE_SWITCHED,
+        aggregate_type=AggregateType.CONVERSATION,
+        aggregate_id=str(conversation.id),
+        correlation_id="surface-corr",
+        source=EventSource.CONTROLLER,
+        actor="controller",
+        visibility=Visibility.USER,
+        payload={
+            "chat_id": 100,
+            "conversation_id": conversation.id,
+            "from_mode": "product",
+            "to_mode": "terminal",
+            "active_agent": "claude",
+        },
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+    ))
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", Path("/tmp/wlcodex"), True),
+    ))
+    controller = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        runtime_event_store=store,
+    )
+
+    response = await controller.handle("/status", {"chat_id": 100, "user_id": 200})
+
+    assert "当前视图：现场" in response.text
+    assert "模式：总工程师" in response.text
+    assert "运行 #" not in response.text
+    assert "事件总数" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_status_defaults_to_product_without_surface_event(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="Default",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", Path("/tmp/wlcodex"), True),
+    ))
+    controller = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        runtime_event_store=store,
+    )
+
+    response = await controller.handle("/status", {"chat_id": 100, "user_id": 200})
+
+    assert "当前视图：驾驶舱" in response.text
+    assert "模式：总工程师" in response.text

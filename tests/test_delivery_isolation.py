@@ -150,6 +150,22 @@ def test_detect_verification_drift_ignores_negative_message_id_audit() -> None:
     assert _detect_verification_delivery_drift(verify_text) == []
 
 
+def test_detect_verification_drift_ignores_no_match_audit_line() -> None:
+    from wlcodex.orchestrator import _detect_verification_delivery_drift
+
+    verify_text = (
+        "约束检查：\n"
+        "- 未发送 Telegram 消息。\n"
+        "- 未读取 token/env。\n"
+        "- 未调用 Telegram Bot API。\n"
+        "- diff 中未匹配到 `sendMessage`、`editMessageText`、"
+        "`api.telegram.org`、`message_id=`。\n"
+        "- Claude 完成摘要中未发现“已发送 Telegram”或 `message_id=xxx`。"
+    )
+
+    assert _detect_verification_delivery_drift(verify_text) == []
+
+
 def test_detect_verification_drift_flags_positive_delivery_claim() -> None:
     from wlcodex.orchestrator import _detect_verification_delivery_drift
 
