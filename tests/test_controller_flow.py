@@ -330,10 +330,43 @@ async def test_claude_command_busy_returns_terminalized_choice_card(
     assert "当前工作区正在执行" in response.text
     flat_buttons = [button for row in response.buttons for button in row]
     labels = {button["text"] for button in flat_buttons}
-    assert "发给当前 Claude" in labels
+    assert "发给当前 Codex" in labels
+    assert "发给当前 Claude" not in labels
     assert "打断并执行这句" in labels
     assert "排队稍后" in labels
     assert "新开隔离现场" in labels
+
+
+@pytest.mark.asyncio
+async def test_auto_command_busy_labels_actual_current_agent(
+    ctrl_with_claude: CommandController,
+) -> None:
+    ledger = ctrl_with_claude._ledger
+    assert ledger is not None
+    active = ledger.create_conversation(
+        chat_id=102,
+        user_id=202,
+        title="正在执行",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    blocker = ctrl_with_claude._service.reserve_task(
+        "wlcodex", "旧任务", telegram_chat_id=102,
+    )
+    ledger.set_conversation_active_task(active.id, blocker.id)
+    ledger.set_task_status(blocker.id, TaskStatus.RUNNING)
+
+    response = await ctrl_with_claude.handle(
+        "/auto 是否有死代码",
+        {"chat_id": 102, "user_id": 202},
+    )
+
+    assert "发给当前 Codex" in response.text
+    assert "发给当前 Auto" not in response.text
+    flat_buttons = [button for row in response.buttons for button in row]
+    labels = {button["text"] for button in flat_buttons}
+    assert "发给当前 Codex" in labels
+    assert "发给当前 Auto" not in labels
 
 
 @pytest.mark.asyncio

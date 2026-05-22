@@ -632,21 +632,33 @@ class CommandController:
         task: object,
         workspace_path: str,
         prompt: str,
+        interaction_mode: str = "general",
     ) -> str:
         thread_id = str(getattr(active, "codex_thread_id", "") or "")
         if thread_id:
             self._service.set_task_thread(task.id, thread_id)
+            continue_prompt_turn = getattr(self._backend, "continue_prompt_turn", None)
             continue_turn = getattr(self._backend, "continue_turn", None)
-            if callable(continue_turn):
+            if interaction_mode != "general" and callable(continue_prompt_turn):
+                await continue_prompt_turn(thread_id, prompt, interaction_mode)
+            elif callable(continue_turn):
                 await continue_turn(thread_id, prompt)
             else:
                 await self._backend.start_turn(thread_id, prompt)
             return thread_id
 
-        thread_id = await self._backend.create_thread(workspace_path)
+        create_prompt_thread = getattr(self._backend, "create_prompt_thread", None)
+        if interaction_mode != "general" and callable(create_prompt_thread):
+            thread_id = await create_prompt_thread(workspace_path, interaction_mode)
+        else:
+            thread_id = await self._backend.create_thread(workspace_path)
         self._service.set_task_thread(task.id, thread_id)
         self._ledger.set_conversation_codex_thread(active.id, thread_id)
-        await self._backend.start_turn(thread_id, prompt)
+        start_prompt_turn = getattr(self._backend, "start_prompt_turn", None)
+        if interaction_mode != "general" and callable(start_prompt_turn):
+            await start_prompt_turn(thread_id, prompt, interaction_mode)
+        else:
+            await self._backend.start_turn(thread_id, prompt)
         return thread_id
 
     async def _handle_codex_analysis_only(
@@ -667,6 +679,7 @@ class CommandController:
             constraints=[],
             workspace=active.workspace_alias,
             budget=budget,
+            handoff=False,
         )
         task = self._reserve_execution_lease(
             conversation_id=active.id,
@@ -687,6 +700,7 @@ class CommandController:
                 task=task,
                 workspace_path=workspace_path,
                 prompt=packet.render(),
+                interaction_mode="read_only_analysis",
             )
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
@@ -906,6 +920,13 @@ class CommandController:
             logger.debug("Failed to check workspace blocker", exc_info=True)
             return None
 
+    def _busy_append_agent_label(self, convo: object, fallback: str = "现场") -> str:
+        if getattr(convo, "active_codex_task_id", None):
+            return "Codex"
+        if getattr(convo, "active_claude_run_id", None):
+            return "Claude"
+        return fallback
+
     async def _direct_command_busy_response(
         self,
         *,
@@ -930,7 +951,7 @@ class CommandController:
             None,
             self._new_correlation_id(),
             original_text=original_text,
-            agent_label=agent_label,
+            agent_label=self._busy_append_agent_label(active, agent_label),
         )
 
     async def handle_terminal_workspace_busy(
@@ -1051,6 +1072,10 @@ class CommandController:
     ) -> ControllerResponse:
         """Handle workspace busy: emit events and return user choice buttons."""
         conv_id = active.id if active else 0
+        workspace_alias = (
+            str(getattr(active, "workspace_alias", "") or self._default_workspace)
+            if active else self._default_workspace
+        )
 
         # Store the original message text so callbacks can carry it.
         if original_text and self._ledger is not None and conv_id:
@@ -1066,7 +1091,7 @@ class CommandController:
             schema_version=1,
             event_type=EventType.WORKSPACE_BUSY_DETECTED,
             aggregate_type=AggregateType.SYSTEM,
-            aggregate_id=f"workspace-{self._default_workspace}",
+            aggregate_id=f"workspace-{workspace_alias}",
             correlation_id=correlation_id,
             source=EventSource.CONTROLLER,
             actor="controller",
@@ -1087,7 +1112,7 @@ class CommandController:
             schema_version=1,
             event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_REQUESTED,
             aggregate_type=AggregateType.SYSTEM,
-            aggregate_id=f"workspace-{self._default_workspace}",
+            aggregate_id=f"workspace-{workspace_alias}",
             correlation_id=correlation_id,
             source=EventSource.CONTROLLER,
             actor="controller",
@@ -2223,6 +2248,9 @@ class CommandController:
             convo = self._ledger.get_conversation(conversation_id)
         except KeyError:
             return ControllerResponse("对话不存在或已被删除。")
+        workspace_alias = str(
+            getattr(convo, "workspace_alias", "") or self._default_workspace
+        )
 
         # Retrieve original message text from conversation summary
         original_text = ""
@@ -2240,7 +2268,7 @@ class CommandController:
                 schema_version=1,
                 event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
                 aggregate_type=AggregateType.SYSTEM,
-                aggregate_id=f"workspace-{self._default_workspace}",
+                aggregate_id=f"workspace-{workspace_alias}",
                 correlation_id=cid,
                 source=EventSource.CONTROLLER,
                 actor="user",
@@ -2280,7 +2308,7 @@ class CommandController:
                 schema_version=1,
                 event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
                 aggregate_type=AggregateType.SYSTEM,
-                aggregate_id=f"workspace-{self._default_workspace}",
+                aggregate_id=f"workspace-{workspace_alias}",
                 correlation_id=cid,
                 source=EventSource.CONTROLLER,
                 actor="user",
@@ -2308,7 +2336,7 @@ class CommandController:
                 schema_version=1,
                 event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
                 aggregate_type=AggregateType.SYSTEM,
-                aggregate_id=f"workspace-{self._default_workspace}",
+                aggregate_id=f"workspace-{workspace_alias}",
                 correlation_id=cid,
                 source=EventSource.CONTROLLER,
                 actor="user",
@@ -2343,7 +2371,7 @@ class CommandController:
                 schema_version=1,
                 event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
                 aggregate_type=AggregateType.SYSTEM,
-                aggregate_id=f"workspace-{self._default_workspace}",
+                aggregate_id=f"workspace-{workspace_alias}",
                 correlation_id=cid,
                 source=EventSource.CONTROLLER,
                 actor="user",
@@ -2383,7 +2411,7 @@ class CommandController:
                 schema_version=1,
                 event_type=EventType.WORKSPACE_BUSY_USER_CHOICE_RECORDED,
                 aggregate_type=AggregateType.SYSTEM,
-                aggregate_id=f"workspace-{self._default_workspace}",
+                aggregate_id=f"workspace-{workspace_alias}",
                 correlation_id=cid,
                 source=EventSource.CONTROLLER,
                 actor="user",

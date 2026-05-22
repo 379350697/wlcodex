@@ -170,15 +170,35 @@ def build_codex_analysis_packet(
     constraints: list[str] | None = None,
     workspace: str = "wlcodex",
     budget: ContextBudget | None = None,
+    handoff: bool = True,
 ) -> CodexAnalysisPacket:
     bgt = budget or ContextBudget()
-    analysis_only_constraints = [
-        "Codex 本轮是总工程师分析/方案/交接，不要直接完成 Claude 的实现补丁。",
-        "可以调用 skill、GitNexus、只读上下文检索和必要的方案验证工具。",
-        "可以生成或写入 docs/ 或 .wlcodex/ 下的设计、评审、部署、验收类文档。",
-        "不要修改业务代码、测试代码、依赖锁或配置，不要进入改代码/跑实现测试闭环。",
-        "把实现交给 Claude，输出交接包：目标、文件、步骤、验收标准和禁止事项。",
-    ]
+    if handoff:
+        analysis_only_constraints = [
+            "Codex 本轮是总工程师分析/方案/交接，不要直接完成 Claude 的实现补丁。",
+            "可以调用 skill、GitNexus、只读上下文检索和必要的方案验证工具。",
+            "可以生成或写入 docs/ 或 .wlcodex/ 下的设计、评审、部署、验收类文档。",
+            "不要修改业务代码、测试代码、依赖锁或配置，不要进入改代码/跑实现测试闭环。",
+            "把实现交给 Claude，输出交接包：目标、文件、步骤、验收标准和禁止事项。",
+        ]
+        requested_output = (
+            "Chief-engineer Claude handoff packet: root cause, files_to_touch, "
+            "implementation_steps, acceptance_criteria, verification_plan, "
+            "prohibited_changes. Do not implement code changes yourself."
+        )
+    else:
+        analysis_only_constraints = [
+            "本轮是只读分析/查询，不是 Claude 交接，也不是实现任务。",
+            "只能读取代码、日志和状态；禁止创建、修改、删除任何工作区文件，包括 docs/、"
+            ".wlcodex/、配置、测试、依赖锁文件。",
+            "不要输出 Claude 交接包，不要把工作交给 Claude；直接回答结论、依据、"
+            "风险和建议下一步。",
+            "如果判断需要修改、部署、清理或跑实现闭环，明确提示用户用 /auto 或显式 "
+            "/codex、/claude 开始执行。",
+        ]
+        requested_output = (
+            "中文可读结论：直接回答用户问题，列出关键依据、风险等级和建议下一步。"
+        )
     return CodexAnalysisPacket(
         mode="chief_engineer",
         workspace=workspace,
@@ -187,11 +207,7 @@ def build_codex_analysis_packet(
         relevant_files=relevant_files or [],
         recent_user_constraints=analysis_only_constraints + (constraints or []),
         token_budget=bgt.codex_analysis_tokens,
-        requested_output=(
-            "Chief-engineer Claude handoff packet: root cause, files_to_touch, "
-            "implementation_steps, acceptance_criteria, verification_plan, "
-            "prohibited_changes. Do not implement code changes yourself."
-        ),
+        requested_output=requested_output,
     )
 
 

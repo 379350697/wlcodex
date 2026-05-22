@@ -361,7 +361,7 @@ class EventBridge:
 
         rows = self._ledger._conn.execute(
             """
-            SELECT id, status FROM agent_runs
+            SELECT id, status, role FROM agent_runs
             WHERE hidden_task_id = ?
             ORDER BY id ASC
             """,
@@ -384,6 +384,7 @@ class EventBridge:
                 task,
                 agent_run_id=int(row["id"]),
                 agent_status=agent_status,
+                role=str(row["role"] or "implementation"),
                 summary=str(summary)[:2000],
             )
 
@@ -393,6 +394,7 @@ class EventBridge:
         *,
         agent_run_id: int,
         agent_status: str,
+        role: str,
         summary: str,
     ) -> None:
         if self._runtime_store is None:
@@ -442,7 +444,7 @@ class EventBridge:
                 visibility=Visibility.OPERATOR,
                 payload={
                     "agent": "codex",
-                    "role": "implementation",
+                    "role": role,
                     "summary": summary,
                     "completion_summary": summary,
                 },

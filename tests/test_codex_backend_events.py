@@ -482,6 +482,51 @@ async def test_app_server_send_codex_analysis_prompt_uses_planning_overrides() -
 
 
 @pytest.mark.asyncio
+async def test_app_server_read_only_analysis_prompt_uses_read_only_sandbox() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        request_timeout_seconds=0.3,
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    class RecordingClient:
+        async def request(
+            self, method: str, params: dict[str, object] | None = None
+        ) -> dict[str, object]:
+            requests.append((method, params or {}))
+            if method == "thread/start":
+                return {"threadId": "readonly-thread"}
+            if method == "turn/start":
+                backend._emit(BackendEvent("agent_message_delta", {
+                    "threadId": "readonly-thread",
+                    "turnId": "readonly-turn",
+                    "delta": "只读结论",
+                }))
+                backend._emit(BackendEvent("turn_completed", {
+                    "threadId": "readonly-thread",
+                    "turnId": "readonly-turn",
+                }))
+                return {"turnId": "readonly-turn"}
+            raise AssertionError(method)
+
+    backend._client = RecordingClient()
+
+    result = await backend.send_codex_prompt(
+        "/tmp/demo",
+        "prompt",
+        interaction_mode="read_only_analysis",
+    )
+
+    assert result == "只读结论"
+    _, thread_params = requests[0]
+    _, turn_params = requests[1]
+    assert "只读分析" in str(thread_params["developerInstructions"])
+    assert "禁止创建、修改、删除" in str(thread_params["developerInstructions"])
+    assert turn_params["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
+    assert "outputSchema" not in turn_params
+
+
+@pytest.mark.asyncio
 async def test_app_server_send_codex_analysis_prompt_inherits_high_trust_policy() -> None:
     backend = AppServerCodexBackend(
         endpoint="ws://127.0.0.1:17431",

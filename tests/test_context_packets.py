@@ -55,6 +55,20 @@ def test_codex_analysis_packet_render() -> None:
     assert "Root cause analysis" in rendered
 
 
+def test_codex_analysis_packet_can_be_read_only_user_answer() -> None:
+    packet = build_codex_analysis_packet(
+        user_goal="查一下结构是否臃肿",
+        handoff=False,
+    )
+
+    rendered = packet.render()
+    assert "只读分析" in rendered
+    assert "禁止创建、修改、删除任何工作区文件" in rendered
+    assert ".wlcodex" in rendered
+    assert "不要输出 Claude 交接包" in rendered
+    assert "Chief-engineer Claude handoff packet" not in rendered
+
+
 def test_claude_handoff_packet_render() -> None:
     packet = ClaudeHandoffPacket(
         mode="chief_engineer",

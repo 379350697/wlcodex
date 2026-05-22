@@ -779,7 +779,7 @@ async def test_direct_codex_turn_completion_marks_agent_run_done(
     agent_run = ledger.create_agent_run(
         conversation.id,
         "codex",
-        "implementation",
+        "analysis",
         hidden_task_id=task.id,
         external_session_id="thread-direct",
     )
@@ -801,6 +801,8 @@ async def test_direct_codex_turn_completion_marks_agent_run_done(
     events = store.list_by_agent_run(agent_run.id)
     event_types = [event.event_type for event in events]
     assert EventType.AGENT_RUN_COMPLETED in event_types
+    completed = [event for event in events if event.event_type == EventType.AGENT_RUN_COMPLETED][-1]
+    assert completed.payload["role"] == "analysis"
     assert find_non_terminal_agent_runs(store) == []
 
 

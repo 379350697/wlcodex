@@ -278,6 +278,9 @@ async def test_conversation_text_defaults_to_codex_only(tmp_path: Path) -> None:
     assert convos[0].mode == ConversationMode.CHIEF_ENGINEER.value
     runs = ctrl._ledger.list_agent_runs(convos[0].id, limit=10)
     assert [(run.agent, run.role) for run in runs] == [("codex", "analysis")]
+    assert ctrl._backend.prompt_turns[-1][2] == "read_only_analysis"
+    assert "禁止创建、修改、删除任何工作区文件" in ctrl._backend.turns[-1][1]
+    assert "Claude handoff packet" not in ctrl._backend.turns[-1][1]
 
 
 @pytest.mark.asyncio

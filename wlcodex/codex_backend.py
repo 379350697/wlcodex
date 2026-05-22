@@ -118,6 +118,15 @@ def _planning_developer_instructions(interaction_mode: str) -> str:
             "decision: pass/retry/stop/need_user 格式。"
             + _output_limit
         )
+    if interaction_mode == "read_only_analysis":
+        return (
+            "你是 WLCodex 的 Codex 只读分析子流程。你的任务是查询、解释、"
+            "审阅和给出建议；只能读取代码、日志和状态，禁止创建、修改、删除"
+            "任何工作区文件，包括 docs/、.wlcodex/、配置、测试和依赖锁文件。"
+            "不要输出 Claude 交接包，不要进入实现闭环；如果需要修改、部署、"
+            "清理或跑实现测试，提示用户显式使用 /auto、/codex 或 /claude。"
+            + _output_limit
+        )
     return (
         "你是 WLCodex 的 Codex 总工程师分析子流程。可以调用 skill、"
         "GitNexus、只读上下文检索和必要的方案验证工具；可以生成或写入设计、"
@@ -143,10 +152,15 @@ def _planning_turn_options(
     approval_policy: str = "on-request",
     sandbox: str = "workspace-write",
 ) -> dict[str, object]:
+    sandbox_policy = (
+        {"type": "readOnly", "networkAccess": False}
+        if interaction_mode == "read_only_analysis"
+        else _planning_sandbox_policy(sandbox)
+    )
     options: dict[str, object] = {
         "effort": "xhigh",
         "approval_policy": approval_policy,
-        "sandbox_policy": _planning_sandbox_policy(sandbox),
+        "sandbox_policy": sandbox_policy,
         "model": "gpt-5.5",
         "summary": "none",
         "personality": "pragmatic",
@@ -331,6 +345,7 @@ class BackendEvent:
 class FakeCodexBackend:
     def __init__(self) -> None:
         self.turns: list[tuple[str, str]] = []
+        self.prompt_turns: list[tuple[str, str, str]] = []
         self.steers: list[tuple[str, str, str]] = []
         self.threads: dict[str, str] = {}
         self._injected_events: list[BackendEvent] = []
@@ -361,6 +376,23 @@ class FakeCodexBackend:
         turn_id = f"fake-turn-{self._turn_counter}"
         self.turns.append((thread_id, prompt))
         return turn_id
+
+    async def create_prompt_thread(
+        self, workspace_path: str, interaction_mode: str
+    ) -> str:
+        return await self.create_thread(workspace_path)
+
+    async def start_prompt_turn(
+        self, thread_id: str, prompt: str, interaction_mode: str
+    ) -> str:
+        self.prompt_turns.append((thread_id, prompt, interaction_mode))
+        return await self.start_turn(thread_id, prompt)
+
+    async def continue_prompt_turn(
+        self, thread_id: str, prompt: str, interaction_mode: str
+    ) -> str:
+        self.prompt_turns.append((thread_id, prompt, interaction_mode))
+        return await self.continue_turn(thread_id, prompt)
 
     async def steer_turn(self, thread_id: str, expected_turn_id: str, prompt: str) -> None:
         self.steers.append((thread_id, expected_turn_id, prompt))
@@ -775,7 +807,7 @@ class AppServerCodexBackend:
     async def _create_prompt_thread(
         self, workspace_path: str, interaction_mode: str
     ) -> str:
-        if interaction_mode not in ("analysis", "verification"):
+        if interaction_mode not in ("analysis", "verification", "read_only_analysis"):
             return await self.create_thread(workspace_path)
         client = await self._ensure_client()
         result = await client.request(
@@ -795,6 +827,11 @@ class AppServerCodexBackend:
         )
         return parse_thread_start_response(result)
 
+    async def create_prompt_thread(
+        self, workspace_path: str, interaction_mode: str
+    ) -> str:
+        return await self._create_prompt_thread(workspace_path, interaction_mode)
+
     async def start_turn(self, thread_id: str, prompt: str) -> str:
         client = await self._ensure_client()
         result = await client.request(
@@ -806,7 +843,7 @@ class AppServerCodexBackend:
     async def _start_prompt_turn(
         self, thread_id: str, prompt: str, interaction_mode: str
     ) -> str:
-        if interaction_mode not in ("analysis", "verification"):
+        if interaction_mode not in ("analysis", "verification", "read_only_analysis"):
             return await self.start_turn(thread_id, prompt)
         client = await self._ensure_client()
         result = await client.request(
@@ -822,6 +859,18 @@ class AppServerCodexBackend:
             ),
         )
         return parse_turn_response(result)
+
+    async def start_prompt_turn(
+        self, thread_id: str, prompt: str, interaction_mode: str
+    ) -> str:
+        return await self._start_prompt_turn(thread_id, prompt, interaction_mode)
+
+    async def continue_prompt_turn(
+        self, thread_id: str, prompt: str, interaction_mode: str
+    ) -> str:
+        client = await self._ensure_client()
+        await client.request("thread/resume", {"threadId": thread_id})
+        return await self._start_prompt_turn(thread_id, prompt, interaction_mode)
 
     async def continue_turn(self, thread_id: str, prompt: str) -> str:
         client = await self._ensure_client()
@@ -865,14 +914,14 @@ class AppServerCodexBackend:
         })
 
     def _hard_timeout_seconds(self, interaction_mode: str) -> float:
-        if interaction_mode == "analysis":
+        if interaction_mode in ("analysis", "read_only_analysis"):
             return self._codex_analysis_hard_timeout_seconds
         if interaction_mode == "verification":
             return self._codex_verification_hard_timeout_seconds
         return self._request_timeout_seconds
 
     def _idle_timeout_seconds(self, interaction_mode: str) -> float | None:
-        if interaction_mode in ("analysis", "verification"):
+        if interaction_mode in ("analysis", "verification", "read_only_analysis"):
             return self._codex_prompt_idle_timeout_seconds
         return None
 
