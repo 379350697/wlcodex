@@ -374,11 +374,14 @@ def build_auto_final_plan_packet(
             "如果需要实现，再包含给 Claude 的执行提示词。",
             "如果无需实现，明确写 needs_implementation: false，并说明不要交给 Claude。",
             "保留用户补充的约束和禁止事项。",
+            "如果涉及 LightFeeV2 线上排障/状态检查，必须先运行 python scripts/diagnose_live.py --json",
+            "并将输出的 diagnose JSON 完整嵌入 ```json 代码块，作为 evidence manifest。",
         ],
         token_budget=bgt.codex_analysis_tokens,
         requested_output=(
             "中文最终结论/方案，包含 diagnosis, evidence, confidence, files_to_touch, "
             "claude_prompt（仅实现类任务需要）, acceptance_criteria, verification_result。"
+            "如有 diagnose JSON，必须用 ```json 代码块完整附上。"
         ),
     )
 

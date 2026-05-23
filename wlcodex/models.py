@@ -218,6 +218,7 @@ class OrchestrationRun:
     last_codex_analysis: str
     last_claude_summary: str
     last_verification_result: str
+    diagnose_json: str
     created_at: datetime
     updated_at: datetime
 

@@ -518,3 +518,177 @@ def _ensure_sentence(text: str) -> str:
 
 def _contains_cjk(text: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+# ---------------------------------------------------------------------------
+# Structured diagnose digest \u2014 consumes diagnose_live.py JSON, not raw text
+# ---------------------------------------------------------------------------
+
+
+def render_auto_diagnose_digest(
+    diagnose_json_str: str,
+    *,
+    max_chars: int = 700,
+) -> str:
+    """Render a concise Chinese digest from structured diagnose JSON.
+
+    Unlike render_auto_draft_digest which regex-parses free-text model output,
+    this function consumes the stable JSON output of diagnose_live.py so
+    Telegram shows the same structured facts as the local diagnose.
+    """
+    import json as _json
+
+    try:
+        diag = _json.loads(diagnose_json_str)
+    except (_json.JSONDecodeError, ValueError):
+        return ""
+
+    if not isinstance(diag, dict) or not diag:
+        return ""
+
+    conclusion = diag.get("conclusion", {})
+    if not isinstance(conclusion, dict):
+        conclusion = {}
+
+    health = diag.get("health", {})
+    if not isinstance(health, dict):
+        health = {}
+
+    local_state = diag.get("local_state", {})
+    if not isinstance(local_state, dict):
+        local_state = {}
+
+    deploy = diag.get("deploy_status", {})
+    if not isinstance(deploy, dict):
+        deploy = {}
+
+    state_consistency = diag.get("state_consistency", {})
+    if not isinstance(state_consistency, dict):
+        state_consistency = {}
+
+    ev_completeness = diag.get("evidence_completeness", {})
+    if not isinstance(ev_completeness, dict):
+        ev_completeness = {}
+
+    order_errors = diag.get("order_error_evidence", [])
+    if not isinstance(order_errors, list):
+        order_errors = []
+
+    service_status = diag.get("service_status", {})
+    if not isinstance(service_status, dict):
+        service_status = {}
+
+    # Build conclusion line
+    status = str(conclusion.get("status", "unknown"))
+    risk = str(conclusion.get("risk", "unknown"))
+    summary = str(conclusion.get("summary", ""))
+    concl_line = "{} ({}): {}".format(_diagnose_status_label(status), _diagnose_risk_label(risk), summary)
+
+    # Build evidence from structured data
+    evidence_lines: list[str] = []
+
+    # Service status
+    svc_parts = []
+    for svc_name, svc in sorted(service_status.items()):
+        active = str(svc.get("active", "unknown"))
+        svc_parts.append("{}={}".format(svc_name, active))
+    if svc_parts:
+        evidence_lines.append("\u670d\u52a1: {}".format(", ".join(svc_parts)))
+
+    # Deploy status
+    if deploy.get("version_mismatch"):
+        evidence_lines.append("\u7248\u672c\u4e0d\u4e00\u81f4: HEAD={}, deploy={}".format(
+            deploy.get("git_head", "?"), deploy.get("deploy_version", "?"),
+        ))
+
+    # Local state
+    evidence_lines.append("\u672c\u5730: {}/{} \u5f00\u4ed3{} \u5f85\u5f00{} \u5f85\u5e73{}".format(
+        local_state.get("lifecycle", "?"),
+        local_state.get("risk_mode", "?"),
+        local_state.get("open_position_count", 0),
+        local_state.get("pending_entry_count", 0),
+        local_state.get("pending_close_count", 0),
+    ))
+
+    # State mismatch
+    if state_consistency.get("state_mismatch"):
+        evidence_lines.append("\u72b6\u6001\u4e0d\u4e00\u81f4: local_open_exchange_flat={}".format(
+            state_consistency.get("local_open_exchange_flat", False),
+        ))
+
+    # Order error evidence \u2014 show exchange_code/exchange_msg
+    for err in order_errors[:3]:
+        ex_err = err.get("exchange_error", {}) if isinstance(err.get("exchange_error"), dict) else {}
+        ex_code = str(ex_err.get("exchange_code", ""))
+        ex_msg = str(ex_err.get("exchange_msg", ""))
+        venue = str(err.get("venue", ""))
+        err_kind = str(err.get("kind", ""))
+        err_count = int(err.get("count", 0))
+
+        if ex_code:
+            line = "{} {}: code={}".format(venue, err_kind, ex_code)
+            if ex_msg:
+                line += " msg={}".format(ex_msg[:80])
+            if err_count > 1:
+                line += " x{}".format(err_count)
+            evidence_lines.append(line)
+        else:
+            evidence_lines.append("{} {}: \u65e0exchange_code (x{})".format(venue, err_kind, err_count))
+
+    # Evidence completeness
+    completeness = str(ev_completeness.get("overall", ""))
+    confidence = str(ev_completeness.get("confidence", ""))
+    missing = ev_completeness.get("missing_evidence", [])
+    if not isinstance(missing, list):
+        missing = []
+
+    if completeness in ("partial", "missing"):
+        missing_str = ", ".join(missing) if missing else "\u672a\u77e5"
+        evidence_lines.append("\u8bc1\u636e\u4e0d\u5b8c\u6574({}/{})\uff0c\u7f3a\u5931: {}".format(completeness, confidence, missing_str))
+
+    # Health fingerprints
+    fingerprints = health.get("fingerprints", [])
+    if isinstance(fingerprints, list) and fingerprints:
+        evidence_lines.append("\u5065\u5eb7\u544a\u8b66: {}".format(", ".join(fingerprints[:3])))
+
+    # Risk
+    risk_line = "\u98ce\u9669={}".format(_diagnose_risk_label(risk))
+    if completeness != "complete":
+        risk_line += "\uff0c\u8bc1\u636e\u5b8c\u6574\u5ea6={}\uff0c\u4e0d\u5f97\u6807\u8bb0\u4e3ahigh confidence".format(completeness)
+
+    # Next actions
+    next_actions = conclusion.get("next_actions", [])
+    if not isinstance(next_actions, list):
+        next_actions = []
+    next_line = "; ".join(next_actions[:2]) if next_actions else "\u65e0\u660e\u786e\u4e0b\u4e00\u6b65"
+
+    rendered = "\u5173\u952e\u6458\u8981\uff1a\n\u7ed3\u8bba\uff1a{}\n\u4f9d\u636e\uff1a\n{}\n\u98ce\u9669\uff1a{}\n\u4e0b\u4e00\u6b65\uff1a{}".format(
+        _ensure_sentence(concl_line),
+        "\n".join("- {}".format(e) for e in evidence_lines[:6]) if evidence_lines else "\u672a\u63d0\u53d6\u5230\u660e\u786e\u8bc1\u636e\u3002",
+        _ensure_sentence(risk_line),
+        _ensure_sentence(next_line),
+    )
+
+    if len(rendered) <= max_chars:
+        return rendered
+    return rendered[: max_chars - 12].rstrip() + "\n...\uff08\u5df2\u7cbe\u7b80\uff09"
+
+
+def _diagnose_status_label(status: str) -> str:
+    labels = {
+        "healthy": "\u5065\u5eb7",
+        "unhealthy": "\u5f02\u5e38",
+        "degraded": "\u964d\u7ea7",
+        "unknown": "\u672a\u77e5",
+    }
+    return labels.get(status, status)
+
+
+def _diagnose_risk_label(risk: str) -> str:
+    labels = {
+        "low": "\u4f4e\u98ce\u9669",
+        "medium": "\u4e2d\u98ce\u9669",
+        "high": "\u9ad8\u98ce\u9669",
+        "critical": "\u4e25\u91cd",
+    }
+    return labels.get(risk, risk)

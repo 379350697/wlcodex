@@ -213,6 +213,7 @@ class Ledger:
                 last_codex_analysis TEXT NOT NULL DEFAULT '',
                 last_claude_summary TEXT NOT NULL DEFAULT '',
                 last_verification_result TEXT NOT NULL DEFAULT '',
+                diagnose_json TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(conversation_id) REFERENCES conversation_sessions(id)
@@ -1359,6 +1360,7 @@ class Ledger:
         last_codex_analysis: str | None = None,
         last_claude_summary: str | None = None,
         last_verification_result: str | None = None,
+        diagnose_json: str | None = None,
     ) -> OrchestrationRun:
         now = _now()
         sets: list[str] = ["updated_at = ?"]
@@ -1382,6 +1384,9 @@ class Ledger:
         if last_verification_result is not None:
             sets.append("last_verification_result = ?")
             params.append(last_verification_result)
+        if diagnose_json is not None:
+            sets.append("diagnose_json = ?")
+            params.append(diagnose_json)
 
         params.append(run_id)
         self._conn.execute(
@@ -2038,6 +2043,7 @@ def _orchestration_run(row: sqlite3.Row) -> OrchestrationRun:
         last_codex_analysis=str(row["last_codex_analysis"] or ""),
         last_claude_summary=str(row["last_claude_summary"] or ""),
         last_verification_result=str(row["last_verification_result"] or ""),
+        diagnose_json=str(row["diagnose_json"] or ""),
         created_at=_dt(str(row["created_at"])),
         updated_at=_dt(str(row["updated_at"])),
     )

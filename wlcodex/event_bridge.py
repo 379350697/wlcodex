@@ -17,9 +17,34 @@ from wlcodex.db import Ledger
 from wlcodex.models import TaskStatus
 from wlcodex.status import render_approval_card
 from wlcodex.task_service import TaskService, drain_workspace
-from wlcodex.telegram_digest import render_auto_draft_digest
+from wlcodex.telegram_digest import render_auto_draft_digest, render_auto_diagnose_digest
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_diagnose_json(text: str) -> str:
+    """Try to extract a diagnose JSON block from Codex model output.
+
+    Looks for ```json ... ``` blocks containing schema_version or diagnose
+    markers. Falls back to empty string.
+    """
+    import json as _json
+    import re as _re
+
+    if not text:
+        return ""
+
+    # Find all json code blocks
+    for match in _re.finditer(r"```(?:json)?\s*\n(.*?)\n```", text, _re.DOTALL):
+        block = match.group(1).strip()
+        try:
+            parsed = _json.loads(block)
+        except (_json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and "schema_version" in parsed:
+            # Valid diagnose JSON — return the raw string
+            return block
+    return ""
 
 EXPIRY_SCAN_INTERVAL_SECONDS = 60
 TASK_WATCHDOG_INTERVAL_SECONDS = 60
@@ -573,21 +598,25 @@ class EventBridge:
             # Context collection or supplement completed → stay in collecting_context
             # The user can still add more context and now click "生成最终方案".
             new_step = AUTO_COLLECTING_CONTEXT
+            diagnose_json = _extract_diagnose_json(completion_summary)
             self._ledger.update_orchestration_run(
                 auto_run.id,
                 status="needs_user",
                 current_step=new_step,
                 last_codex_analysis=completion_summary[:5000] if completion_summary else "",
+                diagnose_json=diagnose_json,
             )
 
         elif agent_role == "auto_final_plan" and agent_status == "done":
             # Final plan generated → advance to draft_ready
             new_step = AUTO_DRAFT_READY
+            diagnose_json = _extract_diagnose_json(completion_summary)
             self._ledger.update_orchestration_run(
                 auto_run.id,
                 status="needs_user",
                 current_step=new_step,
                 last_codex_analysis=completion_summary[:5000] if completion_summary else "",
+                diagnose_json=diagnose_json,
             )
 
         elif agent_role in ("auto_implementation", "auto_repair") and agent_status == "done":
@@ -664,21 +693,29 @@ class EventBridge:
         )
         # Include orch run data in the message for draft_ready
         stage_label = auto_stage_label(new_stage)
+
+        # Prefer structured diagnose JSON digest when available
+        diagnose_json = getattr(auto_run, "diagnose_json", "") or ""
+        if diagnose_json:
+            structured_digest = render_auto_diagnose_digest(diagnose_json)
+        else:
+            structured_digest = ""
+
         if new_stage == "collecting_context":
             if auto_run.last_codex_analysis:
-                digest = render_auto_draft_digest(
+                digest = structured_digest or render_auto_draft_digest(
                     auto_run.last_codex_analysis,
                     fallback_next="继续补充信息，或点击生成最终方案。",
                 )
-                text = f"Codex 已更新分析。\n\n{digest}\n\n请选择下一步："
+                text = "Codex 已更新分析。\n\n{}\n\n请选择下一步：".format(digest)
             else:
                 text = (
                     "Codex 已完成上下文收集。\n\n"
                     "你可以继续补充信息，或生成最终方案。"
                 )
         elif new_stage == "draft_ready" and auto_run.last_codex_analysis:
-            digest = render_auto_draft_digest(auto_run.last_codex_analysis)
-            text = f"最终方案已生成。\n\n{digest}\n\n请选择下一步："
+            digest = structured_digest or render_auto_draft_digest(auto_run.last_codex_analysis)
+            text = "最终方案已生成。\n\n{}\n\n请选择下一步：".format(digest)
         elif new_stage == "draft_ready":
             text = (
                 "最终方案生成完成，但没有收到方案正文。\n\n"
