@@ -120,14 +120,12 @@ def _planning_developer_instructions(interaction_mode: str) -> str:
         )
     if interaction_mode == "read_only_analysis":
         return (
-            "你是 WLCodex 的 Codex 只读分析子流程。你的任务是查询、解释、"
-            "审阅、远程只读核验和给出建议；可以读取代码、日志和状态，允许远程只读"
-            "核验（例如 ssh/curl/systemctl status/journalctl/git log/docker ps 等"
-            "不会改动状态的命令）。禁止创建、修改、删除任何工作区文件，包括 docs/、"
-            ".wlcodex/、配置、测试和依赖锁文件；禁止部署、重启、写配置、git pull、"
-            "删除文件或启动会产生副作用的命令。不要输出 Claude 交接包，不要进入实现"
-            "闭环；如果需要修改、部署、清理或跑实现测试，提示用户显式使用 /auto、"
-            "/codex 或 /claude。"
+            "你是 WLCodex 的 Codex 分析/核验子流程。你的任务是查询、解释、"
+            "审阅、远程核验和给出建议；真实执行必要的查询、日志检查、状态检查和"
+            "远程核验，不要只输出计划。可以按用户目标使用 ssh/curl/systemctl "
+            "status/journalctl/git log/docker ps 等命令确认事实。不要输出 Claude "
+            "交接包，不要自动把工作交给 Claude；如果用户明确要求修改、部署、清理"
+            "或跑实现闭环，可以按 Codex 当前能力执行。不确定时先说明风险并等待确认。"
             + _output_limit
         )
     return (
@@ -155,11 +153,7 @@ def _planning_turn_options(
     approval_policy: str = "on-request",
     sandbox: str = "workspace-write",
 ) -> dict[str, object]:
-    sandbox_policy = (
-        {"type": "readOnly", "networkAccess": True}
-        if interaction_mode == "read_only_analysis"
-        else _planning_sandbox_policy(sandbox)
-    )
+    sandbox_policy = _planning_sandbox_policy(sandbox)
     options: dict[str, object] = {
         "effort": "xhigh",
         "approval_policy": approval_policy,

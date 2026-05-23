@@ -697,7 +697,7 @@ class WlCodexHandlers:
         await self.send_telegram(
             update.effective_chat.id,
             "⚙️ 设置\n\n"
-            "普通消息：Codex 只读分析\n"
+            "普通消息：Codex 分析/核验\n"
             "/auto：Codex → Claude → Codex\n"
             "当前视图：驾驶舱\n\n"
             "你可以调整：",

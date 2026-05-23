@@ -17,6 +17,7 @@ from wlcodex.db import Ledger
 from wlcodex.models import TaskStatus
 from wlcodex.status import render_approval_card
 from wlcodex.task_service import TaskService, drain_workspace
+from wlcodex.telegram_digest import render_auto_draft_digest
 
 logger = logging.getLogger(__name__)
 
@@ -647,10 +648,8 @@ class EventBridge:
                 "你可以继续补充信息，或生成最终方案。"
             )
         elif new_stage == "draft_ready" and auto_run.last_codex_analysis:
-            preview = auto_run.last_codex_analysis[:3500]
-            if len(auto_run.last_codex_analysis) > len(preview):
-                preview = f"{preview}\n\n...（方案较长，已截断显示）"
-            text = f"最终方案已生成。\n\n{preview}\n\n请选择下一步："
+            digest = render_auto_draft_digest(auto_run.last_codex_analysis)
+            text = f"最终方案已生成。\n\n{digest}\n\n请选择下一步："
         elif new_stage == "draft_ready":
             text = (
                 "最终方案生成完成，但没有收到方案正文。\n\n"
@@ -658,11 +657,15 @@ class EventBridge:
                 "请重写方案或继续补充上下文。"
             )
         elif new_stage == "claude_done":
-            text = f"Claude 执行完成。\n\n{auto_run.last_claude_summary or '完成'}\n\n请选择下一步："
+            digest = render_auto_draft_digest(auto_run.last_claude_summary or "结论：完成。")
+            text = f"Claude 执行完成。\n\n{digest}\n\n请选择下一步："
         elif new_stage == "completed":
             text = "验收通过，任务完成。"
         elif new_stage == "retry_ready":
-            text = f"验收未通过。\n\n{auto_run.last_verification_result[:300] if auto_run.last_verification_result else ''}\n\n请选择下一步："
+            digest = render_auto_draft_digest(
+                auto_run.last_verification_result or "结论：验收未通过。"
+            )
+            text = f"验收未通过。\n\n{digest}\n\n请选择下一步："
         else:
             text = f"阶段：{stage_label}\n\n请选择下一步："
 

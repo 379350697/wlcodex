@@ -31,7 +31,7 @@ HIDDEN_FROM_NATURAL = [
 # ── Help semantics ──────────────────────────────────────────────────────
 
 REQUIRED_HELP_PHRASES = [
-    "普通消息：Codex 只读分析",
+    "普通消息：Codex 分析/核验",
     "/auto：Codex 主导闭环（分析→确认→执行→确认→验收）",
     "当前视图：驾驶舱",
     "接管现场",

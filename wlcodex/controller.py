@@ -779,7 +779,7 @@ class CommandController:
                 task=task,
                 workspace_path=workspace_path,
                 prompt=packet.render(),
-                interaction_mode="read_only_analysis",
+                interaction_mode="general",
             )
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
@@ -882,7 +882,7 @@ class CommandController:
                 task=task,
                 workspace_path=workspace_path,
                 prompt=packet.render(),
-                interaction_mode="read_only_analysis",
+                interaction_mode="general",
             )
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
@@ -1933,7 +1933,7 @@ class CommandController:
                 task=task,
                 workspace_path=workspace_path,
                 prompt=packet.render(),
-                interaction_mode="read_only_analysis",
+                interaction_mode="general",
             )
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
@@ -1968,7 +1968,7 @@ class CommandController:
         start_text = (
             "Codex 开始分析。你可以继续补充信息，"
             "分析完成后会显示「生成最终方案」。\n\n"
-            "注意：当前是只读分析阶段，不会启动 Claude，不会修改代码。"
+            "注意：当前不会启动 Claude；Codex 会按任务需要执行查询和核验。"
         )
 
         if self._interaction_renderer is not None:
@@ -2123,7 +2123,7 @@ class CommandController:
                 task=task,
                 workspace_path=workspace_path,
                 prompt=packet.render(),
-                interaction_mode="read_only_analysis",
+                interaction_mode="general",
             )
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))
@@ -2306,7 +2306,7 @@ class CommandController:
                 task=task,
                 workspace_path=workspace_path,
                 prompt=packet.render(),
-                interaction_mode="read_only_analysis",
+                interaction_mode="general",
             )
         except Exception as exc:
             task = self._service.fail_task(task.id, str(exc))

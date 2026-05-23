@@ -257,7 +257,7 @@ async def test_claude_direct_disabled_claude_shows_error(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# Test: Plain text is read-only by default; /auto starts orchestration
+# Test: Plain text uses Codex only by default; /auto starts orchestration
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -278,8 +278,10 @@ async def test_conversation_text_defaults_to_codex_only(tmp_path: Path) -> None:
     assert convos[0].mode == ConversationMode.CHIEF_ENGINEER.value
     runs = ctrl._ledger.list_agent_runs(convos[0].id, limit=10)
     assert [(run.agent, run.role) for run in runs] == [("codex", "analysis")]
-    assert ctrl._backend.prompt_turns[-1][2] == "read_only_analysis"
-    assert "禁止创建、修改、删除任何工作区文件" in ctrl._backend.turns[-1][1]
+    assert ctrl._backend.prompt_turns == []
+    assert ctrl._backend.turns
+    assert "真实执行必要的查询和核验" in ctrl._backend.turns[-1][1]
+    assert "禁止创建、修改、删除任何工作区文件" not in ctrl._backend.turns[-1][1]
     assert "Claude handoff packet" not in ctrl._backend.turns[-1][1]
 
 
@@ -312,8 +314,8 @@ async def test_auto_mode_starts_staged_context_collection(tmp_path: Path) -> Non
     assert any(run.role == "auto_analysis" for run in agent_runs), (
         f"Expected auto_analysis agent run, got roles: {[run.role for run in agent_runs]}"
     )
-    # Response must indicate read-only analysis stage
-    assert "补充" in response.text or "最终方案" in response.text or "只读分析" in response.text
+    # Response must indicate Codex analysis stage
+    assert "补充" in response.text or "最终方案" in response.text or "分析" in response.text
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +558,7 @@ async def test_claude_session_is_scoped_to_workbench_until_new(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_auto_starts_context_collection_without_claude(tmp_path: Path) -> None:
-    """``/auto`` starts Codex read-only context collection and does NOT start Claude."""
+    """``/auto`` starts Codex context collection and does NOT start Claude."""
     claude = FakeClaudeBackend(enabled=True)
     runner = FakeOrchestrationRunner()
     ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
@@ -584,11 +586,12 @@ async def test_auto_starts_context_collection_without_claude(tmp_path: Path) -> 
         f"Expected auto_analysis agent run, got: {[run.role for run in agent_runs]}"
     )
 
-    # Codex backend must have been called with read_only_analysis mode
-    assert ctrl._backend.prompt_turns[-1][2] == "read_only_analysis"
+    # Codex backend must use the normal turn path so remote diagnostics can execute.
+    assert ctrl._backend.prompt_turns == []
+    assert ctrl._backend.turns
 
     # Response must mention context collection
-    assert "只读分析" in response.text or "最终方案" in response.text or "补充" in response.text
+    assert "分析" in response.text or "最终方案" in response.text or "补充" in response.text
 
 
 @pytest.mark.asyncio

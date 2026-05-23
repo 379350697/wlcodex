@@ -188,18 +188,17 @@ def build_codex_analysis_packet(
         )
     else:
         analysis_only_constraints = [
-            "本轮是只读分析/查询，不是 Claude 交接，也不是实现任务。",
-            "只能读取代码、日志和状态；禁止创建、修改、删除任何工作区文件，包括 docs/、"
-            ".wlcodex/、配置、测试、依赖锁文件。",
-            "允许远程只读核验，例如 ssh/curl/systemctl status/journalctl/git log/docker ps；"
-            "禁止部署、重启、写配置、git pull、删除文件或运行会产生副作用的命令。",
+            "本轮是 Codex 分析/查询，不是 Claude 交接。",
+            "真实执行必要的查询和核验，不要只输出执行计划。",
+            "可以按用户目标使用本地命令、GitNexus、ssh/curl/systemctl/journalctl/"
+            "git log/docker ps 等方式确认事实。",
             "不要输出 Claude 交接包，不要把工作交给 Claude；直接回答结论、依据、"
             "风险和建议下一步。",
-            "如果判断需要修改、部署、清理或跑实现闭环，明确提示用户用 /auto 或显式 "
-            "/codex、/claude 开始执行。",
+            "如果用户明确要求修改、部署、清理或跑实现闭环，可以按 Codex 当前能力执行；"
+            "不确定时先说明风险并等待确认。",
         ]
         requested_output = (
-            "中文可读结论：直接回答用户问题，列出关键依据、风险等级和建议下一步。"
+            "中文可读结论：已执行的核验、关键依据、风险等级和建议下一步。"
         )
     return CodexAnalysisPacket(
         mode="chief_engineer",
@@ -341,14 +340,14 @@ def build_auto_context_packet(
         conversation_summary=trim_to_budget(conversation_summary, bgt.conversation_summary_tokens),
         recent_user_constraints=[
             "本轮是 /auto 的 Codex 上下文收集阶段。",
-            "只读分析：禁止创建、修改、删除任何工作区文件。",
-            "允许远程只读核验，例如 ssh/curl/systemctl status/journalctl/git log/docker ps；"
-            "禁止部署、重启、写配置、git pull、删除文件或运行会产生副作用的命令。",
+            "真实执行必要的查询和远程核验，不要只输出核验计划。",
+            "允许使用 ssh/curl/systemctl/journalctl/git log/docker ps 等命令确认事实。",
+            "不要因为任务是查询/核验就停止在方案层；能查就直接查，给出证据和结论。",
             "不要启动 Claude，不要输出最终执行包。",
-            "如果信息不足，继续等待用户补充；如果已有判断，给出阶段性结论。",
+            "如果信息不足，说明还缺什么；如果已有判断，给出阶段性结论。",
         ],
         token_budget=bgt.codex_analysis_tokens,
-        requested_output="中文阶段性分析：当前判断、缺失信息、建议用户补充什么。",
+        requested_output="中文阶段性结果：已执行的核验、证据、当前判断、缺失信息。",
     )
 
 
@@ -370,15 +369,16 @@ def build_auto_final_plan_packet(
         user_goal=user_goal,
         conversation_summary=trim_to_budget(conversation_summary, bgt.conversation_summary_tokens),
         recent_user_constraints=[
-            "输出 /auto 的最终方案，不要改代码。",
-            "必须包含给 Claude 的执行提示词。",
+            "输出 /auto 的最终方案或最终结论。",
+            "查询/核验类任务必须基于已执行证据给最终结论，不要只输出下一步计划。",
+            "如果需要实现，再包含给 Claude 的执行提示词。",
             "如果无需实现，明确写 needs_implementation: false，并说明不要交给 Claude。",
             "保留用户补充的约束和禁止事项。",
         ],
         token_budget=bgt.codex_analysis_tokens,
         requested_output=(
-            "中文最终方案，包含 diagnosis, confidence, files_to_touch, "
-            "claude_prompt, acceptance_criteria, prohibited_changes, verification_plan。"
+            "中文最终结论/方案，包含 diagnosis, evidence, confidence, files_to_touch, "
+            "claude_prompt（仅实现类任务需要）, acceptance_criteria, verification_result。"
         ),
     )
 

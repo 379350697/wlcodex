@@ -59,19 +59,19 @@ def test_codex_analysis_packet_render() -> None:
     assert "Root cause analysis" in rendered
 
 
-def test_codex_analysis_packet_can_be_read_only_user_answer() -> None:
+def test_codex_analysis_packet_can_execute_user_query_without_handoff() -> None:
     packet = build_codex_analysis_packet(
         user_goal="查一下结构是否臃肿",
         handoff=False,
     )
 
     rendered = packet.render()
-    assert "只读分析" in rendered
-    assert "禁止创建、修改、删除任何工作区文件" in rendered
-    assert ".wlcodex" in rendered
+    assert "真实执行必要的查询和核验" in rendered
+    assert "不要只输出执行计划" in rendered
     assert "不要输出 Claude 交接包" in rendered
-    assert "允许远程只读核验" in rendered
-    assert "禁止部署、重启、写配置" in rendered
+    assert "只读分析" not in rendered
+    assert "禁止创建、修改、删除任何工作区文件" not in rendered
+    assert "禁止部署、重启、写配置" not in rendered
     assert "Chief-engineer Claude handoff packet" not in rendered
 
 
@@ -295,7 +295,7 @@ def test_context_packet_base_render() -> None:
 # --- Staged-auto context packet tests ---
 
 
-def test_auto_context_collection_packet_is_read_only_and_not_handoff() -> None:
+def test_auto_context_collection_packet_allows_real_diagnostics_and_not_handoff() -> None:
     packet = build_auto_context_packet(
         user_goal="定位偶发失败",
         conversation_summary="用户会继续补充日志",
@@ -303,11 +303,12 @@ def test_auto_context_collection_packet_is_read_only_and_not_handoff() -> None:
     )
     rendered = packet.render()
 
-    assert "只读分析" in rendered
-    assert "继续等待用户补充" in rendered
-    assert "禁止创建、修改、删除任何工作区文件" in rendered
-    assert "允许远程只读核验" in rendered
-    assert "禁止部署、重启、写配置" in rendered
+    assert "真实执行必要的查询和远程核验" in rendered
+    assert "ssh/curl/systemctl/journalctl/git log/docker ps" in rendered
+    assert "不要只输出核验计划" in rendered
+    assert "只读分析" not in rendered
+    assert "禁止创建、修改、删除任何工作区文件" not in rendered
+    assert "禁止部署、重启、写配置" not in rendered
     # Must NOT contain Claude handoff instructions
     assert "Claude handoff packet" not in rendered
     assert "交给 Claude" not in rendered
@@ -323,7 +324,7 @@ def test_auto_context_collection_packet_mentions_workspace() -> None:
     assert "lightfeev2" in rendered
 
 
-def test_auto_final_plan_packet_requests_claude_prompt() -> None:
+def test_auto_final_plan_packet_answers_query_or_requests_claude_prompt() -> None:
     packet = build_auto_final_plan_packet(
         user_goal="修复登录错误",
         conversation_summary="已确认是空用户路径",
@@ -332,9 +333,10 @@ def test_auto_final_plan_packet_requests_claude_prompt() -> None:
     rendered = packet.render()
 
     assert "最终方案" in rendered
-    assert "给 Claude 的执行提示词" in rendered
+    assert "查询/核验类任务" in rendered
+    assert "如果需要实现，再包含给 Claude 的执行提示词" in rendered
     assert "acceptance_criteria" in rendered or "验收标准" in rendered.lower()
-    assert "prohibited_changes" in rendered or "禁止" in rendered
+    assert "不要只输出下一步计划" in rendered
 
 
 def test_auto_final_plan_packet_mentions_no_implementation_flag() -> None:
@@ -344,6 +346,7 @@ def test_auto_final_plan_packet_mentions_no_implementation_flag() -> None:
     )
     rendered = packet.render()
     assert "needs_implementation: false" in rendered
+    assert "最终结论" in rendered
 
 
 def test_auto_verification_packet_includes_round() -> None:

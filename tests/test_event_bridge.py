@@ -971,6 +971,195 @@ async def test_auto_final_plan_completion_shows_assembled_plan_before_claude_gat
 
 
 @pytest.mark.asyncio
+async def test_auto_final_plan_completion_sends_chinese_digest_not_raw_long_plan(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate final conclusion",
+        codex_thread_id="thread-final-digest",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "summarize skill research")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-final-digest",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+    long_plan = (
+        "最终结论：Codex 和 Claude 都有技能体系，但 Telegram 驾驶舱应该做发送前精炼层。\n"
+        "依据：Claude Code 支持 .claude/skills；Codex 支持 .agents/skills；Telegram 单条消息有限长。\n"
+        "风险：如果继续直接展示原文，用户无法快速判断是否可以交给 Claude。\n"
+        "下一步：新增中文摘要卡，全文保留在草稿里。\n\n"
+        "以下是冗长背景：\n"
+        + "\n".join(
+            f"背景段落 {i}: 这里模拟模型输出的大量解释、操作步骤、mkdir -p ~/.claude/skills/summarize、SKILL.md 内容。"
+            for i in range(120)
+        )
+    )
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-final-digest", "turnId": "turn-final-digest"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-final-digest",
+            "turnId": "turn-final-digest",
+            "delta": long_plan,
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-final-digest", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    assert updated.current_step == AUTO_DRAFT_READY
+    assert "背景段落 10" in updated.last_codex_analysis
+
+    text = sent[-1][1]
+    assert len(text) < 900
+    assert "结论：" in text
+    assert "依据：" in text
+    assert "风险：" in text
+    assert "下一步：" in text
+    assert "背景段落 10" not in text
+    assert "mkdir -p" not in text
+    assert "请选择下一步" in text
+
+
+@pytest.mark.asyncio
+async def test_auto_claude_done_sends_chinese_digest_not_raw_long_summary(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_CLAUDE_DONE,
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_IMPLEMENTATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run Claude implementation",
+        codex_thread_id="thread-claude-digest",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "implement digest")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_DRAFT_READY,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "claude",
+        ROLE_AUTO_IMPLEMENTATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-claude-digest",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+    long_summary = (
+        "结论：Claude 已实现 Telegram 驾驶舱摘要层。\n"
+        "依据：新增摘要 helper；事件桥发送短卡片；相关测试已覆盖。\n"
+        "风险：需要继续跑完整回归。\n"
+        "下一步：让 Codex 验收。\n\n"
+        + "\n".join(f"执行日志 {i}: 这里是冗长实现细节和终端输出。" for i in range(120))
+    )
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-claude-digest", "turnId": "turn-claude-digest"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-claude-digest",
+            "turnId": "turn-claude-digest",
+            "delta": long_summary,
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-claude-digest", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    assert updated.current_step == AUTO_CLAUDE_DONE
+
+    text = sent[-1][1]
+    assert len(text) < 900
+    assert "结论：" in text
+    assert "依据：" in text
+    assert "风险：" in text
+    assert "下一步：" in text
+    assert "执行日志 20" not in text
+    labels = [
+        button["text"]
+        for row in (sent[-1][2] or [])
+        for button in row
+    ]
+    assert "Codex 验收" in labels
+
+
+@pytest.mark.asyncio
 async def test_auto_final_plan_completion_without_body_hides_claude_gate(
     tmp_path: Path,
 ) -> None:

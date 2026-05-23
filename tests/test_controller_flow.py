@@ -668,7 +668,7 @@ async def test_legacy_diff_command_with_id(ctrl: CommandController) -> None:
 async def test_help_shows_new_commands(ctrl: CommandController) -> None:
     response = await ctrl.handle("/help", {})
     assert "WLCodex" in response.text
-    assert "普通消息：Codex 只读分析" in response.text
+    assert "普通消息：Codex 分析/核验" in response.text
     assert "Codex 主导闭环" in response.text or "/auto" in response.text
     assert "当前视图：驾驶舱" in response.text
     assert "[新工作台]" in response.text
@@ -992,7 +992,7 @@ async def test_staged_auto_does_not_call_eager_runner(
     runs = ledger.list_orchestration_runs(active.id, limit=1)
     assert runs[0].current_step == "collecting_context"
     assert response.already_rendered is False
-    assert ("只读分析" in response.text or "最终方案" in response.text or "Codex" in response.text)
+    assert ("分析" in response.text or "最终方案" in response.text or "Codex" in response.text)
 
 
 @pytest.mark.asyncio
@@ -1183,7 +1183,7 @@ async def test_staged_auto_starts_without_orchestration_runner(
     )
 
     # Staged /auto works without orchestration runner — starts collecting_context
-    assert "只读分析" in response.text or "最终方案" in response.text or "Codex" in response.text
+    assert "分析" in response.text or "最终方案" in response.text or "Codex" in response.text
     assert len(claude.calls) == 0
 
     # Orchestration run must be in collecting_context
@@ -1234,7 +1234,7 @@ async def test_auto_mode_starts_staged_context_collection(ctrl_with_claude: Comm
         {"chat_id": 100, "user_id": 200},
     )
     # Staged /auto starts Codex analysis, not an eager pipeline
-    assert "最终方案" in response.text or "只读分析" in response.text or "Codex" in response.text
+    assert "最终方案" in response.text or "分析" in response.text or "Codex" in response.text
     # Claude must not be started
     assert len(ctrl_with_claude._claude.calls) == 0
     active = ctrl_with_claude._ledger.get_active_conversation(100)
@@ -1254,7 +1254,7 @@ async def test_auto_mode_staged_hides_english_model_snippets(
     )
 
     # Staged /auto starts collecting context, not the eager pipeline
-    assert "只读分析" in response.text or "最终方案" in response.text or "Codex" in response.text
+    assert "分析" in response.text or "最终方案" in response.text or "Codex" in response.text
     assert "Analysis complete" not in response.text
     assert "Fake Claude implementation result" not in response.text
 
@@ -1429,7 +1429,8 @@ async def test_auto_final_plan_callback_hides_final_plan_gate_while_generating(
     assert "查看状态" in labels
     assert "取消" in labels
     assert ledger.get_orchestration_run(orch_run.id).status == "running"
-    assert backend.prompt_turns[-1][2] == "read_only_analysis"
+    assert backend.prompt_turns == []
+    assert backend.turns
 
 
 @pytest.mark.asyncio
@@ -1604,7 +1605,8 @@ async def test_auto_rewrite_plan_from_draft_ready_starts_final_plan_generation(
     assert updated.current_step == "collecting_context"
     assert "生成最终方案" not in labels
     assert "查看状态" in labels
-    assert backend.prompt_turns[-1][2] == "read_only_analysis"
+    assert backend.prompt_turns == []
+    assert backend.turns
 
 
 @pytest.mark.asyncio
