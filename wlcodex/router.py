@@ -170,6 +170,11 @@ class WorkspaceListCommand:
 
 
 @dataclass(frozen=True)
+class CarryWorkbenchCommand:
+    query: str = ""
+
+
+@dataclass(frozen=True)
 class ModeSwitchCommand:
     """Parsed surface mode switch command.
 
@@ -231,6 +236,7 @@ ParsedCommand = (
     | SettingsCommand
     | WorkbenchHistoryCommand
     | WorkspaceListCommand
+    | CarryWorkbenchCommand
 )
 
 
@@ -310,6 +316,12 @@ def parse_command(text: str) -> ParsedCommand:
         return WorkbenchHistoryCommand()
     if stripped == "/workspaces":
         return WorkspaceListCommand()
+
+    # Carryover commands
+    if stripped == "/carry":
+        return CarryWorkbenchCommand()
+    if stripped.startswith("/carry "):
+        return CarryWorkbenchCommand(query=stripped.split(maxsplit=1)[1].strip())
 
     # Dual-surface mode commands
     if stripped == "/mode":

@@ -7,23 +7,89 @@ import re
 
 _SECTION_PATTERNS = {
     "conclusion": re.compile(
-        r"^(?:最终结论|结论|总结|summary|diagnosis|verification_result|最终方案)\s*[:：]\s*(.*)$",
+        r"^(?:最终结论|结论|总结|summary|最终方案)(?:\s*[:：]\s*(.*))?$",
         re.IGNORECASE,
     ),
-    "evidence": re.compile(r"^(?:依据|证据|关键依据|evidence)\s*[:：]\s*(.*)$", re.IGNORECASE),
-    "risk": re.compile(r"^(?:风险|风险等级|risk|confidence)\s*[:：]\s*(.*)$", re.IGNORECASE),
+    "verification_result": re.compile(
+        r"^(?:verification_result|验收结果|核验结论)(?:\s*[:：]\s*(.*))?$",
+        re.IGNORECASE,
+    ),
+    "diagnosis": re.compile(
+        r"^(?:diagnosis|诊断)(?:\s*[:：]\s*(.*))?$",
+        re.IGNORECASE,
+    ),
+    "evidence": re.compile(r"^(?:依据|证据|关键依据|evidence)(?:\s*[:：]\s*(.*))?$", re.IGNORECASE),
+    "executed_check": re.compile(
+        r"^(?:已执行核验|核验结果|关键事实|事实)(?:\s*[:：]\s*(.*))?$",
+        re.IGNORECASE,
+    ),
+    "risk": re.compile(r"^(?:风险|风险等级|risk|confidence)(?:\s*[:：]\s*(.*))?$", re.IGNORECASE),
     "next": re.compile(
-        r"^(?:下一步|建议下一步|建议|next_action|next step|next steps)\s*[:：]\s*(.*)$",
+        r"^(?:下一步|建议下一步|建议|next_action|next step|next steps)(?:\s*[:：]\s*(.*))?$",
         re.IGNORECASE,
     ),
     "claude_task": re.compile(
-        r"^(?:Claude\s*任务|给\s*Claude\s*的任务|交给\s*Claude\s*执行|Claude\s*执行|claude_prompt|handoff_prompt)\s*[:：]\s*(.*)$",
+        r"^(?:Claude\s*任务|给\s*Claude\s*的任务|交给\s*Claude\s*执行|Claude\s*执行|claude_prompt|handoff_prompt)(?:\s*[:：]\s*(.*))?$",
         re.IGNORECASE,
     ),
 }
 
+_CLAUDE_SECTION_NAMES = {
+    "claude 任务",
+    "claude_task",
+    "给 claude 的任务",
+    "交给 claude 执行",
+    "claude 执行",
+    "claude_prompt",
+    "handoff_prompt",
+}
 
-def render_auto_draft_digest(text: str, *, max_chars: int = 700) -> str:
+_KNOWN_MARKDOWN_SECTIONS = {
+    "diagnosis",
+    "evidence",
+    "confidence",
+    "confidence_reason",
+    "risk",
+    "files_to_touch",
+    "claude_prompt",
+    "handoff_prompt",
+    "acceptance_criteria",
+    "verification_result",
+    "needs_implementation",
+}
+
+_KEY_POINT_RE = re.compile(
+    r"^(?:新问题|老问题|部署状态|当前问题|问题)\s*\d*\s*[:：].+"
+    r"|.*(?:开放仓位|平仓卡住|reduce-only|ReduceOnly|HTTP 400|Bad Request|"
+    r"fail_closed|risk_only|状态收敛|本地状态|真实交易所|非零持仓|开放订单|"
+    r"local L2|stale/rebuild|deploy_version|Git HEAD).*",
+    re.IGNORECASE,
+)
+
+_LOW_VALUE_PREFIXES = (
+    "你说得对",
+    "基于已经",
+    "我已经在",
+    "完整结论如下",
+)
+
+_NOOP_NEXT_VALUES = {
+    "无",
+    "没有",
+    "不需要",
+    "无需",
+    "none",
+    "n/a",
+    "null",
+}
+
+
+def render_auto_draft_digest(
+    text: str,
+    *,
+    max_chars: int = 700,
+    fallback_next: str | None = None,
+) -> str:
     """Render a short Chinese digest for /auto draft_ready cockpit cards.
 
     The full model output stays in the orchestration run. This function only
@@ -31,31 +97,40 @@ def render_auto_draft_digest(text: str, *, max_chars: int = 700) -> str:
     """
     lines = _clean_lines(text)
     if not lines:
-        return "关键摘要：\n结论：暂无可展示内容。\n依据：未收到模型正文。\n风险：未知。\n下一步：请重写方案或继续补充上下文。"
+        return "关键摘要：\n结论：暂无可展示内容。\n依据：未收到模型正文。\n风险：未知。\n下一步：请继续补充上下文。"
     if not _contains_cjk(" ".join(lines)):
         return (
             "关键摘要：\n"
             "结论：模型返回了非中文内容，已保留全文。\n"
             "依据：原文可在当前草稿/全文中查看。\n"
             "风险：驾驶舱不直接展示非中文长文，避免误读。\n"
-            "下一步：请查看全文、重写方案或继续补充上下文。"
+            "下一步：请查看全文或继续补充上下文。"
         )
 
-    conclusion = _find_section(lines, "conclusion")
+    conclusion = _find_conclusion(lines)
     evidence = _find_evidence(lines)
+    key_points = _find_key_points(lines)
     risk = _find_section(lines, "risk")
     next_step = _find_section(lines, "next")
-    claude_task = _find_claude_task(lines)
+    claude_task = _find_claude_task(text, lines)
 
     if not conclusion:
         conclusion = _first_informative_line(lines)
+    conclusion = _brief_conclusion(conclusion)
+    if key_points:
+        evidence = _merge_evidence(key_points, evidence)
+    elif not evidence or _is_low_value_evidence(evidence):
+        evidence = key_points
     if not evidence:
         evidence = _fallback_evidence(lines, skip={conclusion, risk, next_step})
     if not risk:
         risk = "未明确风险。"
+    if _is_noop_instruction(next_step):
+        next_step = ""
     if not next_step:
-        next_step = "按下方按钮继续：交给 Claude、继续补充、重写或结束。"
+        next_step = fallback_next or _infer_next_step(key_points, conclusion, risk)
     next_step = _with_claude_task(next_step, claude_task)
+    next_step = _sanitize_next_step(next_step)
 
     rendered = _render_digest(conclusion, evidence, risk, next_step)
     if len(rendered) <= max_chars:
@@ -85,6 +160,7 @@ def _clean_lines(text: str) -> list[str]:
             continue
         line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
         line = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)、]\s*)", "", line)
+        line = re.sub(r"^\*\*(.+?)\*\*$", r"\1", line)
         line = line.strip()
         if line:
             cleaned.append(line)
@@ -97,7 +173,7 @@ def _find_section(lines: list[str], key: str) -> str:
         match = pattern.match(line)
         if not match:
             continue
-        value = match.group(1).strip()
+        value = (match.group(1) or "").strip()
         if value:
             return _normalize_sentence(value)
         if idx + 1 < len(lines):
@@ -105,24 +181,171 @@ def _find_section(lines: list[str], key: str) -> str:
     return ""
 
 
+def _find_conclusion(lines: list[str]) -> str:
+    for key in ("conclusion", "verification_result", "diagnosis"):
+        value = _find_section(lines, key)
+        if value:
+            return value
+    return ""
+
+
+def _brief_conclusion(text: str) -> str:
+    text = re.sub(r"^(?:最终结论是|最终结论)\s*[:：]\s*", "", _normalize_sentence(text))
+    text = re.sub(r"旧的[^。；;]*没有复现[。；;]?", "", text)
+    text = re.sub(r"之前的[^。；;]*没有(?:按原形)?复现[。；;]?", "", text)
+    if "新的问题是" in text:
+        before, after = text.split("新的问题是", 1)
+        issue = re.split(r"[。；;]", after, maxsplit=1)[0].strip()
+        prefix = before.strip(" ；;。")
+        text = f"{prefix}；新问题是：{issue}" if prefix else f"新问题是：{issue}"
+    return _trim_sentence(text, 180)
+
+
 def _find_evidence(lines: list[str]) -> list[str]:
     evidence = _find_section(lines, "evidence")
+    if not evidence:
+        evidence = _find_section(lines, "executed_check")
     if not evidence:
         return []
     parts = re.split(r"[；;]\s*", evidence)
     return [_trim_sentence(part, 140) for part in parts if part.strip()][:3]
 
 
-def _find_claude_task(lines: list[str]) -> str:
+def _find_key_points(lines: list[str]) -> list[str]:
+    ranked: list[tuple[int, int, str]] = []
+    for idx, line in enumerate(lines):
+        normalized = _normalize_sentence(line)
+        if _looks_like_noise(normalized) or _is_heading_only(normalized):
+            continue
+        if not _KEY_POINT_RE.match(normalized):
+            continue
+        if _starts_with_low_value_prefix(normalized):
+            continue
+        point = _trim_sentence(normalized, 140)
+        if any(_same_key_point(point, existing[2]) for existing in ranked):
+            continue
+        ranked.append((_key_point_rank(normalized), idx, point))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [point for _, _, point in ranked[:5]]
+
+
+def _key_point_rank(text: str) -> int:
+    lowered = text.lower()
+    if text.startswith(("新问题", "老问题")):
+        return 0
+    if any(token in lowered for token in ("fail_closed", "risk_only")):
+        return 0
+    if any(token in lowered for token in (
+        "状态收敛",
+        "本地状态",
+        "真实交易所",
+        "reduce-only",
+        "http 400",
+        "bad request",
+        "local l2",
+    )):
+        return 1
+    if any(token in text for token in ("deploy_version", "Git HEAD", "HEAD=")):
+        return 2
+    if "开放仓位" in text:
+        return 3
+    return 4
+
+
+def _merge_evidence(evidence: list[str], key_points: list[str]) -> list[str]:
+    merged = [item for item in evidence if not _starts_with_low_value_prefix(item)]
+    for point in key_points:
+        if any(_same_key_point(point, existing) for existing in merged):
+            continue
+        merged.append(point)
+        if len(merged) >= 5:
+            break
+    return merged[:5]
+
+
+def _is_low_value_evidence(evidence: list[str]) -> bool:
+    return bool(evidence) and all(_starts_with_low_value_prefix(item) for item in evidence)
+
+
+def _starts_with_low_value_prefix(text: str) -> bool:
+    return _normalize_sentence(text).startswith(_LOW_VALUE_PREFIXES)
+
+
+def _same_key_point(left: str, right: str) -> bool:
+    left = _normalize_sentence(left)
+    right = _normalize_sentence(right)
+    return left in right or right in left
+
+
+def _is_heading_only(line: str) -> bool:
+    return _normalize_heading(line) in {
+        "结论",
+        "部署状态",
+        "新问题",
+        "老问题",
+        "已执行核验",
+        "核验结果",
+        "关键事实",
+        "事实",
+    }
+
+
+def _find_claude_task(text: str, lines: list[str]) -> str:
     task = _find_section(lines, "claude_task")
     if not task:
+        task = _find_markdown_claude_section(text)
+    if not task:
         return ""
-    return _brief_claude_task(task)
+    brief = _brief_claude_task(task)
+    return "" if _is_noop_instruction(brief) else brief
+
+
+def _find_markdown_claude_section(text: str) -> str:
+    body: list[str] = []
+    capturing = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        heading = _normalize_heading(line)
+        if capturing:
+            if heading in _KNOWN_MARKDOWN_SECTIONS:
+                break
+            body.append(raw_line.rstrip())
+            continue
+        if heading in _CLAUDE_SECTION_NAMES:
+            inline_value = _inline_section_value(line)
+            if inline_value and inline_value not in {"|", ">"}:
+                body.append(inline_value)
+            capturing = True
+    return _strip_code_fences("\n".join(body))
+
+
+def _normalize_heading(line: str) -> str:
+    line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line.strip())
+    line = re.sub(r"^\*\*(.+?)\*\*$", r"\1", line)
+    line = re.sub(r"^`(.+?)`$", r"\1", line)
+    line = line.rstrip(":：").strip()
+    return re.sub(r"\s+", " ", line).lower()
+
+
+def _inline_section_value(line: str) -> str:
+    match = re.match(r"^.*?[:：]\s*(.+)$", line)
+    return _normalize_sentence(match.group(1)) if match else ""
+
+
+def _strip_code_fences(text: str) -> str:
+    lines: list[str] = []
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def _with_claude_task(next_step: str, claude_task: str) -> str:
     if not claude_task:
         return next_step
+    if _looks_like_generic_next_step(next_step):
+        return f"交给 Claude 执行：{claude_task}"
     if "claude" not in next_step.lower():
         return f"{next_step}；Claude 任务：{claude_task}"
     generic = re.sub(r"[。.!！\s]+$", "", next_step)
@@ -131,13 +354,95 @@ def _with_claude_task(next_step: str, claude_task: str) -> str:
     return f"{generic}：{claude_task}"
 
 
+def _sanitize_next_step(next_step: str) -> str:
+    text = _normalize_sentence(next_step)
+    replacements = (
+        ("请重写方案或继续补充上下文", "请继续补充上下文"),
+        ("请查看全文、重写方案或继续补充上下文", "请查看全文或继续补充上下文"),
+        ("也可继续补充或重写方案", "也可继续补充或结束"),
+        ("也可继续补充、重写或结束", "也可继续补充或结束"),
+        ("继续补充、重写方案、", "继续补充、"),
+        ("继续补充、重写或结束", "继续补充或结束"),
+        ("、重写方案", ""),
+        ("、重写", ""),
+        ("重写方案、", ""),
+        ("重写方案或", ""),
+        ("重写或", ""),
+    )
+    for old, new in replacements:
+        text = text.replace(old, new)
+    text = re.sub(r"\s+", " ", text).strip(" ，,、")
+    return text or "请继续补充上下文。"
+
+
+def _looks_like_generic_next_step(next_step: str) -> bool:
+    normalized = _normalize_sentence(next_step).lower()
+    return (
+        "按下方按钮继续" in next_step
+        or "继续补充、重写或结束" in next_step
+        or normalized.startswith("可选：交给 claude")
+        or _normalize_sentence(next_step) in {"交给 Claude 执行", "交给 Claude"}
+    )
+
+
 def _brief_claude_task(task: str) -> str:
-    task = re.split(r"[；;。.!！\n]", _normalize_sentence(task), maxsplit=1)[0]
+    parts = [
+        _normalize_sentence(part)
+        for part in re.split(r"[；;。.!！\n]+", _strip_code_fences(task))
+    ]
+    candidates = [
+        part
+        for part in parts
+        if part and not _looks_like_claude_prompt_boilerplate(part)
+    ]
+    task = next(
+        (
+            part
+            for part in candidates
+            if re.search(r"(修复|实现|修改|排查|核验|验收|部署|解决|补充|检查)", part)
+        ),
+        candidates[0] if candidates else _normalize_sentence(task),
+    )
     task = re.sub(r"，?(?:让|并|同时)?下一步.*$", "", task)
     task = re.sub(r"，?(?:具体)?文件.*$", "", task)
     task = re.sub(r"，?目标.*$", "", task)
     task = re.sub(r"，?验收.*$", "", task)
     return _trim_sentence(task, 52)
+
+
+def _is_noop_instruction(text: str) -> bool:
+    normalized = _normalize_sentence(text).rstrip("。.!！?？").lower()
+    if not normalized:
+        return False
+    if normalized in _NOOP_NEXT_VALUES:
+        return True
+    return normalized.startswith((
+        "不需要",
+        "无需",
+        "无需交给",
+        "该任务无需",
+        "不要交给 claude",
+    ))
+
+
+def _infer_next_step(key_points: list[str], conclusion: str, risk: str) -> str:
+    combined = " ".join([*key_points, conclusion, risk]).lower()
+    if any(token in combined for token in ("状态收敛", "本地状态", "真实交易所", "残留")):
+        return "可选：交给 Claude 或 Codex 处理状态收敛/残留仓位问题，也可继续补充或结束"
+    if any(token in combined for token in ("平仓", "reduce-only", "http 400", "bad request")):
+        return "可选：交给 Claude 或 Codex 排查平仓失败，也可继续补充或结束"
+    if any(token in combined for token in ("bug", "问题", "风险", "异常", "失败", "优化")):
+        return "可选：交给 Claude 或 Codex 处理上述问题，也可继续补充或结束"
+    return "可选：继续补充、交给 Claude/Codex 处理或结束"
+
+
+def _looks_like_claude_prompt_boilerplate(part: str) -> bool:
+    lowered = part.lower()
+    return (
+        part.startswith(("不要启动", "本提示", "必须遵守", "完成后", "线上证据", "证据"))
+        or "仅作为后续实现任务交接使用" in part
+        or lowered in {"text", "yaml"}
+    )
 
 
 def _fallback_evidence(lines: list[str], *, skip: set[str]) -> list[str]:
@@ -178,11 +483,14 @@ def _render_digest(
     risk: str,
     next_step: str,
 ) -> str:
-    evidence_text = "；".join(evidence) if evidence else "未提取到明确证据。"
+    if evidence:
+        evidence_text = "\n" + "\n".join(f"- {_ensure_sentence(item)}" for item in evidence)
+    else:
+        evidence_text = "未提取到明确证据。"
     return (
         "关键摘要：\n"
         f"结论：{_ensure_sentence(conclusion)}\n"
-        f"依据：{_ensure_sentence(evidence_text)}\n"
+        f"依据：{evidence_text}\n"
         f"风险：{_ensure_sentence(risk)}\n"
         f"下一步：{_ensure_sentence(next_step)}"
     )

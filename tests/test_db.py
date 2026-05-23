@@ -564,3 +564,135 @@ def test_restore_conversation_archives_other_active_workbench(tmp_path: Path) ->
     assert restored.archived_at is None
     assert ledger.get_conversation(current.id).archived_at is not None
     assert ledger.get_active_conversation(10).id == old.id
+
+
+# --- Workbench carryover persistence ---
+
+
+def test_create_and_get_workbench_carryover(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    source = ledger.create_conversation(
+        chat_id=10,
+        user_id=1,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="lightfeev2",
+    )
+
+    carryover = ledger.create_workbench_carryover(
+        chat_id=10,
+        source_conversation_id=source.id,
+        workspace_alias="lightfeev2",
+        brief_text="<carryover_context>brief</carryover_context>",
+        preview_text="brief",
+        source_fingerprint="agent_runs=1",
+        status="ready",
+    )
+
+    loaded = ledger.get_workbench_carryover(carryover.id)
+    assert loaded.id == carryover.id
+    assert loaded.source_conversation_id == source.id
+    assert loaded.target_conversation_id is None
+    assert loaded.brief_text.startswith("<carryover_context>")
+
+
+def test_latest_prepared_carryover_by_chat(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    source = ledger.create_conversation(
+        chat_id=10,
+        user_id=1,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ledger.create_workbench_carryover(
+        chat_id=10,
+        source_conversation_id=source.id,
+        workspace_alias="wlcodex",
+        brief_text="old",
+        preview_text="old",
+        source_fingerprint="old",
+        status="cancelled",
+    )
+    prepared = ledger.create_workbench_carryover(
+        chat_id=10,
+        source_conversation_id=source.id,
+        workspace_alias="wlcodex",
+        brief_text="new",
+        preview_text="new",
+        source_fingerprint="new",
+        status="prepared",
+    )
+
+    loaded = ledger.get_latest_prepared_carryover(10)
+    assert loaded is not None
+    assert loaded.id == prepared.id
+
+
+def test_mark_carryover_used_links_target(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    source = ledger.create_conversation(
+        chat_id=10,
+        user_id=1,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    target = ledger.create_conversation(
+        chat_id=10,
+        user_id=1,
+        title="Target",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    carryover = ledger.create_workbench_carryover(
+        chat_id=10,
+        source_conversation_id=source.id,
+        workspace_alias="wlcodex",
+        brief_text="brief",
+        preview_text="brief",
+        source_fingerprint="fp",
+        status="prepared",
+    )
+
+    used = ledger.mark_workbench_carryover_used(carryover.id, target.id)
+
+    assert used.status == "used"
+    assert used.target_conversation_id == target.id
+    assert used.used_at is not None
+
+
+def test_list_carryover_evidence_from_conversation(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    conversation = ledger.create_conversation(
+        chat_id=10,
+        user_id=1,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    run = ledger.create_agent_run(
+        conversation_id=conversation.id,
+        agent="codex",
+        role="auto_analysis",
+        prompt_packet_summary="分析输入",
+    )
+    ledger.update_agent_run_status(run.id, "done", completion_summary="关键结论")
+    orch = ledger.create_orchestration_run(conversation.id, "目标")
+    ledger.update_orchestration_run(
+        orch.id,
+        status="needs_user",
+        current_step="draft_ready",
+        last_codex_analysis="最终方案摘要",
+    )
+
+    evidence = ledger.list_carryover_evidence(conversation.id)
+
+    assert len(evidence.agent_runs) >= 1
+    assert evidence.agent_runs[0].id == run.id
+    assert len(evidence.orchestration_runs) >= 1
+    assert evidence.orchestration_runs[0].id == orch.id

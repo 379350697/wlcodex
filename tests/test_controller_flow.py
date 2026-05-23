@@ -1544,7 +1544,8 @@ async def test_auto_send_to_claude_rejects_missing_visible_final_plan(
     ]
     assert "没有可见的最终方案正文" in response.text
     assert "交给 Claude 执行" not in labels
-    assert "重写方案" in labels
+    assert "继续补充" in labels
+    assert "重写方案" not in labels
     assert claude.prompts == []
 
 
@@ -1607,6 +1608,68 @@ async def test_auto_rewrite_plan_from_draft_ready_starts_final_plan_generation(
     assert "查看状态" in labels
     assert backend.prompt_turns == []
     assert backend.turns
+
+
+@pytest.mark.asyncio
+async def test_auto_continue_context_plain_text_stays_in_auto_flow(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_CONTINUE_CONTEXT,
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_CONTEXT_SUPPLEMENT,
+    )
+    from wlcodex.conversation_callback import ConversationCallback
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=StreamingClaudeWritesTrackedFile(workspace),
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(conversation.id, "查线上问题")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_DRAFT_READY,
+        last_codex_analysis="结论：已有方案。",
+    )
+
+    await ctrl.handle_conversation_callback(
+        ConversationCallback(
+            conversation_id=conversation.id,
+            action=AUTO_CONTINUE_CONTEXT,
+        )
+    )
+    response = await ctrl.handle_conversation_text(
+        "补充：需要列出新问题、老问题和是否开仓",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    agent_runs = ledger.list_agent_runs(conversation.id)
+    assert "已补充信息到当前 /auto 分析" in response.text
+    assert updated.status == "running"
+    assert updated.current_step == "collecting_context"
+    assert agent_runs[-1].role == ROLE_AUTO_CONTEXT_SUPPLEMENT
 
 
 @pytest.mark.asyncio
@@ -2420,3 +2483,524 @@ async def test_status_defaults_to_product_without_surface_event(
 
     assert "当前视图：驾驶舱" in response.text
     assert "模式：总工程师" in response.text
+
+
+# --- Workbench carryover controller tests ---
+
+
+@pytest.mark.asyncio
+async def test_carry_lists_workbench_candidates(ctrl: CommandController) -> None:
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="云上部署核验",
+        mode="chief_engineer",
+        workspace_alias="lightfeev2",
+    )
+    ctrl._ledger.update_conversation_summary(source.id, "ALTUSDT 状态收敛未闭环。")
+    ctrl._ledger.archive_conversation(source.id)
+
+    response = await ctrl.handle("/carry", {"chat_id": 100, "user_id": 7})
+
+    assert "可接棒历史工作台" in response.text
+    assert "云上部署核验" in response.text
+    labels = [button["text"] for row in (response.buttons or []) for button in row]
+    assert "接棒开新工作台" in labels
+    assert "查看接棒摘要" in labels
+    assert "刷新摘要" in labels
+
+
+@pytest.mark.asyncio
+async def test_carry_search_filters_workbenches(ctrl: CommandController) -> None:
+    hit = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="reduce-only 线上问题",
+        mode="chief_engineer",
+        workspace_alias="lightfeev2",
+    )
+    ctrl._ledger.update_conversation_summary(hit.id, "Binance reduce-only 仍失败。")
+    ctrl._ledger.archive_conversation(hit.id)
+    miss = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Telegram 摘要",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.archive_conversation(miss.id)
+
+    response = await ctrl.handle("/carry reduce-only", {"chat_id": 100, "user_id": 7})
+
+    assert "reduce-only 线上问题" in response.text
+    assert "Telegram 摘要" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_carry_by_id_prepares_next_goal_without_execution(ctrl: CommandController) -> None:
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="云上部署核验",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(source.id, "状态收敛未闭环。")
+    ctrl._ledger.archive_conversation(source.id)
+
+    response = await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+
+    assert f"准备从工作台 #{source.id} 接棒" in response.text
+    assert "请发送新任务目标" in response.text
+    prepared = ctrl._ledger.get_latest_prepared_carryover(100)
+    assert prepared is not None
+    assert prepared.source_conversation_id == source.id
+
+
+@pytest.mark.asyncio
+async def test_carry_show_callback_displays_full_brief(ctrl: CommandController) -> None:
+    from wlcodex.conversation_callback import CARRY_SHOW, ConversationCallback
+
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(source.id, "未闭环背景。")
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation_id=source.id, action=CARRY_SHOW)
+    )
+
+    assert "接棒摘要" in response.text
+    assert "<carryover_context>" in response.text
+    assert "未闭环背景" in response.text
+
+
+@pytest.mark.asyncio
+async def test_prepared_carryover_next_text_creates_new_workbench(ctrl: CommandController) -> None:
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="云上部署核验",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(source.id, "状态收敛未闭环。")
+    await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+
+    response = await ctrl.handle_conversation_text(
+        "继续查状态为什么没有收敛",
+        {"chat_id": 100, "user_id": 7},
+    )
+
+    active = ctrl._ledger.get_active_conversation(100)
+    carryover = ctrl._ledger.get_latest_prepared_carryover(100)
+    assert "已从工作台" in response.text
+    assert active is not None
+    assert active.id != source.id
+    assert active.workspace_alias == "wlcodex"
+    assert "<carryover_context>" in active.conversation_summary
+    assert "继续查状态为什么没有收敛" in active.conversation_summary
+    assert carryover is None
+
+
+@pytest.mark.asyncio
+async def test_new_command_does_not_consume_prepared_carryover(ctrl: CommandController) -> None:
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+
+    await ctrl.handle("/new Clean", {"chat_id": 100, "user_id": 7})
+
+    active = ctrl._ledger.get_active_conversation(100)
+    assert active is not None
+    assert active.title == "Clean"
+    assert "<carryover_context>" not in active.conversation_summary
+    assert ctrl._ledger.get_latest_prepared_carryover(100) is not None
+
+
+@pytest.mark.asyncio
+async def test_carryover_does_not_copy_old_runtime_state(ctrl: CommandController) -> None:
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.set_conversation_active_task(source.id, 123)
+    ctrl._ledger.set_conversation_active_claude_run(source.id, 456)
+    await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+
+    await ctrl.handle_conversation_text(
+        "新目标",
+        {"chat_id": 100, "user_id": 7},
+    )
+
+    active = ctrl._ledger.get_active_conversation(100)
+    assert active is not None
+    assert active.active_codex_task_id is None
+    assert active.active_claude_run_id is None
+    assert active.codex_thread_id == ""
+    assert active.claude_session_id == ""
+
+
+@pytest.mark.asyncio
+async def test_carry_rejects_source_from_another_chat(ctrl: CommandController) -> None:
+    source = ctrl._ledger.create_conversation(
+        chat_id=999,
+        user_id=7,
+        title="Other Chat",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+
+    response = await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+
+    assert "不能接棒其他聊天" in response.text
+
+
+@pytest.mark.asyncio
+async def test_sessions_remains_agent_session_scoped_after_carry(ctrl: CommandController) -> None:
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Source Workbench",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.create_agent_run(
+        conversation_id=source.id,
+        agent="codex",
+        role="analysis",
+        prompt_packet_summary="source run",
+    )
+    await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+    await ctrl.handle_conversation_text("新目标", {"chat_id": 100, "user_id": 7})
+
+    response = await ctrl.handle("/sessions", {"chat_id": 100, "user_id": 7})
+
+    assert "source run" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_carry_start_callback_prepares_carryover(ctrl: CommandController) -> None:
+    from wlcodex.conversation_callback import CARRY_START, ConversationCallback
+
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(source.id, "状态收敛。")
+    ctrl._ledger.archive_conversation(source.id)
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation_id=source.id, action=CARRY_START)
+    )
+
+    assert "准备从工作台" in response.text
+    assert "请发送新任务目标" in response.text
+    prepared = ctrl._ledger.get_latest_prepared_carryover(100)
+    assert prepared is not None
+
+
+@pytest.mark.asyncio
+async def test_carry_cancel_callback_cancels_prepared(ctrl: CommandController) -> None:
+    from wlcodex.conversation_callback import CARRY_CANCEL, ConversationCallback
+
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation_id=source.id, action=CARRY_CANCEL)
+    )
+
+    assert "已取消接棒" in response.text
+    assert ctrl._ledger.get_latest_prepared_carryover(100) is None
+
+
+@pytest.mark.asyncio
+async def test_carry_refresh_callback_shows_fresh_brief(ctrl: CommandController) -> None:
+    from wlcodex.conversation_callback import CARRY_REFRESH, ConversationCallback
+
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(source.id, "验证结果：状态收敛仍然失败。")
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation_id=source.id, action=CARRY_REFRESH)
+    )
+
+    assert "摘要已刷新" in response.text
+    assert "状态收敛仍然失败" in response.text
+    assert "<carryover_context>" in response.text
+
+
+@pytest.mark.asyncio
+async def test_carry_refresh_updates_prepared_brief_for_next_goal(ctrl: CommandController) -> None:
+    from wlcodex.conversation_callback import CARRY_REFRESH, ConversationCallback
+
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(source.id, "旧摘要：reduce-only 仍失败。")
+    await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+
+    ctrl._ledger.update_conversation_summary(source.id, "新摘要：状态收敛已修，剩余 WS 重连。")
+    await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation_id=source.id, action=CARRY_REFRESH)
+    )
+    await ctrl.handle_conversation_text(
+        "接着核验 WS 重连",
+        {"chat_id": 100, "user_id": 7},
+    )
+
+    active = ctrl._ledger.get_active_conversation(100)
+    assert active is not None
+    assert "新摘要：状态收敛已修，剩余 WS 重连" in active.conversation_summary
+    assert "旧摘要：reduce-only 仍失败" not in active.conversation_summary
+
+
+@pytest.mark.asyncio
+async def test_carryover_brief_includes_evidence_from_runs(ctrl: CommandController) -> None:
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Evidence Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(source.id, "背景摘要。")
+    codex_run = ctrl._ledger.create_agent_run(
+        conversation_id=source.id,
+        agent="codex",
+        role="auto_analysis",
+        prompt_packet_summary="分析输入",
+    )
+    ctrl._ledger.update_agent_run_status(
+        codex_run.id, "done", completion_summary="Codex 诊断：状态收敛失败。"
+    )
+    claude_run = ctrl._ledger.create_agent_run(
+        conversation_id=source.id,
+        agent="claude",
+        role="implementation",
+        prompt_packet_summary="执行输入",
+    )
+    ctrl._ledger.update_agent_run_status(
+        claude_run.id, "done", completion_summary="Claude 完成修复。"
+    )
+    orch = ctrl._ledger.create_orchestration_run(source.id, "目标")
+    ctrl._ledger.update_orchestration_run(
+        orch.id,
+        status="needs_user",
+        current_step="draft_ready",
+        last_codex_analysis="最终方案：修改收敛逻辑。",
+        last_verification_result="验收失败：reduce-only 仍报400。",
+    )
+
+    response = await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+
+    assert "准备从工作台" in response.text
+    prepared = ctrl._ledger.get_latest_prepared_carryover(100)
+    assert prepared is not None
+    brief = prepared.brief_text
+    assert "状态收敛失败" in brief
+    assert "Claude 完成修复" in brief
+    assert "验收失败" in brief
+    assert f"agent_run={codex_run.id}" in brief
+    assert f"orchestration_run={orch.id}" in brief
+
+
+@pytest.mark.asyncio
+async def test_new_carryover_cancels_previous_prepared(ctrl: CommandController) -> None:
+    first = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="First Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    second = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Second Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+
+    await ctrl.handle(f"/carry {first.id}", {"chat_id": 100, "user_id": 7})
+    await ctrl.handle(f"/carry {second.id}", {"chat_id": 100, "user_id": 7})
+
+    latest = ctrl._ledger.get_latest_prepared_carryover(100)
+    assert latest is not None
+    assert latest.source_conversation_id == second.id
+    # The first carryover should now be cancelled.
+    all_carryovers = ctrl._ledger._conn.execute(
+        "SELECT id, status FROM workbench_carryovers WHERE chat_id = ? ORDER BY id",
+        (100,),
+    ).fetchall()
+    statuses = {row["id"]: row["status"] for row in all_carryovers}
+    assert statuses[1] == "cancelled"
+    assert statuses[2] == "prepared"
+
+
+@pytest.mark.asyncio
+async def test_prepared_carryover_workspace_busy_does_not_archive(ctrl: CommandController) -> None:
+    """When target workspace is busy, carryover consumption must not archive
+    the current active workbench or consume the prepared carryover."""
+    source = ctrl._ledger.create_conversation(
+        chat_id=100, user_id=7,
+        title="Source", mode="chief_engineer", workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(source.id, "背景。")
+    # Prepare carryover for wlcodex workspace.
+    await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+    assert ctrl._ledger.get_latest_prepared_carryover(100) is not None
+
+    # Create a running task in the wlcodex workspace to make it busy.
+    blocker = ctrl._service.reserve_task("wlcodex", "正在执行的任务", telegram_chat_id=100)
+    ctrl._ledger.set_task_status(blocker.id, TaskStatus.RUNNING)
+
+    response = await ctrl.handle_conversation_text(
+        "继续查收敛",
+        {"chat_id": 100, "user_id": 7},
+    )
+
+    # Must report workspace busy, not silently consume.
+    assert "当前工作区正在执行" in response.text
+    # Prepared carryover must NOT be consumed.
+    prepared = ctrl._ledger.get_latest_prepared_carryover(100)
+    assert prepared is not None
+    assert prepared.status == "prepared"
+    # Current active workbench must NOT be archived (source is available since
+    # we didn't create an active workbench before this test).
+    source_check = ctrl._ledger.get_conversation(source.id)
+    assert source_check is not None
+
+
+@pytest.mark.asyncio
+async def test_prepared_carryover_workspace_busy_uses_standard_choice_card(
+    ctrl: CommandController,
+) -> None:
+    source = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Carry Source",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(source.id, "历史背景。")
+    ctrl._ledger.archive_conversation(source.id)
+    running = ctrl._ledger.create_conversation(
+        chat_id=100,
+        user_id=7,
+        title="Running Workbench",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    blocker = ctrl._service.reserve_task(
+        "wlcodex", "正在执行的任务", telegram_chat_id=100,
+    )
+    ctrl._ledger.set_conversation_active_task(running.id, blocker.id)
+    ctrl._ledger.set_task_status(blocker.id, TaskStatus.RUNNING)
+    await ctrl.handle(f"/carry {source.id}", {"chat_id": 100, "user_id": 7})
+
+    response = await ctrl.handle_conversation_text(
+        "接棒后继续查部署生效",
+        {"chat_id": 100, "user_id": 7},
+    )
+
+    assert "当前工作区正在执行" in response.text
+    labels = {button["text"] for row in response.buttons for button in row}
+    assert "发给当前 现场" in labels
+    assert "打断并执行这句" in labels
+    assert "排队稍后" in labels
+    assert "新开隔离现场" in labels
+    assert "先不处理" in labels
+    callback_ids = {
+        button["callback_data"].split(":", 1)[1]
+        for row in response.buttons
+        for button in row
+    }
+    assert callback_ids == {str(running.id)}
+    prepared = ctrl._ledger.get_latest_prepared_carryover(100)
+    assert prepared is not None
+    assert prepared.status == "prepared"
+
+
+@pytest.mark.asyncio
+async def test_carry_keyword_searches_agent_run_and_orch_run_summaries(ctrl: CommandController) -> None:
+    """Keyword search must match text in agent_run completion_summary and
+    orchestration_run fields, not just conversation title/summary."""
+    convo = ctrl._ledger.create_conversation(
+        chat_id=100, user_id=7,
+        title="普通工作台",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(convo.id, "日常维护。")
+    ctrl._ledger.archive_conversation(convo.id)
+    # Agent run with keyword in completion_summary.
+    run = ctrl._ledger.create_agent_run(
+        conversation_id=convo.id,
+        agent="codex", role="auto_analysis",
+        prompt_packet_summary="分析 reduce-only 问题",
+    )
+    ctrl._ledger.update_agent_run_status(
+        run.id, "done", completion_summary="reduce-only 400 错误仍未解决。",
+    )
+
+    response = await ctrl.handle("/carry reduce-only", {"chat_id": 100, "user_id": 7})
+
+    # Must find the conversation even though title/summary don't contain "reduce-only".
+    assert "普通工作台" in response.text
+
+
+@pytest.mark.asyncio
+async def test_carry_keyword_searches_orch_run_fields(ctrl: CommandController) -> None:
+    """Keyword in orchestration_run last_codex_analysis must match."""
+    convo = ctrl._ledger.create_conversation(
+        chat_id=100, user_id=7,
+        title="某次部署",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ctrl._ledger.update_conversation_summary(convo.id, "部署后检查。")
+    ctrl._ledger.archive_conversation(convo.id)
+    orch = ctrl._ledger.create_orchestration_run(convo.id, "检查状态收敛")
+    ctrl._ledger.update_orchestration_run(
+        orch.id,
+        status="needs_user",
+        current_step="draft_ready",
+        last_codex_analysis="诊断结论：ALTUSDT 状态收敛异常，本地与交易所不一致。",
+    )
+
+    response = await ctrl.handle("/carry ALTUSDT", {"chat_id": 100, "user_id": 7})
+
+    assert "某次部署" in response.text

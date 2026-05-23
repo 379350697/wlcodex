@@ -71,6 +71,7 @@ AUTO_VIEW_STATUS = "auto_view_status"
 # --- Agent run roles ---
 
 ROLE_AUTO_ANALYSIS = "auto_analysis"
+ROLE_AUTO_CONTEXT_SUPPLEMENT = "auto_context_supplement"
 ROLE_AUTO_FINAL_PLAN = "auto_final_plan"
 ROLE_AUTO_VERIFICATION = "auto_verification"
 ROLE_AUTO_IMPLEMENTATION = "auto_implementation"
@@ -128,19 +129,13 @@ def build_auto_stage_buttons(
     Each button text must clearly describe the action it triggers.
     No vague labels like "继续" are used.
 
-    When last_codex_analysis indicates needs_implementation: false,
-    Claude execution buttons are suppressed and the user is directed
-    to close the task or continue asking Codex.
+    Codex may suggest that no implementation is needed, but the user decides
+    whether to hand off, continue with more context, take over, or close.
     """
     def button(text: str, action: str) -> dict[str, str]:
         return {"text": text, "callback_data": f"conv:{conversation_id}:{action}"}
 
     has_visible_plan = bool(last_codex_analysis.strip())
-    no_impl = (
-        "needs_implementation: false" in last_codex_analysis.lower()
-        if last_codex_analysis else False
-    )
-
     if stage == AUTO_COLLECTING_CONTEXT:
         return [[
             button("生成最终方案", AUTO_FINAL_PLAN),
@@ -152,27 +147,16 @@ def build_auto_stage_buttons(
     if stage == AUTO_DRAFT_READY:
         if not has_visible_plan:
             return [[
-                button("重写方案", AUTO_REWRITE_PLAN),
                 button("继续补充", AUTO_CONTINUE_CONTEXT),
-            ], [
                 button("结束任务", AUTO_CLOSE),
-            ]]
-        if no_impl:
-            # Codex determined no implementation is needed — suppress Claude gate.
-            return [[
-                button("继续问 Codex", AUTO_CONTINUE_CONTEXT),
-                button("结束任务", AUTO_CLOSE),
-            ], [
-                button("查看当前草稿", AUTO_SHOW_DRAFT),
             ]]
         return [[
             button("交给 Claude 执行", AUTO_SEND_TO_CLAUDE),
             button("继续补充", AUTO_CONTINUE_CONTEXT),
         ], [
-            button("重写方案", AUTO_REWRITE_PLAN),
             button("查看当前草稿", AUTO_SHOW_DRAFT),
-        ], [
             button("Codex 接管修", AUTO_CODEX_TAKEOVER),
+        ], [
             button("结束任务", AUTO_CLOSE),
         ]]
 

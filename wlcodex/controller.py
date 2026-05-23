@@ -32,6 +32,10 @@ from wlcodex.conversation_state_machine import (
 )
 from wlcodex.conversation import default_title, mode_from_command
 from wlcodex.conversation_callback import (
+    CARRY_CANCEL,
+    CARRY_REFRESH,
+    CARRY_SHOW,
+    CARRY_START,
     CONTINUE,
     DIFF,
     NEW_CONVO,
@@ -78,6 +82,7 @@ from wlcodex.auto_workflow import (
     AUTO_VIEW_DIFF,
     AUTO_VIEW_STATUS,
     ROLE_AUTO_ANALYSIS,
+    ROLE_AUTO_CONTEXT_SUPPLEMENT,
     ROLE_AUTO_FINAL_PLAN,
     ROLE_AUTO_VERIFICATION,
     ROLE_AUTO_IMPLEMENTATION,
@@ -104,8 +109,15 @@ from wlcodex.runtime_events import (
     now_iso,
     safe_text_preview,
 )
+from wlcodex.carryover import (
+    CarryoverSource,
+    build_continuity_brief,
+    build_carryover_preview,
+    build_source_fingerprint,
+)
 from wlcodex.router import (
     AutoModeCommand,
+    CarryWorkbenchCommand,
     ClaudeDirectCommand,
     ClaudePermissionCommand,
     CodexDirectCommand,
@@ -129,8 +141,13 @@ from wlcodex.router import (
 )
 from wlcodex.status import (
     MODE_LABELS,
+    render_carryover_brief_view,
+    render_carryover_cancelled,
+    render_carryover_candidates,
+    render_carryover_target_created,
     render_conversation_help,
     render_conversation_status,
+    render_prepared_carryover,
     render_workbench_history,
     render_workspace_list,
 )
@@ -445,6 +462,9 @@ class CommandController:
             elif isinstance(command, VerifyCommand):
                 return await self.handle_verify(command, telegram_context)
 
+            elif isinstance(command, CarryWorkbenchCommand):
+                return await self.handle_carry_workbench(command, telegram_context)
+
             else:
                 return ControllerResponse("未处理的命令类型。")
 
@@ -511,6 +531,13 @@ class CommandController:
                 return await self.handle(text, telegram_context)
             except Exception:
                 return ControllerResponse("命令处理出错，请重试。")
+
+        # --- Consume pending carryover: next non-command text creates target ---
+        pending = self._ledger.get_latest_prepared_carryover(chat_id)
+        if pending is not None:
+            return await self._consume_prepared_carryover(
+                pending, text, telegram_context,
+            )
 
         # --- Get active conversation and its runtime state ---
         active = self._ledger.get_active_conversation(chat_id)
@@ -593,6 +620,43 @@ class CommandController:
                 original_text=text,
             )
 
+        # /auto owns plain text while its staged workflow is active.  This must
+        # run before the generic append/reanalysis route, otherwise supplement
+        # text cancels the auto run and falls back to long Codex-direct output.
+        if active is not None and self._ledger is not None:
+            auto_run = self._latest_active_auto_run(active.id)
+            if auto_run is not None:
+                step = getattr(auto_run, "current_step", "")
+
+                if step == AUTO_COLLECTING_CONTEXT:
+                    return await self._handle_auto_context_supplement(
+                        text, active, auto_run, telegram_context, cid
+                    )
+
+                if step == AUTO_DRAFT_READY:
+                    self._ledger.update_orchestration_run(
+                        auto_run.id,
+                        status="running",
+                        current_step=AUTO_COLLECTING_CONTEXT,
+                    )
+                    return await self._handle_auto_context_supplement(
+                        text, active, auto_run, telegram_context, cid
+                    )
+
+                if step in (AUTO_CLAUDE_DONE, AUTO_RETRY_READY):
+                    self._ledger.update_conversation_summary(
+                        active.id,
+                        trim_to_budget(
+                            f"{active.conversation_summary}\n[用户备注] {text[:200]}",
+                            ContextBudget().conversation_summary_tokens,
+                        ),
+                    )
+                    buttons = build_auto_stage_buttons(active.id, step)
+                    return ControllerResponse(
+                        f"已记录备注：{text[:100]}",
+                        buttons=buttons,
+                    )
+
         if decision.route == "append_active_conversation":
             return await self._handle_append_to_conversation(
                 decision, text, active, telegram_context, cid
@@ -657,46 +721,6 @@ class CommandController:
             occurred_at=now_iso(),
             conversation_id=active.id,
         ))
-
-        # --- Check for active auto workflow and route plain text per stage ---
-        if active is not None and self._ledger is not None:
-            auto_run = self._latest_active_auto_run(active.id)
-            if auto_run is not None:
-                step = getattr(auto_run, "current_step", "")
-
-                if step == AUTO_COLLECTING_CONTEXT:
-                    # Plain text supplements context, no Claude started.
-                    return await self._handle_auto_context_supplement(
-                        text, active, auto_run, telegram_context, cid
-                    )
-
-                if step == AUTO_DRAFT_READY:
-                    # Plain text means "continue discussing with Codex" —
-                    # return to collecting_context.
-                    self._ledger.update_orchestration_run(
-                        auto_run.id,
-                        status="running",
-                        current_step=AUTO_COLLECTING_CONTEXT,
-                    )
-                    return await self._handle_auto_context_supplement(
-                        text, active, auto_run, telegram_context, cid
-                    )
-
-                if step in (AUTO_CLAUDE_DONE, AUTO_RETRY_READY):
-                    # Plain text is a note for verification or repair revision.
-                    # Append to conversation summary and acknowledge, show current buttons.
-                    self._ledger.update_conversation_summary(
-                        active.id,
-                        trim_to_budget(
-                            f"{active.conversation_summary}\n[用户备注] {text[:200]}",
-                            ContextBudget().conversation_summary_tokens,
-                        ),
-                    )
-                    buttons = build_auto_stage_buttons(active.id, step)
-                    return ControllerResponse(
-                        f"已记录备注：{text[:100]}",
-                        buttons=buttons,
-                    )
 
         # --- Plain text: read-only Codex analysis by default.
         # Full Codex -> Claude -> Codex orchestration is explicit via /auto.
@@ -868,7 +892,7 @@ class CommandController:
         agent_run = self._ledger.create_agent_run(
             conversation_id=active.id,
             agent="codex",
-            role="auto_context_supplement",
+            role=ROLE_AUTO_CONTEXT_SUPPLEMENT,
             hidden_task_id=task.id,
             prompt_packet_summary=packet.summary(),
         )
@@ -2161,8 +2185,8 @@ class CommandController:
         claude_prompt = (orch_run.last_codex_analysis or "").strip()
         if not claude_prompt:
             return ControllerResponse(
-                "没有可见的最终方案正文，不能交给 Claude 执行。"
-                "请先重写方案或继续补充上下文。",
+                "没有可见的最终方案正文，不能交给 Claude 执行。\n"
+                "请先继续补充上下文。",
                 buttons=build_auto_stage_buttons(
                     convo.id,
                     orch_run.current_step,
@@ -2642,6 +2666,389 @@ class CommandController:
             f"{verification_text}"
         )
 
+    # --- Carryover handlers ---
+
+    async def handle_carry_workbench(
+        self, command: CarryWorkbenchCommand, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        query = command.query.strip()
+        if query.isdigit():
+            return await self._prepare_workbench_carryover(int(query), chat_id)
+        conversations = self._ledger.list_conversations_by_chat(
+            chat_id, limit=20, include_archived=True
+        )
+        # Build carryover sources for all candidates so we can deep-search.
+        candidates: list[tuple[object, CarryoverSource, str]] = []
+        for convo in conversations:
+            source = self._build_carryover_source(convo)
+            brief = build_continuity_brief(source)
+            candidates.append((convo, source, brief))
+        if query:
+            lowered = query.lower()
+            candidates = [
+                (convo, source, brief)
+                for convo, source, brief in candidates
+                if lowered in convo.title.lower()
+                or lowered in convo.workspace_alias.lower()
+                or lowered in convo.conversation_summary.lower()
+                or lowered in source.latest_codex_summary.lower()
+                or lowered in source.latest_claude_summary.lower()
+                or lowered in source.latest_verification_result.lower()
+                or lowered in brief.lower()
+            ]
+        # Render up to 8 candidates with previews.
+        items: list[tuple] = [
+            (convo, build_carryover_preview(source))
+            for convo, source, _brief in candidates[:8]
+        ]
+        buttons = self._carryover_candidate_buttons(
+            [item[0] for item in items]
+        )
+        return ControllerResponse(
+            render_carryover_candidates(items), buttons=buttons,
+        )
+
+    def _build_carryover_source(
+        self, conversation: object
+    ) -> CarryoverSource:
+        evidence = self._ledger.list_carryover_evidence(conversation.id)  # type: ignore[union-attr]
+        agent_runs = evidence.agent_runs
+        orch_runs = evidence.orchestration_runs
+        latest_codex = next(
+            (
+                r.completion_summary
+                for r in agent_runs
+                if r.agent == "codex" and r.completion_summary
+            ),
+            "",
+        )
+        latest_claude = next(
+            (
+                r.completion_summary
+                for r in agent_runs
+                if r.agent == "claude" and r.completion_summary
+            ),
+            "",
+        )
+        # Fall back to orchestration_run fields when agent_runs don't have summaries.
+        if not latest_codex:
+            latest_codex = next(
+                (r.last_codex_analysis for r in orch_runs if r.last_codex_analysis),
+                "",
+            )
+        if not latest_claude:
+            latest_claude = next(
+                (r.last_claude_summary for r in orch_runs if r.last_claude_summary),
+                "",
+            )
+        latest_verification = next(
+            (
+                r.last_verification_result
+                for r in orch_runs
+                if r.last_verification_result
+            ),
+            "",
+        )
+        refs = [
+            *(f"agent_run={run.id}:{run.agent}/{run.role}/{run.status}" for run in agent_runs[:3]),
+            *(f"orchestration_run={run.id}:{run.status}/{run.current_step}" for run in orch_runs[:3]),
+        ]
+        return CarryoverSource(
+            source_conversation_id=conversation.id,
+            title=conversation.title,
+            workspace_alias=conversation.workspace_alias,
+            conversation_summary=conversation.conversation_summary,
+            latest_codex_summary=latest_codex,
+            latest_claude_summary=latest_claude,
+            latest_verification_result=latest_verification,
+            evidence_refs=refs,
+        )
+
+    def _carryover_candidate_buttons(
+        self, conversations: list
+    ) -> list[list[dict[str, str]]]:
+        button_rows: list[list[dict[str, str]]] = []
+        for convo in conversations:
+            button_rows.append([
+                {
+                    "text": "接棒开新工作台",
+                    "callback_data": encode_conversation_callback(convo.id, CARRY_START),
+                },
+                {
+                    "text": "查看接棒摘要",
+                    "callback_data": encode_conversation_callback(convo.id, CARRY_SHOW),
+                },
+                {
+                    "text": "刷新摘要",
+                    "callback_data": encode_conversation_callback(convo.id, CARRY_REFRESH),
+                },
+            ])
+        return button_rows
+
+    async def _cancel_previous_prepared_for_chat(
+        self, chat_id: int,
+    ) -> None:
+        """Cancel all previously prepared carryovers for this chat."""
+        if self._ledger is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self._ledger._conn.execute(
+            """
+            UPDATE workbench_carryovers
+            SET status = 'cancelled', updated_at = ?
+            WHERE chat_id = ? AND status = 'prepared'
+            """,
+            (now, chat_id),
+        )
+        self._ledger._conn.commit()
+
+    async def _prepare_workbench_carryover(
+        self, source_conversation_id: int, chat_id: int
+    ) -> ControllerResponse:
+        try:
+            source_convo = self._ledger.get_conversation(source_conversation_id)  # type: ignore[union-attr]
+        except KeyError:
+            return ControllerResponse("工作台不存在或已被删除。")
+        if source_convo.chat_id != chat_id:
+            return ControllerResponse("不能接棒其他聊天里的工作台。")
+        await self._cancel_previous_prepared_for_chat(chat_id)
+        source = self._build_carryover_source(source_convo)
+        brief = build_continuity_brief(source)
+        preview = build_carryover_preview(source)
+        fingerprint = build_source_fingerprint(
+            conversation_id=source_convo.id,
+            latest_agent_run_ids=[
+                run.id
+                for run in self._ledger.list_recent_agent_runs(source_convo.id, limit=5)  # type: ignore[union-attr]
+            ],
+            latest_orchestration_run_ids=[
+                run.id
+                for run in self._ledger.list_orchestration_runs(source_convo.id, limit=5)  # type: ignore[union-attr]
+            ],
+        )
+        self._ledger.create_workbench_carryover(  # type: ignore[union-attr]
+            chat_id=chat_id,
+            source_conversation_id=source_convo.id,
+            workspace_alias=source_convo.workspace_alias,
+            brief_text=brief,
+            preview_text=preview,
+            source_fingerprint=fingerprint,
+            status="prepared",
+        )
+        return ControllerResponse(
+            render_prepared_carryover(
+                source_conversation_id=source_convo.id,
+                source_title=source_convo.title,
+                workspace_alias=source_convo.workspace_alias,
+                preview=preview,
+            ),
+            buttons=[[
+                {
+                    "text": "查看接棒摘要",
+                    "callback_data": encode_conversation_callback(source_convo.id, CARRY_SHOW),
+                },
+                {
+                    "text": "取消接棒",
+                    "callback_data": encode_conversation_callback(source_convo.id, CARRY_CANCEL),
+                },
+            ]],
+        )
+
+    async def _handle_carry_start(
+        self, convo: object,
+    ) -> ControllerResponse:
+        return await self._prepare_workbench_carryover(convo.id, convo.chat_id)
+
+    async def _handle_carry_show(
+        self, convo: object,
+    ) -> ControllerResponse:
+        source = self._build_carryover_source(convo)
+        brief = build_continuity_brief(source)
+        buttons: list[list[dict[str, str]]] = [[
+            {
+                "text": "刷新摘要",
+                "callback_data": encode_conversation_callback(convo.id, CARRY_REFRESH),
+            },
+        ]]
+        return ControllerResponse(
+            render_carryover_brief_view(
+                source_conversation_id=convo.id, brief_text=brief,
+            ),
+            buttons=buttons,
+        )
+
+    async def _handle_carry_refresh(
+        self, convo: object,
+    ) -> ControllerResponse:
+        source = self._build_carryover_source(convo)
+        brief = build_continuity_brief(source)
+        preview = build_carryover_preview(source)
+        prepared = self._ledger.get_latest_prepared_carryover(convo.chat_id)  # type: ignore[union-attr]
+        if prepared is not None and prepared.source_conversation_id == convo.id:
+            fingerprint = build_source_fingerprint(
+                conversation_id=convo.id,
+                latest_agent_run_ids=[
+                    run.id
+                    for run in self._ledger.list_recent_agent_runs(convo.id, limit=5)  # type: ignore[union-attr]
+                ],
+                latest_orchestration_run_ids=[
+                    run.id
+                    for run in self._ledger.list_orchestration_runs(convo.id, limit=5)  # type: ignore[union-attr]
+                ],
+            )
+            self._ledger.update_workbench_carryover_brief(  # type: ignore[union-attr]
+                prepared.id,
+                brief_text=brief,
+                preview_text=preview,
+                source_fingerprint=fingerprint,
+            )
+        buttons: list[list[dict[str, str]]] = [[
+            {
+                "text": "接棒开新工作台",
+                "callback_data": encode_conversation_callback(convo.id, CARRY_START),
+            },
+        ]]
+        return ControllerResponse(
+            "摘要已刷新。\n\n"
+            + render_carryover_brief_view(
+                source_conversation_id=convo.id, brief_text=brief,
+            ),
+            buttons=buttons,
+        )
+
+    async def _handle_carry_cancel(
+        self, convo: object,
+    ) -> ControllerResponse:
+        chat_id = convo.chat_id
+        if chat_id:
+            prepared = self._ledger.get_latest_prepared_carryover(chat_id)  # type: ignore[union-attr]
+            if prepared is not None:
+                self._ledger.update_workbench_carryover_status(prepared.id, "cancelled")  # type: ignore[union-attr]
+        return ControllerResponse(render_carryover_cancelled())
+
+    async def _consume_prepared_carryover(
+        self,
+        carryover: object,
+        text: str,
+        ctx: dict[str, Any] | None,
+    ) -> ControllerResponse:
+        chat_id = (
+            ctx.get("chat_id", 0)
+            if ctx
+            else getattr(carryover, "chat_id", 0)
+        )
+        user_id = ctx.get("user_id", 0) if ctx else 0
+        try:
+            source = self._ledger.get_conversation(carryover.source_conversation_id)  # type: ignore[union-attr]
+        except KeyError:
+            self._ledger.update_workbench_carryover_status(carryover.id, "cancelled")  # type: ignore[union-attr]
+            return ControllerResponse("接棒来源工作台已不存在，已取消。")
+        if source.chat_id != chat_id:
+            self._ledger.update_workbench_carryover_status(carryover.id, "cancelled")  # type: ignore[union-attr]
+            return ControllerResponse("接棒来源不属于当前聊天，已取消。")
+        try:
+            self._service.get_workspace(carryover.workspace_alias)
+        except Exception:
+            return ControllerResponse(
+                f"来源工作区 {carryover.workspace_alias} 当前未配置。"
+                "请先在配置中加入该工作区，或取消接棒后使用 /switch。"
+            )
+        blocker = self._service.blocker_for_workspace(carryover.workspace_alias)
+        if blocker is not None:
+            busy_convo = self._find_workspace_busy_conversation(
+                chat_id=chat_id,
+                workspace_alias=carryover.workspace_alias,
+                blocking_task_id=blocker.id,
+            )
+            decision = RouteDecision(
+                route="workspace_busy",
+                reason="carryover_workspace_busy",
+                new_conversation=False,
+                intent="normal_text",
+            )
+            response = await self._handle_workspace_busy(
+                decision,
+                busy_convo or source,
+                blocker.id,
+                None,
+                self._new_correlation_id(),
+                original_text=text,
+                agent_label="现场",
+            )
+            return ControllerResponse(
+                response.text + "\n\n接棒状态已保留，不会丢失。",
+                buttons=response.buttons,
+            )
+        old = self._ledger.get_active_conversation(chat_id)  # type: ignore[union-attr]
+        if old is not None:
+            self._ledger.archive_conversation(old.id)  # type: ignore[union-attr]
+        title = default_title(text)
+        target = self._ledger.create_conversation(  # type: ignore[union-attr]
+            chat_id=chat_id,
+            user_id=user_id,
+            title=title,
+            mode=self._default_mode,
+            workspace_alias=carryover.workspace_alias,
+        )
+        summary = trim_to_budget(
+            f"{carryover.brief_text}\n\n当前用户新任务：{text[:500]}",
+            ContextBudget().conversation_summary_tokens,
+        )
+        self._ledger.update_conversation_summary(target.id, summary)  # type: ignore[union-attr]
+        self._ledger.mark_workbench_carryover_used(carryover.id, target.id)  # type: ignore[union-attr]
+        return ControllerResponse(
+            render_carryover_target_created(
+                source_conversation_id=source.id,
+                target_title=target.title,
+                workspace_alias=target.workspace_alias,
+            ),
+            buttons=[[
+                {
+                    "text": "查看状态",
+                    "callback_data": encode_conversation_callback(target.id, STATUS),
+                },
+            ]],
+        )
+
+    def _find_workspace_busy_conversation(
+        self,
+        *,
+        chat_id: int,
+        workspace_alias: str,
+        blocking_task_id: int | None,
+    ) -> object | None:
+        if self._ledger is None:
+            return None
+        candidates: list[object] = []
+        active = self._ledger.get_active_conversation(chat_id)
+        if active is not None:
+            candidates.append(active)
+        for convo in self._ledger.list_conversations_by_chat(
+            chat_id, limit=20, include_archived=False
+        ):
+            if active is not None and convo.id == active.id:
+                continue
+            candidates.append(convo)
+
+        workspace_candidates = [
+            convo
+            for convo in candidates
+            if getattr(convo, "workspace_alias", "") == workspace_alias
+        ]
+        if blocking_task_id is not None:
+            for convo in workspace_candidates:
+                if getattr(convo, "active_codex_task_id", None) == blocking_task_id:
+                    return convo
+        for convo in workspace_candidates:
+            if getattr(convo, "active_codex_task_id", None) or getattr(
+                convo, "active_claude_run_id", None
+            ):
+                return convo
+        return workspace_candidates[0] if workspace_candidates else None
+
     async def _handle_restore_workbench(self, conversation_id: int) -> ControllerResponse:
         if self._ledger is None:
             return ControllerResponse("系统未完全初始化。请检查配置。")
@@ -3026,6 +3433,16 @@ class CommandController:
                 "/status",
                 {"chat_id": convo.chat_id, "user_id": convo.user_id},
             )
+
+        # --- Carryover callback actions ---
+        if callback.action == CARRY_START:
+            return await self._handle_carry_start(convo)
+        elif callback.action == CARRY_SHOW:
+            return await self._handle_carry_show(convo)
+        elif callback.action == CARRY_REFRESH:
+            return await self._handle_carry_refresh(convo)
+        elif callback.action == CARRY_CANCEL:
+            return await self._handle_carry_cancel(convo)
 
         # --- Original callback actions ---
         if callback.action == RESTORE_WORKBENCH:

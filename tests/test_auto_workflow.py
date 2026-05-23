@@ -170,13 +170,13 @@ class TestBuildAutoStageButtons:
 
         assert "交给 Claude 执行" in labels
         assert "继续补充" in labels
-        assert "重写方案" in labels
         assert "查看当前草稿" in labels
         assert "Codex 接管修" in labels
         assert "结束任务" in labels
         assert AUTO_SEND_TO_CLAUDE in actions
         assert AUTO_CONTINUE_CONTEXT in actions
-        assert AUTO_REWRITE_PLAN in actions
+        assert "重写方案" not in labels
+        assert AUTO_REWRITE_PLAN not in actions
         assert AUTO_SHOW_DRAFT in actions
         assert AUTO_CODEX_TAKEOVER in actions
         assert AUTO_CLOSE in actions
@@ -188,13 +188,13 @@ class TestBuildAutoStageButtons:
 
         assert "交给 Claude 执行" not in labels
         assert AUTO_SEND_TO_CLAUDE not in actions
-        assert "重写方案" in labels
         assert "继续补充" in labels
         assert "结束任务" in labels
+        assert "重写方案" not in labels
+        assert AUTO_REWRITE_PLAN not in actions
 
-    def test_draft_ready_no_implementation_suppresses_claude_gate(self) -> None:
-        """When Codex says needs_implementation: false, draft_ready must not
-        offer Claude execution; must offer 结束任务 and 继续问 Codex."""
+    def test_draft_ready_no_implementation_still_preserves_user_choice(self) -> None:
+        """Codex can suggest no implementation, but the user decides next action."""
         buttons = build_auto_stage_buttons(
             42, AUTO_DRAFT_READY,
             last_codex_analysis="needs_implementation: false\n无需修改代码。",
@@ -202,11 +202,17 @@ class TestBuildAutoStageButtons:
         labels = _labels(buttons)
         actions = _actions(buttons)
 
-        assert "交给 Claude 执行" not in labels
-        assert AUTO_SEND_TO_CLAUDE not in actions
-        assert "继续问 Codex" in labels
+        assert "交给 Claude 执行" in labels
+        assert "继续补充" in labels
+        assert "查看当前草稿" in labels
+        assert "Codex 接管修" in labels
         assert "结束任务" in labels
+        assert AUTO_SEND_TO_CLAUDE in actions
         assert AUTO_CONTINUE_CONTEXT in actions
+        assert "重写方案" not in labels
+        assert AUTO_REWRITE_PLAN not in actions
+        assert AUTO_SHOW_DRAFT in actions
+        assert AUTO_CODEX_TAKEOVER in actions
         assert AUTO_CLOSE in actions
 
     def test_claude_running_buttons(self) -> None:

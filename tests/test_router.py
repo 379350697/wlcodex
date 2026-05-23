@@ -164,3 +164,24 @@ def test_parse_exec_mode_command() -> None:
 
     assert isinstance(command, ExecModeCommand)
     assert command.mode_name == "codex_direct"
+
+
+def test_parse_carry_command_without_query() -> None:
+    from wlcodex.router import CarryWorkbenchCommand, parse_command
+
+    cmd = parse_command("/carry")
+
+    assert isinstance(cmd, CarryWorkbenchCommand)
+    assert cmd.query == ""
+
+
+def test_parse_carry_command_with_workbench_id_or_query() -> None:
+    from wlcodex.router import CarryWorkbenchCommand, parse_command
+
+    by_id = parse_command("/carry 36")
+    by_query = parse_command("/carry lightfeev2 状态收敛")
+
+    assert isinstance(by_id, CarryWorkbenchCommand)
+    assert by_id.query == "36"
+    assert isinstance(by_query, CarryWorkbenchCommand)
+    assert by_query.query == "lightfeev2 状态收敛"

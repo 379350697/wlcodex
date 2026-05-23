@@ -453,6 +453,68 @@ def render_runtime_status_lines(
     return lines
 
 
+# --- Carryover renderers ---
+
+
+def render_carryover_candidates(
+    items: Sequence[tuple[ConversationSession, str]]
+) -> str:
+    if not items:
+        return "没有找到可接棒的历史工作台。可以换个关键词，或用 /new 开始干净工作台。"
+    lines = ["可接棒历史工作台", ""]
+    for session, preview in items:
+        lines.append(
+            f"#{session.id} {_trim(session.title, 36)} · {session.workspace_alias} · {_format_dt(session.updated_at)}"
+        )
+        lines.append(f"摘要：{_trim(preview, 120)}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def render_prepared_carryover(
+    *,
+    source_conversation_id: int,
+    source_title: str,
+    workspace_alias: str,
+    preview: str,
+) -> str:
+    return "\n".join([
+        f"准备从工作台 #{source_conversation_id} 接棒",
+        f"来源：{_trim(source_title, 60)}",
+        f"工作区：{workspace_alias}",
+        "",
+        "接棒摘要：",
+        _trim(preview, 220),
+        "",
+        "请发送新任务目标。",
+        "",
+        "说明：新工作台只继承接棒摘要，不继承旧会话全文、旧执行状态、旧权限或旧终端现场，也不会启动 Claude。",
+    ])
+
+
+def render_carryover_brief_view(
+    *, source_conversation_id: int, brief_text: str
+) -> str:
+    return f"接棒摘要 · 来源工作台 #{source_conversation_id}\n\n{brief_text}"
+
+
+def render_carryover_target_created(
+    *,
+    source_conversation_id: int,
+    target_title: str,
+    workspace_alias: str,
+) -> str:
+    return (
+        f"已从工作台 #{source_conversation_id} 接棒，创建新工作台：「{target_title}」\n"
+        f"工作区：{workspace_alias}\n\n"
+        "接棒摘要已带入。直接发消息会让 Codex 基于当前目标分析；也可以使用 /auto。"
+    )
+
+
+def render_carryover_cancelled() -> str:
+    return "已取消接棒。可以重新 /carry 或使用 /new 开始干净工作台。"
+
+
 def render_agent_result_summary(result: AgentRun) -> str:
     parts = [f"运行 #{result.id}"]
     parts.append(f"类型：{result.agent} / {result.role}")

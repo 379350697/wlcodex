@@ -21,6 +21,12 @@ RESTORE_WORKBENCH = "restore_workbench"
 WORKBENCH_STATUS = "workbench_status"
 WORKBENCH_SESSIONS = "workbench_sessions"
 
+# Workbench carryover callback actions
+CARRY_START = "carry_start"
+CARRY_SHOW = "carry_show"
+CARRY_REFRESH = "carry_refresh"
+CARRY_CANCEL = "carry_cancel"
+
 # Staged-auto callback actions (imported from auto_workflow for use in
 # callback-data encoding). These are re-exported here so that controller.py
 # and telegram_app.py can import them from one location.

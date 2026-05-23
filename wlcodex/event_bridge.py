@@ -316,7 +316,10 @@ class EventBridge:
         task = self._service._find_by_thread(thread_id)
         if task is None or task.telegram_chat_id is None:
             return
-        if self._service.is_orchestration_managed_task(task.id):
+        if (
+            self._service.is_orchestration_managed_task(task.id)
+            or self._is_staged_auto_agent_task(task.id)
+        ):
             return
         delta = str(event.payload.get("delta", ""))
         if not delta:
@@ -337,6 +340,8 @@ class EventBridge:
         if self._interaction_renderer is None:
             return
         if task.telegram_chat_id is None:
+            return
+        if self._is_staged_auto_agent_task(int(task.id)):
             return
         from wlcodex.interaction.events import InteractionEvent
 
@@ -370,6 +375,20 @@ class EventBridge:
         if assembled:
             return assembled
         return str(getattr(task, "last_summary", "") or "").strip()
+
+    def _is_staged_auto_agent_task(self, task_id: int) -> bool:
+        row = self._ledger._conn.execute(
+            """
+            SELECT role FROM agent_runs
+            WHERE hidden_task_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        return str(row["role"] or "").startswith("auto_")
 
     def _sync_direct_agent_run_status(self, task: object) -> None:
         task_id = getattr(task, "id", None)
@@ -506,6 +525,8 @@ class EventBridge:
             AUTO_RETRY_READY,
             AUTO_CODEX_TAKEOVER_RUNNING,
             AUTO_COMPLETED,
+            ROLE_AUTO_ANALYSIS,
+            ROLE_AUTO_CONTEXT_SUPPLEMENT,
         )
 
         task_id = int(getattr(task, "id"))
@@ -548,7 +569,7 @@ class EventBridge:
         new_step: str | None = None
 
         # Advance based on agent role and completion
-        if agent_role == "auto_analysis" and agent_status == "done":
+        if agent_role in (ROLE_AUTO_ANALYSIS, ROLE_AUTO_CONTEXT_SUPPLEMENT) and agent_status == "done":
             # Context collection or supplement completed → stay in collecting_context
             # The user can still add more context and now click "生成最终方案".
             new_step = AUTO_COLLECTING_CONTEXT
@@ -556,6 +577,7 @@ class EventBridge:
                 auto_run.id,
                 status="needs_user",
                 current_step=new_step,
+                last_codex_analysis=completion_summary[:5000] if completion_summary else "",
             )
 
         elif agent_role == "auto_final_plan" and agent_status == "done":
@@ -643,18 +665,25 @@ class EventBridge:
         # Include orch run data in the message for draft_ready
         stage_label = auto_stage_label(new_stage)
         if new_stage == "collecting_context":
-            text = (
-                "Codex 已完成上下文收集。\n\n"
-                "你可以继续补充信息，或生成最终方案。"
-            )
+            if auto_run.last_codex_analysis:
+                digest = render_auto_draft_digest(
+                    auto_run.last_codex_analysis,
+                    fallback_next="继续补充信息，或点击生成最终方案。",
+                )
+                text = f"Codex 已更新分析。\n\n{digest}\n\n请选择下一步："
+            else:
+                text = (
+                    "Codex 已完成上下文收集。\n\n"
+                    "你可以继续补充信息，或生成最终方案。"
+                )
         elif new_stage == "draft_ready" and auto_run.last_codex_analysis:
             digest = render_auto_draft_digest(auto_run.last_codex_analysis)
             text = f"最终方案已生成。\n\n{digest}\n\n请选择下一步："
         elif new_stage == "draft_ready":
             text = (
                 "最终方案生成完成，但没有收到方案正文。\n\n"
-                "为避免黑盒执行，暂不提供 Claude 执行入口。"
-                "请重写方案或继续补充上下文。"
+                "为避免黑盒执行，暂不提供 Claude 执行入口。\n"
+                "请继续补充上下文。"
             )
         elif new_stage == "claude_done":
             digest = render_auto_draft_digest(auto_run.last_claude_summary or "结论：完成。")

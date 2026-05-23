@@ -848,6 +848,23 @@ class WlCodexHandlers:
         response = await self._controller.handle("/health", _ctx(update))
         await self.send_telegram(update.effective_chat.id, response.text)
 
+    # --- Workbench carryover commands ---
+
+    async def carry(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._guard(update):
+            return
+        chat_id = update.effective_chat.id
+        typing_task = await self._start_typing(chat_id)
+        try:
+            response = await self._controller.handle(
+                update.effective_message.text, _ctx(update)
+            )
+        finally:
+            typing_task.cancel()
+        if response.already_rendered:
+            return
+        await self._reply_with_buttons(update, response.text, response.buttons)
+
     # --- Workbench history and workspace commands ---
 
     async def workbenches(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2445,6 +2462,9 @@ def build_application(
     application.add_handler(CommandHandler("workbenches", handlers.workbenches))
     application.add_handler(CommandHandler("history", handlers.workbenches))
     application.add_handler(CommandHandler("workspaces", handlers.workspaces))
+
+    # Workbench carryover command
+    application.add_handler(CommandHandler("carry", handlers.carry))
 
     # Dual-surface mode commands
     application.add_handler(CommandHandler("mode", handlers.mode_cmd))

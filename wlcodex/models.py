@@ -233,6 +233,28 @@ class OrchestrationDecision:
 
 
 @dataclass(frozen=True)
+class WorkbenchCarryover:
+    id: int
+    chat_id: int
+    source_conversation_id: int
+    target_conversation_id: int | None
+    workspace_alias: str
+    brief_text: str
+    preview_text: str
+    source_fingerprint: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    used_at: datetime | None
+
+
+@dataclass(frozen=True)
+class CarryoverEvidence:
+    agent_runs: list[AgentRun] = field(default_factory=list)
+    orchestration_runs: list[OrchestrationRun] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class UsageEvent:
     """Append-only usage ledger entry for a single model request or workflow event."""
     id: int

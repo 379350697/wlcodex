@@ -14,6 +14,7 @@ from wlcodex.models import (
     ApprovalStatus,
     BackendRequest,
     BackendRequestStatus,
+    CarryoverEvidence,
     ConversationSession,
     OrchestrationDecision,
     OrchestrationRun,
@@ -23,6 +24,7 @@ from wlcodex.models import (
     TaskStatus,
     TouchedFile,
     UsageEvent,
+    WorkbenchCarryover,
 )
 
 
@@ -314,6 +316,29 @@ class Ledger:
                 ON runtime_events(agent_run_id, id);
             CREATE INDEX IF NOT EXISTS idx_runtime_events_event_type
                 ON runtime_events(event_type, id);
+
+            CREATE TABLE IF NOT EXISTS workbench_carryovers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                source_conversation_id INTEGER NOT NULL,
+                target_conversation_id INTEGER,
+                workspace_alias TEXT NOT NULL,
+                brief_text TEXT NOT NULL DEFAULT '',
+                preview_text TEXT NOT NULL DEFAULT '',
+                source_fingerprint TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'ready',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                used_at TEXT,
+                FOREIGN KEY(source_conversation_id) REFERENCES conversation_sessions(id),
+                FOREIGN KEY(target_conversation_id) REFERENCES conversation_sessions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_workbench_carryovers_chat_status
+                ON workbench_carryovers(chat_id, status, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_workbench_carryovers_source
+                ON workbench_carryovers(source_conversation_id, updated_at DESC);
             """
         )
 
@@ -1459,6 +1484,126 @@ class Ledger:
         return [_orchestration_decision(row) for row in rows]
 
 
+    # --- Workbench carryovers ---
+
+    def create_workbench_carryover(
+        self,
+        *,
+        chat_id: int,
+        source_conversation_id: int,
+        workspace_alias: str,
+        brief_text: str,
+        preview_text: str,
+        source_fingerprint: str,
+        status: str = "ready",
+    ) -> WorkbenchCarryover:
+        now = _now()
+        cur = self._conn.execute(
+            """
+            INSERT INTO workbench_carryovers (
+                chat_id, source_conversation_id, workspace_alias, brief_text,
+                preview_text, source_fingerprint, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id, source_conversation_id, workspace_alias, brief_text,
+                preview_text, source_fingerprint, status, now, now,
+            ),
+        )
+        self._conn.commit()
+        return self.get_workbench_carryover(int(cur.lastrowid))
+
+    def get_workbench_carryover(self, carryover_id: int) -> WorkbenchCarryover:
+        row = self._conn.execute(
+            "SELECT * FROM workbench_carryovers WHERE id = ?",
+            (carryover_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown workbench carryover id: {carryover_id}")
+        return _workbench_carryover(row)
+
+    def get_latest_prepared_carryover(
+        self, chat_id: int
+    ) -> WorkbenchCarryover | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM workbench_carryovers
+            WHERE chat_id = ? AND status = 'prepared'
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (chat_id,),
+        ).fetchone()
+        return _workbench_carryover(row) if row else None
+
+    def mark_workbench_carryover_used(
+        self, carryover_id: int, target_conversation_id: int
+    ) -> WorkbenchCarryover:
+        now = _now()
+        self._conn.execute(
+            """
+            UPDATE workbench_carryovers
+            SET status = 'used',
+                target_conversation_id = ?,
+                used_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (target_conversation_id, now, now, carryover_id),
+        )
+        self._conn.commit()
+        return self.get_workbench_carryover(carryover_id)
+
+    def update_workbench_carryover_brief(
+        self,
+        carryover_id: int,
+        *,
+        brief_text: str,
+        preview_text: str,
+        source_fingerprint: str,
+    ) -> WorkbenchCarryover:
+        now = _now()
+        self._conn.execute(
+            """
+            UPDATE workbench_carryovers
+            SET brief_text = ?,
+                preview_text = ?,
+                source_fingerprint = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (brief_text, preview_text, source_fingerprint, now, carryover_id),
+        )
+        self._conn.commit()
+        return self.get_workbench_carryover(carryover_id)
+
+    def update_workbench_carryover_status(
+        self, carryover_id: int, status: str
+    ) -> WorkbenchCarryover:
+        self._conn.execute(
+            """
+            UPDATE workbench_carryovers
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, _now(), carryover_id),
+        )
+        self._conn.commit()
+        return self.get_workbench_carryover(carryover_id)
+
+    def list_carryover_evidence(
+        self, conversation_id: int, *, limit: int = 5
+    ) -> CarryoverEvidence:
+        return CarryoverEvidence(
+            agent_runs=self.list_recent_agent_runs(
+                conversation_id, limit=limit
+            ),
+            orchestration_runs=self.list_orchestration_runs(
+                conversation_id, limit=limit
+            ),
+        )
+
     # --- Usage events ---
 
     def record_usage_event(
@@ -1726,7 +1871,34 @@ class Ledger:
         return "\n".join(lines)
 
 
+def _parse_dt(value: object) -> datetime | None:
+    if value is None:
+        return None
+    return datetime.fromisoformat(str(value))
+
+
 # --- Row mappers ---
+
+def _workbench_carryover(row: sqlite3.Row) -> WorkbenchCarryover:
+    return WorkbenchCarryover(
+        id=int(row["id"]),
+        chat_id=int(row["chat_id"]),
+        source_conversation_id=int(row["source_conversation_id"]),
+        target_conversation_id=(
+            int(row["target_conversation_id"])
+            if row["target_conversation_id"] is not None
+            else None
+        ),
+        workspace_alias=str(row["workspace_alias"] or ""),
+        brief_text=str(row["brief_text"] or ""),
+        preview_text=str(row["preview_text"] or ""),
+        source_fingerprint=str(row["source_fingerprint"] or ""),
+        status=str(row["status"] or ""),
+        created_at=_dt(str(row["created_at"])),
+        updated_at=_dt(str(row["updated_at"])),
+        used_at=_parse_dt(row["used_at"]) if row["used_at"] else None,
+    )
+
 
 def _task(row: sqlite3.Row) -> Task:
     return Task(

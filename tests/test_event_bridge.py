@@ -876,6 +876,105 @@ async def test_auto_analysis_completion_releases_final_plan_gate(
 
 
 @pytest.mark.asyncio
+async def test_auto_context_supplement_completion_sends_digest_without_raw_stream(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        ROLE_AUTO_CONTEXT_SUPPLEMENT,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Supplement auto context",
+        codex_thread_id="thread-auto-supplement",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "goal")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_CONTEXT_SUPPLEMENT,
+        hidden_task_id=task.id,
+        external_session_id="thread-auto-supplement",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    sent: list[tuple[int, str, object]] = []
+    rendered = []
+
+    class Interaction:
+        async def handle(self, event):
+            rendered.append(event)
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+        interaction_renderer=Interaction(),
+    )
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-auto-supplement", "turnId": "turn-auto-supplement"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-auto-supplement",
+            "turnId": "turn-auto-supplement",
+            "delta": (
+                "结论：当前有 1 个开放仓位。\n"
+                "依据：新问题 1：ALTUSDT 平仓卡住，Binance reduce-only 被拒；"
+                "老问题 1：local L2 stale/rebuild 仍在大量复现。\n"
+                "风险：高。\n"
+            ),
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-auto-supplement", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_COLLECTING_CONTEXT
+    assert "ALTUSDT 平仓卡住" in updated.last_codex_analysis
+    assert rendered == []
+    assert sent
+    text = sent[-1][1]
+    assert "Codex 已更新分析" in text
+    assert "关键摘要" in text
+    assert "ALTUSDT 平仓卡住" in text
+    assert "local L2 stale/rebuild" in text
+
+
+@pytest.mark.asyncio
 async def test_auto_final_plan_completion_shows_assembled_plan_before_claude_gate(
     tmp_path: Path,
 ) -> None:
@@ -1231,7 +1330,8 @@ async def test_auto_final_plan_completion_without_body_hides_claude_gate(
         for button in row
     ]
     assert "交给 Claude 执行" not in labels
-    assert "重写方案" in labels
+    assert "继续补充" in labels
+    assert "重写方案" not in labels
 
 
 @pytest.mark.asyncio

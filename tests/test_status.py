@@ -455,3 +455,50 @@ def test_render_conversation_status_unknown_surface_mode_falls_back() -> None:
 
     assert "当前视图：驾驶舱" in text
     assert "模式：Claude 直聊" in text
+
+
+# --- Carryover renderers ---
+
+
+def test_render_carryover_candidates_is_human_readable() -> None:
+    from datetime import datetime, timezone
+    from wlcodex.models import ConversationSession
+    from wlcodex.status import render_carryover_candidates
+
+    session = ConversationSession(
+        id=36,
+        chat_id=100,
+        user_id=7,
+        title="云上部署核验",
+        mode="chief_engineer",
+        workspace_alias="lightfeev2",
+        active_codex_task_id=None,
+        active_claude_run_id=None,
+        conversation_summary="已确认部署运行，但状态收敛未闭环。",
+        current_model="",
+        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 23, 12, 35, tzinfo=timezone.utc),
+        archived_at=datetime(2026, 5, 23, 13, 0, tzinfo=timezone.utc),
+    )
+
+    text = render_carryover_candidates([(session, "ALTUSDT 状态收敛未闭环")])
+
+    assert "可接棒历史工作台" in text
+    assert "#36" in text
+    assert "lightfeev2" in text
+    assert "ALTUSDT 状态收敛未闭环" in text
+
+
+def test_render_prepared_carryover_mentions_next_user_goal() -> None:
+    from wlcodex.status import render_prepared_carryover
+
+    text = render_prepared_carryover(
+        source_conversation_id=36,
+        source_title="云上部署核验",
+        workspace_alias="lightfeev2",
+        preview="状态收敛未闭环。",
+    )
+
+    assert "准备从工作台 #36 接棒" in text
+    assert "请发送新任务目标" in text
+    assert "不会启动 Claude" in text
