@@ -16,6 +16,10 @@ _SECTION_PATTERNS = {
         r"^(?:下一步|建议下一步|建议|next_action|next step|next steps)\s*[:：]\s*(.*)$",
         re.IGNORECASE,
     ),
+    "claude_task": re.compile(
+        r"^(?:Claude\s*任务|给\s*Claude\s*的任务|交给\s*Claude\s*执行|Claude\s*执行|claude_prompt|handoff_prompt)\s*[:：]\s*(.*)$",
+        re.IGNORECASE,
+    ),
 }
 
 
@@ -41,6 +45,7 @@ def render_auto_draft_digest(text: str, *, max_chars: int = 700) -> str:
     evidence = _find_evidence(lines)
     risk = _find_section(lines, "risk")
     next_step = _find_section(lines, "next")
+    claude_task = _find_claude_task(lines)
 
     if not conclusion:
         conclusion = _first_informative_line(lines)
@@ -50,6 +55,7 @@ def render_auto_draft_digest(text: str, *, max_chars: int = 700) -> str:
         risk = "未明确风险。"
     if not next_step:
         next_step = "按下方按钮继续：交给 Claude、继续补充、重写或结束。"
+    next_step = _with_claude_task(next_step, claude_task)
 
     rendered = _render_digest(conclusion, evidence, risk, next_step)
     if len(rendered) <= max_chars:
@@ -105,6 +111,33 @@ def _find_evidence(lines: list[str]) -> list[str]:
         return []
     parts = re.split(r"[；;]\s*", evidence)
     return [_trim_sentence(part, 140) for part in parts if part.strip()][:3]
+
+
+def _find_claude_task(lines: list[str]) -> str:
+    task = _find_section(lines, "claude_task")
+    if not task:
+        return ""
+    return _brief_claude_task(task)
+
+
+def _with_claude_task(next_step: str, claude_task: str) -> str:
+    if not claude_task:
+        return next_step
+    if "claude" not in next_step.lower():
+        return f"{next_step}；Claude 任务：{claude_task}"
+    generic = re.sub(r"[。.!！\s]+$", "", next_step)
+    if claude_task in generic:
+        return next_step
+    return f"{generic}：{claude_task}"
+
+
+def _brief_claude_task(task: str) -> str:
+    task = re.split(r"[；;。.!！\n]", _normalize_sentence(task), maxsplit=1)[0]
+    task = re.sub(r"，?(?:让|并|同时)?下一步.*$", "", task)
+    task = re.sub(r"，?(?:具体)?文件.*$", "", task)
+    task = re.sub(r"，?目标.*$", "", task)
+    task = re.sub(r"，?验收.*$", "", task)
+    return _trim_sentence(task, 52)
 
 
 def _fallback_evidence(lines: list[str], *, skip: set[str]) -> list[str]:

@@ -615,6 +615,7 @@ class TaskService:
             task = self._find_by_thread(thread_id)
             if task is None:
                 return
+            self._mark_running_from_backend_activity(task)
             self._ledger.clear_active_turn(task.id)
             turn_status = _turn_status(payload)
             if turn_status == "failed":
@@ -754,6 +755,7 @@ class TaskService:
             task = self._find_by_thread(thread_id)
             if task is None:
                 return
+            self._mark_running_from_backend_activity(task)
             plan_text = str(payload.get("plan", payload.get("summary", "")))
             self._ledger.set_task_status(
                 task.id, task.status, phase="planning", summary=plan_text
@@ -764,6 +766,7 @@ class TaskService:
             task = self._find_by_thread(thread_id)
             if task is None:
                 return
+            self._mark_running_from_backend_activity(task)
             self._ledger.increment_changed_files(task.id, 1)
             diff_text = str(payload.get("diff", payload.get("summary", "")))
             if diff_text:
@@ -778,6 +781,7 @@ class TaskService:
             task = self._find_by_thread(thread_id)
             if task is None:
                 return
+            self._mark_running_from_backend_activity(task)
             file_path = str(payload.get("path", ""))
             change_kind = str(payload.get("kind", "modified"))
             if file_path:
@@ -788,6 +792,7 @@ class TaskService:
             task = self._find_by_thread(thread_id)
             if task is None:
                 return
+            self._mark_running_from_backend_activity(task)
             # Legacy backwards-compat: extract token counts from v2 nested or legacy flat
             # Must be defensive against non-numeric values
             try:
@@ -811,6 +816,7 @@ class TaskService:
             task = self._find_by_thread(thread_id)
             if task is None:
                 return
+            self._mark_running_from_backend_activity(task)
             delta = str(payload.get("delta", payload.get("text", "")))
             if delta:
                 self._ledger.add_event(
@@ -825,6 +831,7 @@ class TaskService:
             task = self._find_by_thread(thread_id)
             if task is None:
                 return
+            self._mark_running_from_backend_activity(task)
             delta = str(payload.get("delta", ""))
             if delta:
                 summary = str(payload.get("summary", delta))[:5000]
@@ -857,6 +864,7 @@ class TaskService:
                         event_payload={"threadId": thread_id, "status": status},
                     )
                     return
+                self._mark_running_from_backend_activity(task)
                 self._ledger.set_task_status(
                     task.id, task.status, phase=status[:120]
                 )
@@ -866,6 +874,7 @@ class TaskService:
             task = self._find_by_thread(thread_id)
             if task is None:
                 return
+            self._mark_running_from_backend_activity(task)
             item_payload = _item_event_payload(payload)
             self._ledger.add_event(
                 task.id, "item_started", item_payload
@@ -876,6 +885,7 @@ class TaskService:
             task = self._find_by_thread(thread_id)
             if task is None:
                 return
+            self._mark_running_from_backend_activity(task)
             item_payload = _item_event_payload(payload)
             self._ledger.add_event(
                 task.id, "item_completed", item_payload
@@ -914,6 +924,11 @@ class TaskService:
 
     def _find_by_thread(self, thread_id: str) -> Task | None:
         return self._ledger.find_task_by_thread_id(thread_id)
+
+    def _mark_running_from_backend_activity(self, task: Task) -> None:
+        """Treat backend activity as an implicit start when turn_started is absent."""
+        if task.status == TaskStatus.QUEUED:
+            self._transition(task.id, TaskStatus.RUNNING)
 
     def is_orchestration_managed_task(self, task_id: int) -> bool:
         return self._ledger.task_has_running_orchestration(task_id)

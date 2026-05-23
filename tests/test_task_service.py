@@ -288,6 +288,45 @@ def test_item_events_store_nested_item_details(service: TaskService) -> None:
     }
 
 
+def test_item_started_marks_queued_task_running_when_turn_started_missing(
+    service: TaskService,
+) -> None:
+    from wlcodex.codex_backend import BackendEvent
+
+    service.start_task("demo", "Fix bug", codex_thread_id="thread-1")
+
+    service.apply_backend_event(BackendEvent(
+        event_type="item_started",
+        payload={
+            "threadId": "thread-1",
+            "item": {"type": "commandExecution", "status": "inProgress"},
+        },
+    ))
+
+    assert service.get_task(1).status == TaskStatus.RUNNING
+
+
+def test_turn_completed_finishes_task_even_when_turn_started_missing(
+    service: TaskService,
+) -> None:
+    from wlcodex.codex_backend import BackendEvent
+
+    service.start_task("demo", "Fix bug", codex_thread_id="thread-1")
+    service.apply_backend_event(BackendEvent(
+        event_type="agent_message_delta",
+        payload={"threadId": "thread-1", "delta": "完成"},
+    ))
+
+    service.apply_backend_event(BackendEvent(
+        event_type="turn_completed",
+        payload={"threadId": "thread-1", "status": "completed"},
+    ))
+
+    updated = service.get_task(1)
+    assert updated.status == TaskStatus.DONE
+    assert updated.last_summary == "完成"
+
+
 def test_approval_changes_state_to_waiting(service: TaskService) -> None:
     from wlcodex.codex_backend import BackendEvent
 
