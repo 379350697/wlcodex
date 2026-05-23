@@ -323,6 +323,7 @@ def test_render_workbench_history_marks_active_and_archived() -> None:
             mode="chief_engineer",
             workspace_alias="wlcodex",
             archived_at=None,
+            created_at=now,
             updated_at=now,
         ),
         SimpleNamespace(
@@ -331,6 +332,7 @@ def test_render_workbench_history_marks_active_and_archived() -> None:
             mode="codex_direct",
             workspace_alias="lightfee",
             archived_at=now,
+            created_at=now,
             updated_at=now,
         ),
     ]

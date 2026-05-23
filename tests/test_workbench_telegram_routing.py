@@ -898,7 +898,7 @@ async def test_workbench_history_restore_buttons_use_titles_not_ids():
 
     controller = MagicMock()
     controller.handle = AsyncMock(
-        return_value=SimpleNamespace(text="工作台历史\n\n* Current（当前）\n  Old")
+        return_value=SimpleNamespace(text="工作台历史 — 1 个进行中，1 个已归档\n点击下方按钮恢复已归档的工作台：")
     )
     now = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
     ledger = MagicMock()
@@ -910,6 +910,7 @@ async def test_workbench_history_restore_buttons_use_titles_not_ids():
             mode="chief_engineer",
             workspace_alias="wlcodex",
             archived_at=None,
+            created_at=now,
             updated_at=now,
         ),
         SimpleNamespace(
@@ -918,6 +919,7 @@ async def test_workbench_history_restore_buttons_use_titles_not_ids():
             mode="chief_engineer",
             workspace_alias="wlcodex",
             archived_at=now,
+            created_at=now,
             updated_at=now,
         ),
     ])
@@ -935,10 +937,10 @@ async def test_workbench_history_restore_buttons_use_titles_not_ids():
 
     assert sent
     buttons = sent[-1][2]
-    assert buttons == [[{
-        "text": "恢复 Old",
-        "callback_data": "conv:1:restore_workbench",
-    }]]
+    assert len(buttons) == 1
+    btn = buttons[0][0]
+    assert "恢复 Old" in btn["text"]
+    assert btn["callback_data"] == "conv:1:restore_workbench"
 
 
 @pytest.mark.asyncio

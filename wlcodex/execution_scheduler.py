@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from wlcodex.conversation import workbench_title_from_task
+
 
 @dataclass(frozen=True)
 class RunIntent:
@@ -42,6 +44,13 @@ class ExecutionScheduler:
             telegram_chat_id=intent.telegram_chat_id,
         )
         self._ledger.set_conversation_active_task(intent.conversation_id, task.id)
+
+        # Auto-name the workbench after its first task
+        convo = self._ledger.get_conversation(intent.conversation_id)
+        if convo.title == "新工作台":
+            new_title = workbench_title_from_task(intent.prompt)
+            self._ledger.update_conversation_title(intent.conversation_id, new_title)
+
         return ExecutionLease(
             hidden_task_id=task.id,
             workspace_alias=intent.workspace_alias,

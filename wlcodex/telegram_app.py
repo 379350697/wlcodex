@@ -16,6 +16,7 @@ from telegram.ext import (
     filters,
 )
 
+from wlcodex.conversation import relative_time
 from wlcodex.config import AppConfig
 from wlcodex.controller import CommandController
 from wlcodex.db import Ledger
@@ -881,8 +882,9 @@ class WlCodexHandlers:
             )
             for session in sessions:
                 if session.archived_at is not None:
+                    age = relative_time(session.created_at)
                     buttons.append([{
-                        "text": f"恢复 {_trim_workbench_title(session.title)}",
+                        "text": f"恢复 {_trim_workbench_title(session.title, 18)} · {age}",
                         "callback_data": f"conv:{session.id}:restore_workbench",
                     }])
         await self.send_telegram(chat_id, response.text, buttons=buttons or None)

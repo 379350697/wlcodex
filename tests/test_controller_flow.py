@@ -2134,8 +2134,9 @@ async def test_workbenches_command_lists_archived_conversations(ctrl: CommandCon
     response = await ctrl.handle("/workbenches", {"chat_id": 100, "user_id": 7})
 
     assert "工作台历史" in response.text
-    assert "First" in response.text
-    assert "Second" in response.text
+    assert "1 个进行中" in response.text
+    assert "1 个已归档" in response.text
+    assert "点击下方按钮恢复" in response.text
 
 
 @pytest.mark.asyncio
@@ -2352,8 +2353,9 @@ async def test_new_new_history_restore_status_flow(ctrl: CommandController) -> N
     await ctrl.handle("/new Second", {"chat_id": 100, "user_id": 7})
 
     history = await ctrl.handle("/history", {"chat_id": 100, "user_id": 7})
-    assert "First" in history.text
-    assert "Second" in history.text
+    assert "工作台历史" in history.text
+    assert "1 个进行中" in history.text
+    assert "1 个已归档" in history.text
 
     from wlcodex.conversation_callback import ConversationCallback
     await ctrl.handle_conversation_callback(

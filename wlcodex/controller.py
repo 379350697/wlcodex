@@ -148,7 +148,6 @@ from wlcodex.status import (
     render_conversation_help,
     render_conversation_status,
     render_prepared_carryover,
-    render_workbench_history,
     render_workspace_list,
 )
 from wlcodex.models import ConversationMode
@@ -410,7 +409,16 @@ class CommandController:
                     sessions = self._ledger.list_conversations_by_chat(
                         chat_id, include_archived=True
                     )
-                    return ControllerResponse(render_workbench_history(sessions))
+                    active_count = sum(1 for s in sessions if s.archived_at is None)
+                    archived_count = sum(1 for s in sessions if s.archived_at is not None)
+                    if not sessions:
+                        return ControllerResponse(
+                            "还没有历史工作台。发送 /new 开始新的工作台。"
+                        )
+                    return ControllerResponse(
+                        f"工作台历史 — {active_count} 个进行中，{archived_count} 个已归档\n"
+                        f"点击下方按钮恢复已归档的工作台："
+                    )
                 return ControllerResponse(
                     "还没有历史工作台。发送 /new 开始新的工作台。"
                 )

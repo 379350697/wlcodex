@@ -1119,6 +1119,16 @@ class Ledger:
         self._conn.commit()
         return self.get_conversation(conversation_id)
 
+    def update_conversation_title(
+        self, conversation_id: int, title: str
+    ) -> ConversationSession:
+        self._conn.execute(
+            "UPDATE conversation_sessions SET title = ?, updated_at = ? WHERE id = ?",
+            (title, _now(), conversation_id),
+        )
+        self._conn.commit()
+        return self.get_conversation(conversation_id)
+
     def set_conversation_codex_thread(
         self, conversation_id: int, thread_id: str
     ) -> ConversationSession:

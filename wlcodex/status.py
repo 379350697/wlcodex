@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from wlcodex.models import ConversationSession, AgentRun, OrchestrationRun
+from wlcodex.conversation import relative_time
 
 if TYPE_CHECKING:
     from wlcodex.health_snapshot import HealthSnapshot
@@ -344,8 +345,9 @@ def render_workbench_history(sessions: Sequence[ConversationSession]) -> str:
     for session in sessions:
         marker = "*" if session.archived_at is None else " "
         suffix = "（当前）" if session.archived_at is None else ""
+        age = relative_time(session.created_at)
         lines.append(
-            f"{marker} {_trim(session.title, 42)}{suffix}"
+            f"{marker} {_trim(session.title, 42)}  {age}{suffix}"
         )
     return "\n".join(lines)
 
