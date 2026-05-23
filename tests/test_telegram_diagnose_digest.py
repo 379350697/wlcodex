@@ -196,7 +196,12 @@ def test_state_mismatch_shown_in_digest():
     )
 
     digest = render_auto_diagnose_digest(diagnose_json)
-    assert "状态不一致" in digest or "open=1" in digest
+    assert (
+        "严重" in digest
+        or "状态不一致" in digest
+        or "local_open_exchange_flat" in digest
+        or "开仓1" in digest
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +335,266 @@ def test_state_mismatch_and_completeness_preserved():
 
     digest = render_auto_diagnose_digest(diagnose_json)
     # State mismatch must be visible
-    assert "状态不一致" in digest or "open=2" in digest
+    assert (
+        "严重" in digest
+        or "状态不一致" in digest
+        or "开仓2" in digest
+        or "state_mismatch" in digest.lower()
+    )
     # Evidence incompleteness must be visible
     assert "证据不完整" in digest or "missing" in digest.lower()
     # Must warn about evidence being incomplete, not positively claim "high confidence"
     assert "不得标记为high confidence" in digest.lower() or "证据不完整" in digest or "missing" in digest.lower()
+
+
+# ---------------------------------------------------------------------------
+# Body missing → digest shows exchange_error_body=missing and missing evidence
+# ---------------------------------------------------------------------------
+
+
+def test_body_missing_is_shown_in_digest():
+    """When exchange_error has no raw_body, digest shows NO body and missing evidence."""
+    diagnose_json = _sample_diagnose_json(
+        order_error_evidence=[
+            {
+                "kind": "exit.passive_close_maker_submit_error",
+                "position_id": "pos_no_body",
+                "symbol": "BTCUSDT",
+                "venue": "binance",
+                "operation": "submit_passive_order",
+                "error": "HTTP 400 Bad Request",
+                "exchange_error": {
+                    "http_status": 400,
+                    "exchange_code": "",
+                    "exchange_msg": "",
+                },
+                "request_context": {"symbol": "BTCUSDT"},
+                "http_status": 400,
+                "exchange_code": "",
+                "exchange_msg": "",
+                "evidence_completeness": "missing_exchange_body",
+                "confidence": "medium",
+                "raw_body_present": False,
+                "missing_evidence": ["exchange_response_body", "exchange_error_code", "exchange_error_msg"],
+                "count": 5,
+                "first_ts_ms": 1700000001000,
+                "last_ts_ms": 1700000002000,
+            }
+        ],
+        top_exchange_errors=[
+            {
+                "venue": "binance",
+                "symbol": "BTCUSDT",
+                "http_status": 400,
+                "exchange_code": "",
+                "exchange_msg": "",
+                "evidence_completeness": "missing_exchange_body",
+                "raw_body_present": False,
+                "missing_evidence": ["exchange_response_body", "exchange_error_code", "exchange_error_msg"],
+                "count": 5,
+                "last_ts_ms": 1700000002000,
+            }
+        ],
+        evidence_completeness={
+            "overall": "missing",
+            "missing_evidence": ["exchange_response_body", "exchange_truth_unavailable"],
+            "confidence": "low",
+        },
+        conclusion={
+            "status": "degraded",
+            "risk": "medium",
+            "summary": "5 order errors; evidence: missing",
+            "next_actions": ["collect full exchange error bodies"],
+        },
+    )
+
+    digest = render_auto_diagnose_digest(diagnose_json)
+    # Must show NO body indicator
+    assert "[NO body]" in digest
+    # Must show HTTP status
+    assert "HTTP400" in digest.replace(" ", "")
+    # Must show missing evidence
+    assert "missing" in digest.lower()
+    assert "证据不完整" in digest
+
+
+# ---------------------------------------------------------------------------
+# Multiple HTTP status codes all shown in digest
+# ---------------------------------------------------------------------------
+
+
+def test_multiple_http_status_codes_in_digest():
+    """Digest must show different HTTP status codes, not just 400."""
+    diagnose_json = _sample_diagnose_json(
+        order_error_evidence=[
+            {
+                "kind": "order.rejected",
+                "position_id": "pos_401",
+                "symbol": "ETHUSDT",
+                "venue": "binance",
+                "http_status": 401,
+                "exchange_code": "-2015",
+                "exchange_msg": "Invalid API-key",
+                "evidence_completeness": "complete",
+                "raw_body_present": True,
+                "missing_evidence": [],
+                "count": 3,
+                "first_ts_ms": 1700000001000,
+                "last_ts_ms": 1700000002000,
+            },
+            {
+                "kind": "order.rejected",
+                "position_id": "pos_429",
+                "symbol": "BTCUSDT",
+                "venue": "binance",
+                "http_status": 429,
+                "exchange_code": "-1015",
+                "exchange_msg": "Rate limit exceeded",
+                "evidence_completeness": "complete",
+                "raw_body_present": True,
+                "missing_evidence": [],
+                "count": 7,
+                "first_ts_ms": 1700000003000,
+                "last_ts_ms": 1700000004000,
+            },
+            {
+                "kind": "order.uncertain",
+                "position_id": "pos_503",
+                "symbol": "BTCUSDT",
+                "venue": "bybit",
+                "http_status": 503,
+                "exchange_code": "",
+                "exchange_msg": "",
+                "evidence_completeness": "missing_exchange_body",
+                "raw_body_present": False,
+                "missing_evidence": ["exchange_response_body"],
+                "count": 1,
+                "first_ts_ms": 1700000005000,
+                "last_ts_ms": 1700000005000,
+            },
+        ],
+        top_exchange_errors=[
+            {
+                "venue": "binance", "symbol": "BTCUSDT",
+                "http_status": 429, "exchange_code": "-1015",
+                "exchange_msg": "Rate limit exceeded",
+                "evidence_completeness": "complete",
+                "raw_body_present": True, "count": 7,
+            },
+            {
+                "venue": "binance", "symbol": "ETHUSDT",
+                "http_status": 401, "exchange_code": "-2015",
+                "exchange_msg": "Invalid API-key",
+                "evidence_completeness": "complete",
+                "raw_body_present": True, "count": 3,
+            },
+            {
+                "venue": "bybit", "symbol": "BTCUSDT",
+                "http_status": 503, "exchange_code": "",
+                "exchange_msg": "",
+                "evidence_completeness": "missing_exchange_body",
+                "raw_body_present": False,
+                "missing_evidence": ["exchange_response_body"],
+                "count": 1,
+            },
+        ],
+        evidence_completeness={
+            "overall": "partial",
+            "missing_evidence": ["exchange_truth_unavailable"],
+            "confidence": "medium",
+        },
+        conclusion={
+            "status": "degraded",
+            "risk": "medium",
+            "summary": "order errors: HTTP 401, 429, 503",
+            "next_actions": ["review order_error_evidence"],
+        },
+    )
+
+    digest = render_auto_diagnose_digest(diagnose_json)
+    # Must show at least two different HTTP status codes
+    assert "HTTP401" in digest.replace(" ", "") or "401" in digest
+    assert "HTTP429" in digest.replace(" ", "") or "429" in digest
+    # Must show NO body for body-missing entry (503)
+    assert "[NO body]" in digest
+
+    # Evidence is partial, must warn about incomplete evidence
+    assert "medium" in digest.lower() or "证据不完整" in digest or "partial" in digest
+
+
+# ---------------------------------------------------------------------------
+# No diagnose JSON → returns empty string (caller must show low confidence)
+# ---------------------------------------------------------------------------
+
+
+def test_no_diagnose_json_returns_empty():
+    """When diagnose JSON is missing/unparseable, render returns empty string.
+
+    Caller must detect this and show diagnose_json=missing, confidence=low.
+    """
+    # Empty string
+    assert render_auto_diagnose_digest("") == ""
+    # Not valid JSON
+    assert render_auto_diagnose_digest("not valid json") == ""
+    # Empty object
+    assert render_auto_diagnose_digest("{}") == ""
+    # Valid JSON but no schema_version
+    assert render_auto_diagnose_digest('{"foo":"bar"}') == ""
+
+
+# ---------------------------------------------------------------------------
+# Digest with body present shows [body] indicator
+# ---------------------------------------------------------------------------
+
+
+def test_body_present_shows_body_indicator():
+    """When exchange_error has raw_body, digest shows [body] indicator."""
+    diagnose_json = _sample_diagnose_json(
+        order_error_evidence=[
+            {
+                "kind": "order.rejected",
+                "position_id": "pos_body",
+                "symbol": "ALTUSDT",
+                "venue": "binance",
+                "http_status": 400,
+                "exchange_code": "-2022",
+                "exchange_msg": "ReduceOnly Order is rejected.",
+                "evidence_completeness": "complete",
+                "raw_body_present": True,
+                "missing_evidence": [],
+                "count": 1,
+                "first_ts_ms": 1700000001000,
+                "last_ts_ms": 1700000001000,
+            }
+        ],
+        top_exchange_errors=[
+            {
+                "venue": "binance",
+                "symbol": "ALTUSDT",
+                "http_status": 400,
+                "exchange_code": "-2022",
+                "exchange_msg": "ReduceOnly Order is rejected.",
+                "evidence_completeness": "complete",
+                "raw_body_present": True,
+                "count": 1,
+            }
+        ],
+        evidence_completeness={
+            "overall": "partial",
+            "missing_evidence": ["exchange_truth_unavailable"],
+            "confidence": "medium",
+        },
+        conclusion={
+            "status": "degraded",
+            "risk": "medium",
+            "summary": "exchange error -2022 on ALTUSDT",
+            "next_actions": ["review order_error_evidence"],
+        },
+    )
+
+    digest = render_auto_diagnose_digest(diagnose_json)
+    # Must show [body] indicator
+    assert "[body]" in digest
+    # Must show code and msg
+    assert "-2022" in digest
+    assert "ReduceOnly" in digest

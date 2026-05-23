@@ -696,3 +696,100 @@ def test_list_carryover_evidence_from_conversation(tmp_path: Path) -> None:
     assert evidence.agent_runs[0].id == run.id
     assert len(evidence.orchestration_runs) >= 1
     assert evidence.orchestration_runs[0].id == orch.id
+
+
+def test_old_orchestration_runs_migration_adds_diagnose_json(tmp_path: Path) -> None:
+    """Old DBs missing diagnose_json column get it after migrate()."""
+    import sqlite3
+
+    db_path = tmp_path / "old_schema.sqlite3"
+    conn = sqlite3.connect(db_path)
+
+    # Create old schema WITHOUT diagnose_json
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS conversation_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'chief_engineer',
+            workspace_alias TEXT NOT NULL,
+            active_codex_task_id INTEGER,
+            active_claude_run_id INTEGER,
+            conversation_summary TEXT NOT NULL DEFAULT '',
+            current_model TEXT NOT NULL DEFAULT '',
+            codex_thread_id TEXT NOT NULL DEFAULT '',
+            claude_session_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS orchestration_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            goal TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'running',
+            current_step TEXT NOT NULL DEFAULT '',
+            verify_round INTEGER NOT NULL DEFAULT 0,
+            max_verify_rounds INTEGER NOT NULL DEFAULT 3,
+            last_codex_analysis TEXT NOT NULL DEFAULT '',
+            last_claude_summary TEXT NOT NULL DEFAULT '',
+            last_verification_result TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversation_sessions(id)
+        );
+        CREATE TABLE IF NOT EXISTS schema_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+    # Now migrate — must add diagnose_json column
+    ledger = Ledger.open(db_path)
+    ledger.migrate()
+
+    # Verify diagnose_json column exists and is writable
+    conversation = ledger.create_conversation(
+        chat_id=10, user_id=1, title="Test",
+        mode="chief_engineer", workspace_alias="wlcodex",
+    )
+    orch = ledger.create_orchestration_run(conversation.id, "test diagnosis")
+    test_json = '{"schema_version":2,"conclusion":{"status":"healthy"}}'
+    ledger.update_orchestration_run(
+        orch.id, diagnose_json=test_json,
+    )
+
+    # Read back
+    reloaded = ledger.list_orchestration_runs(conversation.id)
+    assert len(reloaded) >= 1
+    found = next((r for r in reloaded if r.id == orch.id), None)
+    assert found is not None, "orchestration run not found after migration"
+    assert found.diagnose_json == test_json, (
+        "diagnose_json must be readable after old-DB migration"
+    )
+
+
+def test_backfill_diagnose_json_empty_on_new_db(tmp_path: Path) -> None:
+    """New databases created with full schema have diagnose_json defaulting to ''."""
+    ledger = Ledger.open(tmp_path / "new_db.sqlite3")
+    ledger.migrate()
+
+    conversation = ledger.create_conversation(
+        chat_id=10, user_id=1, title="New DB",
+        mode="chief_engineer", workspace_alias="wlcodex",
+    )
+    orch = ledger.create_orchestration_run(conversation.id, "test")
+
+    # Should default to empty string
+    assert orch.diagnose_json == ""
+
+    # Should be writable
+    json_str = '{"schema_version":2}'
+    ledger.update_orchestration_run(orch.id, diagnose_json=json_str)
+    reloaded = next((r for r in ledger.list_orchestration_runs(conversation.id)
+                     if r.id == orch.id), None)
+    assert reloaded is not None
+    assert reloaded.diagnose_json == json_str

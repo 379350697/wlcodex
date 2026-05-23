@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import subprocess
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any
 
 from wlcodex.codex_backend import BackendEvent
@@ -20,6 +23,81 @@ from wlcodex.task_service import TaskService, drain_workspace
 from wlcodex.telegram_digest import render_auto_draft_digest, render_auto_diagnose_digest
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Deterministic diagnose JSON collection
+# ---------------------------------------------------------------------------
+
+_DIAGNOSE_SCRIPT_RELATIVE_PATH = "scripts/diagnose_live.py"
+_DIAGNOSE_TIMEOUT_SECONDS = 30
+
+
+def _run_diagnose_live(workspace_path: str, runtime_dir: str = "") -> str:
+    """Run diagnose_live.py in the given workspace and return its JSON stdout.
+
+    Returns the raw JSON string on success, or "" on any failure.
+    This is the deterministic path — no model involvement.
+    """
+    script_path = Path(workspace_path) / _DIAGNOSE_SCRIPT_RELATIVE_PATH
+    if not script_path.exists():
+        logger.warning("diagnose_live.py not found at %s", script_path)
+        return ""
+
+    cmd = [sys_executable(), str(script_path), "--json"]
+    if runtime_dir:
+        cmd.extend(["--runtime-dir", runtime_dir])
+
+    env = os.environ.copy()
+    # Never inherit a potentially broken PYTHONPATH from the wlcodex venv
+    env.pop("PYTHONPATH", None)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_DIAGNOSE_TIMEOUT_SECONDS,
+            cwd=str(workspace_path),
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("diagnose_live.py timed out after %ds", _DIAGNOSE_TIMEOUT_SECONDS)
+        return ""
+    except Exception as exc:
+        logger.warning("diagnose_live.py subprocess failed: %s", exc)
+        return ""
+
+    if result.returncode != 0:
+        logger.warning("diagnose_live.py exit %d: %s", result.returncode, result.stderr[:500])
+        return ""
+
+    stdout = result.stdout.strip()
+    if not stdout:
+        return ""
+
+    # Basic validation: must be parseable JSON with schema_version
+    try:
+        import json as _json
+        parsed = _json.loads(stdout)
+        if not isinstance(parsed, dict) or "schema_version" not in parsed:
+            logger.warning("diagnose_live.py output missing schema_version")
+            return ""
+    except Exception:
+        logger.warning("diagnose_live.py output is not valid JSON")
+        return ""
+
+    return stdout
+
+
+def sys_executable() -> str:
+    """Return the python executable path, preferring the venv python3."""
+    venv_python = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ".venv", "bin", "python3",
+    )
+    if os.path.exists(venv_python):
+        return venv_python
+    return os.environ.get("PYTHON_EXECUTABLE", "python3")
 
 
 def _extract_diagnose_json(text: str) -> str:
@@ -52,6 +130,33 @@ TASK_WATCHDOG_INTERVAL_SECONDS = 60
 SendTelegram = Callable[[int, str, list[list[dict[str, str]]] | None], Coroutine[Any, Any, int]]
 # Callback: edit_telegram(chat_id, message_id, text, buttons=None) -> None
 EditTelegram = Callable[[int, int, str, list[list[dict[str, str]]] | None], Coroutine[Any, Any, None]]
+
+
+def _try_collect_diagnose_json_sync(bridge: Any, auto_run: Any) -> str:
+    """Synchronous: resolve workspace, run diagnose_live.py, store and return JSON.
+
+    Module-level so it can be passed to run_in_executor.
+    """
+    try:
+        conv = bridge._ledger.get_conversation(auto_run.conversation_id)
+        if conv is None:
+            return ""
+        workspace = bridge._service.get_workspace(conv.workspace_alias)
+        if workspace is None:
+            return ""
+        workspace_path = str(workspace.path)
+    except Exception:
+        return ""
+
+    json_str = _run_diagnose_live(workspace_path, "")
+    if json_str:
+        try:
+            bridge._ledger.update_orchestration_run(
+                auto_run.id, diagnose_json=json_str,
+            )
+        except Exception:
+            pass
+    return json_str
 
 
 class EventBridge:
@@ -595,10 +700,11 @@ class EventBridge:
 
         # Advance based on agent role and completion
         if agent_role in (ROLE_AUTO_ANALYSIS, ROLE_AUTO_CONTEXT_SUPPLEMENT) and agent_status == "done":
-            # Context collection or supplement completed → stay in collecting_context
-            # The user can still add more context and now click "生成最终方案".
             new_step = AUTO_COLLECTING_CONTEXT
-            diagnose_json = _extract_diagnose_json(completion_summary)
+            # Primary: deterministic subprocess. Fallback: regex from model output.
+            diagnose_json = _try_collect_diagnose_json_sync(self, auto_run)
+            if not diagnose_json:
+                diagnose_json = _extract_diagnose_json(completion_summary)
             self._ledger.update_orchestration_run(
                 auto_run.id,
                 status="needs_user",
@@ -608,9 +714,10 @@ class EventBridge:
             )
 
         elif agent_role == "auto_final_plan" and agent_status == "done":
-            # Final plan generated → advance to draft_ready
             new_step = AUTO_DRAFT_READY
-            diagnose_json = _extract_diagnose_json(completion_summary)
+            diagnose_json = _try_collect_diagnose_json_sync(self, auto_run)
+            if not diagnose_json:
+                diagnose_json = _extract_diagnose_json(completion_summary)
             self._ledger.update_orchestration_run(
                 auto_run.id,
                 status="needs_user",
@@ -661,6 +768,16 @@ class EventBridge:
 
         return new_step
 
+    async def _try_collect_diagnose_json_async(self, auto_run: Any) -> str:
+        """Async wrapper: run diagnose_live.py via thread to avoid blocking loop."""
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(
+                None, _try_collect_diagnose_json_sync, self, auto_run,
+            )
+        except Exception:
+            return ""
+
     async def _send_auto_stage_buttons(
         self, task: object, new_stage: str
     ) -> None:
@@ -696,17 +813,66 @@ class EventBridge:
 
         # Prefer structured diagnose JSON digest when available
         diagnose_json = getattr(auto_run, "diagnose_json", "") or ""
+        structured_digest = ""
         if diagnose_json:
             structured_digest = render_auto_diagnose_digest(diagnose_json)
-        else:
-            structured_digest = ""
+
+        # Detect whether diagnose JSON was expected: an auto_analysis or
+        # auto_final_plan agent ran AND the goal/analysis mentions LightFeeV2
+        # production diagnosis keywords.
+        diagnose_expected = False
+        if not diagnose_json:
+            try:
+                agent_runs = self._ledger.list_agent_runs(
+                    auto_run.conversation_id,
+                )
+                has_diagnose_role = any(
+                    ar.role in ("auto_analysis", "auto_final_plan")
+                    for ar in agent_runs
+                )
+                if has_diagnose_role:
+                    goal_lower = (auto_run.goal or "").lower()
+                    analysis_lower = (auto_run.last_codex_analysis or "").lower()
+                    diagnose_keywords = (
+                        "lightfee", "diagnose_live", "diagnose",
+                        "production diagnosis", "line diagnosis",
+                        "线上排障", "生产诊断", "schema_version",
+                    )
+                    if any(kw in goal_lower or kw in analysis_lower
+                           for kw in diagnose_keywords):
+                        diagnose_expected = True
+            except Exception:
+                pass
+
+        # Deterministic collection: when diagnose is expected but not present,
+        # run diagnose_live.py ourselves — no model involvement.
+        if diagnose_expected and not diagnose_json:
+            collected = await self._try_collect_diagnose_json_async(auto_run)
+            if collected:
+                diagnose_json = collected
+                structured_digest = render_auto_diagnose_digest(diagnose_json)
+                diagnose_expected = False  # no longer missing
 
         if new_stage == "collecting_context":
             if auto_run.last_codex_analysis:
-                digest = structured_digest or render_auto_draft_digest(
-                    auto_run.last_codex_analysis,
-                    fallback_next="继续补充信息，或点击生成最终方案。",
-                )
+                if structured_digest:
+                    digest = structured_digest
+                elif diagnose_expected:
+                    digest = (
+                        "关键摘要：\n"
+                        "结论：诊断 JSON 未采集到，无法输出确定性交易结论。\n"
+                        "依据：\n"
+                        "- diagnose_json=missing\n"
+                        "- confidence=low\n"
+                        "- 请手动运行 python scripts/diagnose_live.py --json\n"
+                        "风险：高 — 缺乏结构化证据，不得推送或执行交易操作。\n"
+                        "下一步：重新触发诊断采集，或检查 Codex 日志。"
+                    )
+                else:
+                    digest = render_auto_draft_digest(
+                        auto_run.last_codex_analysis,
+                        fallback_next="继续补充信息，或点击生成最终方案。",
+                    )
                 text = "Codex 已更新分析。\n\n{}\n\n请选择下一步：".format(digest)
             else:
                 text = (
@@ -714,7 +880,21 @@ class EventBridge:
                     "你可以继续补充信息，或生成最终方案。"
                 )
         elif new_stage == "draft_ready" and auto_run.last_codex_analysis:
-            digest = structured_digest or render_auto_draft_digest(auto_run.last_codex_analysis)
+            if structured_digest:
+                digest = structured_digest
+            elif diagnose_expected:
+                digest = (
+                    "关键摘要：\n"
+                    "结论：诊断 JSON 未采集到，无法输出确定性交易结论。\n"
+                    "依据：\n"
+                    "- diagnose_json=missing\n"
+                    "- confidence=low\n"
+                    "- 请手动运行 python scripts/diagnose_live.py --json\n"
+                    "风险：高 — 缺乏结构化证据，不得执行。\n"
+                    "下一步：重新触发诊断采集。"
+                )
+            else:
+                digest = render_auto_draft_digest(auto_run.last_codex_analysis)
             text = "最终方案已生成。\n\n{}\n\n请选择下一步：".format(digest)
         elif new_stage == "draft_ready":
             text = (

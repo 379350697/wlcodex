@@ -410,6 +410,13 @@ class Ledger:
             "conversation_sessions", "claude_session_id",
             "claude_session_id TEXT NOT NULL DEFAULT ''",
         )
+        # orchestration_runs.diagnose_json — added for structured LightFeeV2
+        # diagnose artifact storage (old DBs created before this column must
+        # be upgraded so Telegram digest can consume structured facts).
+        self._add_column_if_missing(
+            "orchestration_runs", "diagnose_json",
+            "diagnose_json TEXT NOT NULL DEFAULT ''",
+        )
         # codex_request_id values are scoped to a task/thread by the app-server.
         # Older databases had a global unique index, which incorrectly dropped
         # approvals when different tasks reused ids like "0" or "1".
