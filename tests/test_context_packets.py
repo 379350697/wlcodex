@@ -12,6 +12,10 @@ from wlcodex.context_packets import (
     build_codex_analysis_packet,
     build_claude_handoff_packet,
     build_codex_verification_packet,
+    build_auto_context_packet,
+    build_auto_final_plan_packet,
+    build_auto_verification_packet,
+    build_auto_repair_packet,
 )
 
 
@@ -284,3 +288,105 @@ def test_context_packet_base_render() -> None:
     assert "Test" in rendered
     assert "test.py" in rendered
     assert "Test constraint" in rendered
+
+
+# --- Staged-auto context packet tests ---
+
+
+def test_auto_context_collection_packet_is_read_only_and_not_handoff() -> None:
+    packet = build_auto_context_packet(
+        user_goal="定位偶发失败",
+        conversation_summary="用户会继续补充日志",
+        workspace="lightfeev2",
+    )
+    rendered = packet.render()
+
+    assert "只读分析" in rendered
+    assert "继续等待用户补充" in rendered
+    assert "禁止创建、修改、删除任何工作区文件" in rendered
+    # Must NOT contain Claude handoff instructions
+    assert "Claude handoff packet" not in rendered
+    assert "交给 Claude" not in rendered
+    assert "auto_collecting_context" in rendered
+
+
+def test_auto_context_collection_packet_mentions_workspace() -> None:
+    packet = build_auto_context_packet(
+        user_goal="查一下问题",
+        workspace="lightfeev2",
+    )
+    rendered = packet.render()
+    assert "lightfeev2" in rendered
+
+
+def test_auto_final_plan_packet_requests_claude_prompt() -> None:
+    packet = build_auto_final_plan_packet(
+        user_goal="修复登录错误",
+        conversation_summary="已确认是空用户路径",
+        workspace="wlcodex",
+    )
+    rendered = packet.render()
+
+    assert "最终方案" in rendered
+    assert "给 Claude 的执行提示词" in rendered
+    assert "acceptance_criteria" in rendered or "验收标准" in rendered.lower()
+    assert "prohibited_changes" in rendered or "禁止" in rendered
+
+
+def test_auto_final_plan_packet_mentions_no_implementation_flag() -> None:
+    packet = build_auto_final_plan_packet(
+        user_goal="检查冗余代码",
+        workspace="wlcodex",
+    )
+    rendered = packet.render()
+    assert "needs_implementation: false" in rendered
+
+
+def test_auto_verification_packet_includes_round() -> None:
+    packet = build_auto_verification_packet(
+        user_goal="验证修复",
+        codex_plan_summary="修改 auth.py",
+        claude_completion_summary="已修改",
+        verify_round=2,
+        workspace="wlcodex",
+    )
+    rendered = packet.render()
+    assert "第 2 轮验收" in rendered
+    assert "repair_prompt" in rendered or "返工" in rendered
+
+
+def test_auto_verification_packet_is_read_only() -> None:
+    packet = build_auto_verification_packet(
+        user_goal="验证修复",
+        workspace="wlcodex",
+    )
+    rendered = packet.render()
+    assert "只读" in rendered
+    assert "不要发送 Telegram 消息" in rendered
+
+
+def test_auto_repair_packet_restricts_scope() -> None:
+    packet = build_auto_repair_packet(
+        user_goal="修复登录错误",
+        codex_plan_summary="修改 auth.py",
+        claude_completion_summary="已修改但未通过验收",
+        verification_result="tests/test_auth.py 第 42 行断言失败",
+        workspace="wlcodex",
+    )
+    rendered = packet.render()
+    assert "修复" in rendered
+    assert "不要扩大范围" in rendered
+    # Must not contain Telegram delivery language
+    assert "绝对不要发送 Telegram" in rendered
+
+
+def test_all_auto_packets_require_chinese_output() -> None:
+    packets = [
+        build_auto_context_packet(user_goal="分析问题"),
+        build_auto_final_plan_packet(user_goal="实现修复"),
+        build_auto_verification_packet(user_goal="验收修复"),
+        build_auto_repair_packet(user_goal="返工修复"),
+    ]
+    for packet in packets:
+        rendered = packet.render()
+        assert "必须使用中文" in rendered

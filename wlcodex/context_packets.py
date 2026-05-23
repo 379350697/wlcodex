@@ -316,3 +316,167 @@ def build_codex_verification_packet(
         test_results=test_results,
         verification_question="Does the implementation meet all acceptance criteria?",
     )
+
+
+def build_auto_context_packet(
+    user_goal: str,
+    conversation_summary: str = "",
+    workspace: str = "wlcodex",
+    budget: ContextBudget | None = None,
+) -> CodexAnalysisPacket:
+    """Build a read-only context collection packet for the /auto
+    collecting_context stage.
+
+    This packet is strictly read-only: Codex must not write files, start
+    Claude, or output handoff packets. It should only analyze and wait for
+    user context supplement.
+    """
+    bgt = budget or ContextBudget()
+    return CodexAnalysisPacket(
+        mode="auto_collecting_context",
+        workspace=workspace,
+        user_goal=user_goal,
+        conversation_summary=trim_to_budget(conversation_summary, bgt.conversation_summary_tokens),
+        recent_user_constraints=[
+            "本轮是 /auto 的 Codex 上下文收集阶段。",
+            "只读分析：禁止创建、修改、删除任何工作区文件。",
+            "不要启动 Claude，不要输出最终执行包。",
+            "如果信息不足，继续等待用户补充；如果已有判断，给出阶段性结论。",
+        ],
+        token_budget=bgt.codex_analysis_tokens,
+        requested_output="中文阶段性分析：当前判断、缺失信息、建议用户补充什么。",
+    )
+
+
+def build_auto_final_plan_packet(
+    user_goal: str,
+    conversation_summary: str = "",
+    workspace: str = "wlcodex",
+    budget: ContextBudget | None = None,
+) -> CodexAnalysisPacket:
+    """Build a final plan packet for the auto draft_ready stage.
+
+    Codex produces: diagnosis, confidence, files, Claude execution prompt,
+    acceptance criteria, prohibited changes, and verification plan.
+    """
+    bgt = budget or ContextBudget()
+    return CodexAnalysisPacket(
+        mode="auto_final_plan",
+        workspace=workspace,
+        user_goal=user_goal,
+        conversation_summary=trim_to_budget(conversation_summary, bgt.conversation_summary_tokens),
+        recent_user_constraints=[
+            "输出 /auto 的最终方案，不要改代码。",
+            "必须包含给 Claude 的执行提示词。",
+            "如果无需实现，明确写 needs_implementation: false，并说明不要交给 Claude。",
+            "保留用户补充的约束和禁止事项。",
+        ],
+        token_budget=bgt.codex_analysis_tokens,
+        requested_output=(
+            "中文最终方案，包含 diagnosis, confidence, files_to_touch, "
+            "claude_prompt, acceptance_criteria, prohibited_changes, verification_plan。"
+        ),
+    )
+
+
+def build_auto_verification_packet(
+    user_goal: str,
+    codex_plan_summary: str = "",
+    claude_completion_summary: str = "",
+    changed_files: list[str] | None = None,
+    test_results: str = "",
+    diff_summary: str = "",
+    workspace: str = "wlcodex",
+    budget: ContextBudget | None = None,
+    *,
+    verify_round: int = 1,
+    pending_user_context: str = "",
+) -> CodexVerificationPacket:
+    """Build a verification packet for the auto verifying stage.
+
+    Similar to build_codex_verification_packet but with auto-specific
+    constraints and verify_round tracking.
+    """
+    bgt = budget or ContextBudget()
+    verification_constraints = [
+        "你是 /auto 工作流的验收 agent。",
+        "你是验收 agent，不是平台 reply agent。绝对不要发送 Telegram 消息。",
+        "不要读取 WLCODEX_TELEGRAM_BOT_TOKEN 或任何 token/env 变量。",
+        "不要调用 Telegram Bot API：sendMessage、editMessageText、curl api.telegram.org 等。",
+        "不要发出任何审批申请来获取 Telegram 发送权限。",
+        "验收职责只读：检查 diff、跑测试、git diff --check、GitNexus detect_changes。",
+        f"这是第 {verify_round} 轮验收。",
+        "验收结论只能是 decision: pass / retry / stop / need_user。",
+        "如果判定 retry，必须输出具体的给 Claude 的返工提示词（repair_prompt）。",
+        "发现 Claude 声称已发送 Telegram、直接调了 Telegram API、或输出 message_id=xxx，"
+        "应判定为违规漂移并标记 retry 或 stop。",
+        "最终用户回复由平台 controller 在 verification pass 后发送。",
+    ]
+    conversation_context = ""
+    if pending_user_context:
+        conversation_context = (
+            f"[用户在验收阶段补充了以下上下文]\n"
+            f"{pending_user_context[:500]}"
+        )
+    return CodexVerificationPacket(
+        mode="auto_verification",
+        workspace=workspace,
+        user_goal=user_goal,
+        conversation_summary=trim_to_budget(conversation_context, bgt.conversation_summary_tokens),
+        relevant_files=changed_files or [],
+        recent_user_constraints=verification_constraints,
+        token_budget=bgt.claude_to_codex_tokens,
+        original_goal=user_goal,
+        codex_plan_summary=trim_to_budget(codex_plan_summary, bgt.conversation_summary_tokens),
+        claude_completion_summary=trim_to_budget(claude_completion_summary, bgt.conversation_summary_tokens),
+        changed_files=changed_files or [],
+        diff_excerpt_or_summary=diff_summary,
+        test_results=test_results,
+        verification_question="Does the implementation meet all acceptance criteria?",
+    )
+
+
+def build_auto_repair_packet(
+    user_goal: str,
+    codex_plan_summary: str = "",
+    claude_completion_summary: str = "",
+    verification_result: str = "",
+    workspace: str = "wlcodex",
+    budget: ContextBudget | None = None,
+) -> CodexHandoffPacket:
+    """Build a Claude repair packet for the auto retry_ready stage.
+
+    This packet contains the focused repair prompt that Codex generated
+    during verification failure, combined with the original goal and plan.
+    """
+    bgt = budget or ContextBudget()
+    repair_constraints = [
+        "你是修复工程师，不是平台 reply agent。绝对不要发送 Telegram 消息。",
+        "不要读取 WLCODEX_TELEGRAM_BOT_TOKEN 或任何 TELEGRAM_BOT_TOKEN 变量。",
+        "不要调用 Telegram Bot API。",
+        "不要声称已发送 Telegram 或输出 message_id=xxx。你无法发 Telegram。",
+        "这是验收失败后的返工，只修复验收指出的问题，不要扩大范围。",
+        "严格遵守 Codex 方案和验收标准，不要偏离范围。",
+    ]
+    steps = []
+    if verification_result:
+        steps.append(f"验收失败原因：{verification_result[:500]}")
+    if codex_plan_summary:
+        steps.append(f"原始方案摘要：{codex_plan_summary[:300]}")
+    return ClaudeHandoffPacket(
+        mode="auto_repair",
+        workspace=workspace,
+        user_goal=user_goal,
+        conversation_summary="",
+        relevant_files=[],
+        recent_user_constraints=repair_constraints,
+        acceptance_criteria=[],
+        token_budget=bgt.codex_to_claude_tokens,
+        handoff_from_codex=ClaudeHandoffPacket.HandoffFromCodex(
+            objective=f"修复验收失败的问题：{user_goal}",
+            analysis=verification_result[:1000] if verification_result else "",
+            steps=steps,
+            acceptance_criteria=["验收指出的所有问题已修复", "原验收标准全部通过"],
+            prohibited_changes=["不要引入新功能", "不要修改验收未涉及的文件"],
+        ),
+    )

@@ -287,9 +287,10 @@ def _build_runtime(tmp_path: Path) -> tuple[
 
 
 @pytest.mark.asyncio
-async def test_controller_starts_background_orchestration_and_returns(
+async def test_controller_starts_staged_auto_collecting_context(
     tmp_path: Path,
 ) -> None:
+    """Staged /auto starts collecting_context via Codex, not eager runner."""
     ledger, service, backend, renderer, _workspace = _build_runtime(tmp_path)
     runner = NeverFinishingRunner()
     controller = CommandController(
@@ -311,19 +312,23 @@ async def test_controller_starts_background_orchestration_and_returns(
         timeout=0.05,
     )
 
+    # Staged /auto renders via interaction_renderer (not via runner)
     assert response.already_rendered is True
-    assert response.text == ""
-    assert len(runner.calls) == 1
-    call = runner.calls[0]
-    assert call["prompt"] == "实现一个需要多轮验收的小功能"
-    assert call["chat_id"] == 100
-    assert call["conversation"].id == 1
-    assert ledger.get_orchestration_run(call["orchestration_run_id"]).status == (
-        OrchestrationStatus.RUNNING
-    )
-    assert ledger.get_agent_run(call["codex_analysis_run_id"]).status == (
-        AgentRunStatus.RUNNING
-    )
+    # The runner is NOT called — staged-auto doesn't use start_chief_engineer
+    assert len(runner.calls) == 0
+
+    # Orchestration run should be created in collecting_context, running
+    orch_runs = ledger.list_orchestration_runs(1)
+    assert len(orch_runs) == 1
+    assert orch_runs[0].current_step == "collecting_context"
+    assert orch_runs[0].status == OrchestrationStatus.RUNNING
+
+    # A codex analysis agent run should be created
+    agent_runs = ledger.list_agent_runs(1)
+    assert len(agent_runs) == 1
+    assert agent_runs[0].agent == "codex"
+    assert agent_runs[0].role == "auto_analysis"
+
     assert any(event.event_type == "run_started" for event in renderer.events)
 
     for task in runner.tasks:

@@ -39,6 +39,7 @@ from wlcodex.conversation_callback import (
     RETRY,
     STATUS,
     VERIFY,
+    AUTO_CALLBACK_ACTIONS,
     ConversationCallback,
     decode_conversation_callback,
     encode_conversation_callback,
@@ -47,7 +48,45 @@ from wlcodex.context_packets import (
     ContextBudget,
     build_codex_analysis_packet,
     build_codex_verification_packet as make_verification_packet,
+    build_auto_context_packet,
+    build_auto_final_plan_packet,
+    build_auto_verification_packet,
+    build_auto_repair_packet,
     trim_to_budget,
+)
+from wlcodex.auto_workflow import (
+    AUTO_COLLECTING_CONTEXT,
+    AUTO_DRAFT_READY,
+    AUTO_CLAUDE_RUNNING,
+    AUTO_CLAUDE_DONE,
+    AUTO_VERIFYING,
+    AUTO_RETRY_READY,
+    AUTO_CODEX_TAKEOVER_RUNNING,
+    AUTO_COMPLETED,
+    AUTO_FINAL_PLAN,
+    AUTO_SHOW_DRAFT,
+    AUTO_CANCEL,
+    AUTO_SEND_TO_CLAUDE,
+    AUTO_CONTINUE_CONTEXT,
+    AUTO_REWRITE_PLAN,
+    AUTO_CODEX_TAKEOVER,
+    AUTO_CLOSE,
+    AUTO_CODEX_VERIFY,
+    AUTO_SEND_REPAIR_TO_CLAUDE,
+    AUTO_REWRITE_REPAIR,
+    AUTO_INTERRUPT_CLAUDE,
+    AUTO_VIEW_DIFF,
+    AUTO_VIEW_STATUS,
+    ROLE_AUTO_ANALYSIS,
+    ROLE_AUTO_FINAL_PLAN,
+    ROLE_AUTO_VERIFICATION,
+    ROLE_AUTO_IMPLEMENTATION,
+    ROLE_AUTO_REPAIR,
+    ROLE_AUTO_CODEX_TAKEOVER,
+    auto_stage_label,
+    build_auto_stage_buttons,
+    is_active_auto_stage,
+    is_auto_collecting_context,
 )
 from wlcodex.claude_permissions import (
     DEFAULT_CLAUDE_PERMISSION_MODE,
@@ -619,6 +658,46 @@ class CommandController:
             conversation_id=active.id,
         ))
 
+        # --- Check for active auto workflow and route plain text per stage ---
+        if active is not None and self._ledger is not None:
+            auto_run = self._latest_active_auto_run(active.id)
+            if auto_run is not None:
+                step = getattr(auto_run, "current_step", "")
+
+                if step == AUTO_COLLECTING_CONTEXT:
+                    # Plain text supplements context, no Claude started.
+                    return await self._handle_auto_context_supplement(
+                        text, active, auto_run, telegram_context, cid
+                    )
+
+                if step == AUTO_DRAFT_READY:
+                    # Plain text means "continue discussing with Codex" —
+                    # return to collecting_context.
+                    self._ledger.update_orchestration_run(
+                        auto_run.id,
+                        status="running",
+                        current_step=AUTO_COLLECTING_CONTEXT,
+                    )
+                    return await self._handle_auto_context_supplement(
+                        text, active, auto_run, telegram_context, cid
+                    )
+
+                if step in (AUTO_CLAUDE_DONE, AUTO_RETRY_READY):
+                    # Plain text is a note for verification or repair revision.
+                    # Append to conversation summary and acknowledge, show current buttons.
+                    self._ledger.update_conversation_summary(
+                        active.id,
+                        trim_to_budget(
+                            f"{active.conversation_summary}\n[用户备注] {text[:200]}",
+                            ContextBudget().conversation_summary_tokens,
+                        ),
+                    )
+                    buttons = build_auto_stage_buttons(active.id, step)
+                    return ControllerResponse(
+                        f"已记录备注：{text[:100]}",
+                        buttons=buttons,
+                    )
+
         # --- Plain text: read-only Codex analysis by default.
         # Full Codex -> Claude -> Codex orchestration is explicit via /auto.
         return await self._handle_codex_analysis_only(
@@ -717,6 +796,104 @@ class CommandController:
         ]]
         return ControllerResponse(
             "我先看一下。完成后会把结论发在这里。",
+            buttons=buttons,
+        )
+
+    async def _handle_auto_context_supplement(
+        self,
+        text: str,
+        active: object,
+        auto_run: object,
+        ctx: dict[str, Any] | None,
+        correlation_id: str,
+    ) -> ControllerResponse:
+        """Handle plain text during auto collecting_context stage.
+
+        Steers existing Codex analysis turn if one is active,
+        or starts a new read-only context supplement turn.
+        Does NOT create a new task or start Claude.
+        """
+        # Update conversation summary with supplemented context
+        summary_prefix = active.conversation_summary or ""
+        self._ledger.update_conversation_summary(
+            active.id,
+            trim_to_budget(
+                f"{summary_prefix}\n[Auto补充] {text[:200]}",
+                ContextBudget().conversation_summary_tokens,
+            ),
+        )
+
+        # Try to steer the current active Codex turn
+        task_id = getattr(active, "active_codex_task_id", None)
+        if task_id:
+            try:
+                task = self._service.get_task(task_id)
+                if (
+                    task is not None
+                    and getattr(task, "codex_thread_id", None)
+                    and getattr(task, "active_turn_id", None)
+                ):
+                    await self._backend.steer_turn(
+                        task.codex_thread_id,
+                        task.active_turn_id,
+                        text,
+                    )
+                    buttons = build_auto_stage_buttons(active.id, AUTO_COLLECTING_CONTEXT)
+                    return ControllerResponse(
+                        f"已补充到当前 Codex 分析：{text[:100]}",
+                        buttons=buttons,
+                    )
+            except Exception:
+                logger.debug("Failed to steer existing auto Codex turn", exc_info=True)
+
+        # If no active turn to steer, start a new read-only context supplement turn
+        budget = ContextBudget()
+        packet = build_auto_context_packet(
+            user_goal=text,
+            conversation_summary=trim_to_budget(
+                active.conversation_summary, budget.conversation_summary_tokens
+            ),
+            workspace=active.workspace_alias,
+            budget=budget,
+        )
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        task = self._reserve_execution_lease(
+            conversation_id=active.id,
+            workspace_alias=active.workspace_alias,
+            prompt=text,
+            telegram_chat_id=chat_id,
+            purpose="auto_context_supplement",
+        )
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=active.id,
+            agent="codex",
+            role="auto_context_supplement",
+            hidden_task_id=task.id,
+            prompt_packet_summary=packet.summary(),
+        )
+        self._ledger.update_agent_run_status(agent_run.id, "running")
+
+        workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+
+        try:
+            await self._start_codex_turn_for_conversation(
+                active=active,
+                task=task,
+                workspace_path=workspace_path,
+                prompt=packet.render(),
+                interaction_mode="read_only_analysis",
+            )
+        except Exception as exc:
+            task = self._service.fail_task(task.id, str(exc))
+            self._ledger.update_agent_run_status(
+                agent_run.id, "failed", completion_summary=str(exc)[:2000],
+            )
+            return ControllerResponse(classify_user_error(exc))
+
+        buttons = build_auto_stage_buttons(active.id, AUTO_COLLECTING_CONTEXT)
+        return ControllerResponse(
+            f"已补充信息到当前 /auto 分析。{text[:100]}",
             buttons=buttons,
         )
 
@@ -1519,6 +1696,11 @@ class CommandController:
                     self._ledger.set_conversation_claude_session(
                         conversation_id, claude_session_id
                     )
+                # Update staged-auto orchestration run if applicable
+                self._transition_auto_claude_completed(
+                    conversation_id, agent_status="failed",
+                    completion_summary=error_text[:5000],
+                )
                 self._emit_event(RuntimeEvent(
                     schema_version=1,
                     event_type=EventType.RUN_FAILED,
@@ -1553,6 +1735,11 @@ class CommandController:
                 self._ledger.set_conversation_claude_session(
                     conversation_id, claude_session_id
                 )
+            # Update staged-auto orchestration run if applicable
+            self._transition_auto_claude_completed(
+                conversation_id, agent_status="done",
+                completion_summary=completion_summary or "Claude 执行完成",
+            )
             try:
                 self._ledger.set_task_status(
                     task_id,
@@ -1595,6 +1782,10 @@ class CommandController:
                 "failed",
                 completion_summary=str(exc)[:2000],
             )
+            self._transition_auto_claude_completed(
+                conversation_id, agent_status="failed",
+                completion_summary=str(exc)[:5000],
+            )
             self._emit_event(RuntimeEvent(
                 schema_version=1,
                 event_type=EventType.RUN_FAILED,
@@ -1614,14 +1805,10 @@ class CommandController:
     async def handle_auto_mode(
         self, command: AutoModeCommand, ctx: dict[str, Any] | None = None
     ) -> ControllerResponse:
+        """Stage-gated /auto: starts in collecting_context, never starts Claude
+        automatically. User must explicitly advance through button clicks."""
         if self._ledger is None:
             return ControllerResponse("系统未完全初始化。请检查配置。")
-
-        if self._claude is None or not getattr(self._claude, "enabled", False):
-            return ControllerResponse(
-                "总工程师编排需要 Claude Code 后端。\n"
-                "请在配置中设置 claude.enabled = true，或使用 /codex 直接对话。"
-            )
 
         chat_id = ctx.get("chat_id", 0) if ctx else 0
         user_id = ctx.get("user_id", 0) if ctx else 0
@@ -1637,6 +1824,7 @@ class CommandController:
                 workspace_alias=self._default_workspace,
             )
 
+        # Check if workspace is busy
         busy = await self._direct_command_busy_response(
             active=active,
             original_text=f"/auto {command.prompt}".strip(),
@@ -1663,46 +1851,67 @@ class CommandController:
             conversation_id=active.id,
         ))
 
-        return await self._handle_chief_engineer_impl(command, active, ctx, correlation_id=cid)
+        # Emit auto.stage.transitioned event
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.CONVERSATION_STARTED,
+            aggregate_type=AggregateType.CONVERSATION,
+            aggregate_id=str(active.id),
+            correlation_id=cid,
+            source=EventSource.CONTROLLER,
+            actor="user",
+            visibility=Visibility.OPERATOR,
+            payload={
+                "goal": command.prompt,
+                "stage": AUTO_COLLECTING_CONTEXT,
+                "mode": "staged_auto",
+                "chat_id": chat_id,
+            },
+            occurred_at=now_iso(),
+            conversation_id=active.id,
+        ))
 
-    async def _handle_chief_engineer_impl(
-        self,
-        command: AutoModeCommand,
-        active: object,
-        ctx: dict[str, Any] | None = None,
-        correlation_id: str = "",
-    ) -> ControllerResponse:
-        """Shared chief-engineer orchestration loop: Codex→Claude→Codex verify.
-
-        Called by handle_auto_mode (/auto). Plain text remains read-only Codex
-        analysis unless the user explicitly enters /auto.
-
-        When the interaction renderer is available (natural profile + streaming
-        enabled), uses the streaming orchestrator path so Claude deltas and
-        phase transitions are visible in real time.
-        """
-        cid = correlation_id or self._new_correlation_id()
-
-        if self._orchestration_runner is None:
-            return ControllerResponse(
-                "总工程师编排器未初始化，无法保证 Codex 验收闭环。请检查 runtime composition。"
-            )
-
-        # Create orchestration run record
+        # Create orchestration_run with collecting_context stage
         orch_run = self._ledger.create_orchestration_run(
             conversation_id=active.id,
             goal=command.prompt,
         )
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="running",
+            current_step=AUTO_COLLECTING_CONTEXT,
+        )
 
-        # Create Codex analysis agent run
+        # Start Codex in read-only analysis mode (NOT the eager orchestration runner)
+        budget = ContextBudget()
+        packet = build_auto_context_packet(
+            user_goal=command.prompt,
+            conversation_summary=trim_to_budget(
+                active.conversation_summary, budget.conversation_summary_tokens
+            ),
+            workspace=active.workspace_alias,
+            budget=budget,
+        )
+
+        task = self._reserve_execution_lease(
+            conversation_id=active.id,
+            workspace_alias=active.workspace_alias,
+            prompt=command.prompt,
+            telegram_chat_id=chat_id,
+            purpose="auto_analysis",
+        )
+
         codex_analysis_run = self._ledger.create_agent_run(
             conversation_id=active.id,
             agent="codex",
-            role="analysis",
+            role=ROLE_AUTO_ANALYSIS,
+            hidden_task_id=task.id,
+            prompt_packet_summary=packet.summary(),
         )
         self._ledger.update_agent_run_status(codex_analysis_run.id, "running")
 
-        # Emit run.requested
+        workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+
         self._emit_event(RuntimeEvent(
             schema_version=1,
             event_type=EventType.RUN_REQUESTED,
@@ -1712,50 +1921,554 @@ class CommandController:
             source=EventSource.CONTROLLER,
             actor="controller",
             visibility=Visibility.OPERATOR,
-            payload={"goal": command.prompt, "max_verify_rounds": 3},
+            payload={"goal": command.prompt, "stage": AUTO_COLLECTING_CONTEXT},
             occurred_at=now_iso(),
             conversation_id=active.id,
             orchestration_run_id=orch_run.id,
         ))
 
-        workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+        try:
+            await self._start_codex_turn_for_conversation(
+                active=active,
+                task=task,
+                workspace_path=workspace_path,
+                prompt=packet.render(),
+                interaction_mode="read_only_analysis",
+            )
+        except Exception as exc:
+            task = self._service.fail_task(task.id, str(exc))
+            self._ledger.update_agent_run_status(
+                codex_analysis_run.id, "failed", completion_summary=str(exc)[:2000],
+            )
+            self._ledger.update_orchestration_run(
+                orch_run.id,
+                status="failed",
+                last_codex_analysis=str(exc)[:5000],
+            )
+            return ControllerResponse(classify_user_error(exc))
 
-        from wlcodex.interaction.events import InteractionEvent
-
-        chat_id = ctx.get("chat_id", 0) if ctx else 0
-        task = self._reserve_execution_lease(
-            conversation_id=active.id,
-            workspace_alias=active.workspace_alias,
-            prompt=command.prompt,
-            telegram_chat_id=chat_id,
-            purpose="chief_engineer",
+        self._ledger.update_conversation_summary(
+            active.id,
+            trim_to_budget(
+                f"[Auto] {command.prompt[:200]}",
+                budget.conversation_summary_tokens,
+            ),
         )
+
+        buttons = build_auto_stage_buttons(active.id, AUTO_COLLECTING_CONTEXT)
+        start_text = (
+            "Codex 开始分析。你可以继续补充信息，"
+            "准备好后点「生成最终方案」让 Codex 出方案。\n\n"
+            "注意：当前是只读分析阶段，不会启动 Claude，不会修改代码。"
+        )
+
         if self._interaction_renderer is not None:
+            from wlcodex.interaction.events import InteractionEvent
             await self._interaction_renderer.handle(
                 InteractionEvent(
                     event_type="run_started",
                     chat_id=chat_id,
                     task_id=task.id,
                     conversation_id=active.id,
+                    text=start_text,
+                    buttons=buttons,
                 )
             )
-        self._orchestration_runner.start_chief_engineer(
-            prompt=command.prompt,
-            conversation=active,
-            task_id=task.id,
-            orchestration_run_id=orch_run.id,
-            codex_analysis_run_id=codex_analysis_run.id,
-            chat_id=chat_id,
-            workspace_path=workspace_path,
-            codex_thread_id=getattr(active, "codex_thread_id", "") or "",
-            claude_session_id=getattr(active, "claude_session_id", "") or "",
-            correlation_id=cid,
-        )
-        if self._interaction_renderer is not None:
             return ControllerResponse("", already_rendered=True)
-        return ControllerResponse(
-            "总工程师编排已开始。可用 /status 查看当前状态，/trace 查看事件轨迹。"
+
+        return ControllerResponse(start_text, buttons=buttons)
+
+    # --- Staged-auto callback handlers ---
+
+    def _latest_active_auto_run(self, conversation_id: int) -> object | None:
+        """Find the latest orchestration run for this conversation that is
+        in an active auto stage."""
+        if self._ledger is None:
+            return None
+        return self._ledger.get_latest_active_auto_run(conversation_id)
+
+    def _transition_auto_claude_completed(
+        self,
+        conversation_id: int,
+        *,
+        agent_status: str,
+        completion_summary: str = "",
+    ) -> None:
+        """Transition staged-auto orchestration run from claude_running to
+        claude_done when a Claude background task completes, and send the
+        new stage buttons to Telegram."""
+        if self._ledger is None:
+            return
+        orch_run = self._latest_active_auto_run(conversation_id)
+        if orch_run is None:
+            return
+        if orch_run.current_step not in (AUTO_CLAUDE_RUNNING,):
+            return
+        new_status = "needs_user" if agent_status == "done" else "failed"
+        new_step = AUTO_CLAUDE_DONE if agent_status == "done" else orch_run.current_step
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status=new_status,
+            current_step=new_step,
+            last_claude_summary=completion_summary[:5000],
         )
+
+        # Send stage buttons to Telegram
+        if self._interaction_renderer is not None and agent_status == "done":
+            try:
+                convo = self._ledger.get_conversation(conversation_id)
+                chat_id = convo.chat_id
+            except Exception:
+                return
+            buttons = build_auto_stage_buttons(
+                conversation_id, new_step,
+                last_codex_analysis=orch_run.last_codex_analysis or "",
+            )
+            from wlcodex.interaction.events import InteractionEvent
+            asyncio.create_task(
+                self._interaction_renderer.handle(
+                    InteractionEvent(
+                        event_type="run_completed",
+                        chat_id=chat_id,
+                        conversation_id=conversation_id,
+                        text=f"Claude 执行完成。\n\n{completion_summary[:500]}\n\n请选择下一步：",
+                        buttons=buttons,
+                    )
+                )
+            )
+
+    async def _handle_auto_final_plan(
+        self, callback: ConversationCallback
+    ) -> ControllerResponse:
+        """User clicked '生成最终方案': start Codex read-only final plan generation.
+        Does NOT start Claude."""
+        convo = self._ledger.get_conversation(callback.conversation_id)
+        orch_run = self._latest_active_auto_run(callback.conversation_id)
+        if orch_run is None:
+            return ControllerResponse("没有活跃的自动工作流。请用 /auto 开始。")
+        if not is_auto_collecting_context(orch_run):
+            return ControllerResponse(
+                f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
+                "无法生成最终方案。请先回到上下文收集阶段。"
+            )
+
+        # Reset the orchestration run context and start final plan Codex turn
+        goal = orch_run.goal
+        conversation_summary = convo.conversation_summary
+        budget = ContextBudget()
+        packet = build_auto_final_plan_packet(
+            user_goal=goal,
+            conversation_summary=trim_to_budget(
+                conversation_summary, budget.conversation_summary_tokens
+            ),
+            workspace=convo.workspace_alias,
+            budget=budget,
+        )
+
+        chat_id = convo.chat_id
+        task = self._reserve_execution_lease(
+            conversation_id=convo.id,
+            workspace_alias=convo.workspace_alias,
+            prompt=f"生成最终方案：{goal}",
+            telegram_chat_id=chat_id,
+            purpose="auto_final_plan",
+        )
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=convo.id,
+            agent="codex",
+            role=ROLE_AUTO_FINAL_PLAN,
+            hidden_task_id=task.id,
+            prompt_packet_summary=packet.summary(),
+        )
+        self._ledger.update_agent_run_status(agent_run.id, "running")
+        workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
+
+        try:
+            await self._start_codex_turn_for_conversation(
+                active=convo,
+                task=task,
+                workspace_path=workspace_path,
+                prompt=packet.render(),
+                interaction_mode="read_only_analysis",
+            )
+        except Exception as exc:
+            task = self._service.fail_task(task.id, str(exc))
+            self._ledger.update_agent_run_status(
+                agent_run.id, "failed", completion_summary=str(exc)[:2000],
+            )
+            return ControllerResponse(classify_user_error(exc))
+
+        buttons = build_auto_stage_buttons(convo.id, AUTO_COLLECTING_CONTEXT)
+        return ControllerResponse("Codex 正在生成最终方案，完成后将显示方案和执行按钮。", buttons=buttons)
+
+    async def _handle_auto_send_to_claude(
+        self, callback: ConversationCallback
+    ) -> ControllerResponse:
+        """User clicked '交给 Claude 执行': start Claude with the Codex-generated
+        prompt. Exactly one Claude run is started. Does not auto-verify."""
+        convo = self._ledger.get_conversation(callback.conversation_id)
+        orch_run = self._latest_active_auto_run(callback.conversation_id)
+        if orch_run is None:
+            return ControllerResponse("没有活跃的自动工作流。请用 /auto 开始。")
+        if orch_run.current_step not in (AUTO_DRAFT_READY, AUTO_RETRY_READY):
+            return ControllerResponse(
+                f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
+                "不能启动 Claude 执行。"
+            )
+
+        if self._claude is None or not getattr(self._claude, "enabled", False):
+            return ControllerResponse(
+                "Claude Code 未启用。请在配置中设置 claude.enabled = true 后重试。"
+            )
+
+        # Extract the Claude execution prompt from the orchestration run's analysis
+        claude_prompt = orch_run.last_codex_analysis or orch_run.goal
+        goal = orch_run.goal
+        chat_id = convo.chat_id
+        budget = ContextBudget()
+
+        # Update orchestration run to claude_running
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="running",
+            current_step=AUTO_CLAUDE_RUNNING,
+        )
+
+        # Create Claude agent run
+        task = self._reserve_execution_lease(
+            conversation_id=convo.id,
+            workspace_alias=convo.workspace_alias,
+            prompt=claude_prompt,
+            telegram_chat_id=chat_id,
+            purpose="auto_implementation" if orch_run.current_step != AUTO_RETRY_READY else "auto_repair",
+        )
+
+        role = ROLE_AUTO_IMPLEMENTATION if orch_run.current_step != AUTO_RETRY_READY else ROLE_AUTO_REPAIR
+        claude_run = self._ledger.create_agent_run(
+            conversation_id=convo.id,
+            agent="claude",
+            role=role,
+            hidden_task_id=task.id,
+            prompt_packet_summary=claude_prompt[:200],
+        )
+        self._ledger.update_agent_run_status(claude_run.id, "running")
+        self._ledger.set_conversation_active_claude_run(convo.id, claude_run.id)
+
+        workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
+
+        # Launch Claude as a background task
+        bg_task = asyncio.create_task(
+            self._run_claude_direct_async(
+                agent_run_id=claude_run.id,
+                task_id=task.id,
+                conversation_id=convo.id,
+                prompt=claude_prompt,
+                workspace_path=workspace_path,
+                chat_id=chat_id,
+                correlation_id=self._new_correlation_id(),
+            ),
+            name=f"auto-claude-{claude_run.id}",
+        )
+        self._background_tasks.add(bg_task)
+        bg_task.add_done_callback(self._background_tasks.discard)
+
+        buttons = build_auto_stage_buttons(convo.id, AUTO_CLAUDE_RUNNING)
+        return ControllerResponse("Claude 开始执行。完成后请点「Codex 验收」。", buttons=buttons)
+
+    async def _handle_auto_codex_verify(
+        self, callback: ConversationCallback
+    ) -> ControllerResponse:
+        """User clicked 'Codex 验收': start Codex read-only verification.
+        Only starts after explicit click, never automatically."""
+        convo = self._ledger.get_conversation(callback.conversation_id)
+        orch_run = self._latest_active_auto_run(callback.conversation_id)
+        if orch_run is None:
+            return ControllerResponse("没有活跃的自动工作流。请用 /auto 开始。")
+        if orch_run.current_step not in (AUTO_CLAUDE_DONE, AUTO_RETRY_READY):
+            return ControllerResponse(
+                f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
+                "不是等待验收阶段。请等 Claude 完成后再点「Codex 验收」。"
+            )
+
+        goal = orch_run.goal
+        codex_analysis = orch_run.last_codex_analysis or ""
+        claude_summary = orch_run.last_claude_summary or ""
+        conversation_summary = convo.conversation_summary
+        verify_round = orch_run.verify_round + 1
+
+        # Collect diff evidence
+        diff_summary = ""
+        changed_files: list[str] = []
+        try:
+            task_id = convo.active_codex_task_id or convo.active_claude_run_id
+            if task_id:
+                workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
+                diff_result = self._inspector.diff(task_id, workspace_path)
+                if diff_result and diff_result.body:
+                    diff_summary = diff_result.body[:1500]
+                files_result = self._inspector.files(task_id)
+                if files_result and files_result.body:
+                    for line in files_result.body.split("\n"):
+                        stripped = line.strip()
+                        if stripped and not stripped.startswith("#"):
+                            changed_files.append(stripped[:200])
+        except Exception:
+            pass
+
+        budget = ContextBudget()
+        packet = build_auto_verification_packet(
+            user_goal=goal,
+            codex_plan_summary=codex_analysis[:800],
+            claude_completion_summary=claude_summary[:1500],
+            changed_files=changed_files[:20],
+            diff_summary=diff_summary[:1500],
+            workspace=convo.workspace_alias,
+            budget=budget,
+            verify_round=verify_round,
+        )
+
+        # Increment verify round
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="running",
+            current_step=AUTO_VERIFYING,
+            verify_round=verify_round,
+        )
+
+        chat_id = convo.chat_id
+        task = self._reserve_execution_lease(
+            conversation_id=convo.id,
+            workspace_alias=convo.workspace_alias,
+            prompt=f"验收：{goal}",
+            telegram_chat_id=chat_id,
+            purpose="auto_verification",
+        )
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=convo.id,
+            agent="codex",
+            role=ROLE_AUTO_VERIFICATION,
+            hidden_task_id=task.id,
+            prompt_packet_summary=packet.summary(),
+        )
+        self._ledger.update_agent_run_status(agent_run.id, "running")
+
+        workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
+
+        try:
+            await self._start_codex_turn_for_conversation(
+                active=convo,
+                task=task,
+                workspace_path=workspace_path,
+                prompt=packet.render(),
+                interaction_mode="read_only_analysis",
+            )
+        except Exception as exc:
+            task = self._service.fail_task(task.id, str(exc))
+            self._ledger.update_agent_run_status(
+                agent_run.id, "failed", completion_summary=str(exc)[:2000],
+            )
+            return ControllerResponse(classify_user_error(exc))
+
+        buttons = build_auto_stage_buttons(convo.id, AUTO_VERIFYING)
+        return ControllerResponse("Codex 开始验收，完成后将显示验收结果。", buttons=buttons)
+
+    async def _handle_auto_codex_takeover(
+        self, callback: ConversationCallback
+    ) -> ControllerResponse:
+        """User clicked 'Codex 接管修': explicitly allow Codex to write code."""
+        convo = self._ledger.get_conversation(callback.conversation_id)
+        orch_run = self._latest_active_auto_run(callback.conversation_id)
+        if orch_run is None:
+            return ControllerResponse("没有活跃的自动工作流。请用 /auto 开始。")
+        if orch_run.current_step not in (AUTO_DRAFT_READY, AUTO_CLAUDE_DONE, AUTO_RETRY_READY):
+            return ControllerResponse(
+                f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
+                "不能在此阶段接管。"
+            )
+
+        goal = orch_run.goal
+        analysis = orch_run.last_codex_analysis or ""
+        claude_summary = orch_run.last_claude_summary or ""
+        verification = orch_run.last_verification_result or ""
+
+        # Update orchestration run to codex_takeover_running
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="running",
+            current_step=AUTO_CODEX_TAKEOVER_RUNNING,
+        )
+
+        budget = ContextBudget()
+        prompt = (
+            f"Codex 接管修复任务\n\n"
+            f"原始目标：{goal}\n\n"
+            f"Codex 方案：{analysis[:500]}\n\n"
+            f"Claude 产出：{claude_summary[:300]}\n\n"
+            f"验收结果：{verification[:300]}\n\n"
+            f"用户明确要求 Codex 直接修复，请直接修改代码完成目标。"
+        )
+
+        chat_id = convo.chat_id
+        task = self._reserve_execution_lease(
+            conversation_id=convo.id,
+            workspace_alias=convo.workspace_alias,
+            prompt=prompt,
+            telegram_chat_id=chat_id,
+            purpose="auto_codex_takeover",
+        )
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=convo.id,
+            agent="codex",
+            role=ROLE_AUTO_CODEX_TAKEOVER,
+            hidden_task_id=task.id,
+            prompt_packet_summary=prompt[:200],
+        )
+        self._ledger.update_agent_run_status(agent_run.id, "running")
+        workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
+
+        try:
+            await self._start_codex_turn_for_conversation(
+                active=convo,
+                task=task,
+                workspace_path=workspace_path,
+                prompt=prompt,
+                interaction_mode="general",
+            )
+        except Exception as exc:
+            task = self._service.fail_task(task.id, str(exc))
+            self._ledger.update_agent_run_status(
+                agent_run.id, "failed", completion_summary=str(exc)[:2000],
+            )
+            return ControllerResponse(classify_user_error(exc))
+
+        buttons = build_auto_stage_buttons(convo.id, AUTO_CODEX_TAKEOVER_RUNNING)
+        return ControllerResponse("Codex 开始直接修复。", buttons=buttons)
+
+    async def _handle_auto_send_repair_to_claude(
+        self, callback: ConversationCallback
+    ) -> ControllerResponse:
+        """User clicked '发给 Claude 返工' or '发给 Claude 返工' from retry_ready:
+        start Claude repair with Codex-generated repair prompt."""
+        convo = self._ledger.get_conversation(callback.conversation_id)
+        orch_run = self._latest_active_auto_run(callback.conversation_id)
+        if orch_run is None:
+            return ControllerResponse("没有活跃的自动工作流。请用 /auto 开始。")
+        if orch_run.current_step not in (AUTO_CLAUDE_DONE, AUTO_RETRY_READY):
+            return ControllerResponse(
+                f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
+                "不能返工。"
+            )
+
+        if self._claude is None or not getattr(self._claude, "enabled", False):
+            return ControllerResponse(
+                "Claude Code 未启用。请在配置中设置 claude.enabled = true 后重试。"
+            )
+
+        goal = orch_run.goal
+        verification = orch_run.last_verification_result or ""
+        analysis = orch_run.last_codex_analysis or ""
+
+        # Build repair prompt from verification result
+        budget = ContextBudget()
+        repair_packet = build_auto_repair_packet(
+            user_goal=goal,
+            codex_plan_summary=analysis[:500],
+            claude_completion_summary="",
+            verification_result=verification[:500],
+            workspace=convo.workspace_alias,
+            budget=budget,
+        )
+        claude_prompt = repair_packet.render()
+
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="running",
+            current_step=AUTO_CLAUDE_RUNNING,
+        )
+
+        chat_id = convo.chat_id
+        task = self._reserve_execution_lease(
+            conversation_id=convo.id,
+            workspace_alias=convo.workspace_alias,
+            prompt=claude_prompt,
+            telegram_chat_id=chat_id,
+            purpose="auto_repair",
+        )
+
+        claude_run = self._ledger.create_agent_run(
+            conversation_id=convo.id,
+            agent="claude",
+            role=ROLE_AUTO_REPAIR,
+            hidden_task_id=task.id,
+            prompt_packet_summary=claude_prompt[:200],
+        )
+        self._ledger.update_agent_run_status(claude_run.id, "running")
+        self._ledger.set_conversation_active_claude_run(convo.id, claude_run.id)
+
+        workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
+
+        bg_task = asyncio.create_task(
+            self._run_claude_direct_async(
+                agent_run_id=claude_run.id,
+                task_id=task.id,
+                conversation_id=convo.id,
+                prompt=claude_prompt,
+                workspace_path=workspace_path,
+                chat_id=chat_id,
+                correlation_id=self._new_correlation_id(),
+            ),
+            name=f"auto-repair-{claude_run.id}",
+        )
+        self._background_tasks.add(bg_task)
+        bg_task.add_done_callback(self._background_tasks.discard)
+
+        buttons = build_auto_stage_buttons(convo.id, AUTO_CLAUDE_RUNNING)
+        return ControllerResponse("Claude 开始返工。完成后请点「Codex 验收」。", buttons=buttons)
+
+    async def _handle_auto_close(self, callback: ConversationCallback) -> ControllerResponse:
+        """User clicked '结束任务': mark the auto run as completed."""
+        convo = self._ledger.get_conversation(callback.conversation_id)
+        orch_run = self._latest_active_auto_run(callback.conversation_id)
+        if orch_run is None:
+            return ControllerResponse("没有活跃的自动工作流。")
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="passed",
+            current_step=AUTO_COMPLETED,
+        )
+        buttons = [[
+            {"text": "查看状态", "callback_data": encode_conversation_callback(convo.id, STATUS)},
+        ]]
+        return ControllerResponse("自动工作流已结束。", buttons=buttons)
+
+    async def _handle_auto_cancel(self, callback: ConversationCallback) -> ControllerResponse:
+        """User clicked '取消': abort the auto run."""
+        convo = self._ledger.get_conversation(callback.conversation_id)
+        orch_run = self._latest_active_auto_run(callback.conversation_id)
+        if orch_run is None:
+            return ControllerResponse("没有活跃的自动工作流。")
+
+        # Abort any active tasks
+        if convo.active_codex_task_id:
+            try:
+                self._service.abort_task(convo.active_codex_task_id)
+            except Exception:
+                pass
+        if convo.active_claude_run_id and self._claude is not None:
+            try:
+                self._claude.interrupt()
+            except Exception:
+                pass
+
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="aborted",
+            current_step=AUTO_COMPLETED,
+        )
+        buttons = [[
+            {"text": "查看状态", "callback_data": encode_conversation_callback(convo.id, STATUS)},
+        ]]
+        return ControllerResponse("自动工作流已取消。", buttons=buttons)
 
     async def handle_verify(
         self, command: VerifyCommand, ctx: dict[str, Any] | None = None
@@ -2195,6 +2908,80 @@ class CommandController:
         except KeyError:
             return ControllerResponse("对话不存在或已被删除。")
 
+        # --- Staged-auto callback actions ---
+        if callback.action == AUTO_FINAL_PLAN:
+            return await self._handle_auto_final_plan(callback)
+        elif callback.action == AUTO_SHOW_DRAFT:
+            orch_run = self._latest_active_auto_run(callback.conversation_id)
+            if orch_run and orch_run.last_codex_analysis:
+                return ControllerResponse(
+                    f"当前方案摘要：\n\n{orch_run.last_codex_analysis[:1500]}",
+                    buttons=build_auto_stage_buttons(
+                        callback.conversation_id, orch_run.current_step,
+                        last_codex_analysis=orch_run.last_codex_analysis or "",
+                    ),
+                )
+            return ControllerResponse("暂无方案草稿。")
+        elif callback.action == AUTO_CANCEL:
+            return await self._handle_auto_cancel(callback)
+        elif callback.action == AUTO_SEND_TO_CLAUDE:
+            return await self._handle_auto_send_to_claude(callback)
+        elif callback.action == AUTO_CONTINUE_CONTEXT:
+            # Re-enter collecting_context from draft_ready or retry_ready
+            orch_run = self._latest_active_auto_run(callback.conversation_id)
+            if orch_run is not None and orch_run.current_step in (
+                AUTO_DRAFT_READY, AUTO_RETRY_READY
+            ):
+                self._ledger.update_orchestration_run(
+                    orch_run.id,
+                    status="running",
+                    current_step=AUTO_COLLECTING_CONTEXT,
+                )
+                return ControllerResponse(
+                    "已回到上下文收集阶段。请补充信息，然后点「生成最终方案」。",
+                    buttons=build_auto_stage_buttons(
+                        callback.conversation_id, AUTO_COLLECTING_CONTEXT
+                    ),
+                )
+            return ControllerResponse(
+                "当前不在方案就绪阶段，无法回到上下文收集。"
+            )
+        elif callback.action == AUTO_REWRITE_PLAN:
+            return await self._handle_auto_final_plan(callback)
+        elif callback.action == AUTO_CODEX_TAKEOVER:
+            return await self._handle_auto_codex_takeover(callback)
+        elif callback.action == AUTO_CLOSE:
+            return await self._handle_auto_close(callback)
+        elif callback.action == AUTO_CODEX_VERIFY:
+            return await self._handle_auto_codex_verify(callback)
+        elif callback.action == AUTO_SEND_REPAIR_TO_CLAUDE:
+            return await self._handle_auto_send_repair_to_claude(callback)
+        elif callback.action == AUTO_REWRITE_REPAIR:
+            # Re-verify to regenerate repair prompt
+            return await self._handle_auto_codex_verify(callback)
+        elif callback.action == AUTO_INTERRUPT_CLAUDE:
+            # Interrupt the active Claude run
+            if convo.active_claude_run_id and self._claude is not None:
+                try:
+                    self._claude.interrupt()
+                except Exception:
+                    pass
+            return ControllerResponse("已请求打断 Claude。", buttons=[[{
+                "text": "查看状态",
+                "callback_data": encode_conversation_callback(callback.conversation_id, STATUS),
+            }]])
+        elif callback.action == AUTO_VIEW_DIFF:
+            return await self.handle(
+                "/diff",
+                {"chat_id": convo.chat_id, "user_id": convo.user_id},
+            )
+        elif callback.action == AUTO_VIEW_STATUS:
+            return await self.handle(
+                "/status",
+                {"chat_id": convo.chat_id, "user_id": convo.user_id},
+            )
+
+        # --- Original callback actions ---
         if callback.action == RESTORE_WORKBENCH:
             return await self._handle_restore_workbench(callback.conversation_id)
 

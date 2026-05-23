@@ -87,6 +87,62 @@ async def test_natural_renderer_flushes_buttons_on_completion() -> None:
     assert "查看 diff" in labels
 
 
+@pytest.mark.asyncio
+async def test_natural_renderer_sends_explicit_start_buttons() -> None:
+    fake = FakeTransport()
+    renderer = InteractionRenderer(
+        transport=TelegramTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+    )
+    buttons = [[{"text": "生成最终方案", "callback_data": "conv:7:auto_final_plan"}]]
+
+    await renderer.handle(
+        InteractionEvent(
+            event_type="run_started",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            text="Codex 开始分析。",
+            buttons=buttons,
+        )
+    )
+
+    assert fake.sent == [(1, "Codex 开始分析。", buttons)]
+
+
+@pytest.mark.asyncio
+async def test_natural_renderer_prefers_explicit_completion_buttons() -> None:
+    fake = FakeTransport()
+    renderer = InteractionRenderer(
+        transport=TelegramTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+    )
+    buttons = [[{"text": "Codex 验收", "callback_data": "conv:7:auto_codex_verify"}]]
+
+    await renderer.handle(
+        InteractionEvent(
+            event_type="text_delta",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            text="Claude 执行完成。",
+        )
+    )
+    await renderer.handle(
+        InteractionEvent(
+            event_type="run_completed",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            buttons=buttons,
+        )
+    )
+
+    assert fake.edited[-1][3] == buttons
+
+
 # ---------------------------------------------------------------------------
 # Typing lifecycle tests (Issue 1)
 # ---------------------------------------------------------------------------
@@ -270,6 +326,94 @@ async def test_product_renderer_buffers_deltas_and_sends_final_once():
 
     body_messages = [m for m in fake.sent if "第一段。第二段。" in m[1]]
     assert len(body_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_product_renderer_uses_explicit_start_buttons():
+    from types import SimpleNamespace
+
+    fake = FakeTransport()
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(
+            preview_enabled=True,
+            semantic_min_chars=20,
+            semantic_max_chars=80,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+    buttons = [[{"text": "生成最终方案", "callback_data": "conv:7:auto_final_plan"}]]
+
+    await renderer.handle(
+        InteractionEvent(
+            event_type="run_started",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            text="Codex 开始分析。",
+            buttons=buttons,
+        )
+    )
+
+    assert any(message == (1, "Codex 开始分析。", buttons) for message in fake.sent)
+
+
+@pytest.mark.asyncio
+async def test_product_renderer_prefers_explicit_completion_buttons():
+    from types import SimpleNamespace
+
+    fake = FakeTransport()
+    renderer = InteractionRenderer(
+        transport=FakePreviewTransport(fake.send, fake.edit, fake.typing),
+        profile=NaturalChatProfile(),
+        min_interval_seconds=0.0,
+        surface_resolver=lambda chat_id: "product",
+        telegram_output_config=SimpleNamespace(
+            preview_enabled=True,
+            semantic_min_chars=20,
+            semantic_max_chars=80,
+            final_chunk_chars=200,
+            product_body_mode="final",
+            terminal_body_mode="semantic_blocks",
+            preview_send_timeout_seconds=2.0,
+        ),
+    )
+    buttons = [[{"text": "Codex 验收", "callback_data": "conv:7:auto_codex_verify"}]]
+
+    await renderer.handle(
+        InteractionEvent(
+            event_type="run_started",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+        )
+    )
+    await renderer.handle(
+        InteractionEvent(
+            event_type="text_delta",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            text="Claude 执行完成。",
+        )
+    )
+    await renderer.handle(
+        InteractionEvent(
+            event_type="run_completed",
+            chat_id=1,
+            conversation_id=7,
+            task_id=10,
+            buttons=buttons,
+        )
+    )
+
+    assert fake.sent[-1] == (1, "Claude 执行完成。", buttons)
 
 
 @pytest.mark.asyncio

@@ -1354,9 +1354,17 @@ class Ledger:
         return [_orchestration_run(row) for row in rows]
 
     def task_has_running_orchestration(self, task_id: int) -> bool:
+        """Return True if the task is managed by the old eager orchestration runner.
+
+        Staged-auto orchestration runs manage their own task lifecycle — tasks
+        under a staged-auto run must reach DONE/FAILED so the event bridge can
+        advance stages.  This method therefore returns False when the running
+        orchestration run is a staged-auto stage.
+        """
+        from wlcodex.auto_workflow import AUTO_STAGE_STEPS
         row = self._conn.execute(
             """
-            SELECT 1
+            SELECT o.current_step
             FROM conversation_sessions AS c
             JOIN orchestration_runs AS o ON o.conversation_id = c.id
             WHERE c.active_codex_task_id = ?
@@ -1365,7 +1373,41 @@ class Ledger:
             """,
             (task_id,),
         ).fetchone()
-        return row is not None
+        if row is None:
+            return False
+        if row["current_step"] in AUTO_STAGE_STEPS:
+            return False
+        return True
+
+    def get_latest_active_auto_run(
+        self, conversation_id: int
+    ) -> OrchestrationRun | None:
+        """Find the latest orchestration run for this conversation that is
+        in an active auto stage (running or needs_user).
+
+        Includes completed steps so that notification helpers can send
+        terminal buttons (e.g. after verification passes).
+
+        Returns None if no active auto run exists.
+        """
+        from wlcodex.auto_workflow import AUTO_STAGE_STEPS
+
+        steps = list(AUTO_STAGE_STEPS)
+        placeholders = ", ".join("?" for _ in steps)
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM orchestration_runs
+            WHERE conversation_id = ?
+              AND status IN ('running', 'needs_user')
+              AND current_step IN ({placeholders})
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (conversation_id, *steps),
+        ).fetchall()
+        if not rows:
+            return None
+        return _orchestration_run(rows[0])
 
     # --- Orchestration decisions ---
 

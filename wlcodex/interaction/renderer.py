@@ -156,12 +156,18 @@ class InteractionRenderer:
 
     async def _handle_started(self, event: InteractionEvent) -> None:
         key = self._key(event)
+        explicit_card_sent = False
+        if event.buttons and event.text:
+            await self._transport.send(event.chat_id, event.text, buttons=event.buttons)
+            explicit_card_sent = True
         if self._output_manager is not None:
             if not self._output_manager_owns_status():
                 typing_task = await self._transport.typing(event.chat_id)
                 if typing_task is not None:
                     self._typing_tasks[key] = typing_task
             await self._ensure_output_session(event)
+            return
+        if explicit_card_sent:
             return
         typing_task = await self._transport.typing(event.chat_id)
         if typing_task is not None:
@@ -198,24 +204,35 @@ class InteractionRenderer:
     async def _handle_completed(self, event: InteractionEvent) -> None:
         key = self._key(event)
         self._cancel_typing(key)
+        status_text = event.text or "运行完成"
         if self._output_manager is not None:
             conversation_id = event.conversation_id or 0
-            buttons = self._profile.completion_buttons(
+            buttons = event.buttons or self._profile.completion_buttons(
                 conversation_id=conversation_id,
                 has_diff=bool(event.metadata.get("has_diff", False)),
             )
-            await self._output_manager.complete(self._output_key(event), buttons=buttons)
+            output_key = self._output_key(event)
+            if output_key in self._output_manager.sessions:
+                await self._output_manager.complete(
+                    output_key,
+                    buttons=buttons,
+                    status_text=status_text,
+                )
+            elif event.buttons:
+                await self._transport.send(event.chat_id, status_text, buttons=buttons)
             if self._output_manager_owns_status() or self._runtime_progress is None:
                 return
         session = self._sessions.get(key)
         if session is not None:
             conversation_id = event.conversation_id or session.conversation_id
-            buttons = self._profile.completion_buttons(
+            buttons = event.buttons or self._profile.completion_buttons(
                 conversation_id=conversation_id,
                 has_diff=bool(event.metadata.get("has_diff", False)),
             )
             await session.renderer.finish(buttons=buttons)
             self._sessions.pop(key, None)
+        elif event.buttons:
+            await self._transport.send(event.chat_id, status_text, buttons=event.buttons)
         if self._runtime_progress is not None:
             state = event.metadata.get("runtime_state")
             if state is not None:

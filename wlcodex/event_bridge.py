@@ -152,7 +152,12 @@ class EventBridge:
                 TaskStatus.ABORTED,
             ):
                 self._sync_direct_agent_run_status(task_after)
-                await self._forward_terminal_event(task_after)
+                # Check for staged-auto workflow transitions
+                advanced_stage = self._advance_staged_auto_on_completion(task_after)
+                if advanced_stage:
+                    await self._send_auto_stage_buttons(task_after, advanced_stage)
+                else:
+                    await self._forward_terminal_event(task_after)
                 await drain_workspace(
                     self._service, self._backend, task_after.workspace_alias
                 )
@@ -459,3 +464,172 @@ class EventBridge:
             )
         )
         self._runtime_causation_by_agent_run[agent_run_id] = stored.id
+
+    def _advance_staged_auto_on_completion(self, task: object) -> str | None:
+        """When a direct agent run completes, check if it belongs to a staged-auto
+        workflow and advance the orchestration run to the next needs_user stage.
+
+        Returns the new current_step if a transition occurred, None otherwise.
+
+        This implements the stage transition logic:
+        - auto_analysis/auto_final_plan completion → draft_ready (needs_user)
+        - auto_verification pass → completed (needs_user)
+        - auto_verification fail → retry_ready (needs_user)
+        - auto_implementation/auto_repair completion → claude_done (needs_user)
+        - auto_codex_takeover completion → completed (needs_user)
+        """
+        from wlcodex.auto_workflow import (
+            AUTO_COLLECTING_CONTEXT,
+            AUTO_DRAFT_READY,
+            AUTO_CLAUDE_DONE,
+            AUTO_VERIFYING,
+            AUTO_RETRY_READY,
+            AUTO_CODEX_TAKEOVER_RUNNING,
+            AUTO_COMPLETED,
+        )
+
+        task_id = int(getattr(task, "id"))
+        rows = self._ledger._conn.execute(
+            """
+            SELECT id, role, status, completion_summary FROM agent_runs
+            WHERE hidden_task_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (task_id,),
+        ).fetchall()
+        if not rows:
+            return None
+
+        agent_role = str(rows[0]["role"] or "")
+        agent_status = str(rows[0]["status"] or "")
+        completion_summary = str(rows[0]["completion_summary"] or "")
+
+        # Find the conversation for this task
+        conv_row = self._ledger._conn.execute(
+            """
+            SELECT id FROM conversation_sessions
+            WHERE active_codex_task_id = ? OR active_claude_run_id = (
+                SELECT id FROM agent_runs WHERE hidden_task_id = ? LIMIT 1
+            )
+            ORDER BY id DESC LIMIT 1
+            """,
+            (task_id, task_id),
+        ).fetchone()
+        if conv_row is None:
+            return None
+        conversation_id = int(conv_row["id"])
+
+        # Find the latest active auto run
+        auto_run = self._ledger.get_latest_active_auto_run(conversation_id)
+        if auto_run is None:
+            return None
+
+        current_step = auto_run.current_step
+        new_step: str | None = None
+
+        # Advance based on agent role and completion
+        if agent_role == "auto_analysis" and agent_status == "done":
+            # Context collection or supplement completed → stay in collecting_context
+            # The user can still add more context and click "生成最终方案"
+            pass
+
+        elif agent_role == "auto_final_plan" and agent_status == "done":
+            # Final plan generated → advance to draft_ready
+            new_step = AUTO_DRAFT_READY
+            self._ledger.update_orchestration_run(
+                auto_run.id,
+                status="needs_user",
+                current_step=new_step,
+                last_codex_analysis=completion_summary[:5000] if completion_summary else "",
+            )
+
+        elif agent_role in ("auto_implementation", "auto_repair") and agent_status == "done":
+            # Claude implementation completed → advance to claude_done
+            new_step = AUTO_CLAUDE_DONE
+            self._ledger.update_orchestration_run(
+                auto_run.id,
+                status="needs_user",
+                current_step=new_step,
+                last_claude_summary=completion_summary[:5000] if completion_summary else "",
+            )
+
+        elif agent_role == "auto_verification" and agent_status == "done":
+            # Codex verification completed → check pass/fail
+            summary_lower = completion_summary.lower()
+            if "decision: pass" in summary_lower or "decision:pass" in summary_lower:
+                new_step = AUTO_COMPLETED
+                self._ledger.update_orchestration_run(
+                    auto_run.id,
+                    status="needs_user",
+                    current_step=new_step,
+                    last_verification_result=completion_summary[:5000] if completion_summary else "",
+                )
+            else:
+                new_step = AUTO_RETRY_READY
+                self._ledger.update_orchestration_run(
+                    auto_run.id,
+                    status="needs_user",
+                    current_step=new_step,
+                    last_verification_result=completion_summary[:5000] if completion_summary else "",
+                )
+
+        elif agent_role == "auto_codex_takeover" and agent_status == "done":
+            # Codex takeover completed → advance to completed
+            new_step = AUTO_COMPLETED
+            self._ledger.update_orchestration_run(
+                auto_run.id,
+                status="passed",
+                current_step=new_step,
+                last_codex_analysis=completion_summary[:5000] if completion_summary else "",
+            )
+
+        return new_step
+
+    async def _send_auto_stage_buttons(
+        self, task: object, new_stage: str
+    ) -> None:
+        """Send stage-appropriate buttons to Telegram after a stage transition."""
+        chat_id = getattr(task, "telegram_chat_id", None)
+        if chat_id is None:
+            return
+        task_id = int(getattr(task, "id"))
+        # Find conversation
+        conv_row = self._ledger._conn.execute(
+            """
+            SELECT id FROM conversation_sessions
+            WHERE active_codex_task_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if conv_row is None:
+            return
+        conversation_id = int(conv_row["id"])
+        auto_run = self._ledger.get_latest_active_auto_run(conversation_id)
+        if auto_run is None:
+            return
+
+        from wlcodex.auto_workflow import build_auto_stage_buttons, auto_stage_label
+
+        buttons = build_auto_stage_buttons(
+            conversation_id, new_stage,
+            last_codex_analysis=auto_run.last_codex_analysis or "",
+        )
+        # Include orch run data in the message for draft_ready
+        stage_label = auto_stage_label(new_stage)
+        if new_stage == "draft_ready" and auto_run.last_codex_analysis:
+            preview = auto_run.last_codex_analysis[:500]
+            text = f"最终方案已生成。\n\n{preview}\n\n请选择下一步："
+        elif new_stage == "claude_done":
+            text = f"Claude 执行完成。\n\n{auto_run.last_claude_summary or '完成'}\n\n请选择下一步："
+        elif new_stage == "completed":
+            text = "验收通过，任务完成。"
+        elif new_stage == "retry_ready":
+            text = f"验收未通过。\n\n{auto_run.last_verification_result[:300] if auto_run.last_verification_result else ''}\n\n请选择下一步："
+        else:
+            text = f"阶段：{stage_label}\n\n请选择下一步："
+
+        try:
+            await self._send_telegram(chat_id, text, buttons)
+        except Exception:
+            logger.exception("Failed to send auto stage buttons")

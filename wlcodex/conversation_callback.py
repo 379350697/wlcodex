@@ -21,6 +21,33 @@ RESTORE_WORKBENCH = "restore_workbench"
 WORKBENCH_STATUS = "workbench_status"
 WORKBENCH_SESSIONS = "workbench_sessions"
 
+# Staged-auto callback actions (imported from auto_workflow for use in
+# callback-data encoding). These are re-exported here so that controller.py
+# and telegram_app.py can import them from one location.
+AUTO_FINAL_PLAN = "auto_final_plan"
+AUTO_SHOW_DRAFT = "auto_show_draft"
+AUTO_CANCEL = "auto_cancel"
+AUTO_SEND_TO_CLAUDE = "auto_send_to_claude"
+AUTO_CONTINUE_CONTEXT = "auto_continue_context"
+AUTO_REWRITE_PLAN = "auto_rewrite_plan"
+AUTO_CODEX_TAKEOVER = "auto_codex_takeover"
+AUTO_CLOSE = "auto_close"
+AUTO_CODEX_VERIFY = "auto_codex_verify"
+AUTO_SEND_REPAIR_TO_CLAUDE = "auto_send_repair_to_claude"
+AUTO_REWRITE_REPAIR = "auto_rewrite_repair"
+AUTO_INTERRUPT_CLAUDE = "auto_interrupt_claude"
+AUTO_VIEW_DIFF = "auto_view_diff"
+AUTO_VIEW_STATUS = "auto_view_status"
+
+AUTO_CALLBACK_ACTIONS = {
+    AUTO_FINAL_PLAN, AUTO_SHOW_DRAFT, AUTO_CANCEL,
+    AUTO_SEND_TO_CLAUDE, AUTO_CONTINUE_CONTEXT,
+    AUTO_REWRITE_PLAN, AUTO_CODEX_TAKEOVER, AUTO_CLOSE,
+    AUTO_CODEX_VERIFY, AUTO_SEND_REPAIR_TO_CLAUDE,
+    AUTO_REWRITE_REPAIR, AUTO_INTERRUPT_CLAUDE,
+    AUTO_VIEW_DIFF, AUTO_VIEW_STATUS,
+}
+
 
 @dataclass(frozen=True)
 class ConversationCallback:

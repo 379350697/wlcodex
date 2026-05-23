@@ -284,20 +284,36 @@ async def test_conversation_text_defaults_to_codex_only(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_explicit_starts_orchestrated(tmp_path: Path) -> None:
-    """``/auto <prompt>`` explicitly starts Codex → Claude → Codex."""
+async def test_auto_mode_starts_staged_context_collection(tmp_path: Path) -> None:
+    """``/auto <prompt>`` starts staged context collection (read-only Codex),
+    NOT an eager Codex->Claude->Codex pipeline. No Claude must be started."""
     claude = FakeClaudeBackend(enabled=True)
     runner = FakeOrchestrationRunner()
     ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
 
-    await ctrl.handle("/auto 修复登录 bug", {"chat_id": 42, "user_id": 1})
+    response = await ctrl.handle("/auto 修复登录 bug", {"chat_id": 42, "user_id": 1})
 
-    assert len(runner.starts) == 1, (
-        f"/auto should trigger exactly 1 orchestrator start, got {len(runner.starts)}"
+    # Must NOT call start_chief_engineer (the old eager pipeline)
+    assert len(runner.starts) == 0, (
+        f"/auto should NOT start eager orchestrator, got {len(runner.starts)} starts"
     )
+    # Claude must not be invoked
+    assert len(claude.send_calls) == 0
+    # Must start collecting_context orchestration run
     convos = ctrl._ledger.list_conversations_by_chat(42)
-    assert convos
+    assert convos, "Expected a conversation"
     assert convos[0].mode == ConversationMode.CHIEF_ENGINEER.value
+    runs = ctrl._ledger.list_orchestration_runs(convos[0].id, limit=1)
+    assert len(runs) == 1
+    assert runs[0].current_step == "collecting_context"
+    assert runs[0].status == "running"
+    # Agent run must be codex read-only analysis, not implementation
+    agent_runs = ctrl._ledger.list_agent_runs(convos[0].id, limit=5)
+    assert any(run.role == "auto_analysis" for run in agent_runs), (
+        f"Expected auto_analysis agent run, got roles: {[run.role for run in agent_runs]}"
+    )
+    # Response must indicate read-only analysis stage
+    assert "补充" in response.text or "最终方案" in response.text or "只读分析" in response.text
 
 
 # ---------------------------------------------------------------------------
@@ -469,8 +485,9 @@ async def test_codex_thread_is_scoped_to_workbench_until_new(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_auto_reuses_workbench_codex_thread(tmp_path: Path) -> None:
-    """``/auto`` continues the Codex side of the current Workbench."""
+async def test_auto_starts_staged_codex_analysis_in_workbench(tmp_path: Path) -> None:
+    """``/auto`` starts a read-only Codex analysis in the current workbench,
+    not an eager pipeline. It reuses the codex thread if one exists."""
     claude = FakeClaudeBackend(enabled=True)
     runner = FakeOrchestrationRunner()
     ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
@@ -484,11 +501,16 @@ async def test_auto_reuses_workbench_codex_thread(tmp_path: Path) -> None:
     assert codex_thread_id
     mark_active_task_done(ctrl, 42)
 
-    await ctrl.handle("/auto 按刚才结论执行修复", ctx)
+    response = await ctrl.handle("/auto 按刚才结论执行修复", ctx)
 
-    assert len(runner.starts) == 1
-    assert runner.starts[0]["conversation"].id == active.id
-    assert runner.starts[0]["codex_thread_id"] == codex_thread_id
+    # Must NOT call start_chief_engineer (old eager pipeline)
+    assert len(runner.starts) == 0
+    # Must start collecting_context, not Claude
+    conv = ctrl._ledger.get_active_conversation(42)
+    runs = ctrl._ledger.list_orchestration_runs(conv.id, limit=1)
+    assert len(runs) == 1
+    assert runs[0].current_step == "collecting_context"
+    assert len(claude.send_calls) == 0
 
 
 @pytest.mark.asyncio
@@ -524,3 +546,105 @@ async def test_claude_session_is_scoped_to_workbench_until_new(tmp_path: Path) -
     assert fresh.claude_session_id
     assert fresh.claude_session_id != first_session
     assert "resume_session_id" not in claude.send_calls[-1].extra
+
+
+# ---------------------------------------------------------------------------
+# Staged-auto workflow tests: verify /auto starts collecting_context only,
+# never auto-starts Claude, and each stage transition requires explicit user action.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auto_starts_context_collection_without_claude(tmp_path: Path) -> None:
+    """``/auto`` starts Codex read-only context collection and does NOT start Claude."""
+    claude = FakeClaudeBackend(enabled=True)
+    runner = FakeOrchestrationRunner()
+    ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
+
+    response = await ctrl.handle("/auto 查登录偶发失败", {"chat_id": 77, "user_id": 88})
+
+    # Must NOT start the eager orchestrator
+    assert len(runner.starts) == 0, (
+        f"/auto should not start orchestrator, got {len(runner.starts)} starts"
+    )
+    # Must NOT invoke Claude
+    assert len(claude.send_calls) == 0
+
+    # Orchestration run must be in collecting_context
+    conversation = ctrl._ledger.get_active_conversation(77)
+    assert conversation is not None
+    runs = ctrl._ledger.list_orchestration_runs(conversation.id, limit=1)
+    assert len(runs) == 1
+    assert runs[0].current_step == "collecting_context"
+    assert runs[0].status == "running"
+
+    # Agent run must be auto_analysis, not implementation
+    agent_runs = ctrl._ledger.list_agent_runs(conversation.id, limit=5)
+    assert any(run.role == "auto_analysis" for run in agent_runs), (
+        f"Expected auto_analysis agent run, got: {[run.role for run in agent_runs]}"
+    )
+
+    # Codex backend must have been called with read_only_analysis mode
+    assert ctrl._backend.prompt_turns[-1][2] == "read_only_analysis"
+
+    # Response must mention context collection
+    assert "只读分析" in response.text or "最终方案" in response.text or "补充" in response.text
+
+
+@pytest.mark.asyncio
+async def test_auto_context_supplement_stays_in_collecting(tmp_path: Path) -> None:
+    """Plain text during collecting_context supplements the active analysis,
+    does not create a new task, and does not start Claude."""
+    claude = FakeClaudeBackend(enabled=True)
+    runner = FakeOrchestrationRunner()
+    ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
+
+    # Start /auto first
+    await ctrl.handle("/auto 查 cloud deploy 是否生效", {"chat_id": 99, "user_id": 100})
+    # Then send plain text as context supplement
+    response = await ctrl.handle_conversation_text(
+        "补充：只看 lightfeev2，不要执行修改",
+        {"chat_id": 99, "user_id": 100},
+    )
+
+    # Must not start Claude
+    assert len(claude.send_calls) == 0
+    # Orchestration run must still be in collecting_context
+    conversation = ctrl._ledger.get_active_conversation(99)
+    runs = ctrl._ledger.list_orchestration_runs(conversation.id, limit=1)
+    assert runs[0].current_step == "collecting_context"
+
+
+@pytest.mark.asyncio
+async def test_auto_does_not_auto_start_claude_until_button(tmp_path: Path) -> None:
+    """After /auto and context collection, no Claude run should exist until
+    the user clicks the send-to-Claude button."""
+    claude = FakeClaudeBackend(enabled=True)
+    runner = FakeOrchestrationRunner()
+    ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
+
+    await ctrl.handle("/auto 查一下结构", {"chat_id": 101, "user_id": 102})
+    await ctrl.handle_conversation_text("补充：重点看死代码", {"chat_id": 101, "user_id": 102})
+
+    # No Claude run should exist at this point
+    assert len(claude.send_calls) == 0
+    conversation = ctrl._ledger.get_active_conversation(101)
+    runs = ctrl._ledger.list_orchestration_runs(conversation.id, limit=1)
+    assert runs[0].current_step == "collecting_context"
+
+
+@pytest.mark.asyncio
+async def test_codex_and_claude_direct_are_unaffected(tmp_path: Path) -> None:
+    """``/codex`` and ``/claude`` single-agent behavior is not affected by staged auto."""
+    claude = FakeClaudeBackend(enabled=True)
+    ctrl = build_controller(tmp_path, claude=claude)
+
+    # /codex should still work normally — use /new to get a clean workbench
+    await ctrl.handle("/new", {"chat_id": 200, "user_id": 1})
+    resp = await ctrl.handle("/codex 分析代码", {"chat_id": 200, "user_id": 1})
+    assert "只交给 Codex" in resp.text or "不会调用 Claude" in resp.text
+
+    # /claude should still work normally — fresh workbench
+    await ctrl.handle("/new", {"chat_id": 201, "user_id": 1})
+    resp2 = await ctrl.handle("/claude 改个文件", {"chat_id": 201, "user_id": 1})
+    assert "Claude" in resp2.text or resp2.already_rendered

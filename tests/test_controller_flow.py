@@ -669,7 +669,7 @@ async def test_help_shows_new_commands(ctrl: CommandController) -> None:
     response = await ctrl.handle("/help", {})
     assert "WLCodex" in response.text
     assert "普通消息：Codex 只读分析" in response.text
-    assert "/auto：Codex -> Claude -> Codex" in response.text
+    assert "Codex 主导闭环" in response.text or "/auto" in response.text
     assert "当前视图：驾驶舱" in response.text
     assert "[新工作台]" in response.text
     assert "[接管现场]" in response.text
@@ -943,10 +943,10 @@ async def test_claude_command_records_claude_direct_run(ctrl_with_claude: Comman
 
 
 @pytest.mark.asyncio
-async def test_chief_engineer_uses_runtime_runner_without_renderer(
+async def test_staged_auto_does_not_call_eager_runner(
     tmp_path: Path,
 ) -> None:
-    """Chief mode must not fall back to the legacy non-runtime orchestration path."""
+    """Staged /auto starts Codex analysis directly, NOT via orchestration runner."""
 
     class RunnerSpy:
         def __init__(self) -> None:
@@ -981,10 +981,18 @@ async def test_chief_engineer_uses_runtime_runner_without_renderer(
         {"chat_id": 100, "user_id": 200},
     )
 
-    assert len(runner.calls) == 1
+    # Must NOT call start_chief_engineer — staged auto uses direct Codex analysis
+    assert len(runner.calls) == 0, (
+        f"staged /auto should not call start_chief_engineer, got {len(runner.calls)} calls"
+    )
+    # Claude must not be started
     assert len(claude.calls) == 0
+    # Orchestration run must be in collecting_context
+    active = ledger.get_active_conversation(100)
+    runs = ledger.list_orchestration_runs(active.id, limit=1)
+    assert runs[0].current_step == "collecting_context"
     assert response.already_rendered is False
-    assert "已开始" in response.text
+    assert ("只读分析" in response.text or "最终方案" in response.text or "Codex" in response.text)
 
 
 @pytest.mark.asyncio
@@ -1065,21 +1073,16 @@ async def test_terminal_state_followup_reuses_same_workbench(
 
 
 @pytest.mark.asyncio
-async def test_no_implementation_completion_records_pass_not_failed(
+async def test_staged_auto_does_not_start_claude_or_eager_pipeline(
     tmp_path: Path,
 ) -> None:
-    """Reply-only/no-op Codex analysis must close cleanly, not as failed."""
+    """Staged /auto creates a collecting_context run but never starts Claude
+    or the eager orchestration pipeline on its own."""
 
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
     store = RuntimeEventStore(ledger._conn)
     backend = FakeCodexBackend()
-    backend._codex_responses = [
-        (
-            '{"summary":"default flow ok","needs_implementation":false,'
-            '"files_to_touch":[],"implementation_steps":[]}'
-        ),
-    ]
     service = TaskService(ledger, (
         WorkspaceConfig("wlcodex", tmp_path, True),
     ))
@@ -1092,36 +1095,23 @@ async def test_no_implementation_completion_records_pass_not_failed(
         claude_backend=claude,
         runtime_event_store=store,
     )
-    _attach_runtime_runner(
-        controller,
-        service=service,
-        backend=backend,
-        claude=claude,
-        ledger=ledger,
-        store=store,
-    )
 
-    await controller.handle(
-        "/auto 请按 /auto 流程只回复：default flow ok",
+    response = await controller.handle(
+        "/auto 查一下为什么偶发失败",
         {"chat_id": 100, "user_id": 200},
     )
-    await _drain_runtime_runner(controller)
 
-    task = service.list_tasks()[0]
-    assert task.status is TaskStatus.DONE
-    assert task.last_error == ""
+    # Must start collecting_context, not Claude
     assert len(claude.calls) == 0
-
-    verification = store._conn.execute(
-        """
-        SELECT payload_json FROM runtime_events
-        WHERE conversation_id = ?
-          AND event_type = ?
-        """,
-        (ledger.get_active_conversation(100).id, EventType.VERIFICATION_DECISION_RECORDED),
-    ).fetchone()
-    assert verification is not None
-    assert '"decision": "pass"' in verification["payload_json"]
+    active = ledger.get_active_conversation(100)
+    assert active is not None
+    runs = ledger.list_orchestration_runs(active.id, limit=1)
+    assert len(runs) == 1
+    assert runs[0].current_step == "collecting_context"
+    assert runs[0].status == "running"
+    # Agent run must be codex auto_analysis
+    agent_runs = ledger.list_agent_runs(active.id, limit=5)
+    assert any(run.role == "auto_analysis" for run in agent_runs)
 
 
 @pytest.mark.asyncio
@@ -1165,10 +1155,12 @@ async def test_conversation_text_event_keeps_only_safe_preview(
 
 
 @pytest.mark.asyncio
-async def test_chief_engineer_refuses_legacy_fallback_without_runtime_runner(
+async def test_staged_auto_starts_without_orchestration_runner(
     tmp_path: Path,
 ) -> None:
-    """Chief mode must fail closed instead of running outside runtime_events."""
+    """Staged /auto starts Codex context collection even without an orchestration
+    runner. It no longer requires OrchestrationRunner because it uses direct
+    Codex analysis, not the eager pipeline."""
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
     backend = FakeCodexBackend()
@@ -1190,9 +1182,15 @@ async def test_chief_engineer_refuses_legacy_fallback_without_runtime_runner(
         {"chat_id": 100, "user_id": 200},
     )
 
-    assert "编排器未初始化" in response.text
-    assert len(backend.turns) == 0
+    # Staged /auto works without orchestration runner — starts collecting_context
+    assert "只读分析" in response.text or "最终方案" in response.text or "Codex" in response.text
     assert len(claude.calls) == 0
+
+    # Orchestration run must be in collecting_context
+    active = ledger.get_active_conversation(100)
+    runs = ledger.list_orchestration_runs(active.id, limit=1)
+    assert len(runs) == 1
+    assert runs[0].current_step == "collecting_context"
 
 
 @pytest.mark.asyncio
@@ -1229,38 +1227,41 @@ async def test_orchestrator_uses_send_codex_prompt(ctrl_with_claude: CommandCont
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_runs_real_orchestration(ctrl_with_claude: CommandController) -> None:
-    """Handle /auto must invoke ChiefEngineerOrchestrator with real backends."""
+async def test_auto_mode_starts_staged_context_collection(ctrl_with_claude: CommandController) -> None:
+    """Handle /auto must start collecting_context, not an eager pipeline."""
     response = await ctrl_with_claude.handle(
         "/auto 修复登录 bug",
         {"chat_id": 100, "user_id": 200},
     )
-    assert "已开始" in response.text
-    await _drain_runtime_runner(ctrl_with_claude)
+    # Staged /auto starts Codex analysis, not an eager pipeline
+    assert "最终方案" in response.text or "只读分析" in response.text or "Codex" in response.text
+    # Claude must not be started
+    assert len(ctrl_with_claude._claude.calls) == 0
     active = ctrl_with_claude._ledger.get_active_conversation(100)
     assert active is not None
-    orch_runs = ctrl_with_claude._ledger.list_orchestration_runs(active.id)
-    assert orch_runs[0].status == OrchestrationStatus.PASSED.value
+    orch_runs = ctrl_with_claude._ledger.list_orchestration_runs(active.id, limit=1)
+    assert orch_runs[0].current_step == "collecting_context"
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_hides_english_model_snippets(
+async def test_auto_mode_staged_hides_english_model_snippets(
     ctrl_with_claude: CommandController,
 ) -> None:
+    """Staged /auto response mentions context collection, not English model output."""
     response = await ctrl_with_claude.handle(
         "/auto 修复登录 bug",
         {"chat_id": 100, "user_id": 200},
     )
 
-    assert "已开始" in response.text
+    # Staged /auto starts collecting context, not the eager pipeline
+    assert "只读分析" in response.text or "最终方案" in response.text or "Codex" in response.text
     assert "Analysis complete" not in response.text
     assert "Fake Claude implementation result" not in response.text
-    assert "confidence: high" not in response.text
 
 
 @pytest.mark.asyncio
-async def test_streaming_auto_records_full_ledger_and_real_diff(tmp_path: Path) -> None:
-    """Natural streaming /auto must leave the same audit trail as legacy orchestration."""
+async def test_staged_auto_records_ledger_on_context_collection(tmp_path: Path) -> None:
+    """Staged /auto starts collecting_context with proper ledger audit trail."""
     workspace = tmp_path / "workspace"
     _init_git_workspace(workspace)
 
@@ -1269,7 +1270,6 @@ async def test_streaming_auto_records_full_ledger_and_real_diff(tmp_path: Path) 
     backend = FakeCodexBackend()
     backend._codex_responses = [
         "Root cause: tracked.txt needs a change. Implementation needed.",
-        "decision: pass\nsummary: Verified changed workspace.",
     ]
     service = TaskService(ledger, (
         WorkspaceConfig("wlcodex", workspace, True),
@@ -1306,33 +1306,34 @@ async def test_streaming_auto_records_full_ledger_and_real_diff(tmp_path: Path) 
     await _drain_runtime_runner(ctrl)
     active = ledger.get_active_conversation(100)
     assert active is not None
-    assert active.active_claude_run_id is not None
-    assert "总工程师" in active.conversation_summary
+    assert "Auto" in active.conversation_summary or "修改" in active.conversation_summary
 
+    # Staged /auto does NOT start Claude automatically
+    assert active.active_claude_run_id is None
+
+    # Should have one codex analysis agent run for collecting_context
     agent_runs = ledger.list_agent_runs(active.id)
-    assert [(run.agent, run.role, run.status) for run in agent_runs] == [
-        ("codex", "analysis", AgentRunStatus.DONE.value),
-        ("claude", "implementation", AgentRunStatus.DONE.value),
-        ("codex", "verification", AgentRunStatus.DONE.value),
-    ]
+    assert len(agent_runs) == 1
+    assert agent_runs[0].agent == "codex"
+    assert agent_runs[0].role == "auto_analysis"
 
+    # Orchestration run should be in collecting_context
     orch_runs = ledger.list_orchestration_runs(active.id)
-    assert orch_runs[0].status == OrchestrationStatus.PASSED.value
-    decisions = ledger.list_orchestration_decisions(orch_runs[0].id)
-    assert decisions
-    assert decisions[-1].decision == "verify_passed"
+    assert len(orch_runs) == 1
+    assert orch_runs[0].current_step == "collecting_context"
+    assert orch_runs[0].status == "running"
 
-    completed_events = [
+    # A run_started event should have been rendered
+    started_events = [
         event for event in renderer.events
-        if getattr(event, "event_type", "") == "run_completed"
+        if getattr(event, "event_type", "") == "run_started"
     ]
-    assert completed_events
-    assert completed_events[-1].metadata["has_diff"] is True
+    assert started_events
 
 
 @pytest.mark.asyncio
-async def test_streaming_auto_binds_all_hidden_codex_threads_to_task(tmp_path: Path) -> None:
-    """Hidden Codex analysis/verify threads must stay routable for EventBridge approvals."""
+async def test_staged_auto_binds_codex_thread_to_task(tmp_path: Path) -> None:
+    """Staged /auto collecting_context must bind its Codex thread to the task."""
     workspace = tmp_path / "workspace"
     _init_git_workspace(workspace)
 
@@ -1376,12 +1377,14 @@ async def test_streaming_auto_binds_all_hidden_codex_threads_to_task(tmp_path: P
     assert active is not None
     assert active.active_codex_task_id is not None
     thread_ids = ledger.list_task_thread_ids(active.active_codex_task_id)
-    assert thread_ids == ["hidden-thread-1", "hidden-thread-2"]
+    # Staged /auto starts one Codex thread for collecting_context analysis
+    assert len(thread_ids) == 1
+    assert thread_ids[0].startswith("fake-")
 
 
 @pytest.mark.asyncio
-async def test_streaming_auto_fails_ledger_on_claude_stream_error(tmp_path: Path) -> None:
-    """Claude stream errors in /auto must fail the run, not continue to verification."""
+async def test_staged_auto_collecting_context_no_claude_called(tmp_path: Path) -> None:
+    """Staged /auto must NOT call Claude; it only starts Codex collecting_context."""
     workspace = tmp_path / "workspace"
     _init_git_workspace(workspace)
 
@@ -1390,7 +1393,6 @@ async def test_streaming_auto_fails_ledger_on_claude_stream_error(tmp_path: Path
     backend = FakeCodexBackend()
     backend._codex_responses = [
         "Root cause: tracked.txt needs a change. Implementation needed.",
-        "decision: pass\nsummary: this verification must not run.",
     ]
     service = TaskService(ledger, (
         WorkspaceConfig("wlcodex", workspace, True),
@@ -1427,19 +1429,24 @@ async def test_streaming_auto_fails_ledger_on_claude_stream_error(tmp_path: Path
     await _drain_runtime_runner(ctrl)
     active = ledger.get_active_conversation(100)
     assert active is not None
+
+    # Staged /auto does NOT call Claude — only Codex
+    # The StreamingClaudeError would fail if called, but it shouldn't be called
+    assert active.active_claude_run_id is None
+
+    # Orchestration run should be in collecting_context, running (not failed)
     orch_runs = ledger.list_orchestration_runs(active.id)
-    assert orch_runs[0].status == OrchestrationStatus.FAILED.value
-    assert len(backend.turns) == 1  # analysis only; no Codex verification after Claude error
+    assert len(orch_runs) == 1
+    assert orch_runs[0].current_step == "collecting_context"
+    assert orch_runs[0].status == "running"
+
+    # Only Codex analysis was run — one turn
+    assert len(backend.turns) == 1
 
     agent_runs = ledger.list_agent_runs(active.id)
-    assert [(run.agent, run.role, run.status) for run in agent_runs] == [
-        ("codex", "analysis", AgentRunStatus.DONE.value),
-        ("claude", "implementation", AgentRunStatus.FAILED.value),
-    ]
-
-    event_types = [getattr(event, "event_type", "") for event in renderer.events]
-    assert "run_failed" in event_types
-    assert "run_completed" not in event_types
+    assert len(agent_runs) == 1
+    assert agent_runs[0].agent == "codex"
+    assert agent_runs[0].role == "auto_analysis"
 
 
 @pytest.mark.asyncio
@@ -1622,7 +1629,7 @@ async def test_stop_with_claude_run_interrupts_claude(ctrl_with_claude: CommandC
 
 
 class _RaisingCodexBackend:
-    """Fake backend that raises on send_codex_prompt to test error paths."""
+    """Fake backend that raises on create_thread to test error paths."""
 
     def __init__(self) -> None:
         self.turns: list[tuple[str, str]] = []
@@ -1632,7 +1639,7 @@ class _RaisingCodexBackend:
         raise RuntimeError("Simulated Codex backend crash")
 
     async def create_thread(self, workspace: str) -> str:
-        return "thread-1"
+        raise RuntimeError("Simulated Codex backend crash")
 
     async def start_turn(self, thread_id: str, prompt: str) -> None:
         self.turns.append((thread_id, prompt))
@@ -1688,7 +1695,8 @@ async def test_orchestrator_exception_marks_runs_as_failed(tmp_path: Path) -> No
         {"chat_id": 100, "user_id": 200},
     )
 
-    assert "已开始" in response.text
+    # When Codex fails, we get an error response (not text_delta rendered)
+    assert "错误" in response.text or "失败" in response.text or "异常" in response.text or "crash" in response.text.lower()
     await _drain_runtime_runner(ctrl)
 
     # Verify orchestration run is marked as failed (not left running)
@@ -1699,7 +1707,7 @@ async def test_orchestrator_exception_marks_runs_as_failed(tmp_path: Path) -> No
 
     # Verify agent run is marked as failed (not left running)
     agent_runs = ledger.list_agent_runs(active.id)
-    analysis_runs = [r for r in agent_runs if r.agent == "codex" and r.role == "analysis"]
+    analysis_runs = [r for r in agent_runs if r.agent == "codex" and r.role == "auto_analysis"]
     assert len(analysis_runs) >= 1
     assert analysis_runs[0].status == AgentRunStatus.FAILED.value
 

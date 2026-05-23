@@ -663,7 +663,14 @@ class TaskService:
             elif self.is_orchestration_managed_task(task.id):
                 self._ledger.set_task_status(task.id, TaskStatus.RUNNING)
             else:
+                # Preserve accumulated delta summary before transition clears it,
+                # so the event bridge can read it for stage advancement.
+                saved_summary = task.last_summary or ""
                 self._transition(task.id, TaskStatus.DONE)
+                if saved_summary:
+                    self._ledger.set_task_status(
+                        task.id, TaskStatus.DONE, summary=saved_summary,
+                    )
             self._ledger.add_event(
                 task.id, "turn_completed", {"threadId": thread_id}
             )
@@ -820,7 +827,7 @@ class TaskService:
                 return
             delta = str(payload.get("delta", ""))
             if delta:
-                summary = str(payload.get("summary", delta))[:240]
+                summary = str(payload.get("summary", delta))[:5000]
                 if not self.is_orchestration_managed_task(task.id):
                     self._ledger.set_task_status(
                         task.id, task.status,
