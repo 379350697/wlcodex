@@ -70,6 +70,8 @@ def test_codex_analysis_packet_can_be_read_only_user_answer() -> None:
     assert "禁止创建、修改、删除任何工作区文件" in rendered
     assert ".wlcodex" in rendered
     assert "不要输出 Claude 交接包" in rendered
+    assert "允许远程只读核验" in rendered
+    assert "禁止部署、重启、写配置" in rendered
     assert "Chief-engineer Claude handoff packet" not in rendered
 
 
@@ -304,6 +306,8 @@ def test_auto_context_collection_packet_is_read_only_and_not_handoff() -> None:
     assert "只读分析" in rendered
     assert "继续等待用户补充" in rendered
     assert "禁止创建、修改、删除任何工作区文件" in rendered
+    assert "允许远程只读核验" in rendered
+    assert "禁止部署、重启、写配置" in rendered
     # Must NOT contain Claude handoff instructions
     assert "Claude handoff packet" not in rendered
     assert "交给 Claude" not in rendered

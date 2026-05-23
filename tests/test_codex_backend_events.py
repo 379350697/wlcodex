@@ -521,8 +521,10 @@ async def test_app_server_read_only_analysis_prompt_uses_read_only_sandbox() -> 
     _, thread_params = requests[0]
     _, turn_params = requests[1]
     assert "只读分析" in str(thread_params["developerInstructions"])
-    assert "禁止创建、修改、删除" in str(thread_params["developerInstructions"])
-    assert turn_params["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
+    instructions = str(thread_params["developerInstructions"])
+    assert "禁止创建、修改、删除" in instructions
+    assert "远程只读核验" in instructions
+    assert turn_params["sandboxPolicy"] == {"type": "readOnly", "networkAccess": True}
     assert "outputSchema" not in turn_params
 
 

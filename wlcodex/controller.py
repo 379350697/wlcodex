@@ -1955,10 +1955,19 @@ class CommandController:
             ),
         )
 
-        buttons = build_auto_stage_buttons(active.id, AUTO_COLLECTING_CONTEXT)
+        buttons = [[
+            {
+                "text": "查看状态",
+                "callback_data": encode_conversation_callback(active.id, AUTO_VIEW_STATUS),
+            },
+            {
+                "text": "取消",
+                "callback_data": encode_conversation_callback(active.id, AUTO_CANCEL),
+            },
+        ]]
         start_text = (
             "Codex 开始分析。你可以继续补充信息，"
-            "准备好后点「生成最终方案」让 Codex 出方案。\n\n"
+            "分析完成后会显示「生成最终方案」。\n\n"
             "注意：当前是只读分析阶段，不会启动 Claude，不会修改代码。"
         )
 
@@ -2046,7 +2055,27 @@ class CommandController:
         orch_run = self._latest_active_auto_run(callback.conversation_id)
         if orch_run is None:
             return ControllerResponse("没有活跃的自动工作流。请用 /auto 开始。")
-        if not is_auto_collecting_context(orch_run):
+        wait_buttons = [[
+            {
+                "text": "查看状态",
+                "callback_data": encode_conversation_callback(convo.id, AUTO_VIEW_STATUS),
+            },
+            {
+                "text": "取消",
+                "callback_data": encode_conversation_callback(convo.id, AUTO_CANCEL),
+            },
+        ]]
+        if orch_run.current_step == AUTO_COLLECTING_CONTEXT and orch_run.status != "needs_user":
+            return ControllerResponse(
+                "Codex 正在生成最终方案，请等待完成。",
+                buttons=wait_buttons,
+            )
+        rewrite_from_draft = (
+            callback.action == AUTO_REWRITE_PLAN
+            and orch_run.status == "needs_user"
+            and orch_run.current_step == AUTO_DRAFT_READY
+        )
+        if not (is_auto_collecting_context(orch_run) or rewrite_from_draft):
             return ControllerResponse(
                 f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
                 "无法生成最终方案。请先回到上下文收集阶段。"
@@ -2081,6 +2110,11 @@ class CommandController:
             prompt_packet_summary=packet.summary(),
         )
         self._ledger.update_agent_run_status(agent_run.id, "running")
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="running",
+            current_step=AUTO_COLLECTING_CONTEXT,
+        )
         workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
 
         try:
@@ -2098,8 +2132,10 @@ class CommandController:
             )
             return ControllerResponse(classify_user_error(exc))
 
-        buttons = build_auto_stage_buttons(convo.id, AUTO_COLLECTING_CONTEXT)
-        return ControllerResponse("Codex 正在生成最终方案，完成后将显示方案和执行按钮。", buttons=buttons)
+        return ControllerResponse(
+            "Codex 正在生成最终方案，完成后将显示方案和执行按钮。",
+            buttons=wait_buttons,
+        )
 
     async def _handle_auto_send_to_claude(
         self, callback: ConversationCallback
@@ -2122,7 +2158,17 @@ class CommandController:
             )
 
         # Extract the Claude execution prompt from the orchestration run's analysis
-        claude_prompt = orch_run.last_codex_analysis or orch_run.goal
+        claude_prompt = (orch_run.last_codex_analysis or "").strip()
+        if not claude_prompt:
+            return ControllerResponse(
+                "没有可见的最终方案正文，不能交给 Claude 执行。"
+                "请先重写方案或继续补充上下文。",
+                buttons=build_auto_stage_buttons(
+                    convo.id,
+                    orch_run.current_step,
+                    last_codex_analysis=orch_run.last_codex_analysis or "",
+                ),
+            )
         goal = orch_run.goal
         chat_id = convo.chat_id
         budget = ContextBudget()
@@ -2915,7 +2961,7 @@ class CommandController:
             orch_run = self._latest_active_auto_run(callback.conversation_id)
             if orch_run and orch_run.last_codex_analysis:
                 return ControllerResponse(
-                    f"当前方案摘要：\n\n{orch_run.last_codex_analysis[:1500]}",
+                    f"当前方案：\n\n{orch_run.last_codex_analysis[:3500]}",
                     buttons=build_auto_stage_buttons(
                         callback.conversation_id, orch_run.current_step,
                         last_codex_analysis=orch_run.last_codex_analysis or "",

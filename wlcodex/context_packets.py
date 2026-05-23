@@ -191,6 +191,8 @@ def build_codex_analysis_packet(
             "本轮是只读分析/查询，不是 Claude 交接，也不是实现任务。",
             "只能读取代码、日志和状态；禁止创建、修改、删除任何工作区文件，包括 docs/、"
             ".wlcodex/、配置、测试、依赖锁文件。",
+            "允许远程只读核验，例如 ssh/curl/systemctl status/journalctl/git log/docker ps；"
+            "禁止部署、重启、写配置、git pull、删除文件或运行会产生副作用的命令。",
             "不要输出 Claude 交接包，不要把工作交给 Claude；直接回答结论、依据、"
             "风险和建议下一步。",
             "如果判断需要修改、部署、清理或跑实现闭环，明确提示用户用 /auto 或显式 "
@@ -340,6 +342,8 @@ def build_auto_context_packet(
         recent_user_constraints=[
             "本轮是 /auto 的 Codex 上下文收集阶段。",
             "只读分析：禁止创建、修改、删除任何工作区文件。",
+            "允许远程只读核验，例如 ssh/curl/systemctl status/journalctl/git log/docker ps；"
+            "禁止部署、重启、写配置、git pull、删除文件或运行会产生副作用的命令。",
             "不要启动 Claude，不要输出最终执行包。",
             "如果信息不足，继续等待用户补充；如果已有判断，给出阶段性结论。",
         ],

@@ -135,7 +135,11 @@ def build_auto_stage_buttons(
     def button(text: str, action: str) -> dict[str, str]:
         return {"text": text, "callback_data": f"conv:{conversation_id}:{action}"}
 
-    no_impl = "needs_implementation: false" in last_codex_analysis.lower() if last_codex_analysis else False
+    has_visible_plan = bool(last_codex_analysis.strip())
+    no_impl = (
+        "needs_implementation: false" in last_codex_analysis.lower()
+        if last_codex_analysis else False
+    )
 
     if stage == AUTO_COLLECTING_CONTEXT:
         return [[
@@ -146,6 +150,13 @@ def build_auto_stage_buttons(
         ]]
 
     if stage == AUTO_DRAFT_READY:
+        if not has_visible_plan:
+            return [[
+                button("重写方案", AUTO_REWRITE_PLAN),
+                button("继续补充", AUTO_CONTINUE_CONTEXT),
+            ], [
+                button("结束任务", AUTO_CLOSE),
+            ]]
         if no_impl:
             # Codex determined no implementation is needed — suppress Claude gate.
             return [[
@@ -159,8 +170,9 @@ def build_auto_stage_buttons(
             button("继续补充", AUTO_CONTINUE_CONTEXT),
         ], [
             button("重写方案", AUTO_REWRITE_PLAN),
-            button("Codex 接管修", AUTO_CODEX_TAKEOVER),
+            button("查看当前草稿", AUTO_SHOW_DRAFT),
         ], [
+            button("Codex 接管修", AUTO_CODEX_TAKEOVER),
             button("结束任务", AUTO_CLOSE),
         ]]
 

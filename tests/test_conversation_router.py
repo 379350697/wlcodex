@@ -45,6 +45,25 @@ def test_parse_auto_command() -> None:
     assert cmd.prompt == "修复登录 bug"
 
 
+def test_parse_auto_command_accepts_direct_chinese_quote() -> None:
+    cmd = parse_command("/auto「云服务器：\n- IP: 127.0.0.1\n请核验部署是否生效」")
+
+    assert isinstance(cmd, AutoModeCommand)
+    assert cmd.prompt == "云服务器：\n- IP: 127.0.0.1\n请核验部署是否生效"
+
+
+def test_parse_auto_command_accepts_unclosed_direct_chinese_quote() -> None:
+    cmd = parse_command("/auto「云服务器：\n- IP: 127.0.0.1\n请核验部署是否生效")
+
+    assert isinstance(cmd, AutoModeCommand)
+    assert cmd.prompt == "云服务器：\n- IP: 127.0.0.1\n请核验部署是否生效"
+
+
+def test_parse_auto_command_does_not_match_longer_command_name() -> None:
+    with pytest.raises(ParseError):
+        parse_command("/autox核验部署")
+
+
 def test_legacy_task_command_still_works() -> None:
     cmd = parse_command("/task wlcodex 修复 bug")
     assert isinstance(cmd, StartTaskCommand)

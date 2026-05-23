@@ -799,10 +799,15 @@ class Ledger:
     def find_task_by_thread_id(self, thread_id: str) -> Task | None:
         row = self._conn.execute(
             """
-            SELECT tasks.* FROM tasks
-            JOIN task_thread_bindings ON task_thread_bindings.task_id = tasks.id
-            WHERE task_thread_bindings.thread_id = ?
-            ORDER BY task_thread_bindings.id DESC
+            SELECT * FROM tasks
+            WHERE codex_thread_id = ?
+            ORDER BY
+                CASE
+                    WHEN status IN ('queued', 'running', 'waiting_approval', 'paused') THEN 0
+                    ELSE 1
+                END,
+                updated_at DESC,
+                id DESC
             LIMIT 1
             """,
             (thread_id,),
@@ -810,9 +815,16 @@ class Ledger:
         if row is None:
             row = self._conn.execute(
                 """
-                SELECT * FROM tasks
-                WHERE codex_thread_id = ?
-                ORDER BY updated_at DESC, id DESC
+                SELECT tasks.* FROM tasks
+                JOIN task_thread_bindings ON task_thread_bindings.task_id = tasks.id
+                WHERE task_thread_bindings.thread_id = ?
+                ORDER BY
+                    CASE
+                        WHEN tasks.status IN ('queued', 'running', 'waiting_approval', 'paused') THEN 0
+                        ELSE 1
+                    END,
+                    tasks.updated_at DESC,
+                    tasks.id DESC
                 LIMIT 1
                 """,
                 (thread_id,),

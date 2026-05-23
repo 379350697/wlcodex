@@ -98,6 +98,26 @@ def test_apply_backend_event_updates_state(service: TaskService) -> None:
     assert updated.active_turn_id == "turn-1"
 
 
+def test_backend_event_for_reused_thread_targets_latest_active_task(
+    service: TaskService,
+) -> None:
+    from wlcodex.codex_backend import BackendEvent
+
+    old = service.start_task("demo", "Old analysis", codex_thread_id="thread-reused")
+    service._ledger.set_task_status(old.id, TaskStatus.DONE)
+    new = service.start_task("demo", "Final plan", codex_thread_id="thread-reused")
+
+    service.apply_backend_event(BackendEvent(
+        event_type="turn_started",
+        payload={"threadId": "thread-reused", "turnId": "turn-new"},
+    ))
+
+    assert service.get_task(old.id).status == TaskStatus.DONE
+    updated = service.get_task(new.id)
+    assert updated.status == TaskStatus.RUNNING
+    assert updated.active_turn_id == "turn-new"
+
+
 def test_apply_backend_event_finds_task_by_bound_codex_thread_alias(
     service: TaskService,
 ) -> None:

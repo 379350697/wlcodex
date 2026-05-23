@@ -807,6 +807,245 @@ async def test_direct_codex_turn_completion_marks_agent_run_done(
 
 
 @pytest.mark.asyncio
+async def test_auto_analysis_completion_releases_final_plan_gate(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_COLLECTING_CONTEXT, ROLE_AUTO_ANALYSIS
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Collect auto context",
+        codex_thread_id="thread-auto",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "goal")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_ANALYSIS,
+        hidden_task_id=task.id,
+        external_session_id="thread-auto",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-auto", "turnId": "turn-auto"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-auto", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_COLLECTING_CONTEXT
+    labels = [
+        button["text"]
+        for _, _, buttons in sent
+        for row in (buttons or [])
+        for button in row
+    ]
+    assert "生成最终方案" in labels
+
+
+@pytest.mark.asyncio
+async def test_auto_final_plan_completion_shows_assembled_plan_before_claude_gate(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate final plan",
+        codex_thread_id="thread-final-plan",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "fix the workflow")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-final-plan",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-final-plan", "turnId": "turn-final-plan"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-final-plan",
+            "turnId": "turn-final-plan",
+            "delta": "最终方案：\n1. 修改入口校验。\n",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-final-plan",
+            "turnId": "turn-final-plan",
+            "delta": "2. 跑完整回归验收。\n",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-final-plan", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_DRAFT_READY
+    assert "最终方案" in updated.last_codex_analysis
+    assert "修改入口校验" in updated.last_codex_analysis
+    assert "完整回归验收" in updated.last_codex_analysis
+    text = sent[-1][1]
+    assert "最终方案" in text
+    assert "修改入口校验" in text
+    assert "完整回归验收" in text
+    labels = [
+        button["text"]
+        for row in (sent[-1][2] or [])
+        for button in row
+    ]
+    assert "交给 Claude 执行" in labels
+
+
+@pytest.mark.asyncio
+async def test_auto_final_plan_completion_without_body_hides_claude_gate(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate empty final plan",
+        codex_thread_id="thread-empty-plan",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "fix the workflow")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-empty-plan",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-empty-plan", "turnId": "turn-empty-plan"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-empty-plan", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_DRAFT_READY
+    assert updated.last_codex_analysis == ""
+    assert "没有收到方案正文" in sent[-1][1]
+    labels = [
+        button["text"]
+        for row in (sent[-1][2] or [])
+        for button in row
+    ]
+    assert "交给 Claude 执行" not in labels
+    assert "重写方案" in labels
+
+
+@pytest.mark.asyncio
 async def test_event_bridge_maps_approval_resolved_without_thread_id(
     tmp_path: Path,
 ) -> None:

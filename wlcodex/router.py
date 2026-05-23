@@ -237,6 +237,49 @@ ParsedCommand = (
 # --- Parser ---
 
 
+_PROMPT_QUOTE_PAIRS = {
+    "「": "」",
+    "『": "』",
+    "“": "”",
+    "‘": "’",
+    '"': '"',
+    "'": "'",
+}
+
+
+def _strip_wrapping_prompt_quotes(prompt: str) -> str:
+    if not prompt:
+        return prompt
+    closing = _PROMPT_QUOTE_PAIRS.get(prompt[0])
+    if closing:
+        if prompt.endswith(closing):
+            return prompt[1:-1].strip()
+        return prompt[1:].strip()
+    return prompt
+
+
+def _prompt_after_verb(stripped: str, verb: str) -> str | None:
+    if stripped == verb:
+        raise ParseError(f"用法：{verb} <prompt>")
+    if not stripped.startswith(verb):
+        return None
+    rest = stripped[len(verb):]
+    if not rest:
+        raise ParseError(f"用法：{verb} <prompt>")
+    first = rest[0]
+    if first.isspace():
+        prompt = rest.strip()
+    elif first in (":", "："):
+        prompt = rest[1:].strip()
+    elif first in _PROMPT_QUOTE_PAIRS:
+        prompt = _strip_wrapping_prompt_quotes(rest.strip())
+    else:
+        return None
+    if not prompt:
+        raise ParseError(f"用法：{verb} <prompt>")
+    return prompt
+
+
 def parse_command(text: str) -> ParsedCommand:
     stripped = text.strip()
 
@@ -304,10 +347,9 @@ def parse_command(text: str) -> ParsedCommand:
             mode_name = stripped.split(maxsplit=1)[1].strip()
             return ClaudePermissionCommand(mode_name=mode_name)
 
-    if stripped.startswith("/auto "):
-        prompt = stripped.split(maxsplit=1)[1].strip()
-        if not prompt:
-            raise ParseError("用法：/auto <prompt>")
+    auto_prompt = _prompt_after_verb(stripped, "/auto")
+    if auto_prompt is not None:
+        prompt = auto_prompt
         return AutoModeCommand(prompt=prompt)
 
     if stripped == "/stop":

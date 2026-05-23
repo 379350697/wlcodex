@@ -159,21 +159,38 @@ class TestBuildAutoStageButtons:
         assert AUTO_SHOW_DRAFT in actions
         assert AUTO_CANCEL in actions
 
-    def test_draft_ready_buttons_expose_claude_gate(self) -> None:
-        buttons = build_auto_stage_buttons(42, AUTO_DRAFT_READY)
+    def test_draft_ready_buttons_expose_claude_gate_only_with_visible_plan(self) -> None:
+        buttons = build_auto_stage_buttons(
+            42,
+            AUTO_DRAFT_READY,
+            last_codex_analysis="最终方案：\n1. 修改代码。\n2. 跑验收。",
+        )
         labels = _labels(buttons)
         actions = _actions(buttons)
 
         assert "交给 Claude 执行" in labels
         assert "继续补充" in labels
         assert "重写方案" in labels
+        assert "查看当前草稿" in labels
         assert "Codex 接管修" in labels
         assert "结束任务" in labels
         assert AUTO_SEND_TO_CLAUDE in actions
         assert AUTO_CONTINUE_CONTEXT in actions
         assert AUTO_REWRITE_PLAN in actions
+        assert AUTO_SHOW_DRAFT in actions
         assert AUTO_CODEX_TAKEOVER in actions
         assert AUTO_CLOSE in actions
+
+    def test_draft_ready_without_visible_plan_suppresses_claude_gate(self) -> None:
+        buttons = build_auto_stage_buttons(42, AUTO_DRAFT_READY)
+        labels = _labels(buttons)
+        actions = _actions(buttons)
+
+        assert "交给 Claude 执行" not in labels
+        assert AUTO_SEND_TO_CLAUDE not in actions
+        assert "重写方案" in labels
+        assert "继续补充" in labels
+        assert "结束任务" in labels
 
     def test_draft_ready_no_implementation_suppresses_claude_gate(self) -> None:
         """When Codex says needs_implementation: false, draft_ready must not
@@ -234,7 +251,11 @@ class TestBuildAutoStageButtons:
         assert "查看状态" in labels
 
     def test_button_callback_data_format(self) -> None:
-        buttons = build_auto_stage_buttons(99, AUTO_DRAFT_READY)
+        buttons = build_auto_stage_buttons(
+            99,
+            AUTO_DRAFT_READY,
+            last_codex_analysis="最终方案：执行修复。",
+        )
         for row in buttons:
             for btn in row:
                 assert btn["callback_data"].startswith("conv:99:")

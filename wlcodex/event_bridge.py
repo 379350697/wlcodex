@@ -351,6 +351,25 @@ class EventBridge:
             )
         )
 
+    def _task_agent_message_summary(self, task: object) -> str:
+        """Return the assembled agent message text for a completed direct task."""
+        task_id = getattr(task, "id", None)
+        if task_id is None:
+            return str(getattr(task, "last_summary", "") or "")
+
+        chunks: list[str] = []
+        for event in self._ledger.list_events(int(task_id), limit=1000):
+            if event.event_type != "agent_message_delta":
+                continue
+            delta = str(event.payload.get("delta", "") or "")
+            if delta:
+                chunks.append(delta)
+
+        assembled = "".join(chunks).strip()
+        if assembled:
+            return assembled
+        return str(getattr(task, "last_summary", "") or "").strip()
+
     def _sync_direct_agent_run_status(self, task: object) -> None:
         task_id = getattr(task, "id", None)
         if task_id is None or self._service.is_orchestration_managed_task(int(task_id)):
@@ -378,19 +397,19 @@ class EventBridge:
             summary = (
                 getattr(task, "last_error", "")
                 if agent_status in {"failed", "aborted"}
-                else getattr(task, "last_summary", "")
+                else self._task_agent_message_summary(task)
             )
             self._ledger.update_agent_run_status(
                 int(row["id"]),
                 agent_status,
-                completion_summary=str(summary)[:2000],
+                completion_summary=str(summary)[:5000],
             )
             self._append_direct_agent_terminal_event(
                 task,
                 agent_run_id=int(row["id"]),
                 agent_status=agent_status,
                 role=str(row["role"] or "implementation"),
-                summary=str(summary)[:2000],
+                summary=str(summary)[:5000],
             )
 
     def _append_direct_agent_terminal_event(
@@ -530,8 +549,13 @@ class EventBridge:
         # Advance based on agent role and completion
         if agent_role == "auto_analysis" and agent_status == "done":
             # Context collection or supplement completed → stay in collecting_context
-            # The user can still add more context and click "生成最终方案"
-            pass
+            # The user can still add more context and now click "生成最终方案".
+            new_step = AUTO_COLLECTING_CONTEXT
+            self._ledger.update_orchestration_run(
+                auto_run.id,
+                status="needs_user",
+                current_step=new_step,
+            )
 
         elif agent_role == "auto_final_plan" and agent_status == "done":
             # Final plan generated → advance to draft_ready
@@ -617,9 +641,22 @@ class EventBridge:
         )
         # Include orch run data in the message for draft_ready
         stage_label = auto_stage_label(new_stage)
-        if new_stage == "draft_ready" and auto_run.last_codex_analysis:
-            preview = auto_run.last_codex_analysis[:500]
+        if new_stage == "collecting_context":
+            text = (
+                "Codex 已完成上下文收集。\n\n"
+                "你可以继续补充信息，或生成最终方案。"
+            )
+        elif new_stage == "draft_ready" and auto_run.last_codex_analysis:
+            preview = auto_run.last_codex_analysis[:3500]
+            if len(auto_run.last_codex_analysis) > len(preview):
+                preview = f"{preview}\n\n...（方案较长，已截断显示）"
             text = f"最终方案已生成。\n\n{preview}\n\n请选择下一步："
+        elif new_stage == "draft_ready":
+            text = (
+                "最终方案生成完成，但没有收到方案正文。\n\n"
+                "为避免黑盒执行，暂不提供 Claude 执行入口。"
+                "请重写方案或继续补充上下文。"
+            )
         elif new_stage == "claude_done":
             text = f"Claude 执行完成。\n\n{auto_run.last_claude_summary or '完成'}\n\n请选择下一步："
         elif new_stage == "completed":

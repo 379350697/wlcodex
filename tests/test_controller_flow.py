@@ -1332,6 +1332,336 @@ async def test_staged_auto_records_ledger_on_context_collection(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_staged_auto_start_does_not_offer_final_plan_while_analysis_runs(tmp_path: Path) -> None:
+    """The final-plan gate must not be clickable until the initial Codex
+    context-collection task has actually finished."""
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    renderer = RecordingInteractionRenderer()
+    store = RuntimeEventStore(ledger._conn)
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=StreamingClaudeWritesTrackedFile(workspace),
+        interaction_renderer=renderer,
+        runtime_event_store=store,
+    )
+
+    response = await ctrl.handle(
+        "/auto 修改 tracked.txt",
+        {"chat_id": 100, "user_id": 200},
+    )
+
+    assert response.already_rendered
+    started_events = [
+        event for event in renderer.events
+        if getattr(event, "event_type", "") == "run_started"
+    ]
+    labels = [
+        button["text"]
+        for row in (getattr(started_events[0], "buttons", None) or [])
+        for button in row
+    ]
+    assert "生成最终方案" not in labels
+    assert "查看状态" in labels
+
+
+@pytest.mark.asyncio
+async def test_auto_final_plan_callback_hides_final_plan_gate_while_generating(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_COLLECTING_CONTEXT, AUTO_FINAL_PLAN
+    from wlcodex.conversation_callback import ConversationCallback
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=StreamingClaudeWritesTrackedFile(workspace),
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(conversation.id, "修改 tracked.txt")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_COLLECTING_CONTEXT,
+        last_codex_analysis="已完成上下文收集。",
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation_id=conversation.id, action=AUTO_FINAL_PLAN)
+    )
+
+    labels = [
+        button["text"]
+        for row in (response.buttons or [])
+        for button in row
+    ]
+    assert "生成最终方案" not in labels
+    assert "查看当前草稿" not in labels
+    assert "查看状态" in labels
+    assert "取消" in labels
+    assert ledger.get_orchestration_run(orch_run.id).status == "running"
+    assert backend.prompt_turns[-1][2] == "read_only_analysis"
+
+
+@pytest.mark.asyncio
+async def test_auto_final_plan_callback_rejects_duplicate_while_generating(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_COLLECTING_CONTEXT, AUTO_FINAL_PLAN
+    from wlcodex.conversation_callback import ConversationCallback
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=StreamingClaudeWritesTrackedFile(workspace),
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(conversation.id, "修改 tracked.txt")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+
+    callback = ConversationCallback(
+        conversation_id=conversation.id,
+        action=AUTO_FINAL_PLAN,
+    )
+    await ctrl.handle_conversation_callback(callback)
+    second = await ctrl.handle_conversation_callback(callback)
+
+    labels = [
+        button["text"]
+        for row in (second.buttons or [])
+        for button in row
+    ]
+    assert "正在生成最终方案" in second.text
+    assert "生成最终方案" not in labels
+    assert len([
+        run for run in ledger.list_agent_runs(conversation.id)
+        if run.role == "auto_final_plan"
+    ]) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_send_to_claude_rejects_missing_visible_final_plan(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_DRAFT_READY, AUTO_SEND_TO_CLAUDE
+    from wlcodex.conversation_callback import ConversationCallback
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    claude = StreamingClaudeWritesTrackedFile(workspace)
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=claude,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    ledger.update_orchestration_run(
+        ledger.create_orchestration_run(conversation.id, "修改 tracked.txt").id,
+        status="needs_user",
+        current_step=AUTO_DRAFT_READY,
+        last_codex_analysis="",
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(
+            conversation_id=conversation.id,
+            action=AUTO_SEND_TO_CLAUDE,
+        )
+    )
+
+    labels = [
+        button["text"]
+        for row in (response.buttons or [])
+        for button in row
+    ]
+    assert "没有可见的最终方案正文" in response.text
+    assert "交给 Claude 执行" not in labels
+    assert "重写方案" in labels
+    assert claude.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_auto_rewrite_plan_from_draft_ready_starts_final_plan_generation(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_DRAFT_READY, AUTO_REWRITE_PLAN
+    from wlcodex.conversation_callback import ConversationCallback
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        claude_backend=StreamingClaudeWritesTrackedFile(workspace),
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(conversation.id, "修改 tracked.txt")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_DRAFT_READY,
+        last_codex_analysis="旧方案",
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(
+            conversation_id=conversation.id,
+            action=AUTO_REWRITE_PLAN,
+        )
+    )
+
+    labels = [
+        button["text"]
+        for row in (response.buttons or [])
+        for button in row
+    ]
+    updated = ledger.get_orchestration_run(orch_run.id)
+    assert "正在生成最终方案" in response.text
+    assert updated.status == "running"
+    assert updated.current_step == "collecting_context"
+    assert "生成最终方案" not in labels
+    assert "查看状态" in labels
+    assert backend.prompt_turns[-1][2] == "read_only_analysis"
+
+
+@pytest.mark.asyncio
+async def test_auto_show_draft_returns_enough_final_plan_to_review(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_DRAFT_READY, AUTO_SHOW_DRAFT
+    from wlcodex.conversation_callback import ConversationCallback
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    ctrl = CommandController(
+        service,
+        FakeCodexBackend(),
+        inspector,
+        ledger=ledger,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    long_plan = "最终方案：\n" + ("步骤内容\n" * 320) + "TAIL-验收标准"
+    ledger.update_orchestration_run(
+        ledger.create_orchestration_run(conversation.id, "修改 tracked.txt").id,
+        status="needs_user",
+        current_step=AUTO_DRAFT_READY,
+        last_codex_analysis=long_plan,
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(
+            conversation_id=conversation.id,
+            action=AUTO_SHOW_DRAFT,
+        )
+    )
+
+    assert "当前方案" in response.text
+    assert "TAIL-验收标准" in response.text
+    labels = [
+        button["text"]
+        for row in (response.buttons or [])
+        for button in row
+    ]
+    assert "交给 Claude 执行" in labels
+
+
+@pytest.mark.asyncio
 async def test_staged_auto_binds_codex_thread_to_task(tmp_path: Path) -> None:
     """Staged /auto collecting_context must bind its Codex thread to the task."""
     workspace = tmp_path / "workspace"
