@@ -135,8 +135,14 @@ cp config/wlcodex.example.toml config/wlcodex.toml
 # Set bot token
 export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
 
-# Run tests
+# Run fast default tests
 .venv/bin/python -m pytest -q
+
+# Profile the full test suite with native pytest output
+bash scripts/pytest-profile 50
+
+# Run all tests, including marked slow/integration/live tests
+.venv/bin/python -m pytest -m "" -q
 
 # Run lint
 .venv/bin/python -m ruff check .
@@ -352,16 +358,17 @@ systemctl --user enable --now wlcodex.service
 
 Real Codex app-server integration tests require:
 ```bash
-WLCODEX_RUN_CODEX_INTEGRATION=1 .venv/bin/python -m pytest tests/test_real_app_server_integration.py -q
+WLCODEX_RUN_CODEX_INTEGRATION=1 .venv/bin/python -m pytest -m "" tests/test_real_app_server_integration.py -q
 ```
 
 ## Final Acceptance
 
 ```bash
 .venv/bin/python -m pytest -q
+.venv/bin/python -m pytest -m "" -q
 .venv/bin/python -m ruff check .
-WLCODEX_RUN_CODEX_INTEGRATION=1 .venv/bin/python -m pytest tests/test_real_app_server_integration.py -q
-WLCODEX_RUN_TELEGRAM_LIVE=1 .venv/bin/python -m pytest tests/test_live_telegram_smoke.py -q
+WLCODEX_RUN_CODEX_INTEGRATION=1 .venv/bin/python -m pytest -m "" tests/test_real_app_server_integration.py -q
+WLCODEX_RUN_TELEGRAM_LIVE=1 .venv/bin/python -m pytest -m "" tests/test_live_telegram_smoke.py -q
 ```
 
 Fake backend tests are unit-test helpers and NOT smoke evidence.

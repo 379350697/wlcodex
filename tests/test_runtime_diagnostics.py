@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from wlcodex.db import Ledger
 from wlcodex.runtime_diagnostics import (
     RuntimeAgentSummary,

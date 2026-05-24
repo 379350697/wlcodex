@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from wlcodex.interaction.events import InteractionEvent
 from wlcodex.interaction.renderer import InteractionRenderer
 from wlcodex.interaction.runtime_renderer import (

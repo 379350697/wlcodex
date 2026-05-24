@@ -6,6 +6,8 @@ import subprocess
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from wlcodex.agent_backend import AgentStreamEvent
 from wlcodex.codex_backend import BackendEvent, FakeCodexBackend
 from wlcodex.config import WorkspaceConfig

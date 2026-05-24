@@ -12,10 +12,13 @@ import pytest
 from wlcodex.app_server_process import AppServerProcess, AppServerProcessConfig
 from wlcodex.codex_backend import AppServerCodexBackend
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("WLCODEX_RUN_CODEX_INTEGRATION") != "1",
-    reason="set WLCODEX_RUN_CODEX_INTEGRATION=1 to run real Codex app-server tests",
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        os.environ.get("WLCODEX_RUN_CODEX_INTEGRATION") != "1",
+        reason="set WLCODEX_RUN_CODEX_INTEGRATION=1 to run real Codex app-server tests",
+    ),
+]
 
 
 @pytest.mark.asyncio

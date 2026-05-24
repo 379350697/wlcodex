@@ -12,6 +12,8 @@ from wlcodex.codex_backend import (
     FakeCodexBackend,
 )
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.asyncio
 async def test_backend_start_turn_sends_turn_start() -> None:

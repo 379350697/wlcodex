@@ -2,6 +2,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from wlcodex.codex_backend import FakeCodexBackend
 from wlcodex.config import WorkspaceConfig
 from wlcodex.controller import CommandController

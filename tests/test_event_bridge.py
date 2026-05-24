@@ -9,6 +9,8 @@ from wlcodex.db import Ledger
 from wlcodex.event_bridge import EventBridge
 from wlcodex.task_service import TaskService
 
+pytestmark = pytest.mark.slow
+
 
 class IdleBackend:
     async def events(self):
@@ -1061,6 +1063,189 @@ async def test_auto_final_plan_completion_shows_assembled_plan_before_claude_gat
     assert "最终方案" in text
     assert "修改入口校验" in text
     assert "完整回归验收" in text
+    labels = [
+        button["text"]
+        for row in (sent[-1][2] or [])
+        for button in row
+    ]
+    assert "交给 Claude 执行" in labels
+
+
+@pytest.mark.asyncio
+async def test_auto_final_plan_prioritizes_human_readable_plan_over_diagnose_json(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When diagnose_json is present, draft_ready must still show the
+    human-readable plan as primary content. Diagnose evidence is only a
+    short supplement, never the main conclusion."""
+    import json as _json
+
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    # Fake diagnose JSON with alarming content that must NOT dominate
+    fake_diagnose = _json.dumps(
+        {
+            "schema_version": "2.0.0",
+            "conclusion": {
+                "status": "unhealthy",
+                "risk": "high",
+                "summary": "service inactive, exchange unavailable",
+            },
+            "health": {
+                "fingerprints": ["service_lightfee-live_inactive"],
+            },
+            "service_status": {
+                "lightfee-live": {"active": "inactive", "n_restarts": 3},
+            },
+            "exchange_truth": {
+                "available": False,
+                "errors": ["exchange unavailable"],
+                "confidence": "low",
+            },
+            "local_state": {
+                "lifecycle": "running",
+                "risk_mode": "fail_closed",
+            },
+            "state_consistency": {},
+            "evidence_quality": {
+                "overall": "missing",
+                "confidence": "low",
+                "missing_evidence": ["exchange data"],
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "wlcodex.event_bridge._try_collect_diagnose_json_sync",
+        lambda bridge, auto_run: fake_diagnose,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate final plan with diagnose present",
+        codex_thread_id="thread-final-diagnose-override",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(
+        conversation.id,
+        "最终方案出来了，下一步你生成精准修复的给 Claude 看的提示词",
+    )
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-final-diagnose-override",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+
+    plan_text = (
+        "结论：下面是可直接交给 Claude 的精准修复提示词。\n"
+        "Claude 任务：修复 /auto 最终方案展示层，保留人话方案摘要。\n"
+        "依据：当前 /auto 最终方案阶段优先展示 diagnose_json 的"
+        "结构化摘要，将人话方案和 Claude handoff 提示词盖掉了。\n"
+        "风险：中 — 用户看不到人话方案，难以决策。\n"
+        "下一步：交给 Claude 执行。"
+    )
+
+    await bridge.process_event(
+        BackendEvent(
+            "turn_started",
+            {
+                "threadId": "thread-final-diagnose-override",
+                "turnId": "turn-final-diagnose-override",
+            },
+        )
+    )
+    await bridge.process_event(
+        BackendEvent(
+            "agent_message_delta",
+            {
+                "threadId": "thread-final-diagnose-override",
+                "turnId": "turn-final-diagnose-override",
+                "delta": plan_text,
+            },
+        )
+    )
+    await bridge.process_event(
+        BackendEvent(
+            "turn_completed",
+            {
+                "threadId": "thread-final-diagnose-override",
+                "status": "completed",
+            },
+        )
+    )
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_DRAFT_READY
+
+    text = sent[-1][1]
+
+    # Human-readable plan must be the primary content
+    assert "最终方案已生成" in text
+    assert "Claude" in text
+    assert "精准修复提示词" in text
+    assert "展示层" in text
+    assert "人话方案" in text
+
+    # Diagnose supplement must exist but be labeled as reference-only
+    assert "诊断证据" in text
+    assert "仅作证据参考" in text
+    assert "不替代最终方案" in text
+
+    # The plan content must appear BEFORE the diagnose supplement section
+    plan_pos = text.find("人话方案")
+    supplement_pos = text.find("诊断证据")
+    assert plan_pos < supplement_pos, (
+        "Plan must precede diagnose supplement, but "
+        f"plan_pos={plan_pos} >= supplement_pos={supplement_pos}"
+    )
+
+    # The diagnose supplement must be short (not the full structured digest)
+    supplement_section = text[supplement_pos:]
+    assert len(supplement_section) < 200, (
+        f"Supplement too long ({len(supplement_section)} chars), "
+        "full diagnose digest must not replace plan"
+    )
+
+    # The alarming diagnose content must NOT appear in the primary
+    # conclusion area (before the supplement section)
+    pre_supplement = text[:supplement_pos]
+    assert "service_lightfee-live_inactive" not in pre_supplement
+    assert "exchange unavailable" not in pre_supplement
+
+    # Buttons must include the Claude execution gate
     labels = [
         button["text"]
         for row in (sent[-1][2] or [])

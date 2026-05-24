@@ -94,9 +94,11 @@ class TelegramOutbox:
         store: object | None = None,
         *,
         max_retries: int = MAX_RETRIES,
+        sleep_fn: Any | None = None,
     ) -> None:
         self._store = store  # RuntimeEventStore
         self._max_retries = max_retries
+        self._sleep = sleep_fn or asyncio.sleep
         self._queue: list[DeliveryRequest] = []
         self._pending: dict[str, DeliveryRequest] = {}
         self._processing = False
@@ -295,7 +297,7 @@ class TelegramOutbox:
                         "next_attempt": attempt + 1,
                         "delay_seconds": round(delay, 2),
                     })
-                    await asyncio.sleep(delay)
+                    await self._sleep(delay)
                 else:
                     self._emit_event(EventType.TELEGRAM_MESSAGE_FAILED, payload={
                         "delivery_id": req.delivery_id,

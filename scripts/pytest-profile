@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+durations="${1:-50}"
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+.venv/bin/python -m pytest -m "" --durations="$durations" -q "$@"

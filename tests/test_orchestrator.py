@@ -3,6 +3,9 @@
 import subprocess
 
 import pytest
+
+pytestmark = pytest.mark.integration
+
 from wlcodex.orchestrator import (
     ChiefEngineerOrchestrator,
     OrchestrationProgress,

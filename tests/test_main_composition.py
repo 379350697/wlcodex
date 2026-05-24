@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 
 from wlcodex.approval import ApprovalService
 from wlcodex.codex_backend import FakeCodexBackend

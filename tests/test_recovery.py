@@ -2,6 +2,10 @@
 
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.integration
+
 from wlcodex.db import Ledger
 from wlcodex.models import TaskStatus
 from wlcodex.runtime_diagnostics import (

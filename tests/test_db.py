@@ -1,8 +1,11 @@
 from pathlib import Path
 
+import pytest
 
 from wlcodex.db import Ledger
 from wlcodex.models import ApprovalKind, ApprovalStatus, TaskStatus
+
+pytestmark = pytest.mark.slow
 
 
 def test_ledger_creates_and_lists_tasks(tmp_path: Path) -> None:

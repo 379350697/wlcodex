@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from wlcodex.telegram_app import build_application, is_authorized
 
 

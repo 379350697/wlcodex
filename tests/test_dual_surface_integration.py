@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from wlcodex.router import (
     ModeSwitchCommand,
     TerminalSubCommand,

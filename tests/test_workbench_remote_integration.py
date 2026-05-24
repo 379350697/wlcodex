@@ -32,6 +32,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from wlcodex.workbench.models import (
     ExecutionMode,
     ViewMode,

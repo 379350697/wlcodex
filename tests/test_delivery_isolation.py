@@ -14,6 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 
 # ---------------------------------------------------------------------------
 # 1. Claude subprocess environment is sanitized of Telegram secrets

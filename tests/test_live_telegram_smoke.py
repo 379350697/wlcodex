@@ -17,10 +17,13 @@ import pytest
 from wlcodex.config import load_config
 
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("WLCODEX_RUN_TELEGRAM_LIVE") != "1",
-    reason="set WLCODEX_RUN_TELEGRAM_LIVE=1 to run live Telegram smoke",
-)
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        os.environ.get("WLCODEX_RUN_TELEGRAM_LIVE") != "1",
+        reason="set WLCODEX_RUN_TELEGRAM_LIVE=1 to run live Telegram smoke",
+    ),
+]
 
 def _config_path() -> Path:
     return Path(os.environ.get("WLCODEX_CONFIG_PATH", "config/wlcodex.toml"))

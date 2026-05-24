@@ -5,6 +5,8 @@ from wlcodex.interaction.profiles import NaturalChatProfile
 from wlcodex.interaction.renderer import InteractionRenderer
 from wlcodex.interaction.transport import TelegramTransport
 
+pytestmark = pytest.mark.slow
+
 
 class FakeTransport:
     def __init__(self) -> None:

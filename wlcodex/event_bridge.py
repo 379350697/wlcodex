@@ -124,6 +124,21 @@ def _extract_diagnose_json(text: str) -> str:
             return block
     return ""
 
+def _brief_diagnose_supplement(diagnose_digest: str) -> str:
+    """Short supplement for final-plan stages — diagnose evidence reference only.
+
+    Must be short (1-2 lines) and must NOT reproduce the full diagnose digest.
+
+    diagnose_digest is accepted but intentionally unused — the current policy
+    returns a fixed disclaimer to avoid diagnostic content leaking into the
+    plan display. The parameter is retained for future callers that may want
+    to extract a controlled sub-field (e.g. conclusion status only).
+    """
+    if not diagnose_digest:
+        return ""
+    return "诊断证据：已采集结构化诊断；详细诊断仅作证据参考，不替代最终方案。"
+
+
 EXPIRY_SCAN_INTERVAL_SECONDS = 60
 TASK_WATCHDOG_INTERVAL_SECONDS = 60
 # Callback: send_telegram(chat_id, text, buttons) -> message_id
@@ -880,22 +895,22 @@ class EventBridge:
                     "你可以继续补充信息，或生成最终方案。"
                 )
         elif new_stage == "draft_ready" and auto_run.last_codex_analysis:
+            # Primary: always render the human-readable plan from
+            # last_codex_analysis. Diagnose JSON, if present, is only a
+            # supplementary evidence note — it must never replace the plan.
+            digest = render_auto_draft_digest(auto_run.last_codex_analysis)
+            supplement = ""
             if structured_digest:
-                digest = structured_digest
+                supplement = _brief_diagnose_supplement(structured_digest)
             elif diagnose_expected:
-                digest = (
-                    "关键摘要：\n"
-                    "结论：诊断 JSON 未采集到，无法输出确定性交易结论。\n"
-                    "依据：\n"
-                    "- diagnose_json=missing\n"
-                    "- confidence=low\n"
-                    "- 请手动运行 python scripts/diagnose_live.py --json\n"
-                    "风险：高 — 缺乏结构化证据，不得执行。\n"
-                    "下一步：重新触发诊断采集。"
+                supplement = (
+                    "诊断 JSON 未采集到，缺少结构化证据。"
+                    "请手动运行 python scripts/diagnose_live.py --json"
                 )
+            if supplement:
+                text = "最终方案已生成。\n\n{}\n\n{}\n\n请选择下一步：".format(digest, supplement)
             else:
-                digest = render_auto_draft_digest(auto_run.last_codex_analysis)
-            text = "最终方案已生成。\n\n{}\n\n请选择下一步：".format(digest)
+                text = "最终方案已生成。\n\n{}\n\n请选择下一步：".format(digest)
         elif new_stage == "draft_ready":
             text = (
                 "最终方案生成完成，但没有收到方案正文。\n\n"

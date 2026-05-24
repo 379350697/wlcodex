@@ -15,6 +15,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from wlcodex.agent_backend import AgentRequest, AgentResult, AgentStreamEvent
 from wlcodex.codex_backend import FakeCodexBackend
 from wlcodex.config import WorkspaceConfig

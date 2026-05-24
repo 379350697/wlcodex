@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 
 # ===========================================================================
 # Helpers
@@ -156,6 +158,35 @@ def test_outbox_records_message_is_not_modified_as_skipped(tmp_path: Path) -> No
     events = store.list_by_correlation("")
     skipped = [e for e in events if e.event_type == EventType.TELEGRAM_EDIT_SKIPPED_NO_CHANGE]
     assert len(skipped) >= 1
+
+
+def test_outbox_retry_sleep_can_be_injected_for_fast_tests(tmp_path: Path) -> None:
+    """Retry behavior should be testable without waiting on real backoff sleeps."""
+    from telegram.error import NetworkError
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.telegram_outbox import TelegramOutbox
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    slept: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+
+    outbox = TelegramOutbox(store=store, max_retries=2, sleep_fn=fake_sleep)
+
+    async def flaky_send(chat_id, text, buttons=None):
+        if not slept:
+            raise NetworkError("temporary network failure")
+        return 42
+
+    outbox.enqueue_send(chat_id=1, text="hello", send_fn=flaky_send)
+
+    _run(outbox.process_all())
+
+    assert slept
 
 
 # ===========================================================================

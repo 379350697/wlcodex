@@ -8,6 +8,8 @@ import ast
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 
 def _install_telegram_stubs() -> None:
     telegram = types.ModuleType("telegram")

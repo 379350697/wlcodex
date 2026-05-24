@@ -7,6 +7,8 @@ from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
 from wlcodex.claude_permissions import ClaudePermissionState
 from wlcodex.agent_backend import AgentRequest
 
+pytestmark = pytest.mark.slow
+
 
 def test_claude_disabled_reports_unavailable() -> None:
     config = ClaudeConfig(enabled=False)

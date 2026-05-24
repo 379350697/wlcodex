@@ -25,6 +25,12 @@ target-version = "py312"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-m 'not slow and not integration and not live'"
+markers = [
+  "slow: slower behavioral tests excluded from the default fast test run",
+  "integration: cross-component or subprocess integration tests",
+  "live: tests that require live external services or real credentials",
+]
 
 [tool.setuptools.packages.find]
 include = ["wlcodex*"]
