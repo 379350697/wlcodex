@@ -10,7 +10,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-runtime/*.sqlite3
+build/
+runtime/*.sqlite3*
 runtime/tasks/
 runtime/worktrees/
 runtime/*.log
