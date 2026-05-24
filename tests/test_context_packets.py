@@ -1,6 +1,4 @@
 """Tests for compact context packet builders."""
-
-import pytest
 from wlcodex.context_packets import (
     ContextBudget,
     ContextPacket,
@@ -159,7 +157,6 @@ def test_claude_handoff_packet_tells_claude_to_background_long_commands() -> Non
 
 
 def test_packet_within_budget() -> None:
-    budget = ContextBudget(codex_to_claude_tokens=100)
     packet = ClaudeHandoffPacket(
         mode="chief_engineer",
         workspace="wlcodex",
@@ -183,7 +180,6 @@ def test_packet_within_budget() -> None:
 
 
 def test_packet_over_budget() -> None:
-    budget = ContextBudget(codex_to_claude_tokens=5)
     packet = ClaudeHandoffPacket(
         mode="chief_engineer",
         workspace="wlcodex",
@@ -322,6 +318,91 @@ def test_auto_context_collection_packet_mentions_workspace() -> None:
     )
     rendered = packet.render()
     assert "lightfeev2" in rendered
+
+
+def test_lightfeev2_auto_context_packet_uses_bugfix_audit_protocol() -> None:
+    packet = build_auto_context_packet(
+        user_goal="部署后查看系统运行是否正常，然后修复复现问题",
+        workspace="lightfeev2",
+    )
+    rendered = packet.render()
+
+    assert "lightfeev2_bugfix_protocol" in rendered
+    assert "post_deploy_audit" in rendered
+    assert "只读生产巡检" in rendered
+    assert "不得下单、撤单、手动清仓" in rendered
+    assert "本地 state 与交易所只读真实仓位/挂单" in rendered
+    assert "旧问题复现" in rendered
+    assert "新问题" in rendered
+
+
+def test_lightfeev2_auto_final_plan_packet_requires_v1_or_docs_boundary() -> None:
+    packet = build_auto_final_plan_packet(
+        user_goal="给 LightFeeV2 线上问题生成精准修复提示词",
+        conversation_summary="OKX sz=0，pending residual 未闭环",
+        workspace="lightfeev2",
+    )
+    rendered = packet.render()
+
+    assert "lightfeev2_bugfix_protocol" in rendered
+    assert "/media/wl/新加卷/codex/LightFee" in rendered
+    assert "/media/wl/新加卷/codex/LightFeeV2" in rendered
+    assert "V2 语义漂移" in rendered
+    assert "交易所官方文档" in rendered
+    assert "不能用测试通过替代完整语义" in rendered
+    assert "精准修复提示词" in rendered
+
+
+def test_lightfeev2_auto_verification_packet_requires_post_fix_evidence() -> None:
+    packet = build_auto_verification_packet(
+        user_goal="验收 LightFeeV2 bug 修复",
+        codex_plan_summary="修 OKX 数量和 residual 闭环",
+        claude_completion_summary="已修改 transport/runtime",
+        changed_files=["lightfee/venues/transport.py"],
+        workspace="lightfeev2",
+    )
+    rendered = packet.render()
+
+    assert "lightfeev2_bugfix_protocol" in rendered
+    assert "GitNexus detect_changes" in rendered
+    assert "静态检查" in rendered
+    assert "部署后重复只读巡检" in rendered
+    assert "清 state" in rendered
+    assert "忽略 uncertain" in rendered
+    assert "mock 假成功" in rendered
+
+
+def test_lightfeev2_auto_repair_packet_tells_claude_to_follow_protocol() -> None:
+    packet = build_auto_repair_packet(
+        user_goal="返工修复 LightFeeV2 OKX 残余问题",
+        codex_plan_summary="V2 OKX 数量单位漂移",
+        claude_completion_summary="验收发现 passive path 未修",
+        verification_result="OKX passive 仍可能发送 sz=0",
+        workspace="lightfeev2",
+    )
+    rendered = packet.render()
+
+    assert "lightfeev2_bugfix_protocol" in rendered
+    assert "读取 AGENTS.md" in rendered
+    assert "GitNexus impact" in rendered
+    assert "不得对生产下单、撤单、手动清仓" in rendered
+    assert "V1 语义复刻" in rendered
+    assert "交易所官方文档" in rendered
+    assert "不能忽略 uncertain" in rendered
+
+
+def test_non_lightfeev2_auto_packets_do_not_include_lightfee_bugfix_protocol() -> None:
+    packets = [
+        build_auto_context_packet(user_goal="修复普通问题", workspace="wlcodex"),
+        build_auto_final_plan_packet(user_goal="修复普通问题", workspace="wlcodex"),
+        build_auto_verification_packet(user_goal="验收普通修复", workspace="wlcodex"),
+        build_auto_repair_packet(user_goal="返工普通修复", workspace="wlcodex"),
+    ]
+
+    for packet in packets:
+        rendered = packet.render()
+        assert "lightfeev2_bugfix_protocol" not in rendered
+        assert "LightFeeV2 bug 修复场景必须包含精准修复提示词" not in rendered
 
 
 def test_auto_final_plan_packet_answers_query_or_requests_claude_prompt() -> None:

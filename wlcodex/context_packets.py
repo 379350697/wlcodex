@@ -14,6 +14,76 @@ CHINESE_OUTPUT_POLICY = (
     "或代码、命令、文件名、错误原文必须保留。"
 )
 
+LIGHTFEEV2_V1_PATH = "/media/wl/新加卷/codex/LightFee"
+LIGHTFEEV2_V2_PATH = "/media/wl/新加卷/codex/LightFeeV2"
+
+
+def _is_lightfeev2_workspace(workspace: str) -> bool:
+    normalized = workspace.strip().lower().replace("-", "").replace("_", "")
+    return normalized == "lightfeev2"
+
+
+def _lightfeev2_bugfix_constraints(stage: str) -> list[str]:
+    marker = (
+        "lightfeev2_bugfix_protocol: 仅当当前 workspace 是 LightFeeV2 时启用；"
+        "目标是生产证据驱动的 bug 修复闭环，不是泛化 auto 流程。"
+    )
+    common = [
+        marker,
+        "LightFeeV2 生产动作边界：只做代码修复和测试；线上只允许只读取证，"
+        "不得下单、撤单、手动清仓、清 state、重启或部署，除非用户再次明确授权。",
+        f"V1 路径：{LIGHTFEEV2_V1_PATH}；V2 路径：{LIGHTFEEV2_V2_PATH}。",
+        "修复边界：V2 语义漂移必须做 V1 语义复刻；交易所 API/单位/仓位语义必须查交易所官方文档；"
+        "V1/V2 共有问题也必须按官方文档根修。",
+        "不能用测试通过替代完整语义，不能用清 state、忽略 uncertain、mock 假成功掩盖问题。",
+    ]
+    if stage == "context":
+        return common + [
+            "phase post_deploy_audit: 先做只读生产巡检，采集服务状态、版本、启动时间、journal、业务日志、"
+            "本地 state 与交易所只读真实仓位/挂单。",
+            "必须对比本地 state 与交易所只读真实仓位/挂单是否一致。",
+            "必须分类输出：旧问题复现、旧问题下降但未归零、新问题、当前最高风险。",
+            "进入根因前必须保留线上日志原始字段、对应代码路径、V1 对照或官方文档依据。",
+        ]
+    if stage == "final_plan":
+        return common + [
+            "phase evidence_root_cause: 每个问题都要给证据链：线上日志字段、代码路径、V1 对照、"
+            "官方文档依据、根因分类。",
+            "phase repair_prompt_generate: 如果需要实现，输出精准修复提示词，必须包含文件、函数、错误行为、"
+            "正确语义、V1 对照、官方文档点、必加测试、验收标准、禁止事项。",
+            "Claude 提示词必须明确：先读 AGENTS.md；修改 symbol 前跑 GitNexus impact；HIGH/CRITICAL 先报告。",
+            "Claude 提示词必须明确：不要猜交易所语义，必须查询官方文档后再改；不要只追求绿测。",
+            "最终方案必须显式写出哪些修复属于 V1 语义复刻，哪些修复属于交易所官方文档修复。",
+        ]
+    if stage == "verification":
+        return common + [
+            "验收必须检查新增测试和相关 venue/runtime/recovery/residual/passive close 测试集合。",
+            "验收必须运行或要求 GitNexus detect_changes，并确认影响范围符合预期。",
+            "必须做静态检查：交易所请求不能再出现非法零数量、错误 endpoint、仓位方向/单位混用等同类漂移。",
+            "必须做语义检查：REST/WS 仓位方向、base/contract 单位、cancel 语义、residual 闭环与最终方案一致。",
+            "必要时部署后重复只读巡检；未完成巡检时只能给 pending/need_user，不能判 pass。",
+        ]
+    if stage == "repair":
+        return common + [
+            "读取 AGENTS.md；修改任何函数、类、方法前先跑 GitNexus impact，HIGH/CRITICAL 风险先报告。",
+            "优先写失败测试再修复；测试必须覆盖线上证据暴露的真实语义，不允许只改 mock。",
+            "按边界执行：V1 语义复刻、交易所官方文档修复、V1/V2 共有问题三类分开处理。",
+            "不得对生产下单、撤单、手动清仓；生产日志和交易所接口只允许只读取证。",
+            "不能忽略 uncertain、不能清 state 掩盖、不能 mock 假成功；必须完整闭环到验收标准。",
+        ]
+    return common
+
+
+def _with_lightfeev2_bugfix_constraints(
+    workspace: str,
+    constraints: list[str],
+    *,
+    stage: str,
+) -> list[str]:
+    if not _is_lightfeev2_workspace(workspace):
+        return constraints
+    return constraints + _lightfeev2_bugfix_constraints(stage)
+
 
 def approx_tokens(text: str) -> int:
     return max(1, len(text) // 4)
@@ -333,12 +403,9 @@ def build_auto_context_packet(
     user context supplement.
     """
     bgt = budget or ContextBudget()
-    return CodexAnalysisPacket(
-        mode="auto_collecting_context",
-        workspace=workspace,
-        user_goal=user_goal,
-        conversation_summary=trim_to_budget(conversation_summary, bgt.conversation_summary_tokens),
-        recent_user_constraints=[
+    constraints = _with_lightfeev2_bugfix_constraints(
+        workspace,
+        [
             "本轮是 /auto 的 Codex 上下文收集阶段。",
             "真实执行必要的查询和远程核验，不要只输出核验计划。",
             "允许使用 ssh/curl/systemctl/journalctl/git log/docker ps 等命令确认事实。",
@@ -346,6 +413,14 @@ def build_auto_context_packet(
             "不要启动 Claude，不要输出最终执行包。",
             "如果信息不足，说明还缺什么；如果已有判断，给出阶段性结论。",
         ],
+        stage="context",
+    )
+    return CodexAnalysisPacket(
+        mode="auto_collecting_context",
+        workspace=workspace,
+        user_goal=user_goal,
+        conversation_summary=trim_to_budget(conversation_summary, bgt.conversation_summary_tokens),
+        recent_user_constraints=constraints,
         token_budget=bgt.codex_analysis_tokens,
         requested_output="中文阶段性结果：已执行的核验、证据、当前判断、缺失信息。",
     )
@@ -363,12 +438,9 @@ def build_auto_final_plan_packet(
     acceptance criteria, prohibited changes, and verification plan.
     """
     bgt = budget or ContextBudget()
-    return CodexAnalysisPacket(
-        mode="auto_final_plan",
-        workspace=workspace,
-        user_goal=user_goal,
-        conversation_summary=trim_to_budget(conversation_summary, bgt.conversation_summary_tokens),
-        recent_user_constraints=[
+    constraints = _with_lightfeev2_bugfix_constraints(
+        workspace,
+        [
             "输出 /auto 的最终方案或最终结论。",
             "查询/核验类任务必须基于已执行证据给最终结论，不要只输出下一步计划。",
             "如果需要实现，再包含给 Claude 的执行提示词。",
@@ -377,12 +449,23 @@ def build_auto_final_plan_packet(
             "如果涉及 LightFeeV2 线上排障/状态检查，必须先运行 python scripts/diagnose_live.py --json",
             "并将输出的 diagnose JSON 完整嵌入 ```json 代码块，作为 evidence manifest。",
         ],
+        stage="final_plan",
+    )
+    requested_output = (
+        "中文最终结论/方案，包含 diagnosis, evidence, confidence, files_to_touch, "
+        "claude_prompt（仅实现类任务需要）, acceptance_criteria, verification_result。"
+    )
+    if _is_lightfeev2_workspace(workspace):
+        requested_output += "LightFeeV2 bug 修复场景必须包含精准修复提示词。"
+    requested_output += "如有 diagnose JSON，必须用 ```json 代码块完整附上。"
+    return CodexAnalysisPacket(
+        mode="auto_final_plan",
+        workspace=workspace,
+        user_goal=user_goal,
+        conversation_summary=trim_to_budget(conversation_summary, bgt.conversation_summary_tokens),
+        recent_user_constraints=constraints,
         token_budget=bgt.codex_analysis_tokens,
-        requested_output=(
-            "中文最终结论/方案，包含 diagnosis, evidence, confidence, files_to_touch, "
-            "claude_prompt（仅实现类任务需要）, acceptance_criteria, verification_result。"
-            "如有 diagnose JSON，必须用 ```json 代码块完整附上。"
-        ),
+        requested_output=requested_output,
     )
 
 
@@ -419,6 +502,11 @@ def build_auto_verification_packet(
         "应判定为违规漂移并标记 retry 或 stop。",
         "最终用户回复由平台 controller 在 verification pass 后发送。",
     ]
+    verification_constraints = _with_lightfeev2_bugfix_constraints(
+        workspace,
+        verification_constraints,
+        stage="verification",
+    )
     conversation_context = ""
     if pending_user_context:
         conversation_context = (
@@ -450,7 +538,7 @@ def build_auto_repair_packet(
     verification_result: str = "",
     workspace: str = "wlcodex",
     budget: ContextBudget | None = None,
-) -> CodexHandoffPacket:
+) -> ClaudeHandoffPacket:
     """Build a Claude repair packet for the auto retry_ready stage.
 
     This packet contains the focused repair prompt that Codex generated
@@ -465,6 +553,11 @@ def build_auto_repair_packet(
         "这是验收失败后的返工，只修复验收指出的问题，不要扩大范围。",
         "严格遵守 Codex 方案和验收标准，不要偏离范围。",
     ]
+    repair_constraints = _with_lightfeev2_bugfix_constraints(
+        workspace,
+        repair_constraints,
+        stage="repair",
+    )
     steps = []
     if verification_result:
         steps.append(f"验收失败原因：{verification_result[:500]}")
