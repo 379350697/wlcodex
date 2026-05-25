@@ -109,7 +109,7 @@ def is_auto_collecting_context(run: object | None) -> bool:
 def auto_stage_label(step: str) -> str:
     """Return a human-readable label for an auto stage step."""
     labels = {
-        AUTO_COLLECTING_CONTEXT: "诊断工程师分析中（收集上下文）",
+        AUTO_COLLECTING_CONTEXT: "工程师正在分析中",
         AUTO_DRAFT_READY: "方案已就绪，等待用户决定",
         AUTO_CLAUDE_RUNNING: "开发工程师执行中",
         AUTO_CLAUDE_DONE: "开发完成，测试通过，等待验收",

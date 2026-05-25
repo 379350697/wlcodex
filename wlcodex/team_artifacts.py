@@ -11,6 +11,10 @@ class GateResult:
     passed: bool
     missing: tuple[str, ...] = ()
 
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        return self.missing
+
 
 _PLACEHOLDER_PREFIXES = (
     "No changed files reported.",
@@ -518,6 +522,45 @@ def validate_architecture_plan(payload: Mapping[str, Any]) -> GateResult:
     )
 
 
+def validate_diagnosis_report(payload: Mapping[str, Any]) -> GateResult:
+    missing = list(
+        _missing(
+            payload,
+            (
+                "summary",
+                "symptom",
+                "expected_behavior",
+                "evidence",
+                "root_cause",
+                "confidence",
+                "minimal_fix_plan",
+                "regression_tests",
+                "risk_level",
+                "open_questions",
+            ),
+        )
+    )
+    if not _valid_non_placeholder_list(payload.get("evidence")):
+        _append_missing_once(missing, "evidence")
+    if not _valid_non_placeholder_list(payload.get("minimal_fix_plan")):
+        _append_missing_once(missing, "minimal_fix_plan")
+    if not _valid_non_placeholder_list(payload.get("regression_tests")):
+        _append_missing_once(missing, "regression_tests")
+    return _result(tuple(missing))
+
+
+def validate_gate_a_handoff(
+    *, route_kind: str, artifact_type: str, payload: Mapping[str, Any]
+) -> GateResult:
+    if route_kind == "bug":
+        if artifact_type != "diagnosis_report":
+            return _result(("diagnosis_report",))
+        return validate_diagnosis_report(payload)
+    if artifact_type != "architecture_plan":
+        return _result(("architecture_plan",))
+    return validate_architecture_plan(payload)
+
+
 def validate_implementation_report(payload: Mapping[str, Any]) -> GateResult:
     missing = list(
         _missing(
@@ -595,6 +638,33 @@ def architecture_plan_payload(
             "when diagnosis and architecture run in one black-box step"
         ),
         "source": source,
+    }
+
+
+def diagnosis_report_payload(
+    *,
+    summary: str,
+    symptom: str,
+    expected_behavior: str,
+    evidence: list[str],
+    root_cause: str,
+    confidence: str,
+    minimal_fix_plan: list[str],
+    regression_tests: list[str],
+    risk_level: str = "medium",
+    open_questions: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "summary": summary,
+        "symptom": symptom,
+        "expected_behavior": expected_behavior,
+        "evidence": evidence,
+        "root_cause": root_cause,
+        "confidence": confidence,
+        "minimal_fix_plan": minimal_fix_plan,
+        "regression_tests": regression_tests,
+        "risk_level": risk_level,
+        "open_questions": open_questions or ["None"],
     }
 
 

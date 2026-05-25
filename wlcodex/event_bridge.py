@@ -1318,40 +1318,66 @@ class EventBridge:
         team_run = self._team_run_for_auto_run(auto_run)
         if team_run is None or not hasattr(self._ledger, "record_team_artifact"):
             return
+        route_kind = self._team_route_kind(team_run) or "feature"
+        first_role = self._team_first_role(team_run) or "architect"
+        artifact_type = (
+            "diagnosis_report" if route_kind == "bug" else "architecture_plan"
+        )
         job = self._running_team_job(
             team_run,
-            role="architect",
+            role=first_role,
             agent_run_id=agent_run_id,
         )
         if job is None and agent_run_id is not None and hasattr(
             self._ledger, "list_team_agent_jobs"
         ):
             for candidate in self._ledger.list_team_agent_jobs(team_run.id):
-                if candidate.role == "architect" and candidate.agent_run_id == agent_run_id:
+                if (
+                    candidate.role == first_role
+                    and candidate.agent_run_id == agent_run_id
+                ):
                     job = candidate
                     break
         if job is None:
-            job = self._single_running_team_job(team_run, role="architect")
+            job = self._single_running_team_job(team_run, role=first_role)
         agent_job_id = job.id if job is not None else None
         if self._has_team_artifact(
             team_run.id,
-            artifact_type="architecture_plan",
+            artifact_type=artifact_type,
             agent_job_id=agent_job_id,
         ):
             return
         summary = completion_summary[:2000] or "Final plan completed."
-        from wlcodex.team_artifacts import architecture_plan_payload
+        from wlcodex.team_artifacts import (
+            architecture_plan_payload,
+            diagnosis_report_payload,
+        )
+
+        if artifact_type == "diagnosis_report":
+            payload = diagnosis_report_payload(
+                summary=summary,
+                symptom="Bug route requires diagnosis before implementation.",
+                expected_behavior="Implementation starts only after diagnosis handoff.",
+                evidence=[summary],
+                root_cause=summary,
+                confidence="medium",
+                minimal_fix_plan=["Follow the accepted diagnosis handoff."],
+                regression_tests=["Run focused verification for the reported failure."],
+                risk_level="medium",
+            )
+        else:
+            payload = architecture_plan_payload(
+                summary=summary,
+                risk_level="medium",
+                source="auto_final_plan_completion",
+            )
 
         artifact = self._ledger.record_team_artifact(
             team_run_id=team_run.id,
             agent_job_id=agent_job_id,
-            artifact_type="architecture_plan",
+            artifact_type=artifact_type,
             summary=summary,
-            payload=architecture_plan_payload(
-                summary=summary,
-                risk_level="medium",
-                source="auto_final_plan_completion",
-            ),
+            payload=payload,
         )
         from wlcodex.runtime_events import EventType
 
@@ -1366,6 +1392,32 @@ class EventBridge:
                 "artifact_type": artifact.artifact_type,
             },
         )
+
+    def _team_route_kind(self, team_run: object | None) -> str:
+        if team_run is None or not hasattr(self._ledger, "list_team_artifacts"):
+            return ""
+        for artifact in self._ledger.list_team_artifacts(team_run.id):
+            if artifact.artifact_type != "routing_decision":
+                continue
+            payload = getattr(artifact, "payload", {})
+            if isinstance(payload, dict):
+                route_kind = str(payload.get("route_kind", "")).strip()
+                if route_kind:
+                    return route_kind
+        return ""
+
+    def _team_first_role(self, team_run: object | None) -> str:
+        if team_run is None or not hasattr(self._ledger, "list_team_artifacts"):
+            return ""
+        for artifact in self._ledger.list_team_artifacts(team_run.id):
+            if artifact.artifact_type != "routing_decision":
+                continue
+            payload = getattr(artifact, "payload", {})
+            if isinstance(payload, dict):
+                first_role = str(payload.get("first_role", "")).strip()
+                if first_role:
+                    return first_role
+        return ""
 
     def _record_implementation_report_artifact(
         self,
@@ -1445,6 +1497,7 @@ class EventBridge:
             auto_run,
             team_run=team_run,
             agent_run_id=agent_run_id,
+            model_profile=getattr(job, "model_profile", None) or "codex_gpt",
         )
         test_gate_passed: bool | None = None
         if tester_job is not None and not self._has_team_artifact(
@@ -1496,6 +1549,7 @@ class EventBridge:
         *,
         team_run: object,
         agent_run_id: int | None,
+        model_profile: str,
     ) -> object | None:
         if not hasattr(self._ledger, "list_team_agent_jobs") or not hasattr(
             self._ledger, "create_team_agent_job"
@@ -1507,7 +1561,7 @@ class EventBridge:
         tester_job = self._ledger.create_team_agent_job(
             team_run_id=team_run.id,
             role="tester",
-            model_profile="codex_gpt",
+            model_profile=model_profile,
             status="running",
             agent_run_id=agent_run_id,
         )
@@ -1515,8 +1569,8 @@ class EventBridge:
             self._ledger.record_team_assignment(
                 team_run_id=team_run.id,
                 role="tester",
-                model_profile="codex_gpt",
-                selected_by="policy",
+                model_profile=model_profile,
+                selected_by="follow_implementer",
             )
         from wlcodex.runtime_events import EventType
 
@@ -1528,7 +1582,8 @@ class EventBridge:
             agent_run_id=agent_run_id,
             payload={
                 "role": "tester",
-                "model_profile": "codex_gpt",
+                "model_profile": model_profile,
+                "follow_role": "implementer",
             },
         )
         return tester_job
@@ -1725,17 +1780,18 @@ class EventBridge:
         *,
         agent_run_id: int | None = None,
     ) -> None:
+        team_run = self._team_run_for_auto_run(auto_run)
+        role = self._team_first_role(team_run) or "architect"
         marked = self._mark_team_agent_job_done(
             auto_run,
-            role="architect",
+            role=role,
             agent_run_id=agent_run_id,
         )
         if marked:
             return
-        team_run = self._team_run_for_auto_run(auto_run)
         if team_run is None or not hasattr(self._ledger, "update_team_agent_job_status"):
             return
-        job = self._single_running_team_job(team_run, role="architect")
+        job = self._single_running_team_job(team_run, role=role)
         if job is None:
             return
         self._ledger.update_team_agent_job_status(job.id, "done")
@@ -1748,7 +1804,7 @@ class EventBridge:
             agent_job_id=job.id,
             agent_run_id=agent_run_id,
             payload={
-                "role": "architect",
+                "role": role,
                 "status": "done",
                 "linked_agent_run_id": job.agent_run_id,
             },

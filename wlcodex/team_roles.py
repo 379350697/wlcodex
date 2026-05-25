@@ -13,6 +13,96 @@ class RoleId(StrEnum):
     AUDITOR = "auditor"
 
 
+class TeamRouteKind(StrEnum):
+    FEATURE = "feature"
+    BUG = "bug"
+
+
+@dataclass(frozen=True)
+class TeamRouteDecision:
+    kind: TeamRouteKind
+    first_role: RoleId
+    reason: str
+    matched_signals: tuple[str, ...] = ()
+
+
+BUG_ROUTE_SIGNALS: tuple[str, ...] = (
+    "报错",
+    "失败",
+    "不对",
+    "修复",
+    "bug",
+    "regression",
+    "回归",
+    "异常",
+    "why",
+    "为什么",
+    "crash",
+    "broken",
+    "fail",
+    "error",
+    "stacktrace",
+    "日志",
+    "验收不过",
+    "测试不过",
+)
+
+FEATURE_ROUTE_SIGNALS: tuple[str, ...] = (
+    "新增",
+    "实现一个",
+    "支持",
+    "设计",
+    "复杂需求",
+    "功能",
+    "feature",
+    "build",
+    "add",
+    "workflow redesign",
+)
+
+
+def classify_team_route(goal: str) -> TeamRouteDecision:
+    text = goal.lower()
+    bug_hits = tuple(signal for signal in BUG_ROUTE_SIGNALS if signal.lower() in text)
+    feature_hits = tuple(
+        signal for signal in FEATURE_ROUTE_SIGNALS if signal.lower() in text
+    )
+    if bug_hits and not feature_hits:
+        return TeamRouteDecision(
+            kind=TeamRouteKind.BUG,
+            first_role=RoleId.INVESTIGATOR,
+            reason="bug_signals",
+            matched_signals=bug_hits,
+        )
+    if feature_hits and not bug_hits:
+        return TeamRouteDecision(
+            kind=TeamRouteKind.FEATURE,
+            first_role=RoleId.ARCHITECT,
+            reason="feature_signals",
+            matched_signals=feature_hits,
+        )
+    if feature_hits and bug_hits:
+        if any(signal in text for signal in ("失败", "报错", "error", "fail", "回归")):
+            return TeamRouteDecision(
+                kind=TeamRouteKind.BUG,
+                first_role=RoleId.INVESTIGATOR,
+                reason="mixed_signals_bug_first",
+                matched_signals=bug_hits + feature_hits,
+            )
+        return TeamRouteDecision(
+            kind=TeamRouteKind.FEATURE,
+            first_role=RoleId.ARCHITECT,
+            reason="mixed_signals_feature_first",
+            matched_signals=feature_hits + bug_hits,
+        )
+    return TeamRouteDecision(
+        kind=TeamRouteKind.BUG,
+        first_role=RoleId.INVESTIGATOR,
+        reason="ambiguous_defaults_to_diagnosis",
+        matched_signals=(),
+    )
+
+
 @dataclass(frozen=True)
 class TeamRole:
     role_id: RoleId
@@ -24,6 +114,11 @@ class TeamRole:
     forbidden_actions: tuple[str, ...]
     required_artifact_type: str
     can_write_product_code: bool = False
+    expert_stance: str = ""
+    expert_priorities: tuple[str, ...] = ()
+    required_checks: tuple[str, ...] = ()
+    anti_patterns: tuple[str, ...] = ()
+    handoff_focus: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,6 +199,34 @@ class TeamRoleCatalog:
                     allowed_capabilities=("read", "shell_readonly", "logs"),
                     forbidden_actions=("edit_product_code", "deploy", "destructive_command"),
                     required_artifact_type="diagnosis_report",
+                    expert_stance="Evidence-first bug investigator.",
+                    expert_priorities=(
+                        "Reproduce or verify the symptom before claiming a cause.",
+                        "Separate symptom, trigger, and root cause.",
+                        "Prefer the smallest credible repair.",
+                        "Leave unrelated dirty work alone.",
+                        "Make uncertainty explicit when evidence is incomplete.",
+                    ),
+                    required_checks=(
+                        "User symptom and expected behavior.",
+                        "Current logs, errors, tests, or runtime status when available.",
+                        "Recent diff or baseline when relevant.",
+                        "Code path that can explain the symptom.",
+                        "Regression test or verification command.",
+                    ),
+                    anti_patterns=(
+                        "Do not guess root cause without evidence.",
+                        "Do not turn bugs into redesigns.",
+                        "Do not blame unrelated workspace diff without conflict evidence.",
+                        "Do not claim fixed before verification exists.",
+                    ),
+                    handoff_focus=(
+                        "Root cause or top hypotheses with confidence.",
+                        "Minimal fix path.",
+                        "Exact evidence references.",
+                        "Regression checks.",
+                        "Risks if evidence is incomplete.",
+                    ),
                 ),
                 RoleId.ARCHITECT: TeamRole(
                     role_id=RoleId.ARCHITECT,
@@ -118,6 +241,34 @@ class TeamRoleCatalog:
                     allowed_capabilities=("read", "gitnexus", "shell_readonly"),
                     forbidden_actions=("edit_product_code", "deploy", "destructive_command"),
                     required_artifact_type="architecture_plan",
+                    expert_stance="Systems designer for new or complex work.",
+                    expert_priorities=(
+                        "Understand current architecture first.",
+                        "Reduce ambiguity into executable scope.",
+                        "Choose a maintainable, small-enough design.",
+                        "Preserve existing product conventions.",
+                        "Expose tradeoffs instead of hiding them.",
+                    ),
+                    required_checks=(
+                        "Current state and relevant flows.",
+                        "In-scope and out-of-scope files or modules.",
+                        "Data, permissions, UI/API, runtime, and deployment impact.",
+                        "User-visible behavior.",
+                        "Acceptance criteria.",
+                    ),
+                    anti_patterns=(
+                        "Do not fix bugs without diagnosis.",
+                        "Do not invent a large framework for a narrow request.",
+                        "Do not propose changes without impacted files or modules.",
+                        "Do not omit rollback or verification concerns when risk is non-trivial.",
+                    ),
+                    handoff_focus=(
+                        "Implementation boundaries.",
+                        "Ordered steps.",
+                        "Files or modules to touch and avoid.",
+                        "Acceptance criteria.",
+                        "Red flags and assumptions.",
+                    ),
                 ),
                 RoleId.IMPLEMENTER: TeamRole(
                     role_id=RoleId.IMPLEMENTER,
@@ -129,20 +280,73 @@ class TeamRoleCatalog:
                     forbidden_actions=("deploy", "destructive_command"),
                     required_artifact_type="implementation_report",
                     can_write_product_code=True,
+                    expert_stance="Focused builder.",
+                    expert_priorities=(
+                        "Make the smallest change that satisfies the accepted plan.",
+                        "Follow existing code patterns.",
+                        "Keep unrelated files untouched.",
+                        "Collect implementation and test evidence.",
+                        "Stop when blocked rather than broadening scope silently.",
+                    ),
+                    required_checks=(
+                        "Accepted Architect or Diagnostician handoff.",
+                        "Task-scoped baseline and diff.",
+                        "Commands run.",
+                        "Tests attempted.",
+                        "Known limitations.",
+                    ),
+                    anti_patterns=(
+                        "Do not redesign during implementation without recording why.",
+                        "Do not change unrelated files because they are dirty.",
+                        "Do not omit commands or tests from the report.",
+                        "Do not expose JSON protocol to users.",
+                    ),
+                    handoff_focus=(
+                        "Changed files.",
+                        "Diff summary.",
+                        "Commands run.",
+                        "Tests attempted.",
+                        "Limitations and follow-up risks.",
+                    ),
                 ),
                 RoleId.TESTER: TeamRole(
                     role_id=RoleId.TESTER,
                     display_name="测试工程师",
                     mission="复现、补测试、跑验证，并给出测试证据。",
                     instructions=(
-                        "Validate acceptance criteria and report command evidence. "
-                        "If testing fails, send the work back to the developer before "
-                        "the user is asked for audit approval."
+                        "Follow the current developer session, validate acceptance "
+                        "criteria, and report command evidence. If testing fails, "
+                        "send the work back to the developer before the user is "
+                        "asked for audit approval."
                     ),
                     skills=("verification-before-completion", "test-driven-development"),
                     allowed_capabilities=("read", "write_tests", "shell_readonly", "tests"),
                     forbidden_actions=("edit_product_code", "deploy", "destructive_command"),
                     required_artifact_type="test_report",
+                    expert_stance="Verification discipline inside the implementer loop.",
+                    expert_priorities=(
+                        "Validate acceptance criteria.",
+                        "Prefer focused tests first.",
+                        "Record exact command evidence.",
+                        "Block audit when tests are missing or failing.",
+                        "Cap internal repair loops at 3 attempts.",
+                    ),
+                    required_checks=(
+                        "Current-round commands.",
+                        "Current-round pass and fail evidence.",
+                        "Coverage of acceptance criteria.",
+                    ),
+                    anti_patterns=(
+                        "Do not start an independent long model conversation for routine personal work.",
+                        "Do not treat test evidence from a previous round as current.",
+                        "Do not hide repeated test failure after the cap is reached.",
+                    ),
+                    handoff_focus=(
+                        "Commands run.",
+                        "Passed and failed checks.",
+                        "Failure evidence.",
+                        "Developer rework needs.",
+                    ),
                 ),
                 RoleId.AUDITOR: TeamRole(
                     role_id=RoleId.AUDITOR,
@@ -157,6 +361,32 @@ class TeamRoleCatalog:
                     allowed_capabilities=("read", "git_diff", "shell_readonly"),
                     forbidden_actions=("edit_product_code", "deploy", "destructive_command"),
                     required_artifact_type="audit_report",
+                    expert_stance="Independent reviewer with anti-false-positive discipline.",
+                    expert_priorities=(
+                        "Review current task diff, artifacts, and tests.",
+                        "Verify implementation matches the accepted handoff.",
+                        "Block only on specific, current, evidence-backed risk.",
+                        "Allow a clean pass when evidence supports it.",
+                    ),
+                    required_checks=(
+                        "Current task diff, not unrelated workspace noise.",
+                        "Implementation report.",
+                        "Test report.",
+                        "Acceptance criteria coverage.",
+                        "Security, regression, UX/API contract, and deployment risk.",
+                    ),
+                    anti_patterns=(
+                        "Do not block on vague concerns.",
+                        "Do not block on unrelated dirty files unless they conflict with the task.",
+                        "Do not rewrite backend protocol keys into user-facing text.",
+                        "Do not treat missing optional polish as a correctness failure.",
+                    ),
+                    handoff_focus=(
+                        "Decision: pass, block, or needs_user.",
+                        "Concrete findings with file/path evidence.",
+                        "Missing evidence.",
+                        "Recommended next action.",
+                    ),
                 ),
             }
         )

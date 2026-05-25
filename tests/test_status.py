@@ -488,6 +488,27 @@ def test_role_aware_auto_status_lists_engineer_roles() -> None:
     assert "方案：Plan ready" in text
 
 
+def test_role_aware_auto_status_uses_route_and_diagnosis_language() -> None:
+    from wlcodex.status import render_team_status_summary
+
+    text = render_team_status_summary(
+        goal="Telegram 验收失败",
+        route="bug",
+        roles=[
+            ("investigator", "codex_gpt", "done"),
+            ("implementer", "claude_deepseek", "queued"),
+        ],
+        latest_artifacts=[
+            "diagnosis_report: Root cause found",
+        ],
+    )
+
+    assert "Bug 修复路线" in text
+    assert "诊断工程师" in text
+    assert "诊断报告：Root cause found" in text
+    assert "diagnosis_report" not in text
+
+
 def test_team_artifact_summary_is_human_readable() -> None:
     from wlcodex.status import render_team_artifact_summary
 

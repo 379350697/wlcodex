@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from wlcodex.team_context import TeamContextInput, build_team_context_packet
 from wlcodex.team_memory import InstinctMemory
-from wlcodex.team_roles import RoleId, TeamRoleCatalog
+from wlcodex.team_roles import RoleId, TeamRouteKind, TeamRoleCatalog
 
 
 def test_context_packet_is_role_specific_and_excludes_full_history() -> None:
@@ -72,6 +72,56 @@ def test_context_packet_is_role_specific_and_excludes_full_history() -> None:
     assert packet.as_json()["handoff_rules"]
     assert packet.as_json()["token_budget"] == 900
     assert packet.within_budget() is True
+
+
+def test_team_context_packet_includes_architect_expert_profile() -> None:
+    role = TeamRoleCatalog.default().role(RoleId.ARCHITECT)
+    packet = build_team_context_packet(
+        TeamContextInput(
+            team_run_id=7,
+            agent_job_id=8,
+            conversation_id=9,
+            orchestration_run_id=10,
+            role=role,
+            model_profile="codex_gpt",
+            user_goal="新增专家判断模式",
+            workspace_alias="wlcodex",
+            route_kind=TeamRouteKind.FEATURE.value,
+            output_schema="architecture_plan",
+        )
+    )
+
+    payload = packet.as_json()
+    rendered = packet.render()
+
+    assert payload["route_kind"] == "feature"
+    assert payload["expert_profile"]["stance"]
+    assert "tradeoff" in rendered.lower()
+    assert "architecture_plan" in rendered
+
+
+def test_team_context_packet_includes_diagnostician_expert_profile() -> None:
+    role = TeamRoleCatalog.default().role(RoleId.INVESTIGATOR)
+    packet = build_team_context_packet(
+        TeamContextInput(
+            team_run_id=7,
+            agent_job_id=8,
+            conversation_id=9,
+            orchestration_run_id=10,
+            role=role,
+            model_profile="codex_gpt",
+            user_goal="Telegram 验收失败",
+            workspace_alias="wlcodex",
+            route_kind=TeamRouteKind.BUG.value,
+            output_schema="diagnosis_report",
+        )
+    )
+
+    rendered = packet.render()
+
+    assert "route_kind: bug" in rendered
+    assert "root cause" in rendered.lower()
+    assert "diagnosis_report" in rendered
 
 
 def test_context_packet_includes_memory_as_historical_advice() -> None:

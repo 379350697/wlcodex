@@ -172,6 +172,18 @@ def test_auto_draft_digest_does_not_show_audit_report_protocol_lines() -> None:
     assert '"PASS"' not in digest
 
 
+def test_audit_digest_does_not_show_raw_protocol_json() -> None:
+    text = render_auto_draft_digest("""
+```json
+{"audit_report":{"decision":"pass","summary":"Looks good","findings":[]}}
+```
+""")
+
+    assert "audit_report" not in text
+    assert '"decision"' not in text
+    assert "Looks good" in text or "通过" in text
+
+
 def test_auto_draft_digest_treats_task_scope_pass_with_warning_as_pass() -> None:
     digest = render_auto_draft_digest(
         "{\n"

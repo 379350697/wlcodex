@@ -276,6 +276,7 @@ def _summary_stat_line_path(line: str) -> str:
 def _human_artifact_type(artifact_type: str) -> str:
     labels = {
         "architecture_plan": "方案记录",
+        "diagnosis_report": "诊断工程师交接报告",
         "implementation_report": "实现记录",
         "test_report": "测试记录",
         "audit_report": "验收记录",
@@ -296,6 +297,7 @@ def _human_gate_field_name(field: str) -> str:
         "coverage_of_acceptance_criteria": "验收标准覆盖情况",
         "decision": "验收结论",
         "architecture_plan": "方案记录",
+        "diagnosis_report": "诊断工程师交接报告",
         "implementation_report": "实现记录",
         "test_report": "测试记录",
         "audit_report": "验收记录",
@@ -720,6 +722,7 @@ class CommandController:
                 model_profile=model_profile,
                 user_goal=team_run.goal,
                 workspace_alias=conversation.workspace_alias,
+                route_kind=self._team_route_kind(team_run) or "",
                 skills=selected_skill_ids,
                 allowed_capabilities=selected_tool_ids,
                 artifact_summaries=artifact_summaries,
@@ -733,6 +736,29 @@ class CommandController:
                 token_budget=budget.max_prompt_tokens,
             )
         )
+
+    def _team_route_kind(self, team_run: object | None) -> str:
+        if team_run is None or not hasattr(self._ledger, "list_team_artifacts"):
+            return ""
+        for artifact in self._ledger.list_team_artifacts(team_run.id):
+            if artifact.artifact_type != "routing_decision":
+                continue
+            payload = getattr(artifact, "payload", {})
+            if isinstance(payload, dict):
+                route_kind = str(payload.get("route_kind", "")).strip()
+                if route_kind:
+                    return route_kind
+        return ""
+
+    def _gate_a_artifact_type_and_validator(self, team_run: object) -> tuple[str, object]:
+        route_kind = self._team_route_kind(team_run) or "feature"
+        if route_kind == "bug":
+            from wlcodex.team_artifacts import validate_diagnosis_report
+
+            return "diagnosis_report", validate_diagnosis_report
+        from wlcodex.team_artifacts import validate_architecture_plan
+
+        return "architecture_plan", validate_architecture_plan
 
     def _emit_event(self, event: RuntimeEvent) -> RuntimeEvent:
         if self._store is None:
@@ -961,7 +987,9 @@ class CommandController:
         artifact_label = _human_artifact_type(artifact_type)
         tester_note = ""
         if gate_name == "Gate C":
-            tester_note = "\n说明：当前由验收员一并检查测试证据，测试记录仍需要对应本轮实现。"
+            tester_note = (
+                "\n说明：测试工程师跟随开发工程师，本轮测试记录需要来自当前实现。"
+            )
         retry_note = (
             "\n已进入返工阶段，可交给 DeepSeek 开发工程师或 GPT 开发工程师补齐后重新验收。"
             if failure_step else ""
@@ -2747,7 +2775,26 @@ class CommandController:
                 orchestration_run_id=orch_run.id,
             ))
 
-        architect_job = None
+        from wlcodex.team_roles import TeamRouteKind, classify_team_route
+
+        route_decision = classify_team_route(command.prompt)
+        first_role = route_decision.first_role.value
+        first_model_profile = (
+            self._architect_model_profile
+            if route_decision.kind == TeamRouteKind.FEATURE
+            else self._investigator_model_profile
+        )
+        first_output_schema = (
+            "architecture_plan"
+            if route_decision.kind == TeamRouteKind.FEATURE
+            else "diagnosis_report"
+        )
+        first_role_display = (
+            "架构工程师"
+            if route_decision.kind == TeamRouteKind.FEATURE
+            else "诊断工程师"
+        )
+        first_job = None
         # Start Codex in read-only analysis mode (NOT the eager orchestration runner)
         budget = ContextBudget()
         packet = build_auto_context_packet(
@@ -2778,19 +2825,34 @@ class CommandController:
         self._ledger.update_agent_run_status(codex_analysis_run.id, "running")
         if team_run is not None:
             try:
-                architect_job = self._ledger.create_team_agent_job(
+                first_job = self._ledger.create_team_agent_job(
                     team_run_id=team_run.id,
-                    role="architect",
-                    model_profile=self._architect_model_profile,
+                    role=first_role,
+                    model_profile=first_model_profile,
                     status="running",
                     agent_run_id=codex_analysis_run.id,
                 )
                 self._ledger.record_team_assignment(
                     team_run_id=team_run.id,
-                    role="architect",
-                    model_profile=self._architect_model_profile,
+                    role=first_role,
+                    model_profile=first_model_profile,
                     selected_by="policy",
                 )
+                if hasattr(self._ledger, "record_team_artifact"):
+                    self._ledger.record_team_artifact(
+                        team_run_id=team_run.id,
+                        agent_job_id=first_job.id,
+                        artifact_type="routing_decision",
+                        summary=(
+                            f"{first_role_display}路线：{route_decision.reason}"
+                        ),
+                        payload={
+                            "route_kind": route_decision.kind.value,
+                            "first_role": first_role,
+                            "reason": route_decision.reason,
+                            "matched_signals": list(route_decision.matched_signals),
+                        },
+                    )
                 self._emit_event(RuntimeEvent(
                     schema_version=1,
                     event_type=EventType.TEAM_AGENT_JOB_STARTED,
@@ -2802,9 +2864,9 @@ class CommandController:
                     visibility=Visibility.OPERATOR,
                     payload={
                         "team_run_id": team_run.id,
-                        "agent_job_id": architect_job.id,
-                        "role": "architect",
-                        "model_profile": self._architect_model_profile,
+                        "agent_job_id": first_job.id,
+                        "role": first_role,
+                        "model_profile": first_model_profile,
                     },
                     occurred_at=now_iso(),
                     conversation_id=active.id,
@@ -2813,17 +2875,17 @@ class CommandController:
                 ))
                 context_packet = self._build_team_context_packet_for_job(
                     team_run=team_run,
-                    agent_job=architect_job,
-                    role="architect",
-                    model_profile=self._architect_model_profile,
+                    agent_job=first_job,
+                    role=first_role,
+                    model_profile=first_model_profile,
                     resume_state="staged auto context collection starting",
-                    output_schema="implementation_plan",
+                    output_schema=first_output_schema,
                 )
                 prompt_text = context_packet.render()
                 codex_prompt = prompt_text
                 packet_record = self._ledger.record_team_context_packet(
                     team_run_id=team_run.id,
-                    agent_job_id=architect_job.id,
+                    agent_job_id=first_job.id,
                     packet_json=context_packet.as_json(),
                     prompt_text=prompt_text,
                     prompt_tokens=approx_tokens(prompt_text),
@@ -2839,7 +2901,7 @@ class CommandController:
                     visibility=Visibility.OPERATOR,
                     payload={
                         "team_run_id": team_run.id,
-                        "agent_job_id": architect_job.id,
+                        "agent_job_id": first_job.id,
                         "context_packet_id": packet_record.id,
                         "prompt_tokens": packet_record.prompt_tokens,
                     },
@@ -2862,7 +2924,7 @@ class CommandController:
                 )
                 self._mark_auto_team_failed(
                     team_run=team_run,
-                    architect_job=architect_job,
+                    architect_job=first_job,
                 )
                 return ControllerResponse(classify_user_error(exc))
 
@@ -2903,7 +2965,7 @@ class CommandController:
             )
             self._mark_auto_team_failed(
                 team_run=team_run,
-                architect_job=architect_job,
+                architect_job=first_job,
             )
             return ControllerResponse(classify_user_error(exc))
 
@@ -2926,9 +2988,9 @@ class CommandController:
             },
         ]]
         start_text = (
-            "诊断工程师开始分析。你可以继续补充信息，"
+            f"{first_role_display}开始分析。你可以继续补充信息，"
             "分析完成后会显示「生成最终方案」。\n\n"
-            "注意：当前不会启动开发工程师；诊断工程师会按任务需要执行查询和核验。"
+            f"注意：当前不会启动开发工程师；{first_role_display}会按任务需要执行查询和核验。"
         )
 
         if self._interaction_renderer is not None:
@@ -3253,11 +3315,15 @@ class CommandController:
                                 },
                             )
                             tester_job = None
+                            tester_model_profile = (
+                                getattr(job, "model_profile", None)
+                                or self._tester_model_profile
+                            )
                             if hasattr(self._ledger, "create_team_agent_job"):
                                 tester_job = self._ledger.create_team_agent_job(
                                     team_run_id=team_run.id,
                                     role="tester",
-                                    model_profile=self._tester_model_profile,
+                                    model_profile=tester_model_profile,
                                     status="running",
                                     agent_run_id=agent_run_id,
                                 )
@@ -3265,8 +3331,8 @@ class CommandController:
                                     self._ledger.record_team_assignment(
                                         team_run_id=team_run.id,
                                         role="tester",
-                                        model_profile=self._tester_model_profile,
-                                        selected_by="policy",
+                                        model_profile=tester_model_profile,
+                                        selected_by="follow_implementer",
                                     )
                                 self._emit_team_runtime_event(
                                     EventType.TEAM_AGENT_JOB_STARTED,
@@ -3278,7 +3344,8 @@ class CommandController:
                                     task_id=task_id,
                                     payload={
                                         "role": "tester",
-                                        "model_profile": self._tester_model_profile,
+                                        "model_profile": tester_model_profile,
+                                        "follow_role": "implementer",
                                     },
                                 )
                             test_existing = [
@@ -3507,9 +3574,26 @@ class CommandController:
                 "callback_data": encode_conversation_callback(convo.id, AUTO_CANCEL),
             },
         ]]
+        final_plan_pending_text = "工程师正在生成最终方案，请等待完成。"
+        final_plan_started_text = "工程师正在生成最终方案，完成后将显示方案和执行按钮。"
+        team_run = None
+        if self._adaptive_team_enabled and hasattr(
+            self._ledger,
+            "get_team_run_for_orchestration",
+        ):
+            team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
+        route_kind = self._team_route_kind(team_run) if team_run is not None else ""
+        if route_kind == "bug":
+            final_plan_pending_text = "诊断工程师正在整理修复方案和交接报告，请等待完成。"
+            final_plan_started_text = (
+                "诊断工程师正在整理修复方案和交接报告，完成后将显示方案和执行按钮。"
+            )
+        elif route_kind == "feature":
+            final_plan_pending_text = "架构工程师正在生成最终方案，请等待完成。"
+            final_plan_started_text = "架构工程师正在生成最终方案，完成后将显示方案和执行按钮。"
         if orch_run.current_step == AUTO_COLLECTING_CONTEXT and orch_run.status != "needs_user":
             return ControllerResponse(
-                "架构工程师正在生成最终方案，请等待完成。",
+                final_plan_pending_text,
                 buttons=wait_buttons,
             )
         rewrite_from_draft = (
@@ -3575,7 +3659,7 @@ class CommandController:
             return ControllerResponse(classify_user_error(exc))
 
         return ControllerResponse(
-            "架构工程师正在生成最终方案，完成后将显示方案和执行按钮。",
+            final_plan_started_text,
             buttons=wait_buttons,
         )
 
@@ -3620,12 +3704,14 @@ class CommandController:
         ):
             team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
         if team_run is not None:
-            from wlcodex.team_artifacts import validate_architecture_plan
+            artifact_type, validator = self._gate_a_artifact_type_and_validator(
+                team_run
+            )
 
             gate_response = self._team_gate_response(
                 gate_name="Gate A",
-                artifact_type="architecture_plan",
-                validator=validate_architecture_plan,
+                artifact_type=artifact_type,
+                validator=validator,
                 team_run=team_run,
                 conversation_id=convo.id,
                 orchestration_run_id=orch_run.id,
@@ -3832,12 +3918,14 @@ class CommandController:
         ):
             team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
         if team_run is not None:
-            from wlcodex.team_artifacts import validate_architecture_plan
+            artifact_type, validator = self._gate_a_artifact_type_and_validator(
+                team_run
+            )
 
             gate_response = self._team_gate_response(
                 gate_name="Gate A",
-                artifact_type="architecture_plan",
-                validator=validate_architecture_plan,
+                artifact_type=artifact_type,
+                validator=validator,
                 team_run=team_run,
                 conversation_id=convo.id,
                 orchestration_run_id=orch_run.id,
@@ -4057,6 +4145,11 @@ class CommandController:
                 role="implementer",
                 status="done",
             )
+            tester_job_id = self._latest_team_job_id(
+                team_run,
+                role="tester",
+                status="done",
+            ) or implementer_job_id
             gate_response = self._team_gate_response(
                 gate_name="Gate B",
                 artifact_type="implementation_report",
@@ -4077,7 +4170,7 @@ class CommandController:
                 team_run=team_run,
                 conversation_id=convo.id,
                 orchestration_run_id=orch_run.id,
-                agent_job_id=implementer_job_id,
+                agent_job_id=tester_job_id,
                 bind_agent_job=True,
                 failure_step=AUTO_RETRY_READY,
             )
@@ -5399,21 +5492,43 @@ class CommandController:
         if role_id is None:
             lines = ["工程师大模型", ""]
             for role in ordered_team_roles(assignments):
-                profiles = self._format_engineer_profiles(assignments[role])
+                profiles = (
+                    "跟随开发工程师"
+                    if role == "tester"
+                    else self._format_engineer_profiles(assignments[role])
+                )
                 lines.append(f"{role_display_name(role)}：{profiles}")
-            lines.extend(["", "选择工程师后可调整使用的大模型。"])
+            lines.extend([
+                "",
+                "选择工程师后可调整使用的大模型；测试工程师跟随开发工程师。",
+            ])
             buttons = [
                 [{
                     "text": role_display_name(role),
                     "callback_data": f"settings:engineer_models:{role}",
                 }]
                 for role in ordered_team_roles(assignments)
+                if role != "tester"
             ]
             buttons.append([{
                 "text": "返回设置",
                 "callback_data": "settings:root",
             }])
             return ControllerResponse("\n".join(lines), buttons=buttons)
+
+        if role_id == "tester":
+            return ControllerResponse(
+                "测试工程师大模型\n\n"
+                "当前：跟随开发工程师\n"
+                "说明：个人开发模式下，测试工程师不单独开启模型会话，"
+                "会使用本轮开发工程师的执行上下文和测试证据。",
+                buttons=[[
+                    {
+                        "text": "返回工程师大模型",
+                        "callback_data": "settings:engineer_models",
+                    }
+                ]],
+            )
 
         selected = set(assignments[role_id])
         mode = "多选" if is_multi_select_role(role_id) else "单选"
@@ -5442,6 +5557,13 @@ class CommandController:
         assignments = self._engineer_model_assignments()
         if role_id not in assignments:
             return ControllerResponse("没有这个工程师配置。")
+        if role_id == "tester":
+            response = self.render_engineer_model_settings(role_id)
+            return ControllerResponse(
+                "测试工程师跟随开发工程师，不单独设置大模型。\n\n"
+                f"{response.text}",
+                response.buttons,
+            )
 
         available_profiles = self._available_engineer_model_profiles()
         if profile_id not in available_profiles:

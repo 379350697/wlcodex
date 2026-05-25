@@ -247,10 +247,13 @@ TEAM_ROLE_ORDER = (
 TEAM_ROUTE_LABELS = {
     "Adaptive Engineering Team": "开发团队",
     "staged_auto": "开发团队",
+    "feature": "功能建设路线",
+    "bug": "Bug 修复路线",
 }
 
 TEAM_ARTIFACT_LABELS = {
     "architecture_plan": "方案",
+    "diagnosis_report": "诊断报告",
     "implementation_report": "实现记录",
     "test_report": "测试记录",
     "audit_report": "审计报告",

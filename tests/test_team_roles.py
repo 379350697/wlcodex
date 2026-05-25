@@ -4,7 +4,9 @@ from wlcodex.team_roles import (
     AssignmentPolicy,
     ModelProfileRef,
     RoleId,
+    TeamRouteKind,
     TeamRoleCatalog,
+    classify_team_route,
 )
 
 
@@ -18,6 +20,46 @@ def test_role_catalog_keeps_roles_backend_agnostic() -> None:
     assert "claude" not in implementer.instructions.lower()
     assert "codex" not in implementer.instructions.lower()
     assert "implementation_report" in implementer.required_artifact_type
+
+
+def test_classify_team_route_sends_bug_language_to_diagnosis() -> None:
+    route = classify_team_route("Telegram 验收一直失败，实际本地测试通过，帮我定位原因")
+
+    assert route.kind == TeamRouteKind.BUG
+    assert route.first_role == RoleId.INVESTIGATOR
+    assert "失败" in route.matched_signals
+
+
+def test_classify_team_route_sends_feature_language_to_architecture() -> None:
+    route = classify_team_route("新增工程师专家判断模式，支持复杂需求走架构方案")
+
+    assert route.kind == TeamRouteKind.FEATURE
+    assert route.first_role == RoleId.ARCHITECT
+    assert "新增" in route.matched_signals
+
+
+def test_classify_team_route_defaults_ambiguous_work_to_diagnosis() -> None:
+    route = classify_team_route("看看这个任务怎么处理")
+
+    assert route.kind == TeamRouteKind.BUG
+    assert route.first_role == RoleId.INVESTIGATOR
+    assert route.reason == "ambiguous_defaults_to_diagnosis"
+
+
+def test_architect_and_diagnostician_have_different_expert_profiles() -> None:
+    catalog = TeamRoleCatalog.default()
+
+    architect = catalog.role(RoleId.ARCHITECT)
+    diagnostician = catalog.role(RoleId.INVESTIGATOR)
+
+    assert "tradeoff" in " ".join(architect.expert_priorities).lower()
+    assert "root cause" in " ".join(diagnostician.expert_priorities).lower()
+    assert "do not fix bugs without diagnosis" in " ".join(
+        architect.anti_patterns
+    ).lower()
+    assert "do not turn bugs into redesigns" in " ".join(
+        diagnostician.anti_patterns
+    ).lower()
 
 
 def test_tester_default_capabilities_do_not_include_product_code_shell() -> None:

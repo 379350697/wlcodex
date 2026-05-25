@@ -388,6 +388,26 @@ def test_auto_verification_packet_keeps_unrelated_dirty_changes_as_warnings() ->
     assert "只在与任务文件冲突或导致无法复核时阻断" in rendered
 
 
+def test_auditor_packet_requires_concrete_failure_mode_before_blocking() -> None:
+    packet = build_auto_verification_packet(
+        user_goal="README 增加一行测试说明",
+        codex_plan_summary="Only edit README.",
+        claude_completion_summary="README updated.",
+        changed_files=["README.md"],
+        unrelated_changed_files=["wlcodex/controller.py"],
+        test_results="pytest passed",
+        diff_summary="README one-line diff",
+        workspace="wlcodex",
+        verify_round=1,
+    )
+
+    text = packet.render()
+
+    assert "concrete failure mode" in text.lower()
+    assert "unrelated dirty files" in text.lower()
+    assert "do not block" in text.lower()
+
+
 def test_lightfeev2_auto_repair_packet_tells_claude_to_follow_protocol() -> None:
     packet = build_auto_repair_packet(
         user_goal="返工修复 LightFeeV2 OKX 残余问题",

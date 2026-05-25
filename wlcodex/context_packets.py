@@ -510,6 +510,11 @@ def build_auto_verification_packet(
         "验收应优先判断本任务范围：若工作区存在任务前已有或平台测试时产生的无关 dirty changes，"
         "请作为风险提示列出，不要仅因无关变更判定本任务失败；只有它们由本任务引入或导致任务无法复核时才阻断。",
         "changed_files 是本任务验收主范围；unrelated_changed_files 是旁路变更，只在与任务文件冲突或导致无法复核时阻断。",
+        "Auditor anti-false-positive rules:",
+        "- Block only with current task evidence, exact file/path when possible, and a concrete failure mode.",
+        "- Do not block on unrelated dirty files unless they conflict with this task or make verification impossible.",
+        "- A clean PASS is valid when diff, tests, and acceptance criteria are sufficient.",
+        "- Missing optional polish is not a blocker unless it violates the accepted goal.",
         f"这是第 {verify_round} 轮验收。",
         "验收结论只能是 decision: pass / retry / stop / need_user。",
         "如果判定 retry，必须输出具体的给 Claude 的返工提示词（repair_prompt）。",

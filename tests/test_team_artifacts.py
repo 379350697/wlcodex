@@ -2,11 +2,14 @@ from wlcodex.team_artifacts import (
     GateResult,
     _missing,
     architecture_plan_payload,
+    diagnosis_report_payload,
     implementation_report_payload,
     structured_implementation_evidence_from_text,
     test_report_payload_from_implementation as build_test_report_payload_from_implementation,
     validate_architecture_plan,
     validate_audit_report,
+    validate_diagnosis_report,
+    validate_gate_a_handoff,
     validate_implementation_report,
     validate_test_report,
 )
@@ -55,6 +58,72 @@ def test_architecture_plan_payload_declares_diagnosis_policy():
 
     assert "diagnosis evidence" in payload["investigator_policy"].lower()
     assert validate_architecture_plan(payload).passed is True
+
+
+def test_validate_diagnosis_report_requires_bug_evidence_and_fix_plan() -> None:
+    result = validate_diagnosis_report({
+        "summary": "Telegram audit fails while local validation passes.",
+        "symptom": "Telegram blocks README-only task.",
+        "expected_behavior": "Audit should pass task-scoped README change.",
+        "evidence": ["local pytest passed", "Telegram audit blocked"],
+        "root_cause": "Audit saw whole workspace instead of task diff.",
+        "confidence": "high",
+        "minimal_fix_plan": ["Scope audit packet to task diff."],
+        "regression_tests": ["controller flow audit scope test"],
+        "risk_level": "medium",
+        "open_questions": ["None"],
+    })
+
+    assert result.passed is True
+
+
+def test_validate_diagnosis_report_blocks_missing_root_cause() -> None:
+    result = validate_diagnosis_report({
+        "summary": "Something failed.",
+        "symptom": "Audit failed.",
+        "expected_behavior": "Audit passes.",
+        "evidence": ["user report"],
+        "minimal_fix_plan": ["Patch it."],
+        "regression_tests": ["pytest"],
+        "risk_level": "medium",
+        "open_questions": ["Need logs"],
+    })
+
+    assert result.passed is False
+    assert "root_cause" in result.missing_fields
+
+
+def test_gate_a_accepts_architecture_for_feature_and_diagnosis_for_bug() -> None:
+    assert validate_gate_a_handoff(
+        route_kind="feature",
+        artifact_type="architecture_plan",
+        payload={
+            "summary": "Add expert profile support.",
+            "files_or_modules_in_scope": ["wlcodex/team_roles.py"],
+            "files_or_modules_out_of_scope": ["unrelated"],
+            "impact_notes": "Prompt/context only.",
+            "risk_level": "medium",
+            "implementation_steps": ["Add profiles"],
+            "acceptance_criteria": ["Context packet includes profile"],
+            "parallelization_policy": "single implementer",
+        },
+    ).passed is True
+
+    assert validate_gate_a_handoff(
+        route_kind="bug",
+        artifact_type="diagnosis_report",
+        payload=diagnosis_report_payload(
+            summary="Fix audit false positive",
+            symptom="Telegram blocks unrelated files",
+            expected_behavior="Ignore unrelated dirty files",
+            evidence=["task diff excludes unrelated files"],
+            root_cause="Audit packet used workspace diff",
+            confidence="high",
+            minimal_fix_plan=["Use task scoped diff"],
+            regression_tests=["controller_flow"],
+            risk_level="medium",
+        ),
+    ).passed is True
 
 
 def test_missing_allows_zero_and_false_required_values():

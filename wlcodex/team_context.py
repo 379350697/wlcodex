@@ -17,6 +17,7 @@ class TeamContextInput:
     model_profile: str
     user_goal: str
     workspace_alias: str
+    route_kind: str = ""
     skills: tuple[str, ...] = ()
     allowed_capabilities: tuple[str, ...] = ()
     artifact_summaries: list[str] = field(default_factory=list)
@@ -60,6 +61,15 @@ class TeamContextPacket:
                 "Audit only starts after implementation and test evidence exist; "
                 "do not pass without current-round test evidence."
             )
+        if role.role_id.value == "implementer" and not any(
+            "Tester follows this developer session" in rule
+            for rule in handoff_rules
+        ):
+            handoff_rules.append(
+                "Tester follows this developer session. Record commands_run and "
+                "tests_attempted; missing or failing current-round tests return to "
+                "the developer before audit."
+            )
         if role.role_id.value == "architect" and not any(
             "diagnosis evidence" in rule
             for rule in handoff_rules
@@ -78,8 +88,16 @@ class TeamContextPacket:
             "model_profile": self.data.model_profile,
             "workspace": self.data.workspace_alias,
             "workspace_alias": self.data.workspace_alias,
+            "route_kind": self.data.route_kind,
             "user_goal": self.data.user_goal,
             "role_mission": role.mission,
+            "expert_profile": {
+                "stance": role.expert_stance,
+                "priorities": list(role.expert_priorities),
+                "required_checks": list(role.required_checks),
+                "anti_patterns": list(role.anti_patterns),
+                "handoff_focus": list(role.handoff_focus),
+            },
             "skills": skills,
             "allowed_capabilities": allowed_tools,
             "allowed_tools": allowed_tools,
@@ -134,6 +152,23 @@ class TeamContextPacket:
             f"allowed_tools: {', '.join(payload['allowed_tools'])}",
             f"forbidden_actions: {', '.join(payload['forbidden_actions'])}",
         ]
+        if payload["route_kind"]:
+            lines.append(f"route_kind: {payload['route_kind']}")
+        profile = payload["expert_profile"]
+        if profile["stance"]:
+            lines.append(f"expert_stance: {profile['stance']}")
+        if profile["priorities"]:
+            lines.append("expert_priorities:")
+            for item in profile["priorities"]:
+                lines.append(f"  - {item}")
+        if profile["required_checks"]:
+            lines.append("required_checks:")
+            for item in profile["required_checks"]:
+                lines.append(f"  - {item}")
+        if profile["anti_patterns"]:
+            lines.append("anti_patterns:")
+            for item in profile["anti_patterns"]:
+                lines.append(f"  - {item}")
         if payload["artifact_summaries"]:
             lines.append("artifact_summaries:")
             for summary in payload["artifact_summaries"]:
@@ -167,6 +202,10 @@ class TeamContextPacket:
             "context_policy: Use this packet and evidence references. Do not ask for or rely "
             "on full chat history.",
         ]
+        if payload["route_kind"]:
+            lines.append(f"route_kind: {payload['route_kind']}")
+        if payload["route_kind"] and payload["expert_profile"]["stance"]:
+            lines.append(f"expert_stance: {payload['expert_profile']['stance']}")
         if payload["evidence_refs"]:
             lines.append(f"evidence_refs: {', '.join(payload['evidence_refs'])}")
         if payload["resume_state"]:
@@ -178,15 +217,22 @@ class TeamContextPacket:
         return "\n".join(lines)
 
     def _render_ultra_compact(self, payload: dict[str, Any]) -> str:
-        return "\n".join(
+        lines = [
+            f"team_run_id: {payload['team_run_id']}",
+            f"agent_job_id: {payload['agent_job_id']}",
+            f"role: {payload['role']}",
+        ]
+        if payload["route_kind"]:
+            lines.append(f"route_kind: {payload['route_kind']}")
+        if payload["route_kind"] and payload["expert_profile"]["stance"]:
+            lines.append(f"expert_stance: {payload['expert_profile']['stance']}")
+        lines.extend(
             [
-                f"team_run_id: {payload['team_run_id']}",
-                f"agent_job_id: {payload['agent_job_id']}",
-                f"role: {payload['role']}",
                 f"model_profile: {payload['model_profile']}",
                 f"token_budget: {payload['token_budget']}",
             ]
         )
+        return "\n".join(lines)
 
     def within_budget(self) -> bool:
         if self.data.token_budget <= 0:

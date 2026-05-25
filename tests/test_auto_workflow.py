@@ -286,8 +286,10 @@ class TestBuildAutoStageButtons:
 
 class TestAutoStageLabel:
     def test_known_stages(self) -> None:
-        assert "诊断工程师" in auto_stage_label(AUTO_COLLECTING_CONTEXT)
-        assert "收集" in auto_stage_label(AUTO_COLLECTING_CONTEXT)
+        assert "工程师正在分析中" in auto_stage_label(AUTO_COLLECTING_CONTEXT)
+        assert "诊断工程师" not in auto_stage_label(AUTO_COLLECTING_CONTEXT)
+        assert "开发" not in auto_stage_label(AUTO_COLLECTING_CONTEXT)
+        assert "工程师" in auto_stage_label(AUTO_COLLECTING_CONTEXT)
         assert "方案" in auto_stage_label(AUTO_DRAFT_READY)
         assert "执行" in auto_stage_label(AUTO_CLAUDE_RUNNING)
         assert "验收" in auto_stage_label(AUTO_CLAUDE_DONE)

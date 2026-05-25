@@ -1319,6 +1319,112 @@ async def test_auto_final_plan_completion_marks_architect_job_done_but_team_run_
 
 
 @pytest.mark.asyncio
+async def test_auto_final_plan_completion_records_diagnosis_artifact_for_bug_route(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate diagnosis",
+        codex_thread_id="thread-final-diagnosis-team",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "Telegram 验收失败")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-final-diagnosis-team",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="Telegram 验收失败",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    investigator_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="investigator",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    ledger.record_team_artifact(
+        team_run_id=team_run.id,
+        agent_job_id=investigator_job.id,
+        artifact_type="routing_decision",
+        summary="bug route",
+        payload={
+            "route_kind": "bug",
+            "first_role": "investigator",
+            "reason": "bug_signals",
+            "matched_signals": ["失败"],
+        },
+    )
+
+    bridge = _bridge(service, IdleBackend(), ledger)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-final-diagnosis-team", "turnId": "turn-final-diagnosis-team"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-final-diagnosis-team",
+            "turnId": "turn-final-diagnosis-team",
+            "delta": "诊断：Telegram 验收失败，因为审计范围包含无关 dirty files。\n",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-final-diagnosis-team", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    updated_job = ledger.list_team_agent_jobs(team_run.id)[0]
+    artifacts = [
+        artifact for artifact in ledger.list_team_artifacts(team_run.id)
+        if artifact.artifact_type == "diagnosis_report"
+    ]
+
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_DRAFT_READY
+    assert updated_job.id == investigator_job.id
+    assert updated_job.status == "done"
+    assert len(artifacts) == 1
+    assert artifacts[0].agent_job_id == investigator_job.id
+    assert "root_cause" in artifacts[0].payload
+
+
+@pytest.mark.asyncio
 async def test_auto_final_plan_completion_closes_existing_architect_job_when_final_plan_uses_new_agent_run(
     tmp_path: Path,
 ) -> None:
@@ -1679,7 +1785,7 @@ async def test_auto_implementation_completion_creates_tester_job_before_audit(
     implementer_job = ledger.create_team_agent_job(
         team_run_id=team_run.id,
         role="implementer",
-        model_profile="codex_gpt",
+        model_profile="claude_deepseek",
         status="running",
         agent_run_id=agent_run.id,
     )
@@ -1720,6 +1826,7 @@ async def test_auto_implementation_completion_creates_tester_job_before_audit(
     assert len(tester_jobs) == 1
     assert tester_jobs[0].status == "done"
     assert tester_jobs[0].agent_run_id == agent_run.id
+    assert tester_jobs[0].model_profile == implementer_job.model_profile
     assert test_reports[0].agent_job_id == tester_jobs[0].id
     assert test_reports[0].payload["passed"] == ["pytest tests/test_app.py -q"]
     assert ledger.list_team_agent_jobs(team_run.id)[0].id == implementer_job.id

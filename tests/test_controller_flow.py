@@ -118,6 +118,80 @@ def _record_valid_architecture_plan(
     )
 
 
+def _record_valid_diagnosis_report(
+    ledger: Ledger,
+    *,
+    team_run_id: int,
+    agent_job_id: int | None = None,
+) -> None:
+    ledger.record_team_artifact(
+        team_run_id=team_run_id,
+        agent_job_id=agent_job_id,
+        artifact_type="diagnosis_report",
+        summary="Diagnosis ready with evidence and minimal fix plan.",
+        payload={
+            "summary": "Diagnosis ready with evidence and minimal fix plan.",
+            "symptom": "Telegram audit fails while local validation passes.",
+            "expected_behavior": "Audit should pass task-scoped changes.",
+            "evidence": ["task diff excludes unrelated files"],
+            "root_cause": "Audit packet used workspace diff instead of task diff.",
+            "confidence": "high",
+            "minimal_fix_plan": ["Use task scoped diff"],
+            "regression_tests": ["controller_flow audit scope test"],
+            "risk_level": "medium",
+            "open_questions": ["None"],
+        },
+    )
+
+
+def _create_auto_run_with_route(
+    ctrl: CommandController,
+    *,
+    route_kind: str,
+    current_step: str,
+    last_codex_analysis: str,
+) -> tuple[object, object, object]:
+    ledger = ctrl._ledger
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(
+        conversation.id,
+        "Telegram 验收失败" if route_kind == "bug" else "新增专家判断模式",
+    )
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=current_step,
+        last_codex_analysis=last_codex_analysis,
+    )
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal=orch_run.goal,
+        route="staged_auto",
+        risk_level="medium",
+    )
+    first_role = "investigator" if route_kind == "bug" else "architect"
+    ledger.record_team_artifact(
+        team_run_id=team_run.id,
+        agent_job_id=None,
+        artifact_type="routing_decision",
+        summary=f"{route_kind} route",
+        payload={
+            "route_kind": route_kind,
+            "first_role": first_role,
+            "reason": f"{route_kind}_test",
+            "matched_signals": [],
+        },
+    )
+    return conversation, orch_run, team_run
+
+
 def _record_valid_implementation_report(
     ledger: Ledger,
     *,
@@ -251,11 +325,16 @@ def test_engineer_model_settings_render_and_persist(ctrl: CommandController) -> 
 
     assert "工程师大模型" in response.text
     assert "开发工程师：claude-deepseek-v4-pro、codex-gpt5.5" in response.text
+    assert "测试工程师：跟随开发工程师" in response.text
     flat_buttons = [button for row in response.buttons for button in row]
     assert {
         "text": "开发工程师",
         "callback_data": "settings:engineer_models:implementer",
     } in flat_buttons
+    assert {
+        "text": "测试工程师",
+        "callback_data": "settings:engineer_models:tester",
+    } not in flat_buttons
 
     updated = ctrl.set_engineer_model_assignment("implementer", "codex_gpt")
 
@@ -273,6 +352,13 @@ def test_engineer_model_settings_render_and_persist(ctrl: CommandController) -> 
     assert ctrl._ledger.get_runtime_setting(
         "adaptive_team.assignment.architect"
     ) == '["claude_deepseek"]'
+
+    updated = ctrl.set_engineer_model_assignment("tester", "claude_deepseek")
+
+    assert "测试工程师跟随开发工程师" in updated.text
+    assert ctrl._ledger.get_runtime_setting(
+        "adaptive_team.assignment.tester"
+    ) is None
 
 
 def test_build_team_context_packet_for_job_records_activation_inputs(
@@ -867,7 +953,7 @@ async def test_codex_command_busy_returns_terminalized_choice_card(
     assert "当前工作区正在执行" in response.text
     flat_buttons = [button for row in response.buttons for button in row]
     labels = {button["text"] for button in flat_buttons}
-    assert "发给当前 Codex" in labels
+    assert "发给当前 GPT 开发工程师" in labels
     assert "打断并执行这句" in labels
     assert "排队稍后" in labels
     assert "新开隔离现场" in labels
@@ -901,7 +987,7 @@ async def test_claude_command_busy_returns_terminalized_choice_card(
     assert "当前工作区正在执行" in response.text
     flat_buttons = [button for row in response.buttons for button in row]
     labels = {button["text"] for button in flat_buttons}
-    assert "发给当前 Codex" in labels
+    assert "发给当前 GPT 开发工程师" in labels
     assert "发给当前 Claude" not in labels
     assert "打断并执行这句" in labels
     assert "排队稍后" in labels
@@ -932,11 +1018,11 @@ async def test_auto_command_busy_labels_actual_current_agent(
         {"chat_id": 102, "user_id": 202},
     )
 
-    assert "发给当前 Codex" in response.text
+    assert "发给当前 GPT 开发工程师" in response.text
     assert "发给当前 Auto" not in response.text
     flat_buttons = [button for row in response.buttons for button in row]
     labels = {button["text"] for button in flat_buttons}
-    assert "发给当前 Codex" in labels
+    assert "发给当前 GPT 开发工程师" in labels
     assert "发给当前 Auto" not in labels
 
 
@@ -1132,7 +1218,7 @@ async def test_trace_command_uses_runtime_inspector(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_auto_mode_reports_claude_needed(ctrl: CommandController) -> None:
     response = await ctrl.handle("/auto 修复登录 bug", {"chat_id": 1, "user_id": 2})
-    assert "Claude" in response.text or "总工程师" in response.text
+    assert "诊断工程师" in response.text
 
 
 @pytest.mark.asyncio
@@ -1367,9 +1453,9 @@ async def test_status_appends_team_summary_for_staged_auto_run(
 
     assert "当前对话：Auto team" in response.text
     assert "团队状态：" in response.text
-    assert "架构工程师：codex_gpt / 已完成" in response.text
-    assert "开发工程师：claude_deepseek / 排队中" in response.text
-    assert "architecture_plan: Plan ready" in response.text
+    assert "架构工程师：已完成" in response.text
+    assert "开发工程师：排队中" in response.text
+    assert "方案：Plan ready" in response.text
 
 
 @pytest.mark.asyncio
@@ -2302,6 +2388,7 @@ async def test_auto_final_plan_callback_rejects_duplicate_while_generating(
         for button in row
     ]
     assert "正在生成最终方案" in second.text
+    assert "架构工程师" not in second.text
     assert "生成最终方案" not in labels
     assert len([
         run for run in ledger.list_agent_runs(conversation.id)
@@ -2341,7 +2428,7 @@ async def test_auto_final_plan_offers_claude_and_codex_implementers(
     )
 
     await ctrl.handle_auto_mode(
-        AutoModeCommand("修复登录偶发失败"),
+        AutoModeCommand("新增登录专家判断模式"),
         {"chat_id": 123, "user_id": 456},
     )
     convo = ledger.get_active_conversation(123)
@@ -2391,7 +2478,7 @@ async def test_auto_mode_creates_architect_team_run_and_context_packet(
     )
 
     await ctrl.handle_auto_mode(
-        AutoModeCommand("修复登录偶发失败"),
+        AutoModeCommand("新增登录专家判断模式"),
         {"chat_id": 123, "user_id": 456},
     )
 
@@ -2401,7 +2488,7 @@ async def test_auto_mode_creates_architect_team_run_and_context_packet(
     team_run = ledger.get_team_run_for_orchestration(orch_run.id)
     assert team_run is not None
     assert team_run.conversation_id == convo.id
-    assert team_run.goal == "修复登录偶发失败"
+    assert team_run.goal == "新增登录专家判断模式"
     assert team_run.route == "staged_auto"
     assert team_run.risk_level == "medium"
 
@@ -2417,7 +2504,7 @@ async def test_auto_mode_creates_architect_team_run_and_context_packet(
     assert packet is not None
     assert packet.packet["role"] == "architect"
     assert packet.packet["model_profile"] == "codex_gpt"
-    assert packet.packet["required_output_schema"] == "implementation_plan"
+    assert packet.packet["required_output_schema"] == "architecture_plan"
     assert any(
         "diagnosis evidence" in rule
         for rule in packet.packet["handoff_rules"]
@@ -2442,6 +2529,202 @@ async def test_auto_mode_creates_architect_team_run_and_context_packet(
         "model_profile": "codex_gpt",
         "selected_by": "policy",
     }
+
+
+@pytest.mark.asyncio
+async def test_auto_bug_route_creates_diagnostician_context_before_final_handoff(
+    ctrl: CommandController,
+) -> None:
+    from wlcodex.router import AutoModeCommand
+
+    response = await ctrl.handle_auto_mode(
+        AutoModeCommand("Telegram 验收失败，本地通过，定位原因"),
+        {"chat_id": 123, "user_id": 456},
+    )
+
+    conversation = ctrl._ledger.get_active_conversation(123)
+    orch_run = ctrl._latest_active_auto_run(conversation.id)
+    team_run = ctrl._ledger.get_team_run_for_orchestration(orch_run.id)
+    jobs = ctrl._ledger.list_team_agent_jobs(team_run.id)
+
+    assert "诊断工程师" in response.text or "诊断" in response.text
+    assert jobs[0].role == "investigator"
+
+
+@pytest.mark.asyncio
+async def test_auto_feature_route_creates_architect_context_before_final_handoff(
+    ctrl: CommandController,
+) -> None:
+    from wlcodex.router import AutoModeCommand
+
+    response = await ctrl.handle_auto_mode(
+        AutoModeCommand("新增专家判断模式，支持复杂需求走架构方案"),
+        {"chat_id": 123, "user_id": 456},
+    )
+
+    conversation = ctrl._ledger.get_active_conversation(123)
+    orch_run = ctrl._latest_active_auto_run(conversation.id)
+    team_run = ctrl._ledger.get_team_run_for_orchestration(orch_run.id)
+    jobs = ctrl._ledger.list_team_agent_jobs(team_run.id)
+
+    assert "架构工程师" in response.text or "架构" in response.text
+    assert jobs[0].role == "architect"
+
+
+@pytest.mark.asyncio
+async def test_auto_feature_route_e2e_reaches_auditor_gate(
+    ctrl_with_claude: CommandController,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE, AUTO_CODEX_VERIFY, AUTO_SEND_TO_CLAUDE
+    from wlcodex.conversation_callback import ConversationCallback
+    from wlcodex.router import AutoModeCommand
+
+    await ctrl_with_claude.handle_auto_mode(
+        AutoModeCommand("新增专家判断模式，支持复杂需求走架构方案"),
+        {"chat_id": 123, "user_id": 456},
+    )
+    ledger = ctrl_with_claude._ledger
+    conversation = ledger.get_active_conversation(123)
+    orch_run = ctrl_with_claude._latest_active_auto_run(conversation.id)
+    team_run = ledger.get_team_run_for_orchestration(orch_run.id)
+    first_job = ledger.list_team_agent_jobs(team_run.id)[0]
+    first_packet = ledger.get_team_context_packet_for_job(first_job.id)
+
+    assert first_job.role == "architect"
+    assert first_packet.packet["route_kind"] == "feature"
+
+    _record_valid_architecture_plan(
+        ledger,
+        team_run_id=team_run.id,
+        agent_job_id=first_job.id,
+    )
+    conversation = ledger.get_conversation(conversation.id)
+    ledger.set_task_status(conversation.active_codex_task_id, TaskStatus.DONE)
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step="draft_ready",
+        last_codex_analysis="方案：新增专家判断模式，并运行 focused tests。",
+    )
+
+    await ctrl_with_claude.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_SEND_TO_CLAUDE)
+    )
+    await _drain_runtime_runner(ctrl_with_claude)
+    jobs = ledger.list_team_agent_jobs(team_run.id)
+    implementer_job = [job for job in jobs if job.role == "implementer"][0]
+    tester_job = [job for job in jobs if job.role == "tester"][0]
+    _record_valid_implementation_report(
+        ledger,
+        team_run_id=team_run.id,
+        agent_job_id=implementer_job.id,
+    )
+    _record_valid_test_report(
+        ledger,
+        team_run_id=team_run.id,
+        agent_job_id=tester_job.id,
+    )
+    ledger.update_team_agent_job_status(tester_job.id, "done")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_CLAUDE_DONE,
+        last_claude_summary="实现完成：结构化证据已补齐。",
+    )
+    await ctrl_with_claude.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_CODEX_VERIFY)
+    )
+
+    jobs = ledger.list_team_agent_jobs(team_run.id)
+    artifacts = ledger.list_team_artifacts(team_run.id)
+    architecture_artifact = [
+        artifact for artifact in artifacts if artifact.artifact_type == "architecture_plan"
+    ][0]
+    auditor_job = [job for job in jobs if job.role == "auditor"][0]
+
+    assert architecture_artifact.artifact_type == "architecture_plan"
+    assert architecture_artifact.agent_job_id == first_job.id
+    assert implementer_job.role == "implementer"
+    assert tester_job.model_profile == implementer_job.model_profile
+    assert auditor_job.role == "auditor"
+
+
+@pytest.mark.asyncio
+async def test_auto_bug_route_e2e_reaches_auditor_gate(
+    ctrl_with_claude: CommandController,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE, AUTO_CODEX_VERIFY, AUTO_SEND_TO_CLAUDE
+    from wlcodex.conversation_callback import ConversationCallback
+    from wlcodex.router import AutoModeCommand
+
+    await ctrl_with_claude.handle_auto_mode(
+        AutoModeCommand("Telegram 验收失败，本地通过，定位原因"),
+        {"chat_id": 123, "user_id": 456},
+    )
+    ledger = ctrl_with_claude._ledger
+    conversation = ledger.get_active_conversation(123)
+    orch_run = ctrl_with_claude._latest_active_auto_run(conversation.id)
+    team_run = ledger.get_team_run_for_orchestration(orch_run.id)
+    first_job = ledger.list_team_agent_jobs(team_run.id)[0]
+    first_packet = ledger.get_team_context_packet_for_job(first_job.id)
+
+    assert first_job.role == "investigator"
+    assert first_packet.packet["route_kind"] == "bug"
+
+    _record_valid_diagnosis_report(
+        ledger,
+        team_run_id=team_run.id,
+        agent_job_id=first_job.id,
+    )
+    conversation = ledger.get_conversation(conversation.id)
+    ledger.set_task_status(conversation.active_codex_task_id, TaskStatus.DONE)
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step="draft_ready",
+        last_codex_analysis="诊断：修复 audit diff scope，并运行 focused tests。",
+    )
+
+    await ctrl_with_claude.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_SEND_TO_CLAUDE)
+    )
+    await _drain_runtime_runner(ctrl_with_claude)
+    jobs = ledger.list_team_agent_jobs(team_run.id)
+    implementer_job = [job for job in jobs if job.role == "implementer"][0]
+    tester_job = [job for job in jobs if job.role == "tester"][0]
+    _record_valid_implementation_report(
+        ledger,
+        team_run_id=team_run.id,
+        agent_job_id=implementer_job.id,
+    )
+    _record_valid_test_report(
+        ledger,
+        team_run_id=team_run.id,
+        agent_job_id=tester_job.id,
+    )
+    ledger.update_team_agent_job_status(tester_job.id, "done")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_CLAUDE_DONE,
+        last_claude_summary="实现完成：结构化证据已补齐。",
+    )
+    await ctrl_with_claude.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_CODEX_VERIFY)
+    )
+
+    jobs = ledger.list_team_agent_jobs(team_run.id)
+    artifacts = ledger.list_team_artifacts(team_run.id)
+    diagnosis_artifact = [
+        artifact for artifact in artifacts if artifact.artifact_type == "diagnosis_report"
+    ][0]
+    auditor_job = [job for job in jobs if job.role == "auditor"][0]
+
+    assert diagnosis_artifact.artifact_type == "diagnosis_report"
+    assert "root_cause" in diagnosis_artifact.payload
+    assert implementer_job.role == "implementer"
+    assert tester_job.model_profile == implementer_job.model_profile
+    assert auditor_job.role == "auditor"
 
 
 @pytest.mark.asyncio
@@ -2747,6 +3030,51 @@ async def test_auto_send_to_codex_blocks_team_run_when_gate_a_artifact_missing(
 
 
 @pytest.mark.asyncio
+async def test_bug_route_implementation_requires_diagnosis_report_not_architecture_plan(
+    ctrl_with_claude: CommandController,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_DRAFT_READY, AUTO_SEND_TO_CLAUDE
+    from wlcodex.conversation_callback import ConversationCallback
+
+    conversation, _orch_run, team_run = _create_auto_run_with_route(
+        ctrl_with_claude,
+        route_kind="bug",
+        current_step=AUTO_DRAFT_READY,
+        last_codex_analysis="诊断：需要修复 audit diff scope。",
+    )
+    _record_valid_architecture_plan(ctrl_with_claude._ledger, team_run_id=team_run.id)
+
+    response = await ctrl_with_claude.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_SEND_TO_CLAUDE)
+    )
+
+    assert "诊断工程师交接报告" in response.text
+    assert "Gate A" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_bug_route_implementation_accepts_valid_diagnosis_report(
+    ctrl_with_claude: CommandController,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_DRAFT_READY, AUTO_SEND_TO_CLAUDE
+    from wlcodex.conversation_callback import ConversationCallback
+
+    conversation, _orch_run, team_run = _create_auto_run_with_route(
+        ctrl_with_claude,
+        route_kind="bug",
+        current_step=AUTO_DRAFT_READY,
+        last_codex_analysis="诊断：需要修复 audit diff scope。",
+    )
+    _record_valid_diagnosis_report(ctrl_with_claude._ledger, team_run_id=team_run.id)
+
+    response = await ctrl_with_claude.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_SEND_TO_CLAUDE)
+    )
+
+    assert "开发工程师开始执行" in response.text
+
+
+@pytest.mark.asyncio
 async def test_auto_send_to_codex_starts_implementer_with_team_context(
     tmp_path: Path,
 ) -> None:
@@ -2859,6 +3187,10 @@ async def test_auto_send_to_codex_starts_implementer_with_team_context(
         "final plan accepted; implementation selected by user"
     )
     assert context_packet.packet["required_output_schema"] == "implementation_report"
+    assert any(
+        "Tester follows this developer session" in rule
+        for rule in context_packet.packet["handoff_rules"]
+    )
 
 
 @pytest.mark.asyncio
@@ -3370,6 +3702,7 @@ async def test_auto_send_to_claude_creates_implementer_context_before_backend_st
         job for job in ledger.list_team_agent_jobs(team_run.id) if job.role == "tester"
     ][0]
     assert tester_job.status == "done"
+    assert tester_job.model_profile == updated_job.model_profile
     assert test_reports[0].agent_job_id == tester_job.id
 
 
@@ -3720,7 +4053,12 @@ async def test_auto_send_repair_to_claude_creates_current_implementer_job_contex
     assert len(implementation_reports) == 1
     assert implementation_reports[0].agent_job_id == updated_job.id
     assert len(test_reports) == 1
-    assert test_reports[0].agent_job_id == updated_job.id
+    tester_job = [
+        job for job in ledger.list_team_agent_jobs(team_run.id)
+        if job.role == "tester"
+    ][0]
+    assert test_reports[0].agent_job_id == tester_job.id
+    assert tester_job.model_profile == updated_job.model_profile
 
 
 @pytest.mark.asyncio
@@ -4346,6 +4684,101 @@ async def test_auto_verification_recovers_structured_evidence_from_report_summar
     assert "Gate C" not in response.text
     assert "审计工程师开始验收" in response.text
     assert backend.turns
+
+
+@pytest.mark.asyncio
+async def test_bug_route_final_plan_generation_uses_diagnostician_copy(
+    ctrl: CommandController,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_COLLECTING_CONTEXT, AUTO_FINAL_PLAN
+    from wlcodex.conversation_callback import ConversationCallback
+
+    ledger = ctrl._ledger
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="bug route",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(conversation.id, "Telegram 验收失败")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="Telegram 验收失败",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    ledger.record_team_artifact(
+        team_run_id=team_run.id,
+        agent_job_id=None,
+        artifact_type="routing_decision",
+        summary="bug route",
+        payload={"route_kind": "bug", "first_role": "investigator"},
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_FINAL_PLAN)
+    )
+
+    assert "诊断工程师正在整理修复方案和交接报告" in response.text
+    assert "架构工程师" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_gate_c_missing_tests_mentions_tester_following_not_auditor(
+    ctrl: CommandController,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE
+    from wlcodex.conversation_callback import AUTO_CODEX_VERIFY, ConversationCallback
+
+    ledger = ctrl._ledger
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="gate c",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(conversation.id, "修改 tracked.txt")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_CLAUDE_DONE,
+        last_codex_analysis="方案：修改 tracked.txt",
+        last_claude_summary="实现完成。",
+    )
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="修改 tracked.txt",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    implementer_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="claude_deepseek",
+        status="done",
+        agent_run_id=None,
+    )
+    _record_valid_implementation_report(
+        ledger,
+        team_run_id=team_run.id,
+        agent_job_id=implementer_job.id,
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_CODEX_VERIFY)
+    )
+
+    assert "测试工程师跟随开发工程师" in response.text
+    assert "验收员一并检查测试证据" not in response.text
 
 
 @pytest.mark.asyncio
