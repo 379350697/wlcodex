@@ -69,7 +69,7 @@ def render_help() -> str:
     return """WLCodex — 远程工作台驾驶舱
 
 普通消息：诊断工程师分析/核验
-/auto：工程团队闭环（诊断 → 确认 → 开发 → 确认 → 审计）
+/auto：工程团队闭环（架构/诊断 → 确认 → 开发/测试 → 确认 → 审计）
 
 驾驶舱与现场：
   /product — 回驾驶舱
@@ -88,7 +88,7 @@ def render_help() -> str:
   • 普通消息 — 诊断工程师分析/核验
   • /codex <提示> — 直接让 GPT 开发工程师处理
   • /claude <提示> — 直接让 DeepSeek 开发工程师实施
-  • /auto <提示> — 工程团队闭环：诊断 → 确认 → 开发 → 确认 → 审计
+  • /auto <提示> — 工程团队闭环：架构/诊断 → 确认 → 开发/测试 → 确认 → 审计
 
 常用命令：
   /new — 开始新工作台
@@ -412,7 +412,7 @@ def render_conversation_help(profile: str = "natural") -> str:
                 "WLCodex 已连接",
                 "",
                 "普通消息：诊断工程师分析/核验",
-                "/auto：工程团队闭环（诊断→确认→开发→确认→审计）",
+                "/auto：工程团队闭环（架构/诊断→确认→开发/测试→确认→审计）",
                 "当前视图：驾驶舱",
                 "工作区：当前项目",
                 "GPT 开发工程师：可用",
@@ -426,7 +426,7 @@ def render_conversation_help(profile: str = "natural") -> str:
         )
     return """WLCodex — 远程工作台驾驶舱
 
-普通消息：诊断工程师分析/核验；/auto：诊断工程师 -> 开发工程师 -> 审计工程师
+普通消息：诊断工程师分析/核验；/auto：架构/诊断工程师 -> 开发/测试工程师 -> 审计工程师
 
 驾驶舱与现场：
   • /product — 回驾驶舱
@@ -445,7 +445,7 @@ def render_conversation_help(profile: str = "natural") -> str:
   • 直接发消息 — 诊断工程师分析/核验
   • /codex <prompt> — 直接让 GPT 开发工程师处理
   • /claude <prompt> — 直接让 DeepSeek 开发工程师实施
-  • /auto <prompt> — 工程团队闭环（诊断→确认→开发→确认→审计）
+  • /auto <prompt> — 工程团队闭环（架构/诊断→确认→开发/测试→确认→审计）
   • /verify — 审计工程师验收最新结果
 
 常用命令：

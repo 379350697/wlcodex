@@ -713,11 +713,11 @@ class WlCodexHandlers:
         return (
             "⚙️ 设置\n\n"
             "普通消息：诊断工程师分析/核验\n"
-            "/auto：诊断工程师 → 开发工程师 → 审计工程师\n"
+            "/auto：架构/诊断工程师 → 开发/测试工程师 → 审计工程师\n"
             "当前视图：驾驶舱\n\n"
             "你可以调整：",
             [
-                [{"text": "完整流程（/auto：诊断 → 开发 → 审计）",
+                [{"text": "完整流程（/auto：架构/诊断 → 开发/测试 → 审计）",
                   "callback_data": "settings:exec_mode:orchestrated"}],
                 [{"text": "只问诊断工程师",
                   "callback_data": "settings:exec_mode:codex_direct"}],
