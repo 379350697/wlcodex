@@ -6,10 +6,68 @@ import pytest
 from wlcodex.codex_backend import BackendEvent
 from wlcodex.config import WorkspaceConfig
 from wlcodex.db import Ledger
-from wlcodex.event_bridge import EventBridge
+from wlcodex.event_bridge import EventBridge, _parse_audit_report_payload
 from wlcodex.task_service import TaskService
 
 pytestmark = pytest.mark.slow
+
+
+def test_parse_audit_report_accepts_json_verdict_shape():
+    payload = _parse_audit_report_payload("""
+Auditor notes before JSON.
+{
+  "audit_report": {
+    "verdict": "BLOCK",
+    "risk": "MEDIUM",
+    "summary": "README change is correct, but unrelated dirty files exist.",
+    "findings": [
+      {
+        "severity": "blocking",
+        "title": "Unrelated dirty files",
+        "detail": "Workspace contains platform changes"
+      }
+    ],
+    "missing_evidence": ["task-scoped diff baseline"]
+  }
+}
+""")
+
+    assert payload["decision"] == "block"
+    assert payload["risk_level"] == "medium"
+    assert payload["summary"].startswith("README change is correct")
+    assert "Unrelated dirty files" in payload["findings"][0]
+    assert payload["missing_evidence"] == ["task-scoped diff baseline"]
+
+
+def test_parse_audit_report_recovers_truncated_json_verdict():
+    payload = _parse_audit_report_payload(
+        'notes {"audit_report": {"verdict": "BLOCK", "risk": "MEDIUM", '
+        '"summary": "README task is blocked by unrelated dirty files", '
+        '"findings": [{"title": "truncated"'
+    )
+
+    assert payload["decision"] == "block"
+    assert payload["risk_level"] == "medium"
+    assert payload["summary"] == "README task is blocked by unrelated dirty files"
+
+
+def test_parse_audit_report_accepts_conclusion_alias():
+    payload = _parse_audit_report_payload("""
+{
+  "audit_report": {
+    "conclusion": "needs_repair",
+    "risk": "high",
+    "summary": "验收发现实现证据不完整。",
+    "issues": ["缺少测试输出"],
+    "next_action": "send_back_to_claude"
+  }
+}
+""")
+
+    assert payload["decision"] == "block"
+    assert payload["risk_level"] == "high"
+    assert payload["findings"] == ["缺少测试输出"]
+    assert payload["recommended_next_action"] == "send_back_to_claude"
 
 
 class IdleBackend:

@@ -209,6 +209,7 @@ class CodexVerificationPacket(ContextPacket):
     codex_plan_summary: str = ""
     claude_completion_summary: str = ""
     changed_files: list[str] = field(default_factory=list)
+    unrelated_changed_files: list[str] = field(default_factory=list)
     diff_excerpt_or_summary: str = ""
     test_results: str = ""
     verification_question: str = ""
@@ -224,6 +225,11 @@ class CodexVerificationPacket(ContextPacket):
             lines.append(f"  claude_completion_summary: {self.claude_completion_summary}")
         if self.changed_files:
             lines.append(f"  changed_files: {', '.join(self.changed_files)}")
+        if self.unrelated_changed_files:
+            lines.append(
+                "  unrelated_changed_files: "
+                + ", ".join(self.unrelated_changed_files)
+            )
         if self.diff_excerpt_or_summary:
             lines.append(f"  diff_excerpt_or_summary: {self.diff_excerpt_or_summary}")
         if self.test_results:
@@ -345,6 +351,7 @@ def build_codex_verification_packet(
     codex_plan_summary: str = "",
     claude_completion_summary: str = "",
     changed_files: list[str] | None = None,
+    unrelated_changed_files: list[str] | None = None,
     test_results: str = "",
     diff_summary: str = "",
     workspace: str = "wlcodex",
@@ -359,6 +366,9 @@ def build_codex_verification_packet(
         "不要调用 Telegram Bot API：sendMessage、editMessageText、curl api.telegram.org 等。",
         "不要发出任何审批申请来获取 Telegram 发送权限。",
         "验收职责只读：检查 diff、跑测试、git diff --check、GitNexus detect_changes。",
+        "验收应优先判断本任务范围：若工作区存在任务前已有或平台测试时产生的无关 dirty changes，"
+        "请作为风险提示列出，不要仅因无关变更判定本任务失败；只有它们由本任务引入或导致任务无法复核时才阻断。",
+        "changed_files 是本任务验收主范围；unrelated_changed_files 是旁路变更，只在与任务文件冲突或导致无法复核时阻断。",
         "验收结论只能是 decision: pass / retry / stop / need_user。",
         "发现 Claude 声称已发送 Telegram、直接调了 Telegram API、或输出 message_id=xxx，"
         "应判定为违规漂移并标记 retry 或 stop。",
@@ -383,6 +393,7 @@ def build_codex_verification_packet(
         codex_plan_summary=trim_to_budget(codex_plan_summary, bgt.conversation_summary_tokens),
         claude_completion_summary=trim_to_budget(claude_completion_summary, bgt.conversation_summary_tokens),
         changed_files=changed_files or [],
+        unrelated_changed_files=unrelated_changed_files or [],
         diff_excerpt_or_summary=diff_summary,
         test_results=test_results,
         verification_question="Does the implementation meet all acceptance criteria?",
@@ -474,6 +485,7 @@ def build_auto_verification_packet(
     codex_plan_summary: str = "",
     claude_completion_summary: str = "",
     changed_files: list[str] | None = None,
+    unrelated_changed_files: list[str] | None = None,
     test_results: str = "",
     diff_summary: str = "",
     workspace: str = "wlcodex",
@@ -495,6 +507,9 @@ def build_auto_verification_packet(
         "不要调用 Telegram Bot API：sendMessage、editMessageText、curl api.telegram.org 等。",
         "不要发出任何审批申请来获取 Telegram 发送权限。",
         "验收职责只读：检查 diff、跑测试、git diff --check、GitNexus detect_changes。",
+        "验收应优先判断本任务范围：若工作区存在任务前已有或平台测试时产生的无关 dirty changes，"
+        "请作为风险提示列出，不要仅因无关变更判定本任务失败；只有它们由本任务引入或导致任务无法复核时才阻断。",
+        "changed_files 是本任务验收主范围；unrelated_changed_files 是旁路变更，只在与任务文件冲突或导致无法复核时阻断。",
         f"这是第 {verify_round} 轮验收。",
         "验收结论只能是 decision: pass / retry / stop / need_user。",
         "如果判定 retry，必须输出具体的给 Claude 的返工提示词（repair_prompt）。",
@@ -525,6 +540,7 @@ def build_auto_verification_packet(
         codex_plan_summary=trim_to_budget(codex_plan_summary, bgt.conversation_summary_tokens),
         claude_completion_summary=trim_to_budget(claude_completion_summary, bgt.conversation_summary_tokens),
         changed_files=changed_files or [],
+        unrelated_changed_files=unrelated_changed_files or [],
         diff_excerpt_or_summary=diff_summary,
         test_results=test_results,
         verification_question="Does the implementation meet all acceptance criteria?",

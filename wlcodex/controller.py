@@ -152,6 +152,7 @@ from wlcodex.status import (
     render_conversation_help,
     render_conversation_status,
     render_prepared_carryover,
+    render_team_artifact_summary,
     render_team_status_summary,
     render_workspace_list,
 )
@@ -188,6 +189,106 @@ def _diff_body_has_evidence(body: str) -> bool:
         stripped
         and stripped not in ("暂无 diff 信息。", "工作区没有未提交变更。")
     )
+
+
+def _changed_files_from_diff_summary(body: str) -> list[str]:
+    changed_files: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("diff --git "):
+            parts = stripped.split()
+            if len(parts) >= 4:
+                path = parts[2]
+                if path.startswith("a/"):
+                    path = path[2:]
+                changed_files.append(path[:200])
+            continue
+        if "|" in stripped:
+            path = stripped.split("|", 1)[0].strip()
+            if path and not path[0].isdigit():
+                changed_files.append(path[:200])
+    return list(dict.fromkeys(changed_files))
+
+
+def _filter_diff_summary_to_files(body: str, files: list[str]) -> str:
+    if not body or not files:
+        return body
+    file_set = set(files)
+    lines = body.splitlines()
+    if any(line.startswith("diff --git ") for line in lines):
+        filtered_sections: list[str] = []
+        current: list[str] = []
+        current_in_scope = False
+        for line in lines:
+            if line.startswith("diff --git "):
+                if current and current_in_scope:
+                    filtered_sections.extend(current)
+                current = [line]
+                current_in_scope = _diff_git_line_path(line) in file_set
+                continue
+            if current:
+                current.append(line)
+            elif _summary_stat_line_path(line) in file_set:
+                filtered_sections.append(line)
+        if current and current_in_scope:
+            filtered_sections.extend(current)
+        return "\n".join(filtered_sections).strip()
+
+    filtered_lines = [
+        line
+        for line in lines
+        if _summary_stat_line_path(line) in file_set
+    ]
+    return "\n".join(filtered_lines).strip()
+
+
+def _diff_git_line_path(line: str) -> str:
+    parts = line.split()
+    if len(parts) < 3:
+        return ""
+    path = parts[2]
+    return path[2:] if path.startswith("a/") else path
+
+
+def _summary_stat_line_path(line: str) -> str:
+    stripped = line.strip()
+    if "|" not in stripped:
+        return ""
+    path = stripped.split("|", 1)[0].strip()
+    if not path or path[0].isdigit():
+        return ""
+    return path[:200]
+
+
+def _human_artifact_type(artifact_type: str) -> str:
+    labels = {
+        "architecture_plan": "方案记录",
+        "implementation_report": "实现记录",
+        "test_report": "测试记录",
+        "audit_report": "验收记录",
+        "verification_request": "验收请求",
+    }
+    return labels.get(artifact_type, "流程记录")
+
+
+def _human_gate_field_name(field: str) -> str:
+    labels = {
+        "summary": "简要说明",
+        "changed_files": "改动文件",
+        "diff_summary": "改动说明",
+        "commands_run": "执行记录",
+        "tests_attempted": "测试记录",
+        "known_limitations": "已知限制",
+        "passed": "是否通过",
+        "coverage_of_acceptance_criteria": "验收标准覆盖情况",
+        "decision": "验收结论",
+        "test_evidence_refs": "测试证据引用",
+        "implementation_report_current_agent_job": "本轮开发任务的实现记录",
+        "test_report_current_agent_job": "本轮开发任务的测试记录",
+    }
+    return labels.get(field, field.replace("_", " "))
 
 
 def _is_lightweight_greeting(text: str) -> bool:
@@ -685,6 +786,53 @@ class CommandController:
                 return int(job.id)
         return None
 
+    def _latest_implementation_scope(
+        self,
+        team_run: object,
+        *,
+        agent_job_id: int | None,
+    ) -> tuple[list[str], str]:
+        _artifact_id, payload = self._latest_team_artifact_payload(
+            team_run=team_run,
+            artifact_type="implementation_report",
+            agent_job_id=agent_job_id,
+        )
+        if payload is None:
+            return [], ""
+        from wlcodex.team_artifacts import structured_implementation_evidence_from_text
+
+        summary_evidence = structured_implementation_evidence_from_text(
+            str(payload.get("summary", ""))
+        )
+        merged = {**payload, **summary_evidence}
+        files = [
+            str(path).strip()
+            for path in merged.get("changed_files", [])
+            if str(path).strip()
+        ]
+        diff_summary = str(merged.get("diff_summary", "")).strip()
+        return list(dict.fromkeys(files)), diff_summary
+
+    def _task_workspace_baseline_dirty_files(self, task_id: int | None) -> list[str]:
+        if task_id is None:
+            return []
+        events = self._ledger.list_events(task_id, limit=500)
+        for event in reversed(events):
+            if event.event_type != "task_workspace_baseline":
+                continue
+            dirty_files = event.payload.get("dirty_files")
+            if not isinstance(dirty_files, list):
+                return []
+            paths: list[str] = []
+            for item in dirty_files:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path", "")).strip()
+                if path:
+                    paths.append(path)
+            return list(dict.fromkeys(paths))
+        return []
+
     def _team_gate_response(
         self,
         *,
@@ -712,6 +860,41 @@ class CommandController:
         if payload is None:
             pass
         else:
+            if artifact_type == "implementation_report":
+                from wlcodex.team_artifacts import (
+                    structured_implementation_evidence_from_text,
+                )
+
+                summary_evidence = structured_implementation_evidence_from_text(
+                    str(payload.get("summary", ""))
+                )
+                if summary_evidence:
+                    payload = {**payload, **summary_evidence}
+            elif artifact_type == "test_report":
+                impl_artifact_id, impl_payload = self._latest_team_artifact_payload(
+                    team_run=team_run,
+                    artifact_type="implementation_report",
+                    agent_job_id=agent_job_id if bind_agent_job else None,
+                )
+                if impl_payload is not None:
+                    from wlcodex.team_artifacts import (
+                        acceptance_criteria_from_artifacts,
+                        structured_implementation_evidence_from_text,
+                        test_report_payload_from_implementation,
+                    )
+
+                    summary_evidence = structured_implementation_evidence_from_text(
+                        str(impl_payload.get("summary", ""))
+                    )
+                    if summary_evidence.get("tests_attempted"):
+                        payload = test_report_payload_from_implementation(
+                            summary=str(payload.get("summary", "")),
+                            implementation_artifact_id=impl_artifact_id,
+                            commands_run=summary_evidence["tests_attempted"],
+                            acceptance_criteria=acceptance_criteria_from_artifacts(
+                                self._ledger.list_team_artifacts(team_run.id)
+                            ),
+                        )
             result = validator(payload)
             if result.passed:
                 self._emit_team_runtime_event(
@@ -757,14 +940,15 @@ class CommandController:
                 ),
                 codex_implementer_enabled=self._codex_implementer_enabled(),
             )
-        missing_text = ", ".join(missing)
+        missing_text = "、".join(_human_gate_field_name(field) for field in missing)
+        artifact_label = _human_artifact_type(artifact_type)
         tester_note = ""
         if gate_name == "Gate C":
-            tester_note = "\n说明：Auditor performs tester duties in v1；测试证据仍必须绑定本轮实现。"
+            tester_note = "\n说明：当前由验收员一并检查测试证据，测试记录仍需要对应本轮实现。"
         retry_note = "\n已进入返工阶段，可交给 Claude 或 Codex 补齐后重新验收。" if failure_step else ""
         return ControllerResponse(
-            f"{gate_name} 阻断：{artifact_type} 缺少必填字段：{missing_text}。\n"
-            "请先补齐上游角色 artifact，再进入下一角色阶段。"
+            f"验收前还缺少{artifact_label}：{missing_text}。\n"
+            "请先让开发团队补齐这些证据，再进入下一步。"
             f"{tester_note}{retry_note}",
             buttons=buttons,
         )
@@ -2806,13 +2990,10 @@ class CommandController:
             f"{artifact.artifact_type}: {artifact.summary}"
             for artifact in self._ledger.list_team_artifacts(team_run.id)
         ]
-        route = "Adaptive Engineering Team"
-        if team_run.status:
-            route = f"{route} / {team_run.status}"
         return ControllerResponse(
             render_team_status_summary(
                 team_run.goal,
-                route,
+                "开发团队",
                 roles,
                 artifacts[-4:],
             ),
@@ -2834,7 +3015,12 @@ class CommandController:
             )
         lines = ["团队证据："]
         for artifact in artifacts[-8:]:
-            lines.append(f"- {artifact.artifact_type}: {artifact.summary[:160]}")
+            lines.append(
+                "- "
+                + render_team_artifact_summary(
+                    f"{artifact.artifact_type}: {artifact.summary[:160]}"
+                )
+            )
         return ControllerResponse(
             "\n".join(lines),
             buttons=self._team_status_buttons(callback.conversation_id),
@@ -3665,6 +3851,7 @@ class CommandController:
 
         task_id = self._implementation_evidence_task_id(convo, orch_run)
         changed_files, diff_summary = self._collect_task_evidence(task_id)
+        unrelated_changed_files: list[str] = []
         team_run = None
         if self._adaptive_team_enabled and hasattr(
             self._ledger, "get_team_run_for_orchestration"
@@ -3707,13 +3894,65 @@ class CommandController:
             )
             if gate_response is not None:
                 return gate_response
+            task_changed_files, task_diff_summary = self._latest_implementation_scope(
+                team_run,
+                agent_job_id=implementer_job_id,
+            )
+            if task_changed_files:
+                workspace_files = changed_files or _changed_files_from_diff_summary(
+                    diff_summary
+                )
+                task_file_set = set(task_changed_files)
+                unrelated_changed_files = [
+                    path for path in workspace_files if path not in task_file_set
+                ]
+                changed_files = task_changed_files
+                if task_diff_summary:
+                    diff_summary = task_diff_summary
+                scoped_diff_summary = _filter_diff_summary_to_files(
+                    diff_summary,
+                    task_changed_files,
+                )
+                if scoped_diff_summary:
+                    diff_summary = scoped_diff_summary
+            else:
+                baseline_dirty = set(
+                    self._task_workspace_baseline_dirty_files(task_id)
+                )
+                if baseline_dirty:
+                    workspace_files = changed_files or _changed_files_from_diff_summary(
+                        diff_summary
+                    )
+                    changed_files = [
+                        path for path in workspace_files if path not in baseline_dirty
+                    ]
+                    unrelated_changed_files = [
+                        path for path in workspace_files if path in baseline_dirty
+                    ]
+                    scoped_diff_summary = _filter_diff_summary_to_files(
+                        diff_summary,
+                        changed_files,
+                    )
+                    if scoped_diff_summary:
+                        diff_summary = scoped_diff_summary
 
         budget = ContextBudget()
+        if unrelated_changed_files:
+            side_note = (
+                "旁路变更提示：当前工作区还存在非本任务文件 "
+                + ", ".join(unrelated_changed_files[:10])
+                + "。这些文件不属于 changed_files 主验收范围；仅当它们与任务文件冲突或导致任务无法复核时才阻断。"
+            )
+            test_results = side_note
+        else:
+            test_results = ""
         packet = build_auto_verification_packet(
             user_goal=goal,
             codex_plan_summary=codex_analysis[:800],
             claude_completion_summary=claude_summary[:1500],
             changed_files=changed_files[:20],
+            unrelated_changed_files=unrelated_changed_files[:20],
+            test_results=test_results,
             diff_summary=diff_summary[:1500],
             workspace=convo.workspace_alias,
             budget=budget,
@@ -3792,6 +4031,7 @@ class CommandController:
                         "codex_plan_summary": codex_analysis[:800],
                         "implementation_summary": claude_summary[:1500],
                         "changed_files": changed_files[:20],
+                        "unrelated_changed_files": unrelated_changed_files[:20],
                         "diff_summary": diff_summary[:1500],
                         "verify_round": verify_round,
                         "tester_policy": "Auditor performs tester duties in v1",
@@ -5105,9 +5345,14 @@ class CommandController:
                 "callback_data": encode_conversation_callback(callback.conversation_id, STATUS),
             }]])
         elif callback.action == AUTO_VIEW_DIFF:
-            return await self.handle(
+            response = await self.handle(
                 "/diff",
                 {"chat_id": convo.chat_id, "user_id": convo.user_id},
+            )
+            return ControllerResponse(
+                response.text,
+                buttons=self._team_status_buttons(callback.conversation_id),
+                already_rendered=response.already_rendered,
             )
         elif callback.action == AUTO_VIEW_STATUS:
             return await self.handle(

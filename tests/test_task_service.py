@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,36 @@ from wlcodex.config import WorkspaceConfig
 from wlcodex.db import Ledger
 from wlcodex.models import TaskStatus
 from wlcodex.task_service import TaskService, WorkspaceBusy
+
+
+def _init_git_workspace(path: Path) -> None:
+    path.mkdir(exist_ok=True)
+    (path / "tracked.txt").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "add", "tracked.txt"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _baseline_events(service: TaskService, task_id: int) -> list[dict[str, object]]:
+    return [
+        event.payload
+        for event in service._ledger.list_events(task_id)
+        if event.event_type == "task_workspace_baseline"
+    ]
 
 
 @pytest.fixture
@@ -27,6 +58,47 @@ def test_start_task_creates_fresh_thread_by_default(service: TaskService) -> Non
     assert task.codex_thread_id == "thread-new"
     assert task.status == TaskStatus.QUEUED
     assert service.list_tasks()[0].status == TaskStatus.QUEUED
+
+
+def test_start_task_records_independent_workspace_baseline(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    _init_git_workspace(workspace)
+    (workspace / "tracked.txt").write_text("dirty before task\n", encoding="utf-8")
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(ledger, (WorkspaceConfig("demo", workspace, True),))
+
+    task = service.start_task("demo", "Fix bug", codex_thread_id="thread-new")
+
+    baselines = _baseline_events(service, task.id)
+    assert len(baselines) == 1
+    baseline = baselines[0]
+    assert baseline["phase"] == "task_created"
+    assert isinstance(baseline["head_commit"], str)
+    assert baseline["head_commit"]
+    assert baseline["dirty_files"] == [{"path": "tracked.txt", "status": "M"}]
+
+
+def test_waiting_task_records_baseline_when_promoted(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(ledger, (WorkspaceConfig("demo", workspace, True),))
+    waiting = service.reserve_waiting_task("demo", "queued work")
+    assert _baseline_events(service, waiting.id) == []
+
+    (workspace / "tracked.txt").write_text("dirty before promotion\n", encoding="utf-8")
+
+    task, prompt = service.promote_waiting_task(waiting.id)
+
+    assert prompt == "queued work"
+    baselines = _baseline_events(service, task.id)
+    assert len(baselines) == 1
+    assert baselines[0]["phase"] == "task_promoted_from_waiting"
+    assert baselines[0]["dirty_files"] == [{"path": "tracked.txt", "status": "M"}]
 
 
 def test_continue_task_requires_existing_task(service: TaskService) -> None:

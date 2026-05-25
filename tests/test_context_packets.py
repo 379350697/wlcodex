@@ -372,6 +372,22 @@ def test_lightfeev2_auto_verification_packet_requires_post_fix_evidence() -> Non
     assert "mock 假成功" in rendered
 
 
+def test_auto_verification_packet_keeps_unrelated_dirty_changes_as_warnings() -> None:
+    packet = build_auto_verification_packet(
+        user_goal="给 README 增加一行说明",
+        changed_files=["README.md"],
+        unrelated_changed_files=["wlcodex/controller.py"],
+        workspace="wlcodex",
+    )
+    rendered = packet.render()
+
+    assert "优先判断本任务范围" in rendered
+    assert "不要仅因无关变更判定本任务失败" in rendered
+    assert "changed_files: README.md" in rendered
+    assert "unrelated_changed_files: wlcodex/controller.py" in rendered
+    assert "只在与任务文件冲突或导致无法复核时阻断" in rendered
+
+
 def test_lightfeev2_auto_repair_packet_tells_claude_to_follow_protocol() -> None:
     packet = build_auto_repair_packet(
         user_goal="返工修复 LightFeeV2 OKX 残余问题",

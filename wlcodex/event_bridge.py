@@ -7,8 +7,10 @@ Status/log data is NEVER fed back into Codex context.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import subprocess
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -184,13 +186,22 @@ def _extract_list_after_heading(lines: list[str], heading: str) -> list[str]:
 
 
 def _parse_audit_report_payload(text: str) -> dict[str, object]:
+    json_report = _extract_audit_report_json(text)
+    if json_report is not None:
+        return json_report
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     lowered = text.lower()
     if "decision: pass" in lowered or "decision:pass" in lowered:
         decision = "pass"
+    elif re.search(r'"(?:decision|verdict|status|conclusion)"\s*:\s*"(?:pass|passed|approve|approved)"', text, re.IGNORECASE):
+        decision = "pass"
     elif "decision: block" in lowered or "decision:block" in lowered:
         decision = "block"
+    elif re.search(r'"(?:decision|verdict|status|conclusion)"\s*:\s*"(?:block|blocked|fail|failed|retry|repair|needs_repair|need_repair)"', text, re.IGNORECASE):
+        decision = "block"
     elif "decision: needs_user" in lowered or "decision:needs_user" in lowered:
+        decision = "needs_user"
+    elif re.search(r'"(?:decision|verdict|status|conclusion)"\s*:\s*"(?:needs_user|need_user|needs user)"', text, re.IGNORECASE):
         decision = "needs_user"
     else:
         decision = ""
@@ -199,6 +210,15 @@ def _parse_audit_report_payload(text: str) -> dict[str, object]:
         if line.lower().startswith("summary:"):
             summary = line.split(":", 1)[1].strip() or summary
             break
+    json_summary = re.search(r'"summary"\s*:\s*"([^"]+)"', text)
+    if json_summary:
+        summary = json_summary.group(1).strip() or summary
+    risk_match = re.search(r'"(?:risk_level|risk)"\s*:\s*"(low|medium|high|critical)"', text, re.IGNORECASE)
+    risk_level = (
+        risk_match.group(1).lower()
+        if risk_match
+        else ("low" if decision == "pass" else "medium")
+    )
     return {
         "summary": summary,
         "decision": decision,
@@ -206,11 +226,113 @@ def _parse_audit_report_payload(text: str) -> dict[str, object]:
         or ["No findings reported."],
         "missing_evidence": _extract_list_after_heading(lines, "missing_evidence")
         or ["None"],
-        "risk_level": "low" if decision == "pass" else "medium",
+        "risk_level": risk_level,
         "recommended_next_action": "close" if decision == "pass" else "repair",
         "test_evidence_refs": _extract_list_after_heading(lines, "test_evidence_refs"),
         "raw_result": text,
     }
+
+
+def _extract_audit_report_json(text: str) -> dict[str, object] | None:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        has_wrapper = "audit_report" in parsed
+        report = parsed.get("audit_report", parsed)
+        if not isinstance(report, dict):
+            continue
+        if not has_wrapper and not any(
+            key in report for key in ("decision", "verdict", "status", "conclusion")
+        ):
+            continue
+        decision = str(
+            report.get("decision")
+            or report.get("verdict")
+            or report.get("status")
+            or report.get("conclusion")
+            or ""
+        ).strip().lower()
+        decision_map = {
+            "pass": "pass",
+            "passed": "pass",
+            "approve": "pass",
+            "approved": "pass",
+            "block": "block",
+            "blocked": "block",
+            "fail": "block",
+            "failed": "block",
+            "retry": "block",
+            "repair": "block",
+            "needs_repair": "block",
+            "need_repair": "block",
+            "needs_user": "needs_user",
+            "need_user": "needs_user",
+            "needs user": "needs_user",
+        }
+        normalized_decision = decision_map.get(decision, "")
+        if not normalized_decision:
+            continue
+        risk_level = str(report.get("risk_level") or report.get("risk") or "").strip().lower()
+        if not risk_level:
+            risk_level = "low" if normalized_decision == "pass" else "medium"
+        findings = (
+            _normalize_audit_list(report.get("findings"))
+            or _normalize_audit_list(report.get("issues"))
+            or _normalize_audit_list(report.get("blockers"))
+            or ["No findings reported."]
+        )
+        missing_evidence = (
+            _normalize_audit_list(report.get("missing_evidence"))
+            or _normalize_audit_list(report.get("missing"))
+            or ["None"]
+        )
+        test_evidence_refs = _normalize_audit_list(report.get("test_evidence_refs"))
+        recommended = str(
+            report.get("recommended_next_action")
+            or report.get("next_action")
+            or report.get("action")
+            or ""
+        ).strip()
+        if not recommended:
+            recommended = "close" if normalized_decision == "pass" else "repair"
+        return {
+            "summary": str(report.get("summary") or text[:2000]),
+            "decision": normalized_decision,
+            "findings": findings,
+            "missing_evidence": missing_evidence,
+            "risk_level": risk_level,
+            "recommended_next_action": recommended,
+            "test_evidence_refs": test_evidence_refs,
+            "raw_result": text,
+        }
+    return None
+
+
+def _normalize_audit_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for entry in value:
+        if isinstance(entry, dict):
+            parts = [
+                str(entry.get(key, "")).strip()
+                for key in ("severity", "title", "detail", "impact", "evidence")
+                if str(entry.get(key, "")).strip()
+            ]
+            if parts:
+                items.append(" | ".join(parts))
+        else:
+            text = str(entry).strip()
+            if text:
+                items.append(text)
+    return items
 
 
 EXPIRY_SCAN_INTERVAL_SECONDS = 60

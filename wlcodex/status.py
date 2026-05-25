@@ -244,6 +244,19 @@ TEAM_ROLE_ORDER = (
     "auditor",
 )
 
+TEAM_ROUTE_LABELS = {
+    "Adaptive Engineering Team": "开发团队",
+    "staged_auto": "开发团队",
+}
+
+TEAM_ARTIFACT_LABELS = {
+    "architecture_plan": "方案",
+    "implementation_report": "实现记录",
+    "test_report": "测试记录",
+    "audit_report": "审计报告",
+    "verification_request": "验收请求",
+}
+
 
 def _latest_team_roles(
     roles: list[tuple[str, str, str]],
@@ -270,6 +283,51 @@ def _latest_team_roles(
     return ordered_roles
 
 
+def _team_route_label(route: str) -> str:
+    base = str(route or "").split("/", 1)[0].strip()
+    return TEAM_ROUTE_LABELS.get(base, base or "开发团队")
+
+
+def _humanize_team_text(text: str) -> str:
+    replacements = {
+        "needs_implementation: true": "需要改代码",
+        "needs_implementation=true": "需要改代码",
+        "implementation = true": "需要改代码",
+        "implementation=true": "需要改代码",
+        "needs_implementation: false": "无需改代码",
+        "needs_implementation=false": "无需改代码",
+        "implementation = false": "无需改代码",
+        "implementation=false": "无需改代码",
+    }
+    result = str(text)
+    for raw, label in replacements.items():
+        result = result.replace(raw, label)
+    return result
+
+
+def _team_artifact_display_text(kind: str, summary: str) -> str:
+    text = _humanize_team_text(str(summary).strip())
+    if kind == "implementation_report":
+        if (
+            "implementation_report" in text
+            or "生成实施报告" in text
+            or "所有验证通过" in text
+        ):
+            return "已更新说明，并完成验证。"
+    if kind == "test_report":
+        if text == "Implementation test evidence collected.":
+            return "已收集测试结果。"
+    return _trim(text, 120)
+
+
+def render_team_artifact_summary(artifact: str) -> str:
+    kind, sep, summary = str(artifact).partition(":")
+    if not sep:
+        return _humanize_team_text(_trim(artifact, 120))
+    label = TEAM_ARTIFACT_LABELS.get(kind.strip(), kind.strip())
+    return f"{label}：{_team_artifact_display_text(kind.strip(), summary)}"
+
+
 def render_team_status_summary(
     goal: str,
     route: str,
@@ -279,18 +337,18 @@ def render_team_status_summary(
     lines = [
         "团队状态：",
         f"目标：{_trim(goal, 100)}",
-        f"路线：{route}",
+        f"路线：{_team_route_label(route)}",
     ]
     if roles:
         lines.append("角色：")
-        for role, model_profile, status in _latest_team_roles(roles):
+        for role, _model_profile, status in _latest_team_roles(roles):
             role_label = TEAM_ROLE_LABELS.get(role, role)
             status_label = _status_label_str(status)
-            lines.append(f"- {role_label}：{model_profile} / {status_label}")
+            lines.append(f"- {role_label}：{status_label}")
     if latest_artifacts:
         lines.append("最新产物：")
         for artifact in latest_artifacts[:4]:
-            lines.append(f"- {_trim(artifact, 120)}")
+            lines.append(f"- {render_team_artifact_summary(artifact)}")
     return "\n".join(lines)
 
 

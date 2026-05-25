@@ -479,10 +479,35 @@ def test_role_aware_auto_status_lists_engineer_roles() -> None:
     assert "总工程师" in text
     assert "架构工程师" in text
     assert "开发工程师" in text
-    assert "claude_deepseek" in text
+    assert "开发团队" in text
+    assert "staged_auto" not in text
+    assert "codex_gpt" not in text
+    assert "claude_deepseek" not in text
     assert "排队中" in text
     assert "queued" not in text
-    assert "architecture_plan: Plan ready" in text
+    assert "方案：Plan ready" in text
+
+
+def test_team_artifact_summary_is_human_readable() -> None:
+    from wlcodex.status import render_team_artifact_summary
+
+    implementation = render_team_artifact_summary(
+        "implementation_report: 在 `# Run fast default tests` 之后插入一行说明。"
+        "现在运行验证。现在运行验证。所有验证通过。生成实施报告： "
+        "```json { \"implementation_report\": { \"status\": \"complete\" } } ```"
+    )
+    test_report = render_team_artifact_summary(
+        "test_report: Implementation test evidence collected."
+    )
+
+    assert implementation == (
+        "实现记录：已更新说明，并完成验证。"
+    )
+    assert test_report == "测试记录：已收集测试结果。"
+    assert "```" not in implementation
+    assert "implementation_report" not in implementation
+    assert "现在运行验证。现在运行验证" not in implementation
+    assert "Implementation test evidence collected" not in test_report
 
 
 # --- Carryover renderers ---

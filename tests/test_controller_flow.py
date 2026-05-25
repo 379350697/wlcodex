@@ -1167,6 +1167,51 @@ async def test_diff_without_workbench_uses_workbench_copy(ctrl: CommandControlle
 
 
 @pytest.mark.asyncio
+async def test_auto_view_diff_preserves_verification_buttons(tmp_path: Path) -> None:
+    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE
+    from wlcodex.conversation_callback import (
+        AUTO_CODEX_VERIFY,
+        AUTO_VIEW_DIFF,
+        ConversationCallback,
+    )
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    ctrl = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto diff",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch = ledger.create_orchestration_run(conversation.id, "查看 diff 后继续验收")
+    ledger.update_orchestration_run(
+        orch.id,
+        status="needs_user",
+        current_step=AUTO_CLAUDE_DONE,
+        last_codex_analysis="方案：做一个小改动。",
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_VIEW_DIFF)
+    )
+
+    assert response.buttons
+    assert AUTO_CODEX_VERIFY in _button_actions(response.buttons)
+
+
+@pytest.mark.asyncio
 async def test_files_without_workbench_uses_workbench_copy(ctrl: CommandController) -> None:
     response = await ctrl.handle("/files", {"chat_id": 123})
 
@@ -3663,10 +3708,16 @@ async def test_auto_verification_records_audit_artifact(
     ledger.set_conversation_active_task(conversation.id, wrong_task.id)
     ledger.set_task_status(wrong_task.id, TaskStatus.DONE)
     ledger.record_touched_file(implementation_task.id, "tracked.txt", "modified")
+    ledger.record_touched_file(implementation_task.id, "unrelated.txt", "modified")
     ledger.add_event(
         implementation_task.id,
         "diff_updated",
-        {"diff": "diff --git a/tracked.txt b/tracked.txt\n+verified evidence"},
+        {
+            "diff": (
+                "diff --git a/tracked.txt b/tracked.txt\n+verified evidence\n"
+                "diff --git a/unrelated.txt b/unrelated.txt\n+side session evidence"
+            )
+        },
     )
 
     response = await ctrl.handle_conversation_callback(
@@ -3711,8 +3762,13 @@ async def test_auto_verification_records_audit_artifact(
     assert verification_request[0].payload["codex_plan_summary"].startswith("方案")
     assert verification_request[0].payload["implementation_summary"].startswith("实现完成")
     assert verification_request[0].payload["changed_files"] == ["tracked.txt"]
-    assert "verified evidence" in verification_request[0].payload["diff_summary"]
+    assert verification_request[0].payload["unrelated_changed_files"] == [
+        "unrelated.txt"
+    ]
+    assert "tracked.txt changed" in verification_request[0].payload["diff_summary"]
     assert verification_request[0].payload["verify_round"] == 1
+    assert "unrelated_changed_files: unrelated.txt" in context_packet.prompt_text
+    assert "旁路变更提示" in context_packet.prompt_text
     artifact_events = [
         event
         for event in store.list_by_conversation(conversation.id, limit=100)
@@ -3724,6 +3780,153 @@ async def test_auto_verification_records_audit_artifact(
         for event in artifact_events
     )
     assert backend.turns
+
+
+@pytest.mark.asyncio
+async def test_auto_verification_filters_workspace_diff_to_task_scope(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE, AUTO_VERIFYING
+    from wlcodex.conversation_callback import AUTO_CODEX_VERIFY, ConversationCallback
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    store = RuntimeEventStore(ledger._conn)
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    inspector = TaskInspector(ledger, tmp_path / "logs")
+    ctrl = CommandController(
+        service,
+        backend,
+        inspector,
+        ledger=ledger,
+        runtime_event_store=store,
+        auditor_model_profile="auditor_codex",
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(conversation.id, "修改 tracked.txt")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_CLAUDE_DONE,
+        last_codex_analysis="方案：修改 tracked.txt。",
+        last_claude_summary="实现完成。",
+    )
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="修改 tracked.txt",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    implementation_task = service.start_task(
+        "wlcodex",
+        "Implement tracked.txt",
+        telegram_chat_id=100,
+    )
+    implementer_run = ledger.create_agent_run(
+        conversation.id,
+        "claude",
+        "auto_implementation",
+        hidden_task_id=implementation_task.id,
+    )
+    ledger.update_agent_run_status(
+        implementer_run.id,
+        "done",
+        completion_summary="实现完成。",
+    )
+    implementer_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="claude_deepseek",
+        status="done",
+        agent_run_id=implementer_run.id,
+    )
+    ledger.record_team_artifact(
+        team_run_id=team_run.id,
+        agent_job_id=implementer_job.id,
+        artifact_type="implementation_report",
+        summary="Implementation complete with evidence.",
+        payload={
+            "summary": "Implementation complete with evidence.",
+            "changed_files": ["tracked.txt"],
+            "diff_summary": (
+                "diff --git a/tracked.txt b/tracked.txt\n+tracked evidence\n"
+                "diff --git a/unrelated.txt b/unrelated.txt\n+side evidence"
+            ),
+            "commands_run": [
+                {
+                    "command": "pytest tests/test_controller_flow.py -q",
+                    "exit_status": 0,
+                    "summary": "controller flow tests passed",
+                }
+            ],
+            "tests_attempted": [
+                {
+                    "command": "pytest tests/test_controller_flow.py -q",
+                    "exit_status": 0,
+                    "summary": "controller flow tests passed",
+                }
+            ],
+            "known_limitations": ["None known"],
+        },
+    )
+    _record_valid_test_report(
+        ledger,
+        team_run_id=team_run.id,
+        agent_job_id=implementer_job.id,
+    )
+    ledger.set_task_status(implementation_task.id, TaskStatus.DONE)
+    ledger.record_touched_file(implementation_task.id, "tracked.txt", "modified")
+    ledger.record_touched_file(implementation_task.id, "unrelated.txt", "modified")
+    ledger.add_event(
+        implementation_task.id,
+        "diff_updated",
+        {
+            "diff": (
+                "diff --git a/tracked.txt b/tracked.txt\n+tracked evidence\n"
+                "diff --git a/unrelated.txt b/unrelated.txt\n+side evidence"
+            )
+        },
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_CODEX_VERIFY)
+    )
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    auditor_job = [
+        job for job in ledger.list_team_agent_jobs(team_run.id)
+        if job.role == "auditor"
+    ][0]
+    context_packet = ledger.get_team_context_packet_for_job(auditor_job.id)
+    verification_request = [
+        artifact
+        for artifact in ledger.list_team_artifacts(team_run.id)
+        if artifact.artifact_type == "verification_request"
+    ][0]
+
+    assert "Codex 开始验收" in response.text
+    assert updated.current_step == AUTO_VERIFYING
+    assert verification_request.payload["changed_files"] == ["tracked.txt"]
+    assert verification_request.payload["unrelated_changed_files"] == [
+        "unrelated.txt"
+    ]
+    assert "tracked.txt" in verification_request.payload["diff_summary"]
+    assert "unrelated.txt" not in verification_request.payload["diff_summary"]
+    assert context_packet is not None
+    assert "diff --git a/unrelated.txt" not in context_packet.prompt_text
 
 
 @pytest.mark.asyncio
@@ -3777,14 +3980,139 @@ async def test_auto_verification_blocks_team_run_when_gate_b_report_missing(
     )
 
     updated = ledger.get_orchestration_run(orch_run.id)
-    assert "Gate B" in response.text
-    assert "implementation_report" in response.text
+    assert "验收前还缺少实现记录" in response.text
+    assert "Gate B" not in response.text
+    assert "implementation_report" not in response.text
     assert updated.status == "needs_user"
     assert updated.current_step == AUTO_RETRY_READY
     assert "auto_send_to_codex" in _button_actions(response.buttons)
     assert ledger.list_team_agent_jobs(team_run.id) == []
     assert ledger.list_agent_runs(conversation.id) == []
     assert backend.turns == []
+
+
+@pytest.mark.asyncio
+async def test_auto_verification_recovers_structured_evidence_from_report_summary(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE
+    from wlcodex.conversation_callback import AUTO_CODEX_VERIFY, ConversationCallback
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    ctrl = CommandController(
+        service,
+        backend,
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        auditor_model_profile="auditor_codex",
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(conversation.id, "修改 README.md")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_CLAUDE_DONE,
+        last_codex_analysis="方案：修改 README.md。",
+        last_claude_summary="实现完成：更新 README.md。",
+    )
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="修改 README.md",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    agent_run = ledger.create_agent_run(conversation.id, "claude", "auto_implementation")
+    job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="claude_deepseek",
+        status="done",
+        agent_run_id=agent_run.id,
+    )
+    summary = """
+```json
+{
+  "implementation_report": {
+    "status": "completed",
+    "change_summary": "在 README.md 的 Local setup 测试命令区新增一行快速默认测试说明",
+    "files_modified": ["README.md"],
+    "verification": {
+      "git_diff_check": "passed",
+      "git_diff": "1 file changed, 1 insertion(+)",
+      "gitnexus_detect_changes": {"passed": true, "runtime_impact": "none"}
+    }
+  }
+}
+```
+"""
+    ledger.record_team_artifact(
+        team_run_id=team_run.id,
+        agent_job_id=job.id,
+        artifact_type="implementation_report",
+        summary=summary,
+        payload={
+            "summary": summary,
+            "changed_files": ["No changed files reported."],
+            "diff_summary": "README.md | 1 +",
+            "commands_run": [{
+                "command": "No structured command evidence reported by implementer.",
+                "exit_status": 1,
+                "summary": "missing",
+            }],
+            "tests_attempted": [{
+                "command": "No structured test attempt reported by implementer.",
+                "exit_status": 1,
+                "summary": "missing",
+            }],
+            "known_limitations": ["None known"],
+        },
+    )
+    ledger.record_team_artifact(
+        team_run_id=team_run.id,
+        agent_job_id=job.id,
+        artifact_type="test_report",
+        summary="Implementation test evidence collected.",
+        payload={
+            "summary": "Implementation test evidence collected.",
+            "commands_run": [{
+                "command": "No structured test attempt reported by implementer.",
+                "exit_status": 1,
+                "summary": "missing",
+            }],
+            "passed": ["No passing test evidence reported."],
+            "failed": ["No structured test attempt reported by implementer."],
+            "coverage_of_acceptance_criteria": [{
+                "criterion": "Focused verification passes",
+                "status": "uncovered",
+                "evidence": "Acceptance criteria coverage was not reported structurally.",
+            }],
+            "failure_evidence": ["team_artifact=1"],
+        },
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_CODEX_VERIFY)
+    )
+
+    assert "Gate B" not in response.text
+    assert "Gate C" not in response.text
+    assert "Codex 开始验收" in response.text
+    assert backend.turns
 
 
 @pytest.mark.asyncio
@@ -3863,8 +4191,9 @@ async def test_auto_verification_requires_current_implementer_artifacts_after_re
         ConversationCallback(conversation.id, AUTO_CODEX_VERIFY)
     )
 
-    assert "Gate B" in response.text
-    assert "implementation_report" in response.text
+    assert "验收前还缺少实现记录" in response.text
+    assert "Gate B" not in response.text
+    assert "implementation_report" not in response.text
     assert [
         job for job in ledger.list_team_agent_jobs(team_run.id)
         if job.role == "auditor"
@@ -4925,6 +5254,24 @@ async def test_team_view_buttons_and_handlers_show_status_and_artifacts(
         summary="Audit passed",
         payload={"decision": "pass"},
     )
+    ledger.record_team_artifact(
+        team_run_id=team.id,
+        agent_job_id=job.id,
+        artifact_type="implementation_report",
+        summary=(
+            "在 `# Run fast default tests` 之后插入一行说明。"
+            "现在运行验证。现在运行验证。所有验证通过。生成实施报告： "
+            "```json { \"implementation_report\": { \"status\": \"complete\" } } ```"
+        ),
+        payload={"status": "complete"},
+    )
+    ledger.record_team_artifact(
+        team_run_id=team.id,
+        agent_job_id=job.id,
+        artifact_type="test_report",
+        summary="Implementation test evidence collected.",
+        payload={"status": "complete"},
+    )
 
     actions = _callback_actions(build_auto_stage_buttons(
         conversation.id,
@@ -4944,8 +5291,17 @@ async def test_team_view_buttons_and_handlers_show_status_and_artifacts(
 
     assert "团队状态" in status.text
     assert "审计工程师" in status.text
+    assert "开发团队" in status.text
+    assert "Adaptive Engineering Team" not in status.text
+    assert "codex_gpt" not in status.text
+    assert "audit_report" not in status.text
     assert "团队证据" in artifacts.text
-    assert "audit_report: Audit passed" in artifacts.text
+    assert "审计报告：Audit passed" in artifacts.text
+    assert "实现记录：已更新说明，并完成验证。" in artifacts.text
+    assert "测试记录：已收集测试结果。" in artifacts.text
+    assert "audit_report" not in artifacts.text
+    assert "implementation_report" not in artifacts.text
+    assert "Implementation test evidence collected" not in artifacts.text
 
 
 def test_auto_draft_ready_buttons_include_codex_when_enabled() -> None:

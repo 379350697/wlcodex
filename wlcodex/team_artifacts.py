@@ -109,14 +109,30 @@ def _missing_test_evidence() -> dict[str, Any]:
 def _normalize_command_entry(entry: Any) -> dict[str, Any] | None:
     if not isinstance(entry, Mapping):
         return None
-    command = str(entry.get("command", "")).strip()
+    command = str(
+        entry.get("command")
+        or entry.get("cmd")
+        or entry.get("name")
+        or entry.get("check")
+        or ""
+    ).strip()
     if not command:
         return None
-    summary = str(entry.get("summary", "")).strip() or "command evidence reported"
+    summary = str(
+        entry.get("summary")
+        or entry.get("result")
+        or entry.get("output")
+        or entry.get("status")
+        or ""
+    ).strip() or "command evidence reported"
     try:
         exit_status = int(entry.get("exit_status", entry.get("exit_code", 0)))
     except (TypeError, ValueError):
         exit_status = 1
+    if "passed" in entry:
+        exit_status = 0 if bool(entry.get("passed")) else 1
+    elif str(entry.get("status", "")).strip().lower() in {"pass", "passed", "success", "succeeded"}:
+        exit_status = 0
     return {
         "command": command,
         "exit_status": exit_status,
@@ -128,13 +144,47 @@ def _normalize_changed_file_entry(entry: Any) -> tuple[str | None, str]:
     if isinstance(entry, Mapping):
         path = str(entry.get("path", entry.get("file", ""))).strip()
         action = str(entry.get("action", "")).strip()
-        evidence = str(entry.get("evidence", "")).strip()
+        evidence = str(entry.get("evidence") or entry.get("summary") or "").strip()
         details = " ".join(part for part in (action, path) if part)
         if evidence:
             details = f"{details}: {evidence}" if details else evidence
         return (path or None), details
     text = str(entry).strip()
     return (text or None), text
+
+
+def _semantic_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+
+def _first_semantic_value(mapping: Mapping[str, Any], names: tuple[str, ...]) -> Any:
+    expected = {_semantic_key(name) for name in names}
+    for key, value in mapping.items():
+        if _semantic_key(key) in expected:
+            return value
+    return None
+
+
+def _json_objects_from_text(text: str) -> list[Mapping[str, Any]]:
+    objects: list[Mapping[str, Any]] = []
+    for match in re.finditer(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL):
+        try:
+            parsed = json.loads(match.group(1).strip())
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+        if isinstance(parsed, Mapping):
+            objects.append(parsed)
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, Mapping):
+            objects.append(parsed)
+    return objects
 
 
 def _acceptance_verification_command(entry: Any) -> dict[str, Any] | None:
@@ -167,37 +217,187 @@ def _acceptance_verification_command(entry: Any) -> dict[str, Any] | None:
     }
 
 
+def _verification_result_passed(value: str) -> bool:
+    text = value.lower()
+    if any(marker in text for marker in ("fail", "failed", "error", "失败", "未通过")):
+        return False
+    return True
+
+
+def _command_summary_from_mapping(entry: Mapping[str, Any]) -> str:
+    for key in ("result", "summary", "runtime_impact", "output", "evidence", "status"):
+        value = entry.get(key)
+        if value not in (None, "", []):
+            return str(value).strip()
+    checks = entry.get("checks")
+    if isinstance(checks, Mapping) and checks:
+        return ", ".join(f"{key}={bool(value)}" for key, value in checks.items())
+    return "verification result reported"
+
+
+def _command_from_named_evidence(name: str, entry: Any) -> dict[str, Any] | None:
+    command = str(name).strip()
+    if not command:
+        return None
+    if isinstance(entry, Mapping):
+        direct = _normalize_command_entry(entry)
+        if direct is not None and entry.get("command"):
+            if "passed" in entry:
+                direct["exit_status"] = 0 if bool(entry.get("passed")) else 1
+            return direct
+        command = str(entry.get("command", command)).strip()
+        result = _command_summary_from_mapping(entry)
+        passed = bool(entry.get("passed")) or _verification_result_passed(result)
+    else:
+        result = str(entry).strip() or "verification result reported"
+        passed = _verification_result_passed(result)
+    if not command:
+        return None
+    if not passed:
+        passed = any(
+            marker in result.lower()
+            for marker in ("pass", "passed", "success", "no whitespace errors", "通过")
+        )
+    return {
+        "command": command,
+        "exit_status": 0 if passed else 1,
+        "summary": result,
+    }
+
+
+def _verification_result_commands(value: Any, *, prefix: str = "") -> list[dict[str, Any]]:
+    commands: list[dict[str, Any]] = []
+    if isinstance(value, list):
+        for index, entry in enumerate(value, start=1):
+            if normalized := _normalize_command_entry(entry):
+                commands.append(normalized)
+            else:
+                commands.extend(
+                    _verification_result_commands(entry, prefix=f"{prefix or 'verification'}[{index}]")
+                )
+        return commands
+    if not isinstance(value, Mapping):
+        command = _command_from_named_evidence(prefix or "verification", value)
+        return [command] if command is not None else []
+    direct = _normalize_command_entry(value)
+    if direct is not None and value.get("command"):
+        if "passed" in value:
+            direct["exit_status"] = 0 if bool(value.get("passed")) else 1
+        return [direct]
+    for name, entry in value.items():
+        semantic_name = _semantic_key(name)
+        if semantic_name in {"acceptancecriteria", "acceptancecriteriamet", "evidencerefs"}:
+            continue
+        command_name = ".".join(part for part in (prefix, str(name).strip()) if part)
+        if isinstance(entry, Mapping) and not any(
+            key in entry
+            for key in (
+                "command",
+                "result",
+                "summary",
+                "runtime_impact",
+                "output",
+                "evidence",
+                "status",
+                "passed",
+                "checks",
+            )
+        ):
+            commands.extend(_verification_result_commands(entry, prefix=command_name))
+            continue
+        command = _command_from_named_evidence(command_name, entry)
+        if command is not None:
+            commands.append(command)
+    return commands
+
+
+def _dedupe_commands(commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for command in commands:
+        key = (str(command.get("command", "")), str(command.get("summary", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(command)
+    return deduped
+
+
+def _semantic_command_evidence(evidence: Mapping[str, Any], *, tests_only: bool = False) -> list[dict[str, Any]]:
+    commands: list[dict[str, Any]] = []
+    markers = ("test", "pytest", "verification", "validation", "verify", "check") if tests_only else (
+        "command",
+        "shell",
+        "test",
+        "pytest",
+        "verification",
+        "validation",
+        "verify",
+        "check",
+    )
+    for key, value in evidence.items():
+        semantic_name = _semantic_key(key)
+        if not any(marker in semantic_name for marker in markers):
+            continue
+        if semantic_name in {"acceptancecriteria", "acceptancecriteriamet"}:
+            continue
+        prefix = "" if semantic_name in {
+            "verification",
+            "verificationresults",
+            "validation",
+            "validationresults",
+            "checks",
+            "testresults",
+            "commandsrun",
+            "testsattempted",
+        } else str(key)
+        commands.extend(_verification_result_commands(value, prefix=prefix))
+    return _dedupe_commands(commands)
+
+
 def structured_implementation_evidence_from_text(text: str) -> dict[str, Any]:
     """Extract a compact implementation evidence JSON block from result text."""
     if not text:
         return {}
-    for match in re.finditer(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL):
-        block = match.group(1).strip()
-        try:
-            parsed = json.loads(block)
-        except (json.JSONDecodeError, ValueError, TypeError):
-            continue
-        if not isinstance(parsed, Mapping):
-            continue
+    for parsed in _json_objects_from_text(text):
         evidence = parsed.get("implementation_evidence")
         if not isinstance(evidence, Mapping):
             evidence = parsed.get("implementation_report")
         if not isinstance(evidence, Mapping):
+            evidence = parsed.get("report")
+        if not isinstance(evidence, Mapping):
             evidence = parsed
         if not isinstance(evidence, Mapping):
             continue
-        keys = {
-            "changed_files",
-            "files_changed",
-            "diff_summary",
-            "commands_run",
-            "tests_attempted",
-            "acceptance_verification",
-        }
-        if not keys.intersection(evidence.keys()):
+        semantic_keys = {_semantic_key(key) for key in evidence.keys()}
+        if not semantic_keys.intersection({
+            "changedfiles",
+            "fileschanged",
+            "filesmodified",
+            "modifiedfiles",
+            "changes",
+            "filechanges",
+            "diffsummary",
+            "changesummary",
+            "commandsrun",
+            "testsattempted",
+        }) and not _semantic_command_evidence(evidence):
             continue
         normalized: dict[str, Any] = {}
-        changed_files = evidence.get("changed_files", evidence.get("files_changed"))
+        changed_files = _first_semantic_value(
+            evidence,
+            (
+                "changed_files",
+                "files_changed",
+                "files_modified",
+                "modified_files",
+                "changedFiles",
+                "filesModified",
+                "changes",
+                "file_changes",
+                "fileChanges",
+            ),
+        )
         if isinstance(changed_files, list):
             paths: list[str] = []
             diff_parts: list[str] = []
@@ -209,24 +409,44 @@ def structured_implementation_evidence_from_text(text: str) -> dict[str, Any]:
                     diff_parts.append(details)
             if paths:
                 normalized["changed_files"] = paths
-            if diff_parts and not evidence.get("diff_summary"):
+            if diff_parts and not _first_semantic_value(evidence, ("diff_summary",)):
                 normalized["diff_summary"] = "; ".join(diff_parts)
-        if evidence.get("diff_summary"):
-            normalized["diff_summary"] = str(evidence["diff_summary"]).strip()
+        change_summary = _first_semantic_value(
+            evidence,
+            ("change_summary", "changeSummary", "summary"),
+        )
+        diff_summary = _first_semantic_value(evidence, ("diff_summary", "diffSummary"))
+        if change_summary:
+            summary_text = str(change_summary).strip()
+            if diff_parts and not any(path in summary_text for path in paths):
+                summary_text = f"{summary_text}; {'; '.join(diff_parts)}"
+            normalized["diff_summary"] = summary_text
+        if diff_summary:
+            normalized["diff_summary"] = str(diff_summary).strip()
         for field in ("commands_run", "tests_attempted"):
+            value = _first_semantic_value(evidence, (field, field.replace("_", "")))
             entries = [
                 normalized_entry
-                for entry in evidence.get(field, [])
+                for entry in (value if isinstance(value, list) else [])
                 if (normalized_entry := _normalize_command_entry(entry)) is not None
             ]
             if entries:
                 normalized[field] = entries
         acceptance_command = _acceptance_verification_command(
-            evidence.get("acceptance_verification")
+            _first_semantic_value(evidence, ("acceptance_verification", "acceptanceVerification"))
         )
         if acceptance_command is not None:
             normalized.setdefault("commands_run", []).append(acceptance_command)
             normalized.setdefault("tests_attempted", []).append(acceptance_command)
+        verification_commands = _semantic_command_evidence(evidence)
+        if verification_commands:
+            normalized.setdefault("commands_run", []).extend(verification_commands)
+        test_commands = _semantic_command_evidence(evidence, tests_only=True) or verification_commands
+        if test_commands:
+            normalized.setdefault("tests_attempted", []).extend(test_commands)
+        for field in ("commands_run", "tests_attempted"):
+            if field in normalized:
+                normalized[field] = _dedupe_commands(normalized[field])
         return normalized
     return {}
 

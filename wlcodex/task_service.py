@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import json
+import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from wlcodex.models import ApprovalKind, Task, TaskStatus
 logger = logging.getLogger(__name__)
 
 MAX_LOG_BYTES = 500 * 1024  # 500 KB — per-task log bounded to avoid 7x24 growth
+TASK_WORKSPACE_BASELINE_EVENT = "task_workspace_baseline"
 
 
 class WorkspaceBusy(RuntimeError):
@@ -159,6 +161,7 @@ class TaskService:
         prompt = self.get_stored_prompt(task_id)
         self._transition(task_id, TaskStatus.QUEUED)
         self._ledger.add_event(task_id, "task_promoted_from_waiting", {})
+        self._record_workspace_baseline(task_id, self.get_workspace(task.workspace_alias), "task_promoted_from_waiting")
         return self._ledger.get_task(task_id), prompt
 
     def list_waiting_tasks(self, workspace_alias: str) -> list[Task]:
@@ -211,6 +214,7 @@ class TaskService:
             "workspace_alias": task.workspace_alias,
             "workspace_path": task.workspace_path,
         })
+        self._record_workspace_baseline(task_id, self.get_workspace(task.workspace_alias), "force_parallel_started")
         return self._ledger.get_task(task_id), prompt
 
     # --- Worktree isolation ---
@@ -443,6 +447,7 @@ class TaskService:
             "task_reserved",
             {"prompt": prompt, "context_policy": "fresh_thread_by_default"},
         )
+        self._record_workspace_baseline(task.id, workspace, "task_reserved")
         return task
 
     def set_task_thread(self, task_id: int, thread_id: str) -> Task:
@@ -474,7 +479,24 @@ class TaskService:
             "task_created",
             {"prompt": prompt, "context_policy": "fresh_thread_by_default"},
         )
+        self._record_workspace_baseline(task.id, workspace, "task_created")
         return task
+
+    def _record_workspace_baseline(
+        self,
+        task_id: int,
+        workspace: WorkspaceConfig,
+        phase: str,
+    ) -> None:
+        payload = _capture_workspace_baseline(workspace.path)
+        payload.update(
+            {
+                "phase": phase,
+                "workspace_alias": workspace.alias,
+                "workspace_path": str(workspace.path),
+            }
+        )
+        self._ledger.add_event(task_id, TASK_WORKSPACE_BASELINE_EVENT, payload)
 
     # --- Lifecycle: continue ---
 
@@ -1087,6 +1109,56 @@ class TaskService:
 def _title(prompt: str) -> str:
     one_line = " ".join(prompt.split())
     return one_line[:80]
+
+
+def _capture_workspace_baseline(workspace_path: Path) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "baseline_version": 1,
+        "head_commit": "",
+        "dirty_files": [],
+    }
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(workspace_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if head.returncode == 0:
+            payload["head_commit"] = head.stdout.strip()
+
+        status = subprocess.run(
+            ["git", "-C", str(workspace_path), "status", "--porcelain=v1", "-z"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if status.returncode != 0:
+            payload["capture_error"] = status.stderr.strip() or "git status failed"
+            return payload
+        payload["dirty_files"] = _parse_porcelain_status_z(status.stdout)
+    except Exception as exc:
+        payload["capture_error"] = str(exc)
+    return payload
+
+
+def _parse_porcelain_status_z(output: str) -> list[dict[str, str]]:
+    dirty_files: list[dict[str, str]] = []
+    entries = [entry for entry in output.split("\0") if entry]
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        if len(entry) < 4:
+            index += 1
+            continue
+        raw_status = entry[:2]
+        path = entry[3:]
+        status = raw_status.strip() or raw_status
+        dirty_files.append({"path": path, "status": status})
+        if raw_status[0] in ("R", "C") or raw_status[1] in ("R", "C"):
+            index += 1
+        index += 1
+    return dirty_files
 
 
 async def drain_workspace(

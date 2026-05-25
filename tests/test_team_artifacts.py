@@ -295,6 +295,170 @@ def test_claude_implementation_report_shape_becomes_gate_ready_evidence():
     assert validate_test_report(test_payload).passed is True
 
 
+def test_claude_report_with_files_modified_and_verification_results_is_gate_ready():
+    text = """
+```json
+{
+  "implementation_report": {
+    "status": "completed",
+    "change_summary": "在 README.md 的 Local setup 测试命令区新增一行快速默认测试说明",
+    "files_modified": ["README.md"],
+    "verification_results": {
+      "git_diff_check": {
+        "passed": true,
+        "result": "no whitespace errors"
+      },
+      "git_diff": {
+        "passed": true,
+        "summary": "1 file changed, 1 insertion(+), README only"
+      },
+      "gitnexus_detect_changes": {
+        "passed": true,
+        "risk_level": "low",
+        "runtime_impact": "none - only README.md touched"
+      }
+    },
+    "acceptance_criteria_met": [
+      "只修改 README.md",
+      "只增加一行测试说明"
+    ]
+  }
+}
+```
+"""
+
+    evidence = structured_implementation_evidence_from_text(text)
+    payload = implementation_report_payload(
+        summary="Claude implementation completed.",
+        changed_files=evidence.get("changed_files", []),
+        diff_summary=evidence.get("diff_summary", ""),
+        source_agent="claude",
+        commands_run=evidence.get("commands_run", []),
+        tests_attempted=evidence.get("tests_attempted", []),
+    )
+    test_payload = build_test_report_payload_from_implementation(
+        summary="Implementation test evidence collected.",
+        implementation_artifact_id=6,
+        commands_run=evidence.get("tests_attempted", []),
+        acceptance_criteria=["README 增加一行说明"],
+    )
+
+    assert evidence["changed_files"] == ["README.md"]
+    assert evidence["diff_summary"].startswith(
+        "在 README.md 的 Local setup 测试命令区新增一行快速默认测试说明"
+    )
+    assert {entry["command"] for entry in evidence["commands_run"]} == {
+        "git_diff_check",
+        "git_diff",
+        "gitnexus_detect_changes",
+    }
+    assert validate_implementation_report(payload).passed is True
+    assert validate_test_report(test_payload).passed is True
+
+
+def test_claude_report_with_generic_verification_shape_is_gate_ready():
+    text = """
+```json
+{
+  "implementation_report": {
+    "status": "completed",
+    "change_summary": "在 README.md Local setup 区 # Run fast default tests 下方新增一行测试说明",
+    "files_modified": ["README.md"],
+    "verification": {
+      "git_diff_check": "passed",
+      "git_diff": "1 file changed, 1 insertion(+) - README only",
+      "gitnexus_detect_changes": {
+        "readme_impact": "Section heading touched, zero runtime impact",
+        "other_changes": "6 pre-existing modified files unrelated to this task",
+        "risk_level": "medium from pre-existing changes"
+      }
+    },
+    "acceptance_criteria": {
+      "only_readme_modified": true,
+      "one_line_added": true,
+      "commands_unchanged": true
+    }
+  }
+}
+```
+"""
+
+    evidence = structured_implementation_evidence_from_text(text)
+    payload = implementation_report_payload(
+        summary="Claude implementation completed.",
+        changed_files=evidence.get("changed_files", []),
+        diff_summary=evidence.get("diff_summary", ""),
+        source_agent="claude",
+        commands_run=evidence.get("commands_run", []),
+        tests_attempted=evidence.get("tests_attempted", []),
+    )
+    test_payload = build_test_report_payload_from_implementation(
+        summary="Implementation test evidence collected.",
+        implementation_artifact_id=8,
+        commands_run=evidence.get("tests_attempted", []),
+        acceptance_criteria=["README 增加一行说明"],
+    )
+
+    assert evidence["changed_files"] == ["README.md"]
+    assert {entry["command"] for entry in evidence["commands_run"]} == {
+        "git_diff_check",
+        "git_diff",
+        "gitnexus_detect_changes.readme_impact",
+        "gitnexus_detect_changes.other_changes",
+        "gitnexus_detect_changes.risk_level",
+    }
+    assert validate_implementation_report(payload).passed is True
+    assert validate_test_report(test_payload).passed is True
+
+
+def test_unfenced_report_with_natural_aliases_becomes_gate_ready():
+    text = """
+完成了 README 文档更新。
+{
+  "implementation_report": {
+    "summary": "README 第139行新增快速测试说明",
+    "changes": [
+      {
+        "file": "README.md",
+        "action": "updated",
+        "summary": "added one routine verification note"
+      }
+    ],
+    "validation": {
+      "diff_check": {"status": "passed", "summary": "no whitespace errors"},
+      "pytest_q": "928 passed, 865 deselected in 65.71s"
+    },
+    "known_limitations": ["None"]
+  }
+}
+"""
+
+    evidence = structured_implementation_evidence_from_text(text)
+    payload = implementation_report_payload(
+        summary="Claude implementation completed.",
+        changed_files=evidence.get("changed_files", []),
+        diff_summary=evidence.get("diff_summary", ""),
+        source_agent="claude",
+        commands_run=evidence.get("commands_run", []),
+        tests_attempted=evidence.get("tests_attempted", []),
+    )
+    test_payload = build_test_report_payload_from_implementation(
+        summary="Implementation test evidence collected.",
+        implementation_artifact_id=10,
+        commands_run=evidence.get("tests_attempted", []),
+        acceptance_criteria=["README 增加一行说明"],
+    )
+
+    assert evidence["changed_files"] == ["README.md"]
+    assert "README.md" in evidence["diff_summary"]
+    assert {entry["command"] for entry in evidence["commands_run"]} == {
+        "diff_check",
+        "pytest_q",
+    }
+    assert validate_implementation_report(payload).passed is True
+    assert validate_test_report(test_payload).passed is True
+
+
 def test_test_report_gate_blocks_placeholder_evidence():
     payload = {
         "summary": "Implementation test evidence requires audit review.",
