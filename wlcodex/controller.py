@@ -50,6 +50,7 @@ from wlcodex.conversation_callback import (
 )
 from wlcodex.context_packets import (
     ContextBudget,
+    approx_tokens,
     build_codex_analysis_packet,
     build_codex_verification_packet as make_verification_packet,
     build_auto_context_packet,
@@ -71,6 +72,7 @@ from wlcodex.auto_workflow import (
     AUTO_SHOW_DRAFT,
     AUTO_CANCEL,
     AUTO_SEND_TO_CLAUDE,
+    AUTO_SEND_TO_CODEX,
     AUTO_CONTINUE_CONTEXT,
     AUTO_REWRITE_PLAN,
     AUTO_CODEX_TAKEOVER,
@@ -81,6 +83,8 @@ from wlcodex.auto_workflow import (
     AUTO_INTERRUPT_CLAUDE,
     AUTO_VIEW_DIFF,
     AUTO_VIEW_STATUS,
+    TEAM_VIEW_ARTIFACTS,
+    TEAM_VIEW_STATUS,
     ROLE_AUTO_ANALYSIS,
     ROLE_AUTO_CONTEXT_SUPPLEMENT,
     ROLE_AUTO_FINAL_PLAN,
@@ -148,6 +152,7 @@ from wlcodex.status import (
     render_conversation_help,
     render_conversation_status,
     render_prepared_carryover,
+    render_team_status_summary,
     render_workspace_list,
 )
 from wlcodex.models import ConversationMode
@@ -160,6 +165,29 @@ from wlcodex.task_service import TaskService
 logger = logging.getLogger(__name__)
 
 HELP_TEXT = render_conversation_help()
+
+
+def _changed_files_from_inspection_body(body: str) -> list[str]:
+    changed_files: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped in ("相关文件：", "暂无文件记录。"):
+            continue
+        if stripped.startswith("[") and "]" in stripped:
+            stripped = stripped.split("]", 1)[1].strip()
+        if stripped:
+            changed_files.append(stripped[:200])
+    return changed_files
+
+
+def _diff_body_has_evidence(body: str) -> bool:
+    stripped = body.strip()
+    return bool(
+        stripped
+        and stripped not in ("暂无 diff 信息。", "工作区没有未提交变更。")
+    )
 
 
 def _is_lightweight_greeting(text: str) -> bool:
@@ -198,6 +226,18 @@ class CommandController:
         orchestration_runner: object | None = None,
         runtime_event_store: object | None = None,
         execution_scheduler: object | None = None,
+        adaptive_team_enabled: bool = True,
+        implementer_model_profiles: tuple[str, ...] = (
+            "claude_deepseek",
+            "codex_gpt",
+        ),
+        adaptive_team_model_profiles: dict[str, str] | None = None,
+        adaptive_team_role_skills: dict[str, tuple[str, ...]] | None = None,
+        adaptive_team_role_capabilities: dict[str, tuple[str, ...]] | None = None,
+        architect_model_profile: str = "codex_gpt",
+        investigator_model_profile: str = "codex_gpt",
+        tester_model_profile: str = "codex_gpt",
+        auditor_model_profile: str = "codex_gpt",
     ) -> None:
         self._service = task_service
         self._backend = backend
@@ -207,6 +247,44 @@ class CommandController:
         self._claude_permission_state = claude_permission_state
         self._default_mode = default_mode
         self._default_workspace = default_workspace
+        self._adaptive_team_enabled = adaptive_team_enabled
+        self._implementer_model_profiles = tuple(implementer_model_profiles)
+        self._adaptive_team_model_profiles = {
+            "claude_deepseek": "claude",
+            "codex_gpt": "codex",
+            **{
+                str(key): str(value)
+                for key, value in (adaptive_team_model_profiles or {}).items()
+            },
+        }
+        self._adaptive_team_role_skills = {
+            str(role): tuple(str(skill) for skill in skills)
+            for role, skills in (adaptive_team_role_skills or {}).items()
+        }
+        self._adaptive_team_role_capabilities = {
+            str(role): tuple(str(capability) for capability in capabilities)
+            for role, capabilities in (adaptive_team_role_capabilities or {}).items()
+        }
+        if self._adaptive_team_enabled:
+            from wlcodex.team_capabilities import audit_role_capability_config
+            from wlcodex.team_roles import TeamRoleCatalog
+
+            catalog = TeamRoleCatalog.default()
+            role_capability_config = {
+                role.role_id.value: role.allowed_capabilities
+                for role in catalog.roles.values()
+            }
+            role_capability_config.update(self._adaptive_team_role_capabilities)
+            capability_findings = audit_role_capability_config(role_capability_config)
+            if capability_findings:
+                raise ValueError(
+                    "invalid adaptive team role capabilities: "
+                    + "; ".join(capability_findings)
+                )
+        self._architect_model_profile = architect_model_profile
+        self._investigator_model_profile = investigator_model_profile
+        self._tester_model_profile = tester_model_profile
+        self._auditor_model_profile = auditor_model_profile
         self._interaction_renderer = interaction_renderer
         self._orchestration_runner = orchestration_runner
         self._store = runtime_event_store
@@ -219,6 +297,48 @@ class CommandController:
             task_service, backend, inspector
         )
         self._background_tasks: set[asyncio.Task[None]] = set()
+
+    def _codex_implementer_enabled(self) -> bool:
+        return (
+            self._adaptive_team_enabled
+            and any(
+                self._adaptive_team_model_profiles.get(profile, profile).lower()
+                == "codex"
+                for profile in self._implementer_model_profiles
+            )
+        )
+
+    def _codex_implementer_model_profile(self) -> str | None:
+        for profile in self._implementer_model_profiles:
+            if (
+                self._adaptive_team_model_profiles.get(profile, profile).lower()
+                == "codex"
+            ):
+                return profile
+        return None
+
+    def _claude_implementer_model_profile(self) -> str | None:
+        for profile in self._implementer_model_profiles:
+            if (
+                self._adaptive_team_model_profiles.get(profile, profile).lower()
+                == "claude"
+            ):
+                return profile
+        return None
+
+    def _mark_auto_team_failed(
+        self,
+        *,
+        team_run: object | None,
+        architect_job: object | None,
+    ) -> None:
+        if team_run is not None and hasattr(self._ledger, "update_team_run_status"):
+            self._ledger.update_team_run_status(team_run.id, "failed")
+        if architect_job is not None and hasattr(
+            self._ledger,
+            "update_team_agent_job_status",
+        ):
+            self._ledger.update_team_agent_job_status(architect_job.id, "failed")
 
     def set_interaction_renderer(self, renderer: object) -> None:
         """Set the interaction renderer after construction (created after handlers)."""
@@ -241,10 +361,394 @@ class CommandController:
         """Return the internal Workbench execution scheduler."""
         return self._execution_scheduler
 
+    def _build_team_context_packet_for_job(
+        self,
+        *,
+        team_run: object,
+        agent_job: object,
+        role: str,
+        model_profile: str,
+        resume_state: str,
+        output_schema: str,
+    ) -> object:
+        from wlcodex.team_capabilities import (
+            CapabilityBudget,
+            SkillCatalog,
+            SkillDefinition,
+            audit_role_capability_config,
+            select_capabilities,
+        )
+        from wlcodex.team_context import TeamContextInput, build_team_context_packet
+        from wlcodex.team_memory import InstinctMemory, select_relevant_instincts
+        from wlcodex.team_roles import RoleId, TeamRoleCatalog
+
+        if self._ledger is None:
+            raise RuntimeError("team context packets require a ledger")
+
+        try:
+            role_id = RoleId(role)
+        except ValueError:
+            raise ValueError(f"unknown team role '{role}'") from None
+        if agent_job.role != role_id.value:
+            raise ValueError(
+                f"agent job role '{agent_job.role}' does not match requested "
+                f"role '{role_id.value}'"
+            )
+
+        role_def = TeamRoleCatalog.default().role(role_id)
+        conversation = self._ledger.get_conversation(team_run.conversation_id)
+        budget = CapabilityBudget(
+            max_skills=2,
+            max_tools=4,
+            max_memory_snippets=2,
+            max_prompt_tokens=1200,
+        )
+        capability_budget = {
+            "max_skills": budget.max_skills,
+            "max_tools": budget.max_tools,
+            "max_memory_snippets": budget.max_memory_snippets,
+            "max_prompt_tokens": budget.max_prompt_tokens,
+        }
+
+        artifacts = []
+        if hasattr(self._ledger, "list_team_artifacts"):
+            artifacts = self._ledger.list_team_artifacts(team_run.id)
+        artifact_summaries = [
+            f"{artifact.artifact_type}: {artifact.summary[:300]}"
+            for artifact in artifacts
+        ]
+
+        active_instincts = self._ledger.list_team_instincts(status="active")
+        task_text = f"{team_run.goal}\n{resume_state}".strip()
+        selected_instincts = select_relevant_instincts(
+            tuple(active_instincts),
+            workspace_alias=conversation.workspace_alias,
+            role=role,
+            task_text=task_text,
+            limit=budget.max_memory_snippets,
+            min_confidence=0.6,
+        )
+        instinct_memories = tuple(
+            InstinctMemory(
+                instinct_id=instinct.instinct_id,
+                scope=instinct.scope,
+                workspace_alias=instinct.workspace_alias,
+                role=instinct.role,
+                domain=instinct.domain,
+                trigger=instinct.trigger,
+                action=instinct.action,
+                confidence=instinct.confidence,
+                evidence_refs=instinct.evidence_refs,
+                status=instinct.status,
+                created_at=instinct.created_at,
+                last_validated_at=instinct.last_validated_at,
+            )
+            for instinct in selected_instincts
+        )
+        relevant_instincts = tuple(
+            memory.as_packet_item() for memory in instinct_memories
+        )
+
+        configured_skill_ids = self._adaptive_team_role_skills.get(role_id.value)
+        configured_tool_ids = self._adaptive_team_role_capabilities.get(role_id.value)
+        role_skill_ids = configured_skill_ids or tuple(role_def.skills)
+        role_tool_ids = configured_tool_ids or tuple(role_def.allowed_capabilities)
+        if configured_tool_ids is not None:
+            capability_findings = audit_role_capability_config({
+                role_id.value: configured_tool_ids,
+            })
+            if capability_findings:
+                raise ValueError(
+                    "invalid adaptive team role capabilities: "
+                    + "; ".join(capability_findings)
+                )
+        capability_selection = select_capabilities(
+            catalog=SkillCatalog(
+                [
+                    SkillDefinition(
+                        skill_id=skill_id,
+                        roles=(role_id.value,),
+                        triggers=(
+                            role_id.value,
+                            role_def.display_name,
+                            role_def.mission,
+                            role_def.instructions,
+                        ),
+                        required_tools=(),
+                        token_cost=0,
+                    )
+                    for skill_id in role_skill_ids
+                ]
+            ),
+            role=role_id.value,
+            task=task_text,
+            available_tools=role_tool_ids,
+            budget=budget,
+        )
+        selected_skill_ids = tuple(
+            skill.skill_id for skill in capability_selection.skills
+        )
+        if not selected_skill_ids:
+            selected_skill_ids = tuple(role_skill_ids[: budget.max_skills])
+        selected_tool_pool = set(capability_selection.tools)
+        selected_tool_ids = tuple(
+            tool for tool in role_tool_ids if tool in selected_tool_pool
+        )[: budget.max_tools]
+        if not selected_tool_ids:
+            selected_tool_ids = tuple(role_tool_ids[: budget.max_tools])
+        selected_activation_ids = selected_skill_ids + selected_tool_ids
+        source_refs = tuple(
+            [f"team_artifact={artifact.id}" for artifact in artifacts]
+            + [f"team_instinct={instinct.id}" for instinct in selected_instincts]
+        )
+        evidence_refs: list[str] = [
+            f"orchestration_run={team_run.orchestration_run_id or 0}",
+            f"conversation={team_run.conversation_id}",
+            f"team_run={team_run.id}",
+            f"agent_job={agent_job.id}",
+        ]
+        evidence_refs.extend(source_refs)
+        for artifact in artifacts:
+            payload = artifact.payload if isinstance(artifact.payload, dict) else {}
+            for changed_file in payload.get("changed_files", [])[:10]:
+                evidence_refs.append(f"changed_file={str(changed_file)[:200]}")
+            for command in payload.get("commands_run", [])[:5]:
+                evidence_refs.append(f"command={str(command)[:200]}")
+        existing_activation_keys = {
+            (
+                activation.activation_type,
+                activation.activation_id,
+                activation.source,
+            )
+            for activation in self._ledger.list_team_skill_activations(agent_job.id)
+        }
+
+        def record_activation_once(
+            *,
+            activation_type: str,
+            activation_id: str,
+            source: str,
+        ) -> None:
+            activation_key = (activation_type, activation_id, source)
+            if activation_key in existing_activation_keys:
+                return
+            self._ledger.record_team_skill_activation(
+                team_run_id=team_run.id,
+                agent_job_id=agent_job.id,
+                activation_type=activation_type,
+                activation_id=activation_id,
+                source=source,
+                token_cost=0,
+            )
+            self._emit_team_runtime_event(
+                EventType.TEAM_SKILL_ACTIVATED,
+                conversation_id=team_run.conversation_id,
+                orchestration_run_id=team_run.orchestration_run_id or 0,
+                team_run_id=team_run.id,
+                agent_job_id=agent_job.id,
+                payload={
+                    "activation_type": activation_type,
+                    "activation_id": activation_id,
+                    "source": source,
+                    "role": role_id.value,
+                    "model_profile": model_profile,
+                },
+            )
+            existing_activation_keys.add(activation_key)
+
+        for skill_id in selected_skill_ids:
+            record_activation_once(
+                activation_type="skill",
+                activation_id=skill_id,
+                source="role_default",
+            )
+        for tool_id in selected_tool_ids:
+            record_activation_once(
+                activation_type="tool",
+                activation_id=tool_id,
+                source="role_capability",
+            )
+        for instinct in selected_instincts:
+            record_activation_once(
+                activation_type="memory",
+                activation_id=instinct.instinct_id,
+                source="instinct_memory",
+            )
+        self._emit_team_runtime_event(
+            EventType.TEAM_CAPABILITY_BUDGET_APPLIED,
+            conversation_id=team_run.conversation_id,
+            orchestration_run_id=team_run.orchestration_run_id or 0,
+            team_run_id=team_run.id,
+            agent_job_id=agent_job.id,
+            payload={
+                "role": role_id.value,
+                "model_profile": model_profile,
+                "budget": capability_budget,
+                "selected_skills": list(selected_skill_ids),
+                "selected_tools": list(selected_tool_ids),
+                "selected_memories": [
+                    instinct.instinct_id for instinct in selected_instincts
+                ],
+            },
+        )
+
+        return build_team_context_packet(
+            TeamContextInput(
+                team_run_id=team_run.id,
+                agent_job_id=agent_job.id,
+                conversation_id=team_run.conversation_id,
+                orchestration_run_id=team_run.orchestration_run_id or 0,
+                role=role_def,
+                model_profile=model_profile,
+                user_goal=team_run.goal,
+                workspace_alias=conversation.workspace_alias,
+                skills=selected_skill_ids,
+                allowed_capabilities=selected_tool_ids,
+                artifact_summaries=artifact_summaries,
+                relevant_instincts=relevant_instincts,
+                capability_budget=capability_budget,
+                skill_activations=selected_activation_ids,
+                source_refs=source_refs,
+                evidence_refs=tuple(dict.fromkeys(evidence_refs)),
+                resume_state=resume_state,
+                output_schema=output_schema,
+                token_budget=budget.max_prompt_tokens,
+            )
+        )
+
     def _emit_event(self, event: RuntimeEvent) -> RuntimeEvent:
         if self._store is None:
             return event
         return self._store.append(event)
+
+    def _emit_team_runtime_event(
+        self,
+        event_type: str,
+        *,
+        conversation_id: int,
+        orchestration_run_id: int,
+        team_run_id: int,
+        agent_job_id: int | None = None,
+        agent_run_id: int | None = None,
+        task_id: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> RuntimeEvent:
+        event_payload: dict[str, Any] = {"team_run_id": team_run_id}
+        if agent_job_id is not None:
+            event_payload["agent_job_id"] = agent_job_id
+        if payload:
+            event_payload.update(payload)
+        return self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=event_type,
+            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+            aggregate_id=str(orchestration_run_id),
+            correlation_id=f"team-run-{team_run_id}",
+            source=EventSource.CONTROLLER,
+            actor="controller",
+            visibility=Visibility.OPERATOR,
+            payload=event_payload,
+            occurred_at=now_iso(),
+            conversation_id=conversation_id,
+            orchestration_run_id=orchestration_run_id,
+            agent_run_id=agent_run_id,
+            task_id=task_id,
+        ))
+
+    def _latest_team_artifact_payload(
+        self,
+        *,
+        team_run: object,
+        artifact_type: str,
+        agent_job_id: int | None = None,
+    ) -> tuple[int | None, dict[str, Any] | None]:
+        if not hasattr(self._ledger, "list_team_artifacts"):
+            return None, None
+        for artifact in reversed(self._ledger.list_team_artifacts(team_run.id)):
+            if artifact.artifact_type == artifact_type:
+                if agent_job_id is not None and artifact.agent_job_id != agent_job_id:
+                    continue
+                return artifact.id, dict(artifact.payload)
+        return None, None
+
+    def _latest_team_job_id(
+        self,
+        team_run: object,
+        *,
+        role: str,
+        status: str = "done",
+    ) -> int | None:
+        if not hasattr(self._ledger, "list_team_agent_jobs"):
+            return None
+        for job in reversed(self._ledger.list_team_agent_jobs(team_run.id)):
+            if job.role == role and job.status == status:
+                return int(job.id)
+        return None
+
+    def _team_gate_response(
+        self,
+        *,
+        gate_name: str,
+        artifact_type: str,
+        validator: object,
+        team_run: object,
+        conversation_id: int,
+        orchestration_run_id: int,
+        agent_job_id: int | None = None,
+        bind_agent_job: bool = False,
+    ) -> ControllerResponse | None:
+        if bind_agent_job and agent_job_id is None:
+            artifact_id = None
+            payload = None
+            missing = (f"{artifact_type}_current_agent_job",)
+        else:
+            artifact_id, payload = self._latest_team_artifact_payload(
+                team_run=team_run,
+                artifact_type=artifact_type,
+                agent_job_id=agent_job_id if bind_agent_job else None,
+            )
+            missing = (artifact_type,) if payload is None else ()
+        if payload is None:
+            pass
+        else:
+            result = validator(payload)
+            if result.passed:
+                self._emit_team_runtime_event(
+                    EventType.TEAM_GATE_PASSED,
+                    conversation_id=conversation_id,
+                    orchestration_run_id=orchestration_run_id,
+                    team_run_id=team_run.id,
+                    payload={
+                        "gate": gate_name,
+                        "artifact_type": artifact_type,
+                        "artifact_id": artifact_id,
+                        "agent_job_id": agent_job_id,
+                    },
+                )
+                return None
+            missing = result.missing
+        self._emit_team_runtime_event(
+            EventType.TEAM_GATE_FAILED,
+            conversation_id=conversation_id,
+            orchestration_run_id=orchestration_run_id,
+            team_run_id=team_run.id,
+            payload={
+                "gate": gate_name,
+                "artifact_type": artifact_type,
+                "artifact_id": artifact_id,
+                "agent_job_id": agent_job_id,
+                "missing": list(missing),
+            },
+        )
+        missing_text = ", ".join(missing)
+        tester_note = ""
+        if gate_name == "Gate C":
+            tester_note = "\n说明：Auditor performs tester duties in v1；测试证据仍必须绑定本轮实现。"
+        return ControllerResponse(
+            f"{gate_name} 阻断：{artifact_type} 缺少必填字段：{missing_text}。\n"
+            "请先补齐上游角色 artifact，再进入下一角色阶段。"
+            f"{tester_note}"
+        )
 
     def _new_correlation_id(self) -> str:
         return str(uuid.uuid4())
@@ -315,11 +819,64 @@ class CommandController:
                         orch_runs = self._ledger.list_orchestration_runs(active.id, limit=1)
                         orch_run = orch_runs[0] if orch_runs else None
                         surface_mode = self._latest_surface_mode(active.id) or "product"
-                        return ControllerResponse(
-                            render_conversation_status(
-                                active, latest_run=latest_run, orch_run=orch_run,
-                                surface_mode=surface_mode,
+                        buttons: list[list[dict[str, str]]] = []
+                        auto_run = self._latest_active_auto_run(active.id)
+                        if auto_run is not None:
+                            buttons = build_auto_stage_buttons(
+                                active.id,
+                                auto_run.current_step,
+                                last_codex_analysis=auto_run.last_codex_analysis or "",
+                                codex_implementer_enabled=(
+                                    self._codex_implementer_enabled()
+                                ),
                             )
+                            orch_run = auto_run
+                        status_text = render_conversation_status(
+                            active, latest_run=latest_run, orch_run=orch_run,
+                            surface_mode=surface_mode,
+                        )
+                        if (
+                            orch_run is not None
+                            and hasattr(self._ledger, "get_team_run_for_orchestration")
+                        ):
+                            team_run = self._ledger.get_team_run_for_orchestration(
+                                orch_run.id
+                            )
+                            if team_run is not None:
+                                roles: list[tuple[str, str, str]] = []
+                                if hasattr(self._ledger, "list_team_agent_jobs"):
+                                    roles = [
+                                        (
+                                            job.role,
+                                            job.model_profile,
+                                            job.status,
+                                        )
+                                        for job in self._ledger.list_team_agent_jobs(
+                                            team_run.id
+                                        )
+                                    ]
+                                latest_artifacts: list[str] = []
+                                if hasattr(self._ledger, "list_team_artifacts"):
+                                    artifacts = self._ledger.list_team_artifacts(
+                                        team_run.id
+                                    )
+                                    latest_artifacts = [
+                                        (
+                                            f"{artifact.artifact_type}: "
+                                            f"{artifact.summary}"
+                                        )
+                                        for artifact in reversed(artifacts[-4:])
+                                    ]
+                                team_summary = render_team_status_summary(
+                                    team_run.goal,
+                                    team_run.route,
+                                    roles,
+                                    latest_artifacts,
+                                )
+                                status_text = f"{status_text}\n\n{team_summary}"
+                        return ControllerResponse(
+                            status_text,
+                            buttons=buttons,
                         )
                 return ControllerResponse(
                     "当前还没有工作台。发送 /new 开始一个新的工作台。"
@@ -659,7 +1216,12 @@ class CommandController:
                             ContextBudget().conversation_summary_tokens,
                         ),
                     )
-                    buttons = build_auto_stage_buttons(active.id, step)
+                    buttons = build_auto_stage_buttons(
+                        active.id,
+                        step,
+                        last_codex_analysis=auto_run.last_codex_analysis or "",
+                        codex_implementer_enabled=self._codex_implementer_enabled(),
+                    )
                     return ControllerResponse(
                         f"已记录备注：{text[:100]}",
                         buttons=buttons,
@@ -1680,12 +2242,15 @@ class CommandController:
             had_error = False
             error_text = ""
             claude_session_id: str = ""
+            stream_chunks: list[str] = []
             if self._interaction_renderer is not None:
                 stream = self._claude.send_streaming(request)
                 if hasattr(stream, "__aiter__"):
                     async for stream_event in stream:
                         event_type = getattr(stream_event, "event_type", "")
                         delta = getattr(stream_event, "delta", "")
+                        if delta and event_type != "error":
+                            stream_chunks.append(str(delta))
                         # Capture latest non-empty session_id for persistence.
                         sid = getattr(stream_event, "session_id", "")
                         if sid:
@@ -1757,6 +2322,8 @@ class CommandController:
                     completion_summary = result.text[:2000]
                 except Exception:
                     completion_summary = ""
+            if not completion_summary and stream_chunks:
+                completion_summary = "".join(stream_chunks).strip()[:5000]
             self._ledger.update_agent_run_status(
                 agent_run_id,
                 "done",
@@ -1856,6 +2423,20 @@ class CommandController:
                 workspace_alias=self._default_workspace,
             )
 
+        existing_auto_run = self._latest_active_auto_run(active.id)
+        if existing_auto_run is not None:
+            buttons = build_auto_stage_buttons(
+                active.id,
+                existing_auto_run.current_step,
+                last_codex_analysis=existing_auto_run.last_codex_analysis or "",
+                codex_implementer_enabled=self._codex_implementer_enabled(),
+            )
+            return ControllerResponse(
+                "已有 /auto 工作流正在进行："
+                f"{auto_stage_label(existing_auto_run.current_step)}",
+                buttons=buttons,
+            )
+
         # Check if workspace is busy
         busy = await self._direct_command_busy_response(
             active=active,
@@ -1913,7 +2494,35 @@ class CommandController:
             status="running",
             current_step=AUTO_COLLECTING_CONTEXT,
         )
+        team_run = None
+        if self._adaptive_team_enabled and hasattr(self._ledger, "create_team_run"):
+            team_run = self._ledger.create_team_run(
+                conversation_id=active.id,
+                orchestration_run_id=orch_run.id,
+                goal=command.prompt,
+                route="staged_auto",
+                risk_level="medium",
+            )
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.TEAM_RUN_STARTED,
+                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                aggregate_id=str(orch_run.id),
+                correlation_id=cid,
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.OPERATOR,
+                payload={
+                    "team_run_id": team_run.id,
+                    "route": "staged_auto",
+                    "risk_level": "medium",
+                },
+                occurred_at=now_iso(),
+                conversation_id=active.id,
+                orchestration_run_id=orch_run.id,
+            ))
 
+        architect_job = None
         # Start Codex in read-only analysis mode (NOT the eager orchestration runner)
         budget = ContextBudget()
         packet = build_auto_context_packet(
@@ -1924,6 +2533,7 @@ class CommandController:
             workspace=active.workspace_alias,
             budget=budget,
         )
+        codex_prompt = packet.render()
 
         task = self._reserve_execution_lease(
             conversation_id=active.id,
@@ -1941,6 +2551,95 @@ class CommandController:
             prompt_packet_summary=packet.summary(),
         )
         self._ledger.update_agent_run_status(codex_analysis_run.id, "running")
+        if team_run is not None:
+            try:
+                architect_job = self._ledger.create_team_agent_job(
+                    team_run_id=team_run.id,
+                    role="architect",
+                    model_profile=self._architect_model_profile,
+                    status="running",
+                    agent_run_id=codex_analysis_run.id,
+                )
+                self._ledger.record_team_assignment(
+                    team_run_id=team_run.id,
+                    role="architect",
+                    model_profile=self._architect_model_profile,
+                    selected_by="policy",
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TEAM_AGENT_JOB_STARTED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(codex_analysis_run.id),
+                    correlation_id=cid,
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "team_run_id": team_run.id,
+                        "agent_job_id": architect_job.id,
+                        "role": "architect",
+                        "model_profile": self._architect_model_profile,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=active.id,
+                    orchestration_run_id=orch_run.id,
+                    agent_run_id=codex_analysis_run.id,
+                ))
+                context_packet = self._build_team_context_packet_for_job(
+                    team_run=team_run,
+                    agent_job=architect_job,
+                    role="architect",
+                    model_profile=self._architect_model_profile,
+                    resume_state="staged auto context collection starting",
+                    output_schema="implementation_plan",
+                )
+                prompt_text = context_packet.render()
+                codex_prompt = prompt_text
+                packet_record = self._ledger.record_team_context_packet(
+                    team_run_id=team_run.id,
+                    agent_job_id=architect_job.id,
+                    packet_json=context_packet.as_json(),
+                    prompt_text=prompt_text,
+                    prompt_tokens=approx_tokens(prompt_text),
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TEAM_CONTEXT_PACKET_RECORDED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(codex_analysis_run.id),
+                    correlation_id=cid,
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "team_run_id": team_run.id,
+                        "agent_job_id": architect_job.id,
+                        "context_packet_id": packet_record.id,
+                        "prompt_tokens": packet_record.prompt_tokens,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=active.id,
+                    orchestration_run_id=orch_run.id,
+                    agent_run_id=codex_analysis_run.id,
+                ))
+            except Exception as exc:
+                task = self._service.fail_task(task.id, str(exc))
+                self._ledger.update_agent_run_status(
+                    codex_analysis_run.id,
+                    "failed",
+                    completion_summary=str(exc)[:2000],
+                )
+                self._ledger.update_orchestration_run(
+                    orch_run.id,
+                    status="failed",
+                    last_codex_analysis=str(exc)[:5000],
+                )
+                self._mark_auto_team_failed(
+                    team_run=team_run,
+                    architect_job=architect_job,
+                )
+                return ControllerResponse(classify_user_error(exc))
 
         workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
 
@@ -1964,7 +2663,7 @@ class CommandController:
                 active=active,
                 task=task,
                 workspace_path=workspace_path,
-                prompt=packet.render(),
+                prompt=codex_prompt,
                 interaction_mode="general",
             )
         except Exception as exc:
@@ -1976,6 +2675,10 @@ class CommandController:
                 orch_run.id,
                 status="failed",
                 last_codex_analysis=str(exc)[:5000],
+            )
+            self._mark_auto_team_failed(
+                team_run=team_run,
+                architect_job=architect_job,
             )
             return ControllerResponse(classify_user_error(exc))
 
@@ -2028,6 +2731,174 @@ class CommandController:
             return None
         return self._ledger.get_latest_active_auto_run(conversation_id)
 
+    def _latest_team_run(self, conversation_id: int) -> object | None:
+        if self._ledger is None or not hasattr(
+            self._ledger,
+            "get_team_run_for_orchestration",
+        ):
+            return None
+        for orch_run in self._ledger.list_orchestration_runs(conversation_id, limit=20):
+            team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
+            if team_run is not None:
+                return team_run
+        return None
+
+    def _team_status_buttons(self, conversation_id: int) -> list[list[dict[str, str]]]:
+        orch_run = self._latest_active_auto_run(conversation_id)
+        if orch_run is None:
+            return [[{
+                "text": "查看状态",
+                "callback_data": encode_conversation_callback(
+                    conversation_id,
+                    AUTO_VIEW_STATUS,
+                ),
+            }, {
+                "text": "团队状态",
+                "callback_data": encode_conversation_callback(
+                    conversation_id,
+                    TEAM_VIEW_STATUS,
+                ),
+            }, {
+                "text": "团队证据",
+                "callback_data": encode_conversation_callback(
+                    conversation_id,
+                    TEAM_VIEW_ARTIFACTS,
+                ),
+            }]]
+        return build_auto_stage_buttons(
+            conversation_id,
+            orch_run.current_step,
+            last_codex_analysis=orch_run.last_codex_analysis or "",
+            codex_implementer_enabled=self._codex_implementer_enabled(),
+        )
+
+    async def _handle_team_view_status(
+        self,
+        callback: ConversationCallback,
+    ) -> ControllerResponse:
+        team_run = self._latest_team_run(callback.conversation_id)
+        if team_run is None or self._ledger is None:
+            return ControllerResponse("暂无团队状态。")
+        roles = [
+            (job.role, job.model_profile, job.status)
+            for job in self._ledger.list_team_agent_jobs(team_run.id)
+        ]
+        artifacts = [
+            f"{artifact.artifact_type}: {artifact.summary}"
+            for artifact in self._ledger.list_team_artifacts(team_run.id)
+        ]
+        route = "Adaptive Engineering Team"
+        if team_run.status:
+            route = f"{route} / {team_run.status}"
+        return ControllerResponse(
+            render_team_status_summary(
+                team_run.goal,
+                route,
+                roles,
+                artifacts[-4:],
+            ),
+            buttons=self._team_status_buttons(callback.conversation_id),
+        )
+
+    async def _handle_team_view_artifacts(
+        self,
+        callback: ConversationCallback,
+    ) -> ControllerResponse:
+        team_run = self._latest_team_run(callback.conversation_id)
+        if team_run is None or self._ledger is None:
+            return ControllerResponse("暂无团队证据。")
+        artifacts = self._ledger.list_team_artifacts(team_run.id)
+        if not artifacts:
+            return ControllerResponse(
+                "团队证据：\n暂无团队证据。",
+                buttons=self._team_status_buttons(callback.conversation_id),
+            )
+        lines = ["团队证据："]
+        for artifact in artifacts[-8:]:
+            lines.append(f"- {artifact.artifact_type}: {artifact.summary[:160]}")
+        return ControllerResponse(
+            "\n".join(lines),
+            buttons=self._team_status_buttons(callback.conversation_id),
+        )
+
+    def _collect_task_evidence(self, task_id: int | None) -> tuple[list[str], str]:
+        if not task_id:
+            return [], ""
+        workspace_path: str | None = None
+        try:
+            task = self._service.get_task(task_id)
+            workspace_path = str(self._service.get_workspace(task.workspace_alias).path)
+        except Exception:
+            workspace_path = None
+
+        changed_files: list[str] = []
+        diff_summary = ""
+        try:
+            files_result = self._inspector.files(task_id)
+            if files_result and files_result.body:
+                changed_files = _changed_files_from_inspection_body(files_result.body)
+        except Exception:
+            changed_files = []
+        try:
+            diff_result = self._inspector.diff(task_id, workspace_path)
+            if (
+                diff_result
+                and diff_result.body
+                and _diff_body_has_evidence(diff_result.body)
+            ):
+                diff_summary = diff_result.body[:1500]
+        except Exception:
+            diff_summary = ""
+        return changed_files[:20], diff_summary[:1500]
+
+    def _hidden_task_id_for_agent_run(self, agent_run_id: int | None) -> int | None:
+        if self._ledger is None or agent_run_id is None:
+            return None
+        try:
+            agent_run = self._ledger.get_agent_run(agent_run_id)
+        except Exception:
+            return None
+        hidden_task_id = getattr(agent_run, "hidden_task_id", None)
+        return int(hidden_task_id) if hidden_task_id is not None else None
+
+    def _implementation_evidence_task_id(
+        self,
+        convo: object,
+        orch_run: object,
+    ) -> int | None:
+        if self._ledger is None:
+            return None
+        if hasattr(self._ledger, "get_team_run_for_orchestration"):
+            team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
+            if team_run is not None and hasattr(self._ledger, "list_team_agent_jobs"):
+                for job in reversed(self._ledger.list_team_agent_jobs(team_run.id)):
+                    if job.role != "implementer" or job.agent_run_id is None:
+                        continue
+                    task_id = self._hidden_task_id_for_agent_run(job.agent_run_id)
+                    if task_id is not None:
+                        return task_id
+
+        active_claude_run_id = getattr(convo, "active_claude_run_id", None)
+        task_id = self._hidden_task_id_for_agent_run(active_claude_run_id)
+        if task_id is not None:
+            return task_id
+
+        try:
+            if hasattr(self._ledger, "list_recent_agent_runs"):
+                agent_runs = self._ledger.list_recent_agent_runs(convo.id, limit=20)
+            else:
+                agent_runs = list(reversed(self._ledger.list_agent_runs(convo.id, limit=20)))
+            for agent_run in agent_runs:
+                if agent_run.role not in (ROLE_AUTO_IMPLEMENTATION, ROLE_AUTO_REPAIR):
+                    continue
+                if agent_run.hidden_task_id is not None:
+                    return int(agent_run.hidden_task_id)
+        except Exception:
+            pass
+
+        active_codex_task_id = getattr(convo, "active_codex_task_id", None)
+        return int(active_codex_task_id) if active_codex_task_id is not None else None
+
     def _transition_auto_claude_completed(
         self,
         conversation_id: int,
@@ -2053,6 +2924,156 @@ class CommandController:
             current_step=new_step,
             last_claude_summary=completion_summary[:5000],
         )
+        if agent_status == "done" and hasattr(
+            self._ledger, "get_team_run_for_orchestration"
+        ):
+            team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
+            agent_run_id = None
+            try:
+                agent_run_id = self._ledger.get_conversation(
+                    conversation_id
+                ).active_claude_run_id
+            except Exception:
+                agent_run_id = None
+            if team_run is not None and hasattr(self._ledger, "list_team_agent_jobs"):
+                for job in self._ledger.list_team_agent_jobs(team_run.id):
+                    if job.role != "implementer" or job.status != "running":
+                        continue
+                    if agent_run_id is not None and job.agent_run_id != agent_run_id:
+                        continue
+                    if agent_run_id is None and job.agent_run_id is not None:
+                        continue
+                    if hasattr(self._ledger, "record_team_artifact"):
+                        existing = [
+                            artifact
+                            for artifact in self._ledger.list_team_artifacts(team_run.id)
+                            if artifact.artifact_type == "implementation_report"
+                            and artifact.agent_job_id == job.id
+                        ]
+                        if not existing:
+                            task_id = self._hidden_task_id_for_agent_run(agent_run_id)
+                            changed_files, diff_summary = self._collect_task_evidence(
+                                task_id
+                            )
+                            from wlcodex.team_artifacts import (
+                                acceptance_criteria_from_artifacts,
+                                command_evidence_from_task_events,
+                                implementation_report_payload,
+                                structured_implementation_evidence_from_text,
+                                test_command_evidence,
+                                test_report_payload_from_implementation,
+                            )
+
+                            task_events = (
+                                self._ledger.list_events(task_id, limit=1000)
+                                if task_id
+                                else []
+                            )
+                            commands_run = command_evidence_from_task_events(task_events)
+                            tests_attempted = test_command_evidence(commands_run)
+                            structured_evidence = (
+                                structured_implementation_evidence_from_text(
+                                    completion_summary
+                                )
+                            )
+                            changed_files = (
+                                structured_evidence.get("changed_files")
+                                or changed_files
+                            )
+                            diff_summary = (
+                                structured_evidence.get("diff_summary")
+                                or diff_summary
+                            )
+                            commands_run = (
+                                structured_evidence.get("commands_run")
+                                or commands_run
+                            )
+                            tests_attempted = (
+                                structured_evidence.get("tests_attempted")
+                                or tests_attempted
+                            )
+
+                            artifact = self._ledger.record_team_artifact(
+                                team_run_id=team_run.id,
+                                agent_job_id=job.id,
+                                artifact_type="implementation_report",
+                                summary=completion_summary[:2000]
+                                or "Claude implementation completed.",
+                                payload=implementation_report_payload(
+                                    summary=completion_summary
+                                    or "Claude implementation completed.",
+                                    changed_files=changed_files,
+                                    diff_summary=diff_summary,
+                                    source_agent="claude",
+                                    commands_run=commands_run,
+                                    tests_attempted=tests_attempted,
+                                ),
+                            )
+                            self._emit_team_runtime_event(
+                                EventType.TEAM_ARTIFACT_RECORDED,
+                                conversation_id=conversation_id,
+                                orchestration_run_id=orch_run.id,
+                                team_run_id=team_run.id,
+                                agent_job_id=job.id,
+                                agent_run_id=agent_run_id,
+                                task_id=task_id,
+                                payload={
+                                    "artifact_id": artifact.id,
+                                    "artifact_type": artifact.artifact_type,
+                                },
+                            )
+                            test_existing = [
+                                artifact
+                                for artifact in self._ledger.list_team_artifacts(team_run.id)
+                                if artifact.artifact_type == "test_report"
+                                and artifact.agent_job_id == job.id
+                            ]
+                            if not test_existing:
+                                acceptance_criteria = acceptance_criteria_from_artifacts(
+                                    self._ledger.list_team_artifacts(team_run.id)
+                                )
+                                test_artifact = self._ledger.record_team_artifact(
+                                    team_run_id=team_run.id,
+                                    agent_job_id=job.id,
+                                    artifact_type="test_report",
+                                    summary="Implementation test evidence collected.",
+                                    payload=test_report_payload_from_implementation(
+                                        summary=(
+                                            "Implementation test evidence collected."
+                                        ),
+                                        implementation_artifact_id=artifact.id,
+                                        commands_run=tests_attempted,
+                                        acceptance_criteria=acceptance_criteria,
+                                    ),
+                                )
+                                self._emit_team_runtime_event(
+                                    EventType.TEAM_ARTIFACT_RECORDED,
+                                    conversation_id=conversation_id,
+                                    orchestration_run_id=orch_run.id,
+                                    team_run_id=team_run.id,
+                                    agent_job_id=job.id,
+                                    agent_run_id=agent_run_id,
+                                    task_id=task_id,
+                                    payload={
+                                        "artifact_id": test_artifact.id,
+                                        "artifact_type": test_artifact.artifact_type,
+                                    },
+                                )
+                    if hasattr(self._ledger, "update_team_agent_job_status"):
+                        self._ledger.update_team_agent_job_status(job.id, "done")
+                        self._emit_team_runtime_event(
+                            EventType.TEAM_AGENT_JOB_COMPLETED,
+                            conversation_id=conversation_id,
+                            orchestration_run_id=orch_run.id,
+                            team_run_id=team_run.id,
+                            agent_job_id=job.id,
+                            agent_run_id=agent_run_id,
+                            payload={
+                                "role": "implementer",
+                                "status": "done",
+                            },
+                        )
+                    break
 
         # Send stage buttons to Telegram
         if self._interaction_renderer is not None and agent_status == "done":
@@ -2064,6 +3085,7 @@ class CommandController:
             buttons = build_auto_stage_buttons(
                 conversation_id, new_step,
                 last_codex_analysis=orch_run.last_codex_analysis or "",
+                codex_implementer_enabled=self._codex_implementer_enabled(),
             )
             from wlcodex.interaction.events import InteractionEvent
             asyncio.create_task(
@@ -2199,8 +3221,27 @@ class CommandController:
                     convo.id,
                     orch_run.current_step,
                     last_codex_analysis=orch_run.last_codex_analysis or "",
+                    codex_implementer_enabled=self._codex_implementer_enabled(),
                 ),
             )
+        team_run = None
+        if self._adaptive_team_enabled and hasattr(
+            self._ledger, "get_team_run_for_orchestration"
+        ):
+            team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
+        if team_run is not None:
+            from wlcodex.team_artifacts import validate_architecture_plan
+
+            gate_response = self._team_gate_response(
+                gate_name="Gate A",
+                artifact_type="architecture_plan",
+                validator=validate_architecture_plan,
+                team_run=team_run,
+                conversation_id=convo.id,
+                orchestration_run_id=orch_run.id,
+            )
+            if gate_response is not None:
+                return gate_response
         goal = orch_run.goal
         chat_id = convo.chat_id
         budget = ContextBudget()
@@ -2232,6 +3273,110 @@ class CommandController:
         self._ledger.update_agent_run_status(claude_run.id, "running")
         self._ledger.set_conversation_active_claude_run(convo.id, claude_run.id)
 
+        implementer_job = None
+        if team_run is not None:
+            try:
+                model_profile = (
+                    self._claude_implementer_model_profile()
+                    or self._implementer_model_profiles[0]
+                )
+                implementer_job = self._ledger.create_team_agent_job(
+                    team_run_id=team_run.id,
+                    role="implementer",
+                    model_profile=model_profile,
+                    status="running",
+                    agent_run_id=claude_run.id,
+                )
+                self._ledger.record_team_assignment(
+                    team_run_id=team_run.id,
+                    role="implementer",
+                    model_profile=model_profile,
+                    selected_by="policy",
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TEAM_AGENT_JOB_STARTED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(claude_run.id),
+                    correlation_id=self._new_correlation_id(),
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "team_run_id": team_run.id,
+                        "agent_job_id": implementer_job.id,
+                        "role": "implementer",
+                        "model_profile": model_profile,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=convo.id,
+                    orchestration_run_id=orch_run.id,
+                    agent_run_id=claude_run.id,
+                ))
+                context_packet = self._build_team_context_packet_for_job(
+                    team_run=team_run,
+                    agent_job=implementer_job,
+                    role="implementer",
+                    model_profile=model_profile,
+                    resume_state=(
+                        "final plan accepted; implementation selected by user "
+                        "(claude)\n\n"
+                        f"Final plan:\n{claude_prompt}"
+                    ),
+                    output_schema="implementation_report",
+                )
+                claude_prompt = context_packet.render()
+                packet_record = self._ledger.record_team_context_packet(
+                    team_run_id=team_run.id,
+                    agent_job_id=implementer_job.id,
+                    packet_json=context_packet.as_json(),
+                    prompt_text=claude_prompt,
+                    prompt_tokens=approx_tokens(claude_prompt),
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TEAM_CONTEXT_PACKET_RECORDED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(claude_run.id),
+                    correlation_id=self._new_correlation_id(),
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "team_run_id": team_run.id,
+                        "agent_job_id": implementer_job.id,
+                        "context_packet_id": packet_record.id,
+                        "prompt_tokens": packet_record.prompt_tokens,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=convo.id,
+                    orchestration_run_id=orch_run.id,
+                    agent_run_id=claude_run.id,
+                ))
+            except Exception as exc:
+                task = self._service.fail_task(task.id, str(exc))
+                self._ledger.update_agent_run_status(
+                    claude_run.id,
+                    "failed",
+                    completion_summary=str(exc)[:2000],
+                )
+                self._ledger.update_orchestration_run(
+                    orch_run.id,
+                    status="failed",
+                    last_claude_summary=str(exc)[:5000],
+                )
+                if hasattr(self._ledger, "update_team_run_status"):
+                    self._ledger.update_team_run_status(team_run.id, "failed")
+                if implementer_job is not None and hasattr(
+                    self._ledger,
+                    "update_team_agent_job_status",
+                ):
+                    self._ledger.update_team_agent_job_status(
+                        implementer_job.id,
+                        "failed",
+                    )
+                return ControllerResponse(classify_user_error(exc))
+
         workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
 
         # Launch Claude as a background task
@@ -2252,6 +3397,231 @@ class CommandController:
 
         buttons = build_auto_stage_buttons(convo.id, AUTO_CLAUDE_RUNNING)
         return ControllerResponse("Claude 开始执行。完成后请点「Codex 验收」。", buttons=buttons)
+
+    async def _handle_auto_send_to_codex(
+        self, callback: ConversationCallback
+    ) -> ControllerResponse:
+        convo = self._ledger.get_conversation(callback.conversation_id)
+        orch_run = self._latest_active_auto_run(callback.conversation_id)
+        if orch_run is None:
+            return ControllerResponse("没有活跃的自动工作流。请用 /auto 开始。")
+        if orch_run.current_step not in (AUTO_DRAFT_READY, AUTO_RETRY_READY):
+            return ControllerResponse(
+                f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
+                "不能启动 Codex 执行。"
+            )
+        if not self._codex_implementer_enabled():
+            return ControllerResponse(
+                "Codex 实施者未启用。请在 Adaptive Team 配置中启用 Codex "
+                "provider 的 implementer 后重试。"
+            )
+
+        plan_text = (orch_run.last_codex_analysis or "").strip()
+        if not plan_text:
+            return ControllerResponse(
+                "没有可见的最终方案正文，不能交给 Codex 执行。\n"
+                "请先继续补充上下文。",
+                buttons=build_auto_stage_buttons(
+                    convo.id,
+                    orch_run.current_step,
+                    last_codex_analysis=orch_run.last_codex_analysis or "",
+                    codex_implementer_enabled=self._codex_implementer_enabled(),
+                ),
+            )
+
+        model_profile = self._codex_implementer_model_profile()
+        if not model_profile:
+            return ControllerResponse(
+                "Codex 实施者未启用。请在 Adaptive Team 配置中启用 Codex "
+                "provider 的 implementer 后重试。"
+            )
+        team_run = None
+        if self._adaptive_team_enabled and hasattr(
+            self._ledger, "get_team_run_for_orchestration"
+        ):
+            team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
+        if team_run is not None:
+            from wlcodex.team_artifacts import validate_architecture_plan
+
+            gate_response = self._team_gate_response(
+                gate_name="Gate A",
+                artifact_type="architecture_plan",
+                validator=validate_architecture_plan,
+                team_run=team_run,
+                conversation_id=convo.id,
+                orchestration_run_id=orch_run.id,
+            )
+            if gate_response is not None:
+                return gate_response
+
+        is_repair = orch_run.current_step == AUTO_RETRY_READY
+        role = ROLE_AUTO_REPAIR if is_repair else ROLE_AUTO_IMPLEMENTATION
+        purpose = "auto_codex_repair" if is_repair else "auto_codex_implementation"
+        chat_id = convo.chat_id
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="running",
+            current_step=AUTO_CLAUDE_RUNNING,
+        )
+
+        task = self._reserve_execution_lease(
+            conversation_id=convo.id,
+            workspace_alias=convo.workspace_alias,
+            prompt=plan_text,
+            telegram_chat_id=chat_id,
+            purpose=purpose,
+        )
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=convo.id,
+            agent="codex",
+            role=role,
+            hidden_task_id=task.id,
+            prompt_packet_summary=plan_text[:200],
+        )
+        self._ledger.update_agent_run_status(agent_run.id, "running")
+
+        prompt_text = plan_text
+        implementer_job = None
+        if team_run is not None:
+            try:
+                implementer_job = self._ledger.create_team_agent_job(
+                    team_run_id=team_run.id,
+                    role="implementer",
+                    model_profile=model_profile,
+                    status="running",
+                    agent_run_id=agent_run.id,
+                )
+                self._ledger.record_team_assignment(
+                    team_run_id=team_run.id,
+                    role="implementer",
+                    model_profile=model_profile,
+                    selected_by="policy",
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TEAM_AGENT_JOB_STARTED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(agent_run.id),
+                    correlation_id=self._new_correlation_id(),
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "team_run_id": team_run.id,
+                        "agent_job_id": implementer_job.id,
+                        "role": "implementer",
+                        "model_profile": model_profile,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=convo.id,
+                    orchestration_run_id=orch_run.id,
+                    agent_run_id=agent_run.id,
+                ))
+                context_packet = self._build_team_context_packet_for_job(
+                    team_run=team_run,
+                    agent_job=implementer_job,
+                    role="implementer",
+                    model_profile=model_profile,
+                    resume_state=(
+                        "final plan accepted; implementation selected by user "
+                        "(codex)\n\n"
+                        f"Final plan:\n{plan_text}"
+                    ),
+                    output_schema="implementation_report",
+                )
+                prompt_text = context_packet.render()
+                packet_record = self._ledger.record_team_context_packet(
+                    team_run_id=team_run.id,
+                    agent_job_id=implementer_job.id,
+                    packet_json=context_packet.as_json(),
+                    prompt_text=prompt_text,
+                    prompt_tokens=approx_tokens(prompt_text),
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TEAM_CONTEXT_PACKET_RECORDED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(agent_run.id),
+                    correlation_id=self._new_correlation_id(),
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "team_run_id": team_run.id,
+                        "agent_job_id": implementer_job.id,
+                        "context_packet_id": packet_record.id,
+                        "prompt_tokens": packet_record.prompt_tokens,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=convo.id,
+                    orchestration_run_id=orch_run.id,
+                    agent_run_id=agent_run.id,
+                ))
+            except Exception as exc:
+                task = self._service.fail_task(task.id, str(exc))
+                self._ledger.update_agent_run_status(
+                    agent_run.id,
+                    "failed",
+                    completion_summary=str(exc)[:2000],
+                )
+                self._ledger.update_orchestration_run(
+                    orch_run.id,
+                    status="failed",
+                    last_claude_summary=str(exc)[:5000],
+                )
+                if team_run is not None and hasattr(
+                    self._ledger,
+                    "update_team_run_status",
+                ):
+                    self._ledger.update_team_run_status(team_run.id, "failed")
+                if implementer_job is not None and hasattr(
+                    self._ledger,
+                    "update_team_agent_job_status",
+                ):
+                    self._ledger.update_team_agent_job_status(
+                        implementer_job.id,
+                        "failed",
+                    )
+                return ControllerResponse(classify_user_error(exc))
+
+        workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
+        try:
+            await self._start_codex_turn_for_conversation(
+                active=convo,
+                task=task,
+                workspace_path=workspace_path,
+                prompt=prompt_text,
+                interaction_mode="general",
+            )
+        except Exception as exc:
+            task = self._service.fail_task(task.id, str(exc))
+            self._ledger.update_agent_run_status(
+                agent_run.id,
+                "failed",
+                completion_summary=str(exc)[:2000],
+            )
+            self._ledger.update_orchestration_run(
+                orch_run.id,
+                status="failed",
+                last_claude_summary=str(exc)[:5000],
+            )
+            if team_run is not None and hasattr(
+                self._ledger,
+                "update_team_run_status",
+            ):
+                self._ledger.update_team_run_status(team_run.id, "failed")
+            if implementer_job is not None and hasattr(
+                self._ledger,
+                "update_team_agent_job_status",
+            ):
+                self._ledger.update_team_agent_job_status(
+                    implementer_job.id,
+                    "failed",
+                )
+            return ControllerResponse(classify_user_error(exc))
+
+        buttons = build_auto_stage_buttons(convo.id, AUTO_CLAUDE_RUNNING)
+        return ControllerResponse("Codex 开始执行。完成后请点「Codex 验收」。", buttons=buttons)
 
     async def _handle_auto_codex_verify(
         self, callback: ConversationCallback
@@ -2274,24 +3644,48 @@ class CommandController:
         conversation_summary = convo.conversation_summary
         verify_round = orch_run.verify_round + 1
 
-        # Collect diff evidence
-        diff_summary = ""
-        changed_files: list[str] = []
-        try:
-            task_id = convo.active_codex_task_id or convo.active_claude_run_id
-            if task_id:
-                workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
-                diff_result = self._inspector.diff(task_id, workspace_path)
-                if diff_result and diff_result.body:
-                    diff_summary = diff_result.body[:1500]
-                files_result = self._inspector.files(task_id)
-                if files_result and files_result.body:
-                    for line in files_result.body.split("\n"):
-                        stripped = line.strip()
-                        if stripped and not stripped.startswith("#"):
-                            changed_files.append(stripped[:200])
-        except Exception:
-            pass
+        task_id = self._implementation_evidence_task_id(convo, orch_run)
+        changed_files, diff_summary = self._collect_task_evidence(task_id)
+        team_run = None
+        if self._adaptive_team_enabled and hasattr(
+            self._ledger, "get_team_run_for_orchestration"
+        ):
+            team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
+        if team_run is not None:
+            from wlcodex.team_artifacts import (
+                validate_implementation_report,
+                validate_test_report,
+            )
+
+            implementer_job_id = self._latest_team_job_id(
+                team_run,
+                role="implementer",
+                status="done",
+            )
+            gate_response = self._team_gate_response(
+                gate_name="Gate B",
+                artifact_type="implementation_report",
+                validator=validate_implementation_report,
+                team_run=team_run,
+                conversation_id=convo.id,
+                orchestration_run_id=orch_run.id,
+                agent_job_id=implementer_job_id,
+                bind_agent_job=True,
+            )
+            if gate_response is not None:
+                return gate_response
+            gate_response = self._team_gate_response(
+                gate_name="Gate C",
+                artifact_type="test_report",
+                validator=validate_test_report,
+                team_run=team_run,
+                conversation_id=convo.id,
+                orchestration_run_id=orch_run.id,
+                agent_job_id=implementer_job_id,
+                bind_agent_job=True,
+            )
+            if gate_response is not None:
+                return gate_response
 
         budget = ContextBudget()
         packet = build_auto_verification_packet(
@@ -2330,6 +3724,134 @@ class CommandController:
         )
         self._ledger.update_agent_run_status(agent_run.id, "running")
 
+        prompt_text = packet.render()
+        auditor_job = None
+        if team_run is not None:
+            try:
+                auditor_job = self._ledger.create_team_agent_job(
+                    team_run_id=team_run.id,
+                    role="auditor",
+                    model_profile=self._auditor_model_profile,
+                    status="running",
+                    agent_run_id=agent_run.id,
+                )
+                self._ledger.record_team_assignment(
+                    team_run_id=team_run.id,
+                    role="auditor",
+                    model_profile=self._auditor_model_profile,
+                    selected_by="policy",
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TEAM_AGENT_JOB_STARTED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(agent_run.id),
+                    correlation_id=self._new_correlation_id(),
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "team_run_id": team_run.id,
+                        "agent_job_id": auditor_job.id,
+                        "role": "auditor",
+                        "model_profile": self._auditor_model_profile,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=convo.id,
+                    orchestration_run_id=orch_run.id,
+                    agent_run_id=agent_run.id,
+                ))
+                verification_artifact = self._ledger.record_team_artifact(
+                    team_run_id=team_run.id,
+                    agent_job_id=auditor_job.id,
+                    artifact_type="verification_request",
+                    summary=f"Verification round {verify_round}: {goal[:200]}",
+                    payload={
+                        "goal": goal,
+                        "codex_plan_summary": codex_analysis[:800],
+                        "implementation_summary": claude_summary[:1500],
+                        "changed_files": changed_files[:20],
+                        "diff_summary": diff_summary[:1500],
+                        "verify_round": verify_round,
+                        "tester_policy": "Auditor performs tester duties in v1",
+                    },
+                )
+                self._emit_team_runtime_event(
+                    EventType.TEAM_ARTIFACT_RECORDED,
+                    conversation_id=convo.id,
+                    orchestration_run_id=orch_run.id,
+                    team_run_id=team_run.id,
+                    agent_job_id=auditor_job.id,
+                    agent_run_id=agent_run.id,
+                    task_id=task.id,
+                    payload={
+                        "artifact_id": verification_artifact.id,
+                        "artifact_type": verification_artifact.artifact_type,
+                    },
+                )
+                context_packet = self._build_team_context_packet_for_job(
+                    team_run=team_run,
+                    agent_job=auditor_job,
+                    role="auditor",
+                    model_profile=self._auditor_model_profile,
+                    resume_state=(
+                        f"verification requested; verify_round={verify_round}\n\n"
+                        f"{prompt_text}"
+                    ),
+                    output_schema="audit_report",
+                )
+                prompt_text = context_packet.render()
+                packet_record = self._ledger.record_team_context_packet(
+                    team_run_id=team_run.id,
+                    agent_job_id=auditor_job.id,
+                    packet_json=context_packet.as_json(),
+                    prompt_text=prompt_text,
+                    prompt_tokens=approx_tokens(prompt_text),
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TEAM_CONTEXT_PACKET_RECORDED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(agent_run.id),
+                    correlation_id=self._new_correlation_id(),
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "team_run_id": team_run.id,
+                        "agent_job_id": auditor_job.id,
+                        "context_packet_id": packet_record.id,
+                        "prompt_tokens": packet_record.prompt_tokens,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=convo.id,
+                    orchestration_run_id=orch_run.id,
+                    agent_run_id=agent_run.id,
+                ))
+            except Exception as exc:
+                task = self._service.fail_task(task.id, str(exc))
+                self._ledger.update_agent_run_status(
+                    agent_run.id,
+                    "failed",
+                    completion_summary=str(exc)[:2000],
+                )
+                self._ledger.update_orchestration_run(
+                    orch_run.id,
+                    status="failed",
+                    last_verification_result=str(exc)[:5000],
+                )
+                if hasattr(self._ledger, "update_team_run_status"):
+                    self._ledger.update_team_run_status(team_run.id, "failed")
+                if auditor_job is not None and hasattr(
+                    self._ledger,
+                    "update_team_agent_job_status",
+                ):
+                    self._ledger.update_team_agent_job_status(
+                        auditor_job.id,
+                        "failed",
+                    )
+                return ControllerResponse(classify_user_error(exc))
+
         workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
 
         try:
@@ -2337,7 +3859,7 @@ class CommandController:
                 active=convo,
                 task=task,
                 workspace_path=workspace_path,
-                prompt=packet.render(),
+                prompt=prompt_text,
                 interaction_mode="general",
             )
         except Exception as exc:
@@ -2345,6 +3867,24 @@ class CommandController:
             self._ledger.update_agent_run_status(
                 agent_run.id, "failed", completion_summary=str(exc)[:2000],
             )
+            self._ledger.update_orchestration_run(
+                orch_run.id,
+                status="failed",
+                last_verification_result=str(exc)[:5000],
+            )
+            if team_run is not None and hasattr(
+                self._ledger,
+                "update_team_run_status",
+            ):
+                self._ledger.update_team_run_status(team_run.id, "failed")
+            if auditor_job is not None and hasattr(
+                self._ledger,
+                "update_team_agent_job_status",
+            ):
+                self._ledger.update_team_agent_job_status(
+                    auditor_job.id,
+                    "failed",
+                )
             return ControllerResponse(classify_user_error(exc))
 
         buttons = build_auto_stage_buttons(convo.id, AUTO_VERIFYING)
@@ -2482,6 +4022,115 @@ class CommandController:
         )
         self._ledger.update_agent_run_status(claude_run.id, "running")
         self._ledger.set_conversation_active_claude_run(convo.id, claude_run.id)
+
+        team_run = None
+        if self._adaptive_team_enabled and hasattr(
+            self._ledger, "get_team_run_for_orchestration"
+        ):
+            team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
+        implementer_job = None
+        if team_run is not None:
+            try:
+                model_profile = (
+                    self._claude_implementer_model_profile()
+                    or self._implementer_model_profiles[0]
+                )
+                implementer_job = self._ledger.create_team_agent_job(
+                    team_run_id=team_run.id,
+                    role="implementer",
+                    model_profile=model_profile,
+                    status="running",
+                    agent_run_id=claude_run.id,
+                )
+                self._ledger.record_team_assignment(
+                    team_run_id=team_run.id,
+                    role="implementer",
+                    model_profile=model_profile,
+                    selected_by="policy",
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TEAM_AGENT_JOB_STARTED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(claude_run.id),
+                    correlation_id=self._new_correlation_id(),
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "team_run_id": team_run.id,
+                        "agent_job_id": implementer_job.id,
+                        "role": "implementer",
+                        "model_profile": model_profile,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=convo.id,
+                    orchestration_run_id=orch_run.id,
+                    agent_run_id=claude_run.id,
+                ))
+                context_packet = self._build_team_context_packet_for_job(
+                    team_run=team_run,
+                    agent_job=implementer_job,
+                    role="implementer",
+                    model_profile=model_profile,
+                    resume_state=(
+                        "repair selected by user (claude)\n\n"
+                        f"Verification result:\n{verification[:1200]}\n\n"
+                        f"Repair prompt:\n{claude_prompt}"
+                    ),
+                    output_schema="implementation_report",
+                )
+                claude_prompt = context_packet.render()
+                packet_record = self._ledger.record_team_context_packet(
+                    team_run_id=team_run.id,
+                    agent_job_id=implementer_job.id,
+                    packet_json=context_packet.as_json(),
+                    prompt_text=claude_prompt,
+                    prompt_tokens=approx_tokens(claude_prompt),
+                )
+                self._emit_event(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.TEAM_CONTEXT_PACKET_RECORDED,
+                    aggregate_type=AggregateType.AGENT_RUN,
+                    aggregate_id=str(claude_run.id),
+                    correlation_id=self._new_correlation_id(),
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "team_run_id": team_run.id,
+                        "agent_job_id": implementer_job.id,
+                        "context_packet_id": packet_record.id,
+                        "prompt_tokens": packet_record.prompt_tokens,
+                    },
+                    occurred_at=now_iso(),
+                    conversation_id=convo.id,
+                    orchestration_run_id=orch_run.id,
+                    agent_run_id=claude_run.id,
+                ))
+            except Exception as exc:
+                task = self._service.fail_task(task.id, str(exc))
+                self._ledger.update_agent_run_status(
+                    claude_run.id,
+                    "failed",
+                    completion_summary=str(exc)[:2000],
+                )
+                self._ledger.update_orchestration_run(
+                    orch_run.id,
+                    status="failed",
+                    last_claude_summary=str(exc)[:5000],
+                )
+                if hasattr(self._ledger, "update_team_run_status"):
+                    self._ledger.update_team_run_status(team_run.id, "failed")
+                if implementer_job is not None and hasattr(
+                    self._ledger,
+                    "update_team_agent_job_status",
+                ):
+                    self._ledger.update_team_agent_job_status(
+                        implementer_job.id,
+                        "failed",
+                    )
+                return ControllerResponse(classify_user_error(exc))
 
         workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
 
@@ -3380,6 +5029,7 @@ class CommandController:
                     buttons=build_auto_stage_buttons(
                         callback.conversation_id, orch_run.current_step,
                         last_codex_analysis=orch_run.last_codex_analysis or "",
+                        codex_implementer_enabled=self._codex_implementer_enabled(),
                     ),
                 )
             return ControllerResponse("暂无方案草稿。")
@@ -3387,6 +5037,8 @@ class CommandController:
             return await self._handle_auto_cancel(callback)
         elif callback.action == AUTO_SEND_TO_CLAUDE:
             return await self._handle_auto_send_to_claude(callback)
+        elif callback.action == AUTO_SEND_TO_CODEX:
+            return await self._handle_auto_send_to_codex(callback)
         elif callback.action == AUTO_CONTINUE_CONTEXT:
             # Re-enter collecting_context from draft_ready or retry_ready
             orch_run = self._latest_active_auto_run(callback.conversation_id)
@@ -3441,6 +5093,10 @@ class CommandController:
                 "/status",
                 {"chat_id": convo.chat_id, "user_id": convo.user_id},
             )
+        elif callback.action == TEAM_VIEW_STATUS:
+            return await self._handle_team_view_status(callback)
+        elif callback.action == TEAM_VIEW_ARTIFACTS:
+            return await self._handle_team_view_artifacts(callback)
 
         # --- Carryover callback actions ---
         if callback.action == CARRY_START:

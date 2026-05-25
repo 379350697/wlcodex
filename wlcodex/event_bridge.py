@@ -17,12 +17,37 @@ from typing import Any
 from wlcodex.codex_backend import BackendEvent
 from wlcodex.codex_runtime_source import CodexRuntimeSource
 from wlcodex.db import Ledger
+from wlcodex.inspection import TaskInspector
 from wlcodex.models import TaskStatus
 from wlcodex.status import render_approval_card
 from wlcodex.task_service import TaskService, drain_workspace
 from wlcodex.telegram_digest import render_auto_draft_digest, render_auto_diagnose_digest
 
 logger = logging.getLogger(__name__)
+
+
+def _changed_files_from_inspection_body(body: str) -> list[str]:
+    changed_files: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped in ("相关文件：", "暂无文件记录。"):
+            continue
+        if stripped.startswith("[") and "]" in stripped:
+            stripped = stripped.split("]", 1)[1].strip()
+        if stripped:
+            changed_files.append(stripped[:200])
+    return changed_files
+
+
+def _diff_body_has_evidence(body: str) -> bool:
+    stripped = body.strip()
+    return bool(
+        stripped
+        and stripped not in ("暂无 diff 信息。", "工作区没有未提交变更。")
+    )
+
 
 # ---------------------------------------------------------------------------
 # Deterministic diagnose JSON collection
@@ -139,6 +164,55 @@ def _brief_diagnose_supplement(diagnose_digest: str) -> str:
     return "诊断证据：已采集结构化诊断；详细诊断仅作证据参考，不替代最终方案。"
 
 
+def _extract_list_after_heading(lines: list[str], heading: str) -> list[str]:
+    items: list[str] = []
+    in_section = False
+    for line in lines:
+        stripped = line.strip()
+        normalized = stripped.lower().replace("-", "_")
+        if normalized.startswith(f"{heading}:"):
+            in_section = True
+            remainder = stripped.split(":", 1)[1].strip()
+            if remainder:
+                items.append(remainder)
+            continue
+        if in_section and stripped.endswith(":"):
+            break
+        if in_section and stripped:
+            items.append(stripped.lstrip("-* ").strip())
+    return [item for item in items if item]
+
+
+def _parse_audit_report_payload(text: str) -> dict[str, object]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lowered = text.lower()
+    if "decision: pass" in lowered or "decision:pass" in lowered:
+        decision = "pass"
+    elif "decision: block" in lowered or "decision:block" in lowered:
+        decision = "block"
+    elif "decision: needs_user" in lowered or "decision:needs_user" in lowered:
+        decision = "needs_user"
+    else:
+        decision = ""
+    summary = text[:2000]
+    for line in lines:
+        if line.lower().startswith("summary:"):
+            summary = line.split(":", 1)[1].strip() or summary
+            break
+    return {
+        "summary": summary,
+        "decision": decision,
+        "findings": _extract_list_after_heading(lines, "findings")
+        or ["No findings reported."],
+        "missing_evidence": _extract_list_after_heading(lines, "missing_evidence")
+        or ["None"],
+        "risk_level": "low" if decision == "pass" else "medium",
+        "recommended_next_action": "close" if decision == "pass" else "repair",
+        "test_evidence_refs": _extract_list_after_heading(lines, "test_evidence_refs"),
+        "raw_result": text,
+    }
+
+
 EXPIRY_SCAN_INTERVAL_SECONDS = 60
 TASK_WATCHDOG_INTERVAL_SECONDS = 60
 # Callback: send_telegram(chat_id, text, buttons) -> message_id
@@ -190,6 +264,7 @@ class EventBridge:
         interaction_renderer: object | None = None,
         runtime_event_store: object | None = None,
         on_workspace_freed: Callable[[str], Coroutine[Any, Any, None]] | None = None,
+        codex_implementer_enabled: bool = False,
     ) -> None:
         self._service = task_service
         self._backend = backend
@@ -202,6 +277,7 @@ class EventBridge:
         self._interaction_renderer = interaction_renderer
         self._runtime_store = runtime_event_store
         self._on_workspace_freed = on_workspace_freed
+        self._codex_implementer_enabled = codex_implementer_enabled
         self._runtime_causation_by_agent_run: dict[int, int] = {}
         self._running = False
 
@@ -686,6 +762,7 @@ class EventBridge:
         if not rows:
             return None
 
+        agent_run_id = int(rows[0]["id"])
         agent_role = str(rows[0]["role"] or "")
         agent_status = str(rows[0]["status"] or "")
         completion_summary = str(rows[0]["completion_summary"] or "")
@@ -740,6 +817,12 @@ class EventBridge:
                 last_codex_analysis=completion_summary[:5000] if completion_summary else "",
                 diagnose_json=diagnose_json,
             )
+            self._record_architecture_plan_artifact(
+                auto_run,
+                agent_run_id=agent_run_id,
+                completion_summary=completion_summary,
+            )
+            self._mark_architect_team_job_done(auto_run, agent_run_id=agent_run_id)
 
         elif agent_role in ("auto_implementation", "auto_repair") and agent_status == "done":
             # Claude implementation completed → advance to claude_done
@@ -750,11 +833,49 @@ class EventBridge:
                 current_step=new_step,
                 last_claude_summary=completion_summary[:5000] if completion_summary else "",
             )
+            self._record_implementation_report_artifact(
+                auto_run,
+                agent_run_id=agent_run_id,
+                task_id=task_id,
+                completion_summary=completion_summary,
+                source_agent="codex",
+            )
+            self._mark_team_agent_job_done(
+                auto_run,
+                role="implementer",
+                agent_run_id=agent_run_id,
+            )
+
+        elif agent_role in ("auto_implementation", "auto_repair") and agent_status == "failed":
+            self._ledger.update_orchestration_run(
+                auto_run.id,
+                status="failed",
+                last_claude_summary=completion_summary[:5000] if completion_summary else "",
+            )
+            self._mark_team_agent_job_failed(
+                auto_run,
+                role="implementer",
+                agent_run_id=agent_run_id,
+            )
 
         elif agent_role == "auto_verification" and agent_status == "done":
             # Codex verification completed → check pass/fail
             summary_lower = completion_summary.lower()
-            if "decision: pass" in summary_lower or "decision:pass" in summary_lower:
+            verification_passed = (
+                "decision: pass" in summary_lower
+                or "decision:pass" in summary_lower
+            )
+            gate_d_passed = self._record_audit_report_artifact(
+                auto_run,
+                agent_run_id=agent_run_id,
+                completion_summary=completion_summary,
+            )
+            team_run = self._team_run_for_auto_run(auto_run)
+            completion_allowed = verification_passed and (
+                gate_d_passed is True
+                or (gate_d_passed is None and team_run is None)
+            )
+            if completion_allowed:
                 new_step = AUTO_COMPLETED
                 self._ledger.update_orchestration_run(
                     auto_run.id,
@@ -770,6 +891,29 @@ class EventBridge:
                     current_step=new_step,
                     last_verification_result=completion_summary[:5000] if completion_summary else "",
                 )
+            self._mark_team_agent_job_done(
+                auto_run,
+                role="auditor",
+                agent_run_id=agent_run_id,
+            )
+            if completion_allowed:
+                self._complete_team_run(
+                    auto_run,
+                    agent_run_id=agent_run_id,
+                    task_id=task_id,
+                )
+
+        elif agent_role == "auto_verification" and agent_status == "failed":
+            self._ledger.update_orchestration_run(
+                auto_run.id,
+                status="failed",
+                last_verification_result=completion_summary[:5000] if completion_summary else "",
+            )
+            self._mark_team_agent_job_failed(
+                auto_run,
+                role="auditor",
+                agent_run_id=agent_run_id,
+            )
 
         elif agent_role == "auto_codex_takeover" and agent_status == "done":
             # Codex takeover completed → advance to completed
@@ -782,6 +926,576 @@ class EventBridge:
             )
 
         return new_step
+
+    def _team_run_for_auto_run(self, auto_run: object) -> object | None:
+        if not hasattr(self._ledger, "get_team_run_for_orchestration"):
+            return None
+        return self._ledger.get_team_run_for_orchestration(auto_run.id)
+
+    def _append_team_runtime_event(
+        self,
+        auto_run: object,
+        event_type: str,
+        *,
+        team_run_id: int,
+        agent_job_id: int | None = None,
+        agent_run_id: int | None = None,
+        task_id: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        from wlcodex.runtime_events import (
+            SCHEMA_VERSION,
+            AggregateType,
+            EventSource,
+            RuntimeEvent,
+            Visibility,
+            now_iso,
+        )
+
+        event_payload = {"team_run_id": team_run_id}
+        if agent_job_id is not None:
+            event_payload["agent_job_id"] = agent_job_id
+        if payload:
+            event_payload.update(payload)
+        self._runtime_store.append(
+            RuntimeEvent(
+                schema_version=SCHEMA_VERSION,
+                event_type=event_type,
+                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                aggregate_id=str(auto_run.id),
+                correlation_id=f"team-run-{team_run_id}",
+                source=EventSource.ORCHESTRATOR,
+                actor="adaptive_team",
+                visibility=Visibility.OPERATOR,
+                payload=event_payload,
+                occurred_at=now_iso(),
+                conversation_id=auto_run.conversation_id,
+                orchestration_run_id=auto_run.id,
+                agent_run_id=agent_run_id,
+                task_id=task_id,
+            )
+        )
+
+    def _complete_team_run(
+        self,
+        auto_run: object,
+        *,
+        agent_run_id: int | None = None,
+        task_id: int | None = None,
+    ) -> None:
+        team_run = self._team_run_for_auto_run(auto_run)
+        if team_run is None or not hasattr(self._ledger, "update_team_run_status"):
+            return
+        if team_run.status == "completed":
+            return
+        self._ledger.update_team_run_status(team_run.id, "completed")
+        from wlcodex.runtime_events import EventType
+
+        self._append_team_runtime_event(
+            auto_run,
+            EventType.TEAM_RUN_COMPLETED,
+            team_run_id=team_run.id,
+            agent_run_id=agent_run_id,
+            task_id=task_id,
+            payload={"status": "completed"},
+        )
+
+    def _team_instinct_status(self, instinct_id: str) -> str | None:
+        if not hasattr(self._ledger, "list_team_instincts"):
+            return None
+        for status in ("active", "candidate"):
+            for instinct in self._ledger.list_team_instincts(status=status):
+                if instinct.instinct_id == instinct_id:
+                    return status
+        return None
+
+    def _collect_task_evidence(self, task_id: int | None) -> tuple[list[str], str]:
+        if not task_id:
+            return [], ""
+        workspace_path: str | None = None
+        try:
+            task = self._service.get_task(task_id)
+            workspace_path = str(self._service.get_workspace(task.workspace_alias).path)
+        except Exception:
+            workspace_path = None
+
+        inspector = TaskInspector(self._ledger, Path(""))
+        changed_files: list[str] = []
+        diff_summary = ""
+        try:
+            files_result = inspector.files(task_id)
+            if files_result and files_result.body:
+                changed_files = _changed_files_from_inspection_body(files_result.body)
+        except Exception:
+            changed_files = []
+        try:
+            diff_result = inspector.diff(task_id, workspace_path)
+            if (
+                diff_result
+                and diff_result.body
+                and _diff_body_has_evidence(diff_result.body)
+            ):
+                diff_summary = diff_result.body[:1500]
+        except Exception:
+            diff_summary = ""
+        return changed_files[:20], diff_summary[:1500]
+
+    def _running_team_job(
+        self,
+        team_run: object,
+        *,
+        role: str,
+        agent_run_id: int | None,
+    ) -> object | None:
+        if not hasattr(self._ledger, "list_team_agent_jobs"):
+            return None
+        for job in self._ledger.list_team_agent_jobs(team_run.id):
+            if job.role != role or job.status != "running":
+                continue
+            if agent_run_id is not None and job.agent_run_id != agent_run_id:
+                continue
+            if agent_run_id is None and job.agent_run_id is not None:
+                continue
+            return job
+        return None
+
+    def _has_team_artifact(
+        self,
+        team_run_id: int,
+        *,
+        artifact_type: str,
+        agent_job_id: int | None,
+    ) -> bool:
+        if not hasattr(self._ledger, "list_team_artifacts"):
+            return False
+        return any(
+            artifact.artifact_type == artifact_type
+            and artifact.agent_job_id == agent_job_id
+            for artifact in self._ledger.list_team_artifacts(team_run_id)
+        )
+
+    def _record_architecture_plan_artifact(
+        self,
+        auto_run: object,
+        *,
+        agent_run_id: int | None,
+        completion_summary: str,
+    ) -> None:
+        if not completion_summary.strip():
+            return
+        team_run = self._team_run_for_auto_run(auto_run)
+        if team_run is None or not hasattr(self._ledger, "record_team_artifact"):
+            return
+        job = self._running_team_job(
+            team_run,
+            role="architect",
+            agent_run_id=agent_run_id,
+        )
+        if job is None and agent_run_id is not None and hasattr(
+            self._ledger, "list_team_agent_jobs"
+        ):
+            for candidate in self._ledger.list_team_agent_jobs(team_run.id):
+                if candidate.role == "architect" and candidate.agent_run_id == agent_run_id:
+                    job = candidate
+                    break
+        agent_job_id = job.id if job is not None else None
+        if self._has_team_artifact(
+            team_run.id,
+            artifact_type="architecture_plan",
+            agent_job_id=agent_job_id,
+        ):
+            return
+        summary = completion_summary[:2000] or "Final plan completed."
+        from wlcodex.team_artifacts import architecture_plan_payload
+
+        artifact = self._ledger.record_team_artifact(
+            team_run_id=team_run.id,
+            agent_job_id=agent_job_id,
+            artifact_type="architecture_plan",
+            summary=summary,
+            payload=architecture_plan_payload(
+                summary=summary,
+                risk_level="medium",
+                source="auto_final_plan_completion",
+            ),
+        )
+        from wlcodex.runtime_events import EventType
+
+        self._append_team_runtime_event(
+            auto_run,
+            EventType.TEAM_ARTIFACT_RECORDED,
+            team_run_id=team_run.id,
+            agent_job_id=agent_job_id,
+            agent_run_id=agent_run_id,
+            payload={
+                "artifact_id": artifact.id,
+                "artifact_type": artifact.artifact_type,
+            },
+        )
+
+    def _record_implementation_report_artifact(
+        self,
+        auto_run: object,
+        *,
+        agent_run_id: int | None,
+        task_id: int | None,
+        completion_summary: str,
+        source_agent: str,
+    ) -> None:
+        team_run = self._team_run_for_auto_run(auto_run)
+        if team_run is None or not hasattr(self._ledger, "record_team_artifact"):
+            return
+        job = self._running_team_job(
+            team_run,
+            role="implementer",
+            agent_run_id=agent_run_id,
+        )
+        if job is None or self._has_team_artifact(
+            team_run.id,
+            artifact_type="implementation_report",
+            agent_job_id=job.id,
+        ):
+            return
+        summary = completion_summary or f"{source_agent} implementation completed."
+        changed_files, diff_summary = self._collect_task_evidence(task_id)
+        from wlcodex.team_artifacts import (
+            acceptance_criteria_from_artifacts,
+            command_evidence_from_task_events,
+            implementation_report_payload,
+            structured_implementation_evidence_from_text,
+            test_command_evidence,
+            test_report_payload_from_implementation,
+        )
+
+        task_events = self._ledger.list_events(task_id, limit=1000) if task_id else []
+        commands_run = command_evidence_from_task_events(task_events)
+        tests_attempted = test_command_evidence(commands_run)
+        structured_evidence = structured_implementation_evidence_from_text(
+            completion_summary
+        )
+        changed_files = structured_evidence.get("changed_files") or changed_files
+        diff_summary = structured_evidence.get("diff_summary") or diff_summary
+        commands_run = structured_evidence.get("commands_run") or commands_run
+        tests_attempted = structured_evidence.get("tests_attempted") or tests_attempted
+
+        artifact = self._ledger.record_team_artifact(
+            team_run_id=team_run.id,
+            agent_job_id=job.id,
+            artifact_type="implementation_report",
+            summary=summary[:2000],
+            payload=implementation_report_payload(
+                summary=summary,
+                changed_files=changed_files,
+                diff_summary=diff_summary,
+                source_agent=source_agent,
+                commands_run=commands_run,
+                tests_attempted=tests_attempted,
+            ),
+        )
+        from wlcodex.runtime_events import EventType
+
+        self._append_team_runtime_event(
+            auto_run,
+            EventType.TEAM_ARTIFACT_RECORDED,
+            team_run_id=team_run.id,
+            agent_job_id=job.id,
+            agent_run_id=agent_run_id,
+            task_id=task_id,
+            payload={
+                "artifact_id": artifact.id,
+                "artifact_type": artifact.artifact_type,
+            },
+        )
+        if not self._has_team_artifact(
+            team_run.id,
+            artifact_type="test_report",
+            agent_job_id=job.id,
+        ):
+            acceptance_criteria = acceptance_criteria_from_artifacts(
+                self._ledger.list_team_artifacts(team_run.id)
+            )
+            test_artifact = self._ledger.record_team_artifact(
+                team_run_id=team_run.id,
+                agent_job_id=job.id,
+                artifact_type="test_report",
+                summary="Implementation test evidence collected.",
+                payload=test_report_payload_from_implementation(
+                    summary="Implementation test evidence collected.",
+                    implementation_artifact_id=artifact.id,
+                    commands_run=tests_attempted,
+                    acceptance_criteria=acceptance_criteria,
+                ),
+            )
+            self._append_team_runtime_event(
+                auto_run,
+                EventType.TEAM_ARTIFACT_RECORDED,
+                team_run_id=team_run.id,
+                agent_job_id=job.id,
+                agent_run_id=agent_run_id,
+                task_id=task_id,
+                payload={
+                    "artifact_id": test_artifact.id,
+                    "artifact_type": test_artifact.artifact_type,
+                },
+            )
+
+    def _record_audit_report_artifact(
+        self,
+        auto_run: object,
+        *,
+        agent_run_id: int | None,
+        completion_summary: str,
+    ) -> bool | None:
+        team_run = self._team_run_for_auto_run(auto_run)
+        if team_run is None or not hasattr(self._ledger, "record_team_artifact"):
+            return None
+        job = self._running_team_job(
+            team_run,
+            role="auditor",
+            agent_run_id=agent_run_id,
+        )
+        if job is None or self._has_team_artifact(
+            team_run.id,
+            artifact_type="audit_report",
+            agent_job_id=job.id,
+        ):
+            return False
+        payload = _parse_audit_report_payload(completion_summary)
+        artifact = self._ledger.record_team_artifact(
+            team_run_id=team_run.id,
+            agent_job_id=job.id,
+            artifact_type="audit_report",
+            summary=str(payload["summary"])[:2000],
+            payload=payload,
+        )
+        from wlcodex.runtime_events import EventType
+
+        self._append_team_runtime_event(
+            auto_run,
+            EventType.TEAM_ARTIFACT_RECORDED,
+            team_run_id=team_run.id,
+            agent_job_id=job.id,
+            agent_run_id=agent_run_id,
+            payload={
+                "artifact_id": artifact.id,
+                "artifact_type": artifact.artifact_type,
+            },
+        )
+        from wlcodex.team_artifacts import validate_audit_report
+
+        gate_result = validate_audit_report(payload)
+        self._append_team_runtime_event(
+            auto_run,
+            EventType.TEAM_GATE_PASSED if gate_result.passed else EventType.TEAM_GATE_FAILED,
+            team_run_id=team_run.id,
+            agent_job_id=job.id,
+            agent_run_id=agent_run_id,
+            payload={
+                "gate": "Gate D",
+                "artifact_id": artifact.id,
+                "artifact_type": "audit_report",
+                "missing": list(gate_result.missing),
+            },
+        )
+        try:
+            from wlcodex.team_observer import (
+                candidate_instinct_from_observation,
+                observations_from_artifact,
+            )
+
+            conversation = self._ledger.get_conversation(auto_run.conversation_id)
+            observations = observations_from_artifact(
+                team_run_id=team_run.id,
+                artifact_type="audit_report",
+                payload=payload,
+                evidence_ref=f"team_artifact={artifact.id}",
+            )
+            for observation in observations:
+                stored = self._ledger.record_team_observation(
+                    team_run_id=observation.team_run_id,
+                    domain=observation.domain,
+                    summary=observation.summary,
+                    evidence_refs=observation.evidence_refs,
+                    confidence=observation.confidence,
+                )
+                self._append_team_runtime_event(
+                    auto_run,
+                    EventType.TEAM_OBSERVATION_RECORDED,
+                    team_run_id=team_run.id,
+                    agent_job_id=job.id,
+                    agent_run_id=agent_run_id,
+                    payload={
+                        "observation_id": stored.id,
+                        "domain": stored.domain,
+                        "confidence": stored.confidence,
+                    },
+                )
+                candidate = candidate_instinct_from_observation(
+                    stored,
+                    workspace_alias=conversation.workspace_alias,
+                    repeated_evidence_count=1,
+                )
+                existing_status = self._team_instinct_status(candidate.instinct_id)
+                repeated_count = 2 if existing_status is not None else 1
+                instinct = candidate_instinct_from_observation(
+                    stored,
+                    workspace_alias=conversation.workspace_alias,
+                    repeated_evidence_count=repeated_count,
+                )
+                stored_instinct = self._ledger.upsert_team_instinct(instinct)
+                if existing_status is None:
+                    self._append_team_runtime_event(
+                        auto_run,
+                        EventType.TEAM_INSTINCT_PROPOSED,
+                        team_run_id=team_run.id,
+                        agent_job_id=job.id,
+                        agent_run_id=agent_run_id,
+                        payload={
+                            "instinct_id": stored_instinct.instinct_id,
+                            "status": stored_instinct.status,
+                        },
+                    )
+                elif existing_status != "active" and stored_instinct.status == "active":
+                    self._append_team_runtime_event(
+                        auto_run,
+                        EventType.TEAM_INSTINCT_PROMOTED,
+                        team_run_id=team_run.id,
+                        agent_job_id=job.id,
+                        agent_run_id=agent_run_id,
+                        payload={
+                            "instinct_id": stored_instinct.instinct_id,
+                            "status": stored_instinct.status,
+                        },
+                    )
+        except Exception:
+            logger.debug("Unable to record audit observations", exc_info=True)
+        return gate_result.passed
+
+    def _mark_architect_team_job_done(
+        self,
+        auto_run: object,
+        *,
+        agent_run_id: int | None = None,
+    ) -> None:
+        self._mark_team_agent_job_done(
+            auto_run,
+            role="architect",
+            agent_run_id=agent_run_id,
+        )
+
+    def _mark_team_agent_job_done(
+        self,
+        auto_run: object,
+        *,
+        role: str,
+        agent_run_id: int | None = None,
+    ) -> None:
+        if not hasattr(self._ledger, "get_team_run_for_orchestration"):
+            return
+        team_run = self._ledger.get_team_run_for_orchestration(auto_run.id)
+        if team_run is None or not hasattr(self._ledger, "list_team_agent_jobs"):
+            return
+        if not hasattr(self._ledger, "update_team_agent_job_status"):
+            return
+        for job in self._ledger.list_team_agent_jobs(team_run.id):
+            if job.role != role or job.status != "running":
+                continue
+            if agent_run_id is not None and job.agent_run_id != agent_run_id:
+                continue
+            if agent_run_id is None and job.agent_run_id is not None:
+                continue
+            self._ledger.update_team_agent_job_status(job.id, "done")
+            from wlcodex.runtime_events import EventType
+
+            self._append_team_runtime_event(
+                auto_run,
+                EventType.TEAM_AGENT_JOB_COMPLETED,
+                team_run_id=team_run.id,
+                agent_job_id=job.id,
+                agent_run_id=agent_run_id,
+                payload={
+                    "role": role,
+                    "status": "done",
+                },
+            )
+
+    def _mark_team_agent_job_failed(
+        self,
+        auto_run: object,
+        *,
+        role: str,
+        agent_run_id: int | None = None,
+    ) -> None:
+        if not hasattr(self._ledger, "get_team_run_for_orchestration"):
+            return
+        team_run = self._ledger.get_team_run_for_orchestration(auto_run.id)
+        if team_run is None or not hasattr(self._ledger, "list_team_agent_jobs"):
+            return
+        if hasattr(self._ledger, "update_team_run_status"):
+            self._ledger.update_team_run_status(team_run.id, "failed")
+        if not hasattr(self._ledger, "update_team_agent_job_status"):
+            return
+        for job in self._ledger.list_team_agent_jobs(team_run.id):
+            if job.role != role or job.status != "running":
+                continue
+            if agent_run_id is not None and job.agent_run_id != agent_run_id:
+                continue
+            if agent_run_id is None and job.agent_run_id is not None:
+                continue
+            self._ledger.update_team_agent_job_status(job.id, "failed")
+
+    def _final_synthesis_text(self, auto_run: object) -> str:
+        team_run = self._team_run_for_auto_run(auto_run)
+        if team_run is None or not hasattr(self._ledger, "list_team_artifacts"):
+            return "最终综合：\n验收通过，任务完成。"
+
+        implementation = None
+        test_report = None
+        audit_report = None
+        for artifact in self._ledger.list_team_artifacts(team_run.id):
+            if artifact.artifact_type == "implementation_report":
+                implementation = artifact
+            elif artifact.artifact_type == "test_report":
+                test_report = artifact
+            elif artifact.artifact_type == "audit_report":
+                audit_report = artifact
+
+        lines = ["最终综合："]
+        if implementation is not None:
+            files = implementation.payload.get("changed_files", [])
+            if isinstance(files, list) and files:
+                lines.append("变更文件：" + ", ".join(str(item) for item in files[:8]))
+            diff_summary = str(implementation.payload.get("diff_summary", "")).strip()
+            if diff_summary:
+                lines.append("变更摘要：" + diff_summary[:240])
+        if test_report is not None:
+            passed = test_report.payload.get("passed", [])
+            if isinstance(passed, list) and passed:
+                lines.append("测试证据：" + ", ".join(str(item) for item in passed[:4]))
+            commands = test_report.payload.get("commands_run", [])
+            if isinstance(commands, list) and commands:
+                command_names = [
+                    str(command.get("command", ""))
+                    for command in commands
+                    if isinstance(command, dict) and command.get("command")
+                ]
+                if command_names:
+                    lines.append("测试命令：" + ", ".join(command_names[:3]))
+        if audit_report is not None:
+            decision = str(audit_report.payload.get("decision", "")).strip()
+            risk = str(audit_report.payload.get("risk_level", "")).strip()
+            summary = str(audit_report.payload.get("summary", "")).strip()
+            audit_line = "审计结论：" + (decision or "unknown")
+            if risk:
+                audit_line += f" / 风险：{risk}"
+            lines.append(audit_line)
+            if summary:
+                lines.append("主要结论：" + summary[:240])
+        else:
+            lines.append("审计结论：验收通过。")
+        return "\n".join(lines)
 
     async def _try_collect_diagnose_json_async(self, auto_run: Any) -> str:
         """Async wrapper: run diagnose_live.py via thread to avoid blocking loop."""
@@ -822,6 +1536,7 @@ class EventBridge:
         buttons = build_auto_stage_buttons(
             conversation_id, new_stage,
             last_codex_analysis=auto_run.last_codex_analysis or "",
+            codex_implementer_enabled=self._codex_implementer_enabled,
         )
         # Include orch run data in the message for draft_ready
         stage_label = auto_stage_label(new_stage)
@@ -919,9 +1634,9 @@ class EventBridge:
             )
         elif new_stage == "claude_done":
             digest = render_auto_draft_digest(auto_run.last_claude_summary or "结论：完成。")
-            text = f"Claude 执行完成。\n\n{digest}\n\n请选择下一步："
+            text = f"实现完成。\n\n{digest}\n\n请选择下一步："
         elif new_stage == "completed":
-            text = "验收通过，任务完成。"
+            text = self._final_synthesis_text(auto_run)
         elif new_stage == "retry_ready":
             digest = render_auto_draft_digest(
                 auto_run.last_verification_result or "结论：验收未通过。"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 import logging
 import os
 from pathlib import Path
@@ -92,6 +93,60 @@ class OrchestrationConfig:
 
 
 @dataclass(frozen=True)
+class AdaptiveTeamConfig:
+    enabled: bool = True
+    model_profiles: dict[str, str] = field(
+        default_factory=lambda: {
+            "codex_gpt": "codex",
+            "claude_deepseek": "claude",
+        }
+    )
+    assignments: dict[str, tuple[str, ...]] = field(
+        default_factory=lambda: {
+            "director": ("codex_gpt",),
+            "investigator": ("codex_gpt",),
+            "architect": ("codex_gpt",),
+            "implementer": ("claude_deepseek", "codex_gpt"),
+            "tester": ("codex_gpt",),
+            "auditor": ("codex_gpt",),
+        }
+    )
+    role_skills: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    role_capabilities: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "model_profiles",
+            {str(key): str(value) for key, value in self.model_profiles.items()},
+        )
+        object.__setattr__(
+            self,
+            "assignments",
+            {
+                str(key): tuple(str(item) for item in value)
+                for key, value in self.assignments.items()
+            },
+        )
+        object.__setattr__(
+            self,
+            "role_skills",
+            {
+                str(key): tuple(str(item) for item in value)
+                for key, value in self.role_skills.items()
+            },
+        )
+        object.__setattr__(
+            self,
+            "role_capabilities",
+            {
+                str(key): tuple(str(item) for item in value)
+                for key, value in self.role_capabilities.items()
+            },
+        )
+
+
+@dataclass(frozen=True)
 class ClaudeConfig:
     enabled: bool = False
     binary: str = "auto"
@@ -179,6 +234,7 @@ class AppConfig:
     workspaces: tuple[WorkspaceConfig, ...]
     conversation: ConversationConfig = ConversationConfig()
     orchestration: OrchestrationConfig = OrchestrationConfig()
+    adaptive_team: AdaptiveTeamConfig = field(default_factory=AdaptiveTeamConfig)
     claude: ClaudeConfig = ClaudeConfig()
     context_budget: ContextBudgetConfig = ContextBudgetConfig()
     streaming: StreamingConfig = StreamingConfig()
@@ -247,6 +303,7 @@ def load_config(path: Path) -> AppConfig:
     task_raw = data.get("task", {})
     conv_raw = data.get("conversation", {})
     orch_raw = data.get("orchestration", {})
+    adaptive_team_raw = data.get("adaptive_team", {})
     claude_raw = data.get("claude", {})
     budget_raw = data.get("context_budget", {})
     streaming_raw = data.get("streaming", {})
@@ -347,6 +404,7 @@ def load_config(path: Path) -> AppConfig:
             max_verify_rounds=int(orch_raw.get("max_verify_rounds", 3)),
             auto_delegate_simple_edits=bool(orch_raw.get("auto_delegate_simple_edits", False)),
         ),
+        adaptive_team=_adaptive_team_config(adaptive_team_raw),
         claude=ClaudeConfig(
             enabled=bool(claude_raw.get("enabled", False)),
             binary=str(claude_raw.get("binary", "auto")),
@@ -389,6 +447,51 @@ def load_config(path: Path) -> AppConfig:
         telegram_output=_telegram_output_config(telegram_output_raw),
         workspace_discovery=discovery,
     )
+
+
+def _adaptive_team_config(data: dict[str, object]) -> AdaptiveTeamConfig:
+    defaults = AdaptiveTeamConfig()
+    model_profiles_raw = data.get("model_profiles", {})
+    assignments_raw = data.get("assignments", {})
+    role_skills_raw = data.get("role_skills", {})
+    role_capabilities_raw = data.get("role_capabilities", {})
+
+    model_profiles = {
+        **defaults.model_profiles,
+        **{str(key): str(value) for key, value in dict(model_profiles_raw).items()},
+    }
+    assignments = {
+        **defaults.assignments,
+        **_string_tuple_mapping("assignments", assignments_raw),
+    }
+    role_skills = {
+        **defaults.role_skills,
+        **_string_tuple_mapping("role_skills", role_skills_raw),
+    }
+    role_capabilities = {
+        **defaults.role_capabilities,
+        **_string_tuple_mapping("role_capabilities", role_capabilities_raw),
+    }
+    return AdaptiveTeamConfig(
+        enabled=bool(data.get("enabled", defaults.enabled)),
+        model_profiles=model_profiles,
+        assignments=assignments,
+        role_skills=role_skills,
+        role_capabilities=role_capabilities,
+    )
+
+
+def _string_tuple_mapping(table: str, raw: object) -> dict[str, tuple[str, ...]]:
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"adaptive_team.{table} must be a table")
+    result: dict[str, tuple[str, ...]] = {}
+    for key, value in raw.items():
+        if not isinstance(value, (list, tuple)):
+            raise ConfigError(f"adaptive_team.{table}.{key} must be a list of strings")
+        if not all(isinstance(item, str) for item in value):
+            raise ConfigError(f"adaptive_team.{table}.{key} must be a list of strings")
+        result[str(key)] = tuple(value)
+    return result
 
 
 def _telegram_output_config(data: dict[str, object]) -> TelegramOutputConfig:

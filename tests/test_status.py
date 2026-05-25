@@ -459,6 +459,32 @@ def test_render_conversation_status_unknown_surface_mode_falls_back() -> None:
     assert "模式：Claude 直聊" in text
 
 
+def test_role_aware_auto_status_lists_engineer_roles() -> None:
+    from wlcodex.status import render_team_status_summary
+
+    text = render_team_status_summary(
+        goal="修复登录偶发失败",
+        route="staged_auto",
+        roles=[
+            ("director", "codex_gpt", "running"),
+            ("architect", "codex_gpt", "done"),
+            ("implementer", "claude_deepseek", "queued"),
+        ],
+        latest_artifacts=[
+            "architecture_plan: Plan ready",
+            "implementation_report: Patch drafted",
+        ],
+    )
+
+    assert "总工程师" in text
+    assert "架构工程师" in text
+    assert "开发工程师" in text
+    assert "claude_deepseek" in text
+    assert "排队中" in text
+    assert "queued" not in text
+    assert "architecture_plan: Plan ready" in text
+
+
 # --- Carryover renderers ---
 
 

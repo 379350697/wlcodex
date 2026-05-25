@@ -1,8 +1,86 @@
 from pathlib import Path
+import tomllib
 
 import pytest
 
-from wlcodex.config import ConfigError, load_config
+from wlcodex.team_capabilities import audit_role_capability_config
+from wlcodex.config import (
+    AdaptiveTeamConfig,
+    AppConfig,
+    ApprovalConfig,
+    BackendConfig,
+    CodexConfig,
+    ConfigError,
+    DisplayConfig,
+    StorageConfig,
+    TaskConfig,
+    TelegramConfig,
+    WorkspaceConfig,
+    load_config,
+)
+
+
+def test_example_adaptive_team_role_capabilities_pass_audit() -> None:
+    example_path = Path(__file__).resolve().parents[1] / "config" / "wlcodex.example.toml"
+    data = tomllib.loads(example_path.read_text(encoding="utf-8"))
+
+    findings = audit_role_capability_config(
+        data["adaptive_team"]["role_capabilities"]
+    )
+
+    assert findings == ()
+
+
+def _minimal_app_config() -> AppConfig:
+    return AppConfig(
+        telegram=TelegramConfig(
+            bot_token_env="TOKEN",
+            allowed_user_ids=frozenset({123}),
+        ),
+        codex=CodexConfig(
+            binary="codex",
+            app_server_host="127.0.0.1",
+            app_server_port=17431,
+            approval_policy="on-request",
+            sandbox="workspace-write",
+        ),
+        storage=StorageConfig(
+            sqlite_path=Path("runtime/wlcodex.sqlite3"),
+            task_log_dir=Path("runtime/tasks"),
+            worktree_root=Path("runtime/worktrees"),
+        ),
+        display=DisplayConfig(
+            status_update_min_interval_seconds=2,
+            tail_lines=40,
+            diff_max_chars=3500,
+        ),
+        backend=BackendConfig(
+            startup_timeout_seconds=15,
+            request_timeout_seconds=60,
+            codex_prompt_idle_timeout_seconds=300,
+            codex_analysis_hard_timeout_seconds=3600,
+            codex_verification_hard_timeout_seconds=3600,
+            event_log_max_chars=20000,
+        ),
+        approval=ApprovalConfig(
+            callback_timeout_seconds=3600,
+            allow_session_approval=True,
+        ),
+        task=TaskConfig(
+            max_running_seconds=7200,
+            max_queued_seconds=1800,
+            max_waiting_approval_seconds=3600,
+            watchdog_interval_seconds=60,
+            backend_dead_grace_seconds=120,
+        ),
+        workspaces=(
+            WorkspaceConfig(
+                alias="wlcodex",
+                path=Path("/tmp/wlcodex"),
+                allow_write=True,
+            ),
+        ),
+    )
 
 
 def test_default_surface_mode_is_product() -> None:
@@ -69,6 +147,176 @@ path = "/tmp/wlcodex"
     assert config.backend.codex_prompt_idle_timeout_seconds == 300
     assert config.backend.codex_analysis_hard_timeout_seconds == 3600
     assert config.backend.codex_verification_hard_timeout_seconds == 3600
+    assert config.adaptive_team.enabled is True
+    assert config.adaptive_team.model_profiles["codex_gpt"] == "codex"
+    assert config.adaptive_team.model_profiles["claude_deepseek"] == "claude"
+    assert config.adaptive_team.assignments["investigator"] == ("codex_gpt",)
+    assert config.adaptive_team.assignments["architect"] == ("codex_gpt",)
+    assert config.adaptive_team.assignments["implementer"] == (
+        "claude_deepseek",
+        "codex_gpt",
+    )
+    assert config.adaptive_team.assignments["tester"] == ("codex_gpt",)
+    assert config.adaptive_team.assignments["auditor"] == ("codex_gpt",)
+
+
+@pytest.mark.parametrize(
+    ("table", "key"),
+    [
+        ("assignments", "implementer"),
+        ("role_skills", "investigator"),
+        ("role_capabilities", "investigator"),
+    ],
+)
+def test_adaptive_team_rejects_scalar_role_lists(
+    tmp_path: Path,
+    table: str,
+    key: str,
+) -> None:
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        f"""
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+
+[codex]
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[adaptive_team.{table}]
+{key} = "codex_gpt"
+
+[[workspaces]]
+alias = "wlcodex"
+path = "/tmp/wlcodex"
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match=rf"adaptive_team\.{table}\.{key} must be a list of strings",
+    ):
+        load_config(config_path)
+
+
+def test_load_config_reads_adaptive_team_overrides(tmp_path: Path) -> None:
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+
+[codex]
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[adaptive_team]
+enabled = false
+
+[adaptive_team.model_profiles]
+codex_gpt = "codex"
+strong_model = "codex"
+local_claude = "claude"
+
+[adaptive_team.assignments]
+director = ["strong_model"]
+investigator = ["codex_gpt"]
+architect = ["strong_model"]
+implementer = ["local_claude", "codex_gpt"]
+tester = ["codex_gpt"]
+auditor = ["strong_model"]
+
+[adaptive_team.role_skills]
+investigator = ["systematic-debugging", "gitnexus-exploring"]
+architect = ["gitnexus-impact-analysis"]
+implementer = ["test-driven-development", "verification-before-completion"]
+
+[adaptive_team.role_capabilities]
+investigator = ["read", "shell_readonly", "logs", "gitnexus"]
+architect = ["read", "gitnexus"]
+implementer = ["read", "write", "shell", "tests"]
+
+[[workspaces]]
+alias = "wlcodex"
+path = "/tmp/wlcodex"
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.adaptive_team.enabled is False
+    assert config.adaptive_team.model_profiles["strong_model"] == "codex"
+    assert config.adaptive_team.model_profiles["local_claude"] == "claude"
+    assert config.adaptive_team.assignments["director"] == ("strong_model",)
+    assert config.adaptive_team.assignments["implementer"] == (
+        "local_claude",
+        "codex_gpt",
+    )
+    assert config.adaptive_team.role_skills["investigator"] == (
+        "systematic-debugging",
+        "gitnexus-exploring",
+    )
+    assert config.adaptive_team.role_capabilities["implementer"] == (
+        "read",
+        "write",
+        "shell",
+        "tests",
+    )
+
+
+def test_adaptive_team_config_copies_incoming_nested_values() -> None:
+    model_profiles = {"codex_gpt": "codex"}
+    assignments = {"implementer": ["codex_gpt"]}
+    role_skills = {"investigator": ["systematic-debugging"]}
+    role_capabilities = {"investigator": ["read"]}
+
+    config = AdaptiveTeamConfig(
+        model_profiles=model_profiles,
+        assignments=assignments,
+        role_skills=role_skills,
+        role_capabilities=role_capabilities,
+    )
+
+    model_profiles["codex_gpt"] = "changed"
+    assignments["implementer"].append("claude_deepseek")
+    role_skills["investigator"].append("gitnexus-exploring")
+    role_capabilities["investigator"].append("shell_readonly")
+
+    assert config.model_profiles == {"codex_gpt": "codex"}
+    assert config.assignments == {"implementer": ("codex_gpt",)}
+    assert config.role_skills == {"investigator": ("systematic-debugging",)}
+    assert config.role_capabilities == {"investigator": ("read",)}
+
+
+def test_app_config_default_adaptive_team_is_not_shared() -> None:
+    first = _minimal_app_config()
+    second = _minimal_app_config()
+
+    first.adaptive_team.model_profiles["extra_profile"] = "codex"
+
+    assert "extra_profile" not in second.adaptive_team.model_profiles
 
 
 def test_load_config_reads_workspace_and_token_env(tmp_path: Path) -> None:

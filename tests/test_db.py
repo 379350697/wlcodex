@@ -1,9 +1,11 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from wlcodex.db import Ledger
 from wlcodex.models import ApprovalKind, ApprovalStatus, TaskStatus
+from wlcodex.team_memory import InstinctMemory
 
 pytestmark = pytest.mark.slow
 
@@ -413,6 +415,38 @@ def test_aggregate_usage_splits_by_agent(tmp_path: Path) -> None:
     assert agg["totals"]["workflow_overhead_input_tokens"] == 300
 
 
+def test_aggregate_usage_without_filters(tmp_path: Path) -> None:
+    """Unfiltered aggregate and summary queries work without a WHERE prefix."""
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    ledger.record_usage_event(
+        agent="codex",
+        role="analysis",
+        input_tokens=100,
+        output_tokens=50,
+        source="exact",
+    )
+    ledger.record_usage_event(
+        agent="claude",
+        role="implementation",
+        input_tokens=200,
+        output_tokens=100,
+        source="estimated",
+    )
+
+    agg = ledger.aggregate_usage()
+
+    assert agg["codex"]["requests"] == 1
+    assert agg["claude"]["requests"] == 1
+    assert agg["totals"]["requests"] == 2
+    assert agg["totals"]["total_tokens"] == 450
+
+    summary = ledger.render_usage_summary()
+    assert "Codex" in summary
+    assert "Claude" in summary
+
+
 def test_render_usage_summary_string(tmp_path: Path) -> None:
     """Render usage summary produces readable output."""
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
@@ -796,3 +830,401 @@ def test_backfill_diagnose_json_empty_on_new_db(tmp_path: Path) -> None:
                      if r.id == orch.id), None)
     assert reloaded is not None
     assert reloaded.diagnose_json == json_str
+
+
+def test_team_run_links_to_existing_orchestration_run(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="Team",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orchestration = ledger.create_orchestration_run(
+        conversation_id=conversation.id,
+        goal="fix bug",
+    )
+
+    team = ledger.create_team_run(
+        conversation.id,
+        orchestration.id,
+        "fix bug",
+        route="staged_auto",
+        risk_level="medium",
+    )
+
+    loaded = ledger.get_team_run(team.id)
+    assert loaded is not None
+    assert loaded.orchestration_run_id == orchestration.id
+    assert loaded.route == "staged_auto"
+    assert loaded.status == "running"
+
+
+def test_team_artifact_round_trip(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="Artifacts",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orchestration = ledger.create_orchestration_run(
+        conversation_id=conversation.id,
+        goal="fix bug",
+    )
+    team = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orchestration.id,
+        goal="fix bug",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    job = ledger.create_team_agent_job(
+        team_run_id=team.id,
+        role="architect",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=None,
+    )
+
+    artifact = ledger.record_team_artifact(
+        team_run_id=team.id,
+        agent_job_id=job.id,
+        artifact_type="architecture_plan",
+        summary="Change one file and add one test.",
+        payload={"acceptance_criteria": ["pytest passes"]},
+    )
+
+    artifacts = ledger.list_team_artifacts(team.id)
+    assert artifacts[0].id == artifact.id
+    assert artifacts[0].payload["acceptance_criteria"] == ["pytest passes"]
+
+
+def test_team_artifact_survives_ledger_reopen(tmp_path: Path) -> None:
+    db_path = tmp_path / "db.sqlite3"
+    ledger = Ledger.open(db_path)
+    ledger.migrate()
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="Artifacts recovery",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orchestration = ledger.create_orchestration_run(
+        conversation_id=conversation.id,
+        goal="recover artifact",
+    )
+    team = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orchestration.id,
+        goal="recover artifact",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    job = ledger.create_team_agent_job(
+        team_run_id=team.id,
+        role="architect",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=None,
+    )
+    artifact = ledger.record_team_artifact(
+        team_run_id=team.id,
+        agent_job_id=job.id,
+        artifact_type="architecture_plan",
+        summary="Persist this plan across restart.",
+        payload={"files": ["wlcodex/db.py"], "steps": ["reopen ledger"]},
+    )
+    ledger._conn.close()
+
+    reopened = Ledger.open(db_path)
+    reopened.migrate()
+
+    artifacts = reopened.list_team_artifacts(team.id)
+    assert len(artifacts) == 1
+    assert artifacts[0].id == artifact.id
+    assert artifacts[0].summary == "Persist this plan across restart."
+    assert artifacts[0].payload == {
+        "files": ["wlcodex/db.py"],
+        "steps": ["reopen ledger"],
+    }
+
+
+def test_team_context_packet_round_trip(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="Context",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orchestration = ledger.create_orchestration_run(
+        conversation_id=conversation.id,
+        goal="fix bug",
+    )
+    team = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orchestration.id,
+        goal="fix bug",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    job = ledger.create_team_agent_job(
+        team_run_id=team.id,
+        role="auditor",
+        model_profile="codex_gpt",
+        status="queued",
+        agent_run_id=None,
+    )
+
+    older = ledger.record_team_context_packet(
+        team_run_id=team.id,
+        agent_job_id=job.id,
+        packet_json={
+            "role": "auditor",
+            "resume_state": "implementation still running",
+        },
+        prompt_text="role: auditor\nresume_state: implementation still running",
+        prompt_tokens=12,
+    )
+    newer = ledger.record_team_context_packet(
+        team_run_id=team.id,
+        agent_job_id=job.id,
+        packet_json={
+            "role": "auditor",
+            "resume_state": "implementation done; audit next",
+        },
+        prompt_text="role: auditor\nresume_state: implementation done; audit next",
+        prompt_tokens=14,
+    )
+
+    loaded = ledger.get_team_context_packet_for_job(job.id)
+    assert loaded is not None
+    assert loaded.id != older.id
+    assert loaded.id == newer.id
+    assert loaded.packet["role"] == "auditor"
+    assert loaded.packet["resume_state"] == "implementation done; audit next"
+
+
+def test_team_skill_activation_round_trip(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="Activation",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orchestration = ledger.create_orchestration_run(
+        conversation_id=conversation.id,
+        goal="audit diff",
+    )
+    team = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orchestration.id,
+        goal="audit diff",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    job = ledger.create_team_agent_job(
+        team_run_id=team.id,
+        role="auditor",
+        model_profile="codex_gpt",
+        status="queued",
+        agent_run_id=None,
+    )
+
+    activation = ledger.record_team_skill_activation(
+        team_run_id=team.id,
+        agent_job_id=job.id,
+        activation_type="skill",
+        activation_id="security-review",
+        source="capability_budget",
+        token_cost=200,
+    )
+
+    activations = ledger.list_team_skill_activations(job.id)
+    assert activations[0].id == activation.id
+    assert activations[0].activation_type == "skill"
+    assert activations[0].activation_id == "security-review"
+    assert activations[0].source == "capability_budget"
+    assert activations[0].token_cost == 200
+
+
+def test_team_instinct_round_trip(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="Instincts",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orchestration = ledger.create_orchestration_run(
+        conversation_id=conversation.id,
+        goal="audit diff",
+    )
+    team = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orchestration.id,
+        goal="audit diff",
+        route="staged_auto",
+        risk_level="medium",
+    )
+
+    observation = ledger.record_team_observation(
+        team_run_id=team.id,
+        domain="audit",
+        summary="Regression test evidence was missing from the audit.",
+        evidence_refs=("team_artifact:42",),
+        confidence=0.7,
+    )
+    stored = ledger.upsert_team_instinct(
+        InstinctMemory(
+            instinct_id="audit-memory",
+            scope="project",
+            workspace_alias="wlcodex",
+            role="auditor",
+            domain="audit",
+            trigger="verification after implementation diff",
+            action="Require regression evidence before approving the diff.",
+            confidence=0.8,
+            evidence_refs=observation.evidence_refs,
+            status="active",
+            created_at=observation.created_at,
+            last_validated_at=observation.created_at,
+        )
+    )
+
+    observations = ledger.list_team_observations(team.id)
+    active = ledger.list_team_instincts(status="active")
+
+    assert observations[0].id == observation.id
+    assert stored.instinct_id == "audit-memory"
+    assert active[0].instinct_id == "audit-memory"
+    assert active[0].evidence_refs == ("team_artifact:42",)
+
+
+def test_team_instinct_upsert_preserves_stronger_existing_memory(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+
+    ledger.upsert_team_instinct(
+        instinct_id="audit-memory",
+        scope="project",
+        workspace_alias="wlcodex",
+        role="auditor",
+        domain="audit",
+        trigger="verification after implementation diff",
+        action="Require regression evidence before approving the diff.",
+        confidence=0.9,
+        evidence_refs=("team_observation=1", "team_observation=2"),
+        status="active",
+    )
+    stored = ledger.upsert_team_instinct(
+        instinct_id="audit-memory",
+        scope="project",
+        workspace_alias="wlcodex",
+        role="auditor",
+        domain="audit",
+        trigger="verification after implementation diff",
+        action="Require regression evidence before approving the diff.",
+        confidence=0.4,
+        evidence_refs=("team_observation=2", "team_observation=3"),
+        status="candidate",
+    )
+
+    assert stored.evidence_refs == (
+        "team_observation=1",
+        "team_observation=2",
+        "team_observation=3",
+    )
+    assert stored.confidence == 0.9
+    assert stored.status == "active"
+
+
+def test_team_memory_persistence_clamps_confidence_bounds(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+
+    low_observation = ledger.record_team_observation(
+        team_run_id=1,
+        domain="audit",
+        summary="low",
+        evidence_refs=("team_artifact=low",),
+        confidence=-0.2,
+    )
+    high_observation = ledger.record_team_observation(
+        team_run_id=1,
+        domain="audit",
+        summary="high",
+        evidence_refs=("team_artifact=high",),
+        confidence=1.2,
+    )
+    low_instinct = ledger.upsert_team_instinct(
+        instinct_id="low-confidence",
+        scope="project",
+        workspace_alias="wlcodex",
+        role="auditor",
+        domain="audit",
+        trigger="low",
+        action="Check evidence.",
+        confidence=-0.2,
+        evidence_refs=("team_observation=low",),
+        status="candidate",
+    )
+    high_instinct = ledger.upsert_team_instinct(
+        instinct_id="high-confidence",
+        scope="project",
+        workspace_alias="wlcodex",
+        role="auditor",
+        domain="audit",
+        trigger="high",
+        action="Check evidence.",
+        confidence=1.2,
+        evidence_refs=("team_observation=high",),
+        status="active",
+    )
+
+    assert low_observation.confidence == 0.0
+    assert high_observation.confidence == 1.0
+    assert low_instinct.confidence == 0.0
+    assert high_instinct.confidence == 1.0
+
+
+def test_team_instinct_upsert_normalizes_naive_datetimes_to_utc(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+
+    stored = ledger.upsert_team_instinct(
+        InstinctMemory(
+            instinct_id="naive-datetime",
+            scope="project",
+            workspace_alias="wlcodex",
+            role="auditor",
+            domain="audit",
+            trigger="verification after implementation diff",
+            action="Require regression evidence before approving the diff.",
+            confidence=0.8,
+            evidence_refs=("team_observation=1",),
+            status="active",
+            created_at=datetime(2026, 5, 25, 12, 0, 0),
+            last_validated_at=datetime(2026, 5, 25, 13, 0, 0),
+        )
+    )
+
+    assert stored.created_at.tzinfo is timezone.utc
+    assert stored.last_validated_at.tzinfo is timezone.utc

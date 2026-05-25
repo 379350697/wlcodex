@@ -219,7 +219,7 @@ class TestBuildAutoStageButtons:
         buttons = build_auto_stage_buttons(42, AUTO_CLAUDE_RUNNING)
         labels = _labels(buttons)
         assert "查看状态" in labels
-        assert "打断 Claude" in labels
+        assert "打断执行" in labels
 
     def test_claude_done_buttons(self) -> None:
         buttons = build_auto_stage_buttons(42, AUTO_CLAUDE_DONE)

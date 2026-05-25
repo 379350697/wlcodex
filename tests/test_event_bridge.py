@@ -43,6 +43,7 @@ def _bridge(
     send_telegram=_send_telegram,
     edit_telegram=_edit_telegram,
     runtime_event_store=None,
+    codex_implementer_enabled: bool = False,
 ) -> EventBridge:
     return EventBridge(
         task_service=service,
@@ -52,7 +53,19 @@ def _bridge(
         edit_telegram=edit_telegram,
         approval_service=ApprovalSpy(),
         runtime_event_store=runtime_event_store,
+        codex_implementer_enabled=codex_implementer_enabled,
     )
+
+
+def _button_actions(buttons: object) -> set[str]:
+    actions: set[str] = set()
+    for row in buttons or []:
+        for button in row:
+            callback_data = button.get("callback_data", "")
+            parts = callback_data.split(":")
+            if len(parts) >= 3:
+                actions.add(parts[2])
+    return actions
 
 
 @pytest.mark.asyncio
@@ -854,7 +867,13 @@ async def test_auto_analysis_completion_releases_final_plan_gate(
         sent.append((chat_id, text, buttons))
         return 1
 
-    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+    bridge = _bridge(
+        service,
+        IdleBackend(),
+        ledger,
+        send_telegram=send_telegram,
+        codex_implementer_enabled=True,
+    )
 
     await bridge.process_event(BackendEvent(
         "turn_started",
@@ -1026,7 +1045,13 @@ async def test_auto_final_plan_completion_shows_assembled_plan_before_claude_gat
         sent.append((chat_id, text, buttons))
         return 1
 
-    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+    bridge = _bridge(
+        service,
+        IdleBackend(),
+        ledger,
+        send_telegram=send_telegram,
+        codex_implementer_enabled=True,
+    )
 
     await bridge.process_event(BackendEvent(
         "turn_started",
@@ -1069,6 +1094,399 @@ async def test_auto_final_plan_completion_shows_assembled_plan_before_claude_gat
         for button in row
     ]
     assert "交给 Claude 执行" in labels
+    assert "交给 Codex 执行" in labels
+    assert "auto_send_to_codex" in _button_actions(sent[-1][2])
+
+
+@pytest.mark.asyncio
+async def test_auto_final_plan_completion_marks_architect_job_done_but_team_run_running(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate final plan",
+        codex_thread_id="thread-final-plan-team",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "fix the workflow")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-final-plan-team",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="fix the workflow",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    architect_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="architect",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    stale_architect_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="architect",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=None,
+    )
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-final-plan-team", "turnId": "turn-final-plan-team"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-final-plan-team",
+            "turnId": "turn-final-plan-team",
+            "delta": "最终方案：\n1. 修改入口校验。\n",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-final-plan-team", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    updated_team = ledger.get_team_run(team_run.id)
+    jobs_by_id = {job.id: job for job in ledger.list_team_agent_jobs(team_run.id)}
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_DRAFT_READY
+    assert jobs_by_id[architect_job.id].status == "done"
+    assert jobs_by_id[stale_architect_job.id].status == "running"
+    assert updated_team is not None
+    assert updated_team.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_replayed_auto_final_plan_completion_does_not_duplicate_architecture_plan(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate final plan",
+        codex_thread_id="thread-final-plan-replay",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "fix the workflow")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-final-plan-replay",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="fix the workflow",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    architect_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="architect",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+    completion = BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-final-plan-replay", "status": "completed"},
+    )
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-final-plan-replay", "turnId": "turn-final-plan-replay"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-final-plan-replay",
+            "turnId": "turn-final-plan-replay",
+            "delta": "最终方案：\n1. 修改入口校验。\n",
+        },
+    ))
+    await bridge.process_event(completion)
+    await bridge.process_event(completion)
+
+    artifacts = [
+        artifact for artifact in ledger.list_team_artifacts(team_run.id)
+        if artifact.artifact_type == "architecture_plan"
+    ]
+    updated_job = ledger.list_team_agent_jobs(team_run.id)[0]
+
+    assert updated_job.id == architect_job.id
+    assert updated_job.status == "done"
+    assert len(artifacts) == 1
+    assert artifacts[0].agent_job_id == architect_job.id
+
+
+@pytest.mark.asyncio
+async def test_auto_implementation_completion_marks_linked_implementer_job_done_only(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_CLAUDE_DONE,
+        AUTO_CLAUDE_RUNNING,
+        ROLE_AUTO_IMPLEMENTATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Implement final plan",
+        codex_thread_id="thread-implementation-team",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "fix the workflow")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_CLAUDE_RUNNING,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_IMPLEMENTATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-implementation-team",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="fix the workflow",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    matching_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    unrelated_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=None,
+    )
+
+    bridge = _bridge(service, IdleBackend(), ledger)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-implementation-team", "turnId": "turn-implementation-team"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-implementation-team",
+            "turnId": "turn-implementation-team",
+            "delta": "Implementation complete; tests passed.",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-implementation-team", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    updated_team = ledger.get_team_run(team_run.id)
+    jobs_by_id = {job.id: job for job in ledger.list_team_agent_jobs(team_run.id)}
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_CLAUDE_DONE
+    assert jobs_by_id[matching_job.id].status == "done"
+    assert jobs_by_id[unrelated_job.id].status == "running"
+    assert updated_team is not None
+    assert updated_team.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_auto_implementation_failure_marks_orchestration_and_linked_job_failed(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_CLAUDE_RUNNING,
+        ROLE_AUTO_IMPLEMENTATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Implement final plan",
+        codex_thread_id="thread-implementation-failure",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "fix the workflow")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_CLAUDE_RUNNING,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_IMPLEMENTATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-implementation-failure",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="fix the workflow",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    matching_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    unrelated_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=None,
+    )
+
+    bridge = _bridge(service, IdleBackend(), ledger)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {
+            "threadId": "thread-implementation-failure",
+            "turnId": "turn-implementation-failure",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {
+            "threadId": "thread-implementation-failure",
+            "status": "failed",
+            "error": {"message": "backend implementation boom"},
+        },
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    updated_team = ledger.get_team_run(team_run.id)
+    updated_agent = ledger.get_agent_run(agent_run.id)
+    jobs_by_id = {job.id: job for job in ledger.list_team_agent_jobs(team_run.id)}
+
+    assert updated.status == "failed"
+    assert updated.current_step == AUTO_CLAUDE_RUNNING
+    assert "backend implementation boom" in updated.last_claude_summary
+    assert updated_agent.status == "failed"
+    assert jobs_by_id[matching_job.id].status == "failed"
+    assert jobs_by_id[unrelated_job.id].status == "running"
+    assert updated_team is not None
+    assert updated_team.status == "failed"
 
 
 @pytest.mark.asyncio
@@ -1441,6 +1859,672 @@ async def test_auto_claude_done_sends_chinese_digest_not_raw_long_summary(
         for button in row
     ]
     assert "Codex 验收" in labels
+
+
+@pytest.mark.asyncio
+async def test_auto_codex_implementation_done_advances_to_claude_done(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_CLAUDE_DONE,
+        AUTO_CLAUDE_RUNNING,
+        ROLE_AUTO_IMPLEMENTATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run Codex implementation",
+        codex_thread_id="thread-codex-implementation",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "implement with codex")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_CLAUDE_RUNNING,
+        last_codex_analysis="方案：让 Codex 执行实现。",
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_IMPLEMENTATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-codex-implementation",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {
+            "threadId": "thread-codex-implementation",
+            "turnId": "turn-codex-implementation",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-codex-implementation",
+            "turnId": "turn-codex-implementation",
+            "delta": "结论：Codex 已完成实现。\n下一步：请验收。",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-codex-implementation", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_CLAUDE_DONE
+    assert "Codex 已完成实现" in updated.last_claude_summary
+    assert "Codex 验收" in [
+        button["text"]
+        for row in (sent[-1][2] or [])
+        for button in row
+    ]
+    assert "实现完成" in sent[-1][1]
+    assert "Claude 执行完成" not in sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_auto_verification_failure_marks_orchestration_and_linked_job_failed(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_VERIFYING,
+        ROLE_AUTO_VERIFICATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run Codex verification",
+        codex_thread_id="thread-verification-failure",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "verify with codex")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_VERIFYING,
+        last_codex_analysis="方案：让 Codex 验收。",
+        last_claude_summary="实现完成。",
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_VERIFICATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-verification-failure",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="verify with codex",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    matching_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="auditor",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    unrelated_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="auditor",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=None,
+    )
+
+    bridge = _bridge(service, IdleBackend(), ledger)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {
+            "threadId": "thread-verification-failure",
+            "turnId": "turn-verification-failure",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {
+            "threadId": "thread-verification-failure",
+            "status": "failed",
+            "error": {"message": "backend verification boom"},
+        },
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    updated_team = ledger.get_team_run(team_run.id)
+    updated_agent = ledger.get_agent_run(agent_run.id)
+    jobs_by_id = {job.id: job for job in ledger.list_team_agent_jobs(team_run.id)}
+
+    assert updated.status == "failed"
+    assert updated.current_step == AUTO_VERIFYING
+    assert "backend verification boom" in updated.last_verification_result
+    assert updated_agent.status == "failed"
+    assert jobs_by_id[matching_job.id].status == "failed"
+    assert jobs_by_id[unrelated_job.id].status == "running"
+    assert updated_team is not None
+    assert updated_team.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_auto_verification_pass_without_test_evidence_blocks_team_completion(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_RETRY_READY,
+        AUTO_VERIFYING,
+        ROLE_AUTO_VERIFICATION,
+    )
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import EventType
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run Codex verification",
+        codex_thread_id="thread-verification-pass-team",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "verify with codex")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_VERIFYING,
+        last_codex_analysis="方案：让 Codex 验收。",
+        last_claude_summary="实现完成。",
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_VERIFICATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-verification-pass-team",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="verify with codex",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    auditor_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="auditor",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    bridge = _bridge(
+        service,
+        IdleBackend(),
+        ledger,
+        runtime_event_store=store,
+    )
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {
+            "threadId": "thread-verification-pass-team",
+            "turnId": "turn-verification-pass-team",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-verification-pass-team",
+            "turnId": "turn-verification-pass-team",
+            "delta": "decision: pass\nsummary: Verification passed.",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {
+            "threadId": "thread-verification-pass-team",
+            "status": "completed",
+        },
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    updated_team = ledger.get_team_run(team_run.id)
+    updated_job = ledger.list_team_agent_jobs(team_run.id)[0]
+    event_types = [
+        event.event_type
+        for event in store.list_by_orchestration_run(orch_run.id, limit=100)
+    ]
+
+    assert updated.current_step == AUTO_RETRY_READY
+    assert updated_team is not None
+    assert updated_team.status == "running"
+    assert updated_job.id == auditor_job.id
+    assert updated_job.status == "done"
+    assert EventType.TEAM_RUN_COMPLETED not in event_types
+    assert EventType.TEAM_GATE_FAILED in event_types
+    assert EventType.TEAM_AGENT_JOB_COMPLETED in event_types
+    assert EventType.TEAM_ARTIFACT_RECORDED in event_types
+
+
+@pytest.mark.asyncio
+async def test_auto_verification_pass_without_team_run_preserves_legacy_completion(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COMPLETED,
+        AUTO_VERIFYING,
+        ROLE_AUTO_VERIFICATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run Codex verification",
+        codex_thread_id="thread-verification-legacy-pass",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "legacy verify")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_VERIFYING,
+        last_codex_analysis="方案：legacy staged auto。",
+        last_claude_summary="实现完成。",
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_VERIFICATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-verification-legacy-pass",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    bridge = _bridge(service, IdleBackend(), ledger)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {
+            "threadId": "thread-verification-legacy-pass",
+            "turnId": "turn-verification-legacy-pass",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-verification-legacy-pass",
+            "turnId": "turn-verification-legacy-pass",
+            "delta": "decision: pass\nsummary: Legacy verification passed.",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {
+            "threadId": "thread-verification-legacy-pass",
+            "status": "completed",
+        },
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+
+    assert updated.current_step == AUTO_COMPLETED
+    assert updated.last_verification_result.startswith("decision: pass")
+
+
+@pytest.mark.asyncio
+async def test_auto_verification_pass_without_current_auditor_job_blocks_completion(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_RETRY_READY,
+        AUTO_VERIFYING,
+        ROLE_AUTO_VERIFICATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run Codex verification",
+        codex_thread_id="thread-verification-no-auditor",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "verify with codex")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_VERIFYING,
+        last_codex_analysis="方案：让 Codex 验收。",
+        last_claude_summary="实现完成。",
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_VERIFICATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-verification-no-auditor",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="verify with codex",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    ledger.record_team_artifact(
+        team_run_id=team_run.id,
+        agent_job_id=None,
+        artifact_type="test_report",
+        summary="Focused tests passed.",
+        payload={
+            "summary": "Focused tests passed.",
+            "commands_run": [
+                {
+                    "command": "pytest tests/test_event_bridge.py -q",
+                    "exit_status": 0,
+                    "summary": "event bridge tests passed",
+                }
+            ],
+            "passed": ["Focused tests"],
+            "failed": ["None"],
+            "coverage_of_acceptance_criteria": [
+                {
+                    "criterion": "Focused verification passes",
+                    "status": "covered",
+                    "evidence": "pytest tests/test_event_bridge.py -q",
+                }
+            ],
+            "failure_evidence": ["None"],
+        },
+    )
+    bridge = _bridge(service, IdleBackend(), ledger)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {
+            "threadId": "thread-verification-no-auditor",
+            "turnId": "turn-verification-no-auditor",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-verification-no-auditor",
+            "turnId": "turn-verification-no-auditor",
+            "delta": (
+                "decision: pass\n"
+                "summary: Verification passed.\n"
+                "test_evidence_refs:\n"
+                "- team_artifact=1"
+            ),
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {
+            "threadId": "thread-verification-no-auditor",
+            "status": "completed",
+        },
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    updated_team = ledger.get_team_run(team_run.id)
+
+    assert updated.current_step == AUTO_RETRY_READY
+    assert updated_team is not None
+    assert updated_team.status == "running"
+    assert not [
+        artifact for artifact in ledger.list_team_artifacts(team_run.id)
+        if artifact.artifact_type == "audit_report"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_auto_completed_message_includes_final_synthesis_from_team_artifacts(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COMPLETED,
+        AUTO_VERIFYING,
+        ROLE_AUTO_VERIFICATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run Codex verification",
+        codex_thread_id="thread-verification-final-synthesis",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "verify with codex")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_VERIFYING,
+        last_codex_analysis="方案：让 Codex 验收。",
+        last_claude_summary="实现完成。",
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_VERIFICATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-verification-final-synthesis",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="verify with codex",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    implementer_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="codex_gpt",
+        status="done",
+        agent_run_id=None,
+    )
+    impl = ledger.record_team_artifact(
+        team_run_id=team_run.id,
+        agent_job_id=implementer_job.id,
+        artifact_type="implementation_report",
+        summary="Implementation complete.",
+        payload={
+            "summary": "Implementation complete.",
+            "changed_files": ["tracked.txt"],
+            "diff_summary": "tracked.txt changed.",
+            "commands_run": [
+                {
+                    "command": "pytest tests/test_event_bridge.py -q",
+                    "exit_status": 0,
+                    "summary": "event bridge tests passed",
+                }
+            ],
+            "tests_attempted": [
+                {
+                    "command": "pytest tests/test_event_bridge.py -q",
+                    "exit_status": 0,
+                    "summary": "event bridge tests passed",
+                }
+            ],
+            "known_limitations": ["None known"],
+        },
+    )
+    test_report = ledger.record_team_artifact(
+        team_run_id=team_run.id,
+        agent_job_id=implementer_job.id,
+        artifact_type="test_report",
+        summary="Focused tests passed.",
+        payload={
+            "summary": "Focused tests passed.",
+            "commands_run": [
+                {
+                    "command": "pytest tests/test_event_bridge.py -q",
+                    "exit_status": 0,
+                    "summary": "event bridge tests passed",
+                }
+            ],
+            "passed": ["pytest tests/test_event_bridge.py -q"],
+            "failed": ["None"],
+            "coverage_of_acceptance_criteria": [
+                {
+                    "criterion": "Focused verification passes",
+                    "status": "covered",
+                    "evidence": f"team_artifact={impl.id}",
+                }
+            ],
+            "failure_evidence": ["None"],
+        },
+    )
+    ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="auditor",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    sent: list[str] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append(text)
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {
+            "threadId": "thread-verification-final-synthesis",
+            "turnId": "turn-verification-final-synthesis",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-verification-final-synthesis",
+            "turnId": "turn-verification-final-synthesis",
+            "delta": (
+                "decision: pass\n"
+                "summary: Reviewed focused pytest evidence.\n"
+                "findings:\n"
+                "- No blocking findings.\n"
+                "missing_evidence:\n"
+                "- None\n"
+                "test_evidence_refs:\n"
+                f"- team_artifact={test_report.id}"
+            ),
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {
+            "threadId": "thread-verification-final-synthesis",
+            "status": "completed",
+        },
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+
+    assert updated.current_step == AUTO_COMPLETED
+    assert sent
+    assert sent[-1] != "验收通过，任务完成。"
+    assert "最终综合" in sent[-1]
+    assert "tracked.txt" in sent[-1]
+    assert "pytest tests/test_event_bridge.py -q" in sent[-1]
+    assert "pass" in sent[-1]
 
 
 @pytest.mark.asyncio

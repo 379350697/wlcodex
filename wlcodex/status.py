@@ -128,8 +128,10 @@ def _status_label_str(status: str) -> str:
     mapping = {
         "running": "运行中",
         "completed": "已完成",
+        "done": "已完成",
         "failed": "已失败",
         "cancelled": "已取消",
+        "queued": "排队中",
         "idle": "空闲",
     }
     return mapping.get(status, status)
@@ -143,7 +145,7 @@ def _phase_cn(phase: str) -> str:
         return auto_label
     mapping = {
         "running_analysis": "Codex 分析",
-        "running_implementation": "Claude 实施",
+        "running_implementation": "开发工程师实施",
         "running_verification": "Codex 验收",
         "retrying_implementation": "重新实施",
     }
@@ -223,6 +225,73 @@ SURFACE_MODE_LABELS = {
     "product": "驾驶舱",
     "terminal": "现场",
 }
+
+TEAM_ROLE_LABELS = {
+    "director": "总工程师",
+    "investigator": "诊断工程师",
+    "architect": "架构工程师",
+    "implementer": "开发工程师",
+    "tester": "测试工程师",
+    "auditor": "审计工程师",
+}
+
+TEAM_ROLE_ORDER = (
+    "director",
+    "investigator",
+    "architect",
+    "implementer",
+    "tester",
+    "auditor",
+)
+
+
+def _latest_team_roles(
+    roles: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    latest_by_role: dict[str, tuple[str, str, str]] = {}
+    unknown_role_order: list[str] = []
+    known_roles = set(TEAM_ROLE_ORDER)
+
+    for role, model_profile, status in roles:
+        if role not in known_roles and role not in latest_by_role:
+            unknown_role_order.append(role)
+        latest_by_role[role] = (role, model_profile, status)
+
+    ordered_roles = [
+        latest_by_role[role]
+        for role in TEAM_ROLE_ORDER
+        if role in latest_by_role
+    ]
+    ordered_roles.extend(
+        latest_by_role[role]
+        for role in unknown_role_order
+        if role in latest_by_role
+    )
+    return ordered_roles
+
+
+def render_team_status_summary(
+    goal: str,
+    route: str,
+    roles: list[tuple[str, str, str]],
+    latest_artifacts: list[str],
+) -> str:
+    lines = [
+        "团队状态：",
+        f"目标：{_trim(goal, 100)}",
+        f"路线：{route}",
+    ]
+    if roles:
+        lines.append("角色：")
+        for role, model_profile, status in _latest_team_roles(roles):
+            role_label = TEAM_ROLE_LABELS.get(role, role)
+            status_label = _status_label_str(status)
+            lines.append(f"- {role_label}：{model_profile} / {status_label}")
+    if latest_artifacts:
+        lines.append("最新产物：")
+        for artifact in latest_artifacts[:4]:
+            lines.append(f"- {_trim(artifact, 120)}")
+    return "\n".join(lines)
 
 
 def render_conversation_status(

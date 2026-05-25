@@ -185,6 +185,30 @@ class EventType:
     # Workbench execution mode
     WORKBENCH_EXECUTION_MODE_SELECTED = "workbench.execution_mode.selected"
 
+    # Adaptive engineering team
+    TEAM_RUN_REQUESTED = "team.run.requested"
+    TEAM_RUN_ROUTED = "team.run.routed"
+    TEAM_RUN_STARTED = "team.run.started"
+    TEAM_RUN_COMPLETED = "team.run.completed"
+    TEAM_RUN_FAILED = "team.run.failed"
+    TEAM_AGENT_JOB_QUEUED = "team.agent_job.queued"
+    TEAM_AGENT_JOB_STARTED = "team.agent_job.started"
+    TEAM_AGENT_JOB_COMPLETED = "team.agent_job.completed"
+    TEAM_AGENT_JOB_FAILED = "team.agent_job.failed"
+    TEAM_CONTEXT_PACKET_RECORDED = "team.context_packet.recorded"
+    TEAM_ARTIFACT_RECORDED = "team.artifact.recorded"
+    TEAM_GATE_PASSED = "team.gate.passed"
+    TEAM_GATE_FAILED = "team.gate.failed"
+    TEAM_ASSIGNMENT_SELECTED = "team.assignment.selected"
+    TEAM_ASSIGNMENT_FALLBACK_USED = "team.assignment.fallback_used"
+    TEAM_SKILL_ACTIVATED = "team.skill_activated"
+    TEAM_CAPABILITY_BUDGET_APPLIED = "team.capability_budget.applied"
+    TEAM_OBSERVATION_RECORDED = "team.observation.recorded"
+    TEAM_INSTINCT_PROPOSED = "team.instinct.proposed"
+    TEAM_INSTINCT_PROMOTED = "team.instinct.promoted"
+    TEAM_INSTINCT_DEPRECATED = "team.instinct.deprecated"
+    TEAM_INSTINCT_SELECTED = "team.instinct.selected"
+
     # Onsite session lifecycle (workbench-level)
     ONSITE_SESSION_ORPHANED = "onsite.session.orphaned"
 

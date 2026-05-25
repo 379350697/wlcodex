@@ -22,10 +22,19 @@ from wlcodex.models import (
     Task,
     TaskEvent,
     TaskStatus,
+    TeamAgentJob,
+    TeamArtifact,
+    TeamAssignment,
+    TeamContextPacketRecord,
+    TeamInstinct,
+    TeamObservation,
+    TeamRun,
+    TeamSkillActivation,
     TouchedFile,
     UsageEvent,
     WorkbenchCarryover,
 )
+from wlcodex.team_memory import InstinctMemory
 
 
 def _now() -> str:
@@ -234,6 +243,112 @@ class Ledger:
 
             CREATE INDEX IF NOT EXISTS idx_orchestration_decisions_run_id
                 ON orchestration_decisions(run_id, id);
+
+            CREATE TABLE IF NOT EXISTS team_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                orchestration_run_id INTEGER,
+                goal TEXT NOT NULL,
+                route TEXT NOT NULL,
+                risk_level TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS team_agent_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_run_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                model_profile TEXT NOT NULL,
+                status TEXT NOT NULL,
+                agent_run_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS team_context_packets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_run_id INTEGER NOT NULL,
+                agent_job_id INTEGER NOT NULL,
+                packet_json TEXT NOT NULL,
+                prompt_text TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS team_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_run_id INTEGER NOT NULL,
+                agent_job_id INTEGER,
+                artifact_type TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS team_assignments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_run_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                model_profile TEXT NOT NULL,
+                selected_by TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS team_skill_activations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_run_id INTEGER NOT NULL,
+                agent_job_id INTEGER NOT NULL,
+                activation_type TEXT NOT NULL,
+                activation_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                token_cost INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS team_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_run_id INTEGER NOT NULL,
+                domain TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                evidence_refs_json TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS team_instincts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instinct_id TEXT NOT NULL UNIQUE,
+                scope TEXT NOT NULL,
+                workspace_alias TEXT,
+                role TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                action TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                evidence_refs_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_validated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_team_runs_conversation
+                ON team_runs(conversation_id, id);
+            CREATE INDEX IF NOT EXISTS idx_team_runs_orchestration
+                ON team_runs(orchestration_run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_team_agent_jobs_team
+                ON team_agent_jobs(team_run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_team_context_packets_job
+                ON team_context_packets(agent_job_id, id);
+            CREATE INDEX IF NOT EXISTS idx_team_artifacts_team
+                ON team_artifacts(team_run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_team_skill_activations_job
+                ON team_skill_activations(agent_job_id, id);
+            CREATE INDEX IF NOT EXISTS idx_team_observations_team
+                ON team_observations(team_run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_team_instincts_scope
+                ON team_instincts(scope, workspace_alias, role, status);
 
             CREATE TABLE IF NOT EXISTS schema_meta (
                 key TEXT PRIMARY KEY,
@@ -1506,6 +1621,446 @@ class Ledger:
         return [_orchestration_decision(row) for row in rows]
 
 
+    # --- Team projections ---
+
+    def create_team_run(
+        self,
+        conversation_id: int,
+        orchestration_run_id: int | None,
+        goal: str,
+        route: str = "staged_auto",
+        risk_level: str = "medium",
+    ) -> TeamRun:
+        now = _now()
+        cur = self._conn.execute(
+            """
+            INSERT INTO team_runs (
+                conversation_id, orchestration_run_id, goal, route, risk_level,
+                status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'running', ?, ?)
+            """,
+            (
+                conversation_id, orchestration_run_id, goal, route,
+                risk_level, now, now,
+            ),
+        )
+        self._conn.commit()
+        team_run = self.get_team_run(int(cur.lastrowid))
+        if team_run is None:
+            raise KeyError(f"unknown team run id: {cur.lastrowid}")
+        return team_run
+
+    def get_team_run(self, team_run_id: int) -> TeamRun | None:
+        row = self._conn.execute(
+            "SELECT * FROM team_runs WHERE id = ?",
+            (team_run_id,),
+        ).fetchone()
+        return _row_to_team_run(row) if row else None
+
+    def get_team_run_for_orchestration(
+        self, orchestration_run_id: int
+    ) -> TeamRun | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM team_runs
+            WHERE orchestration_run_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (orchestration_run_id,),
+        ).fetchone()
+        return _row_to_team_run(row) if row else None
+
+    def update_team_run_status(self, team_run_id: int, status: str) -> None:
+        self._conn.execute(
+            "UPDATE team_runs SET status = ?, updated_at = ? WHERE id = ?",
+            (status, _now(), team_run_id),
+        )
+        self._conn.commit()
+
+    def create_team_agent_job(
+        self,
+        *,
+        team_run_id: int,
+        role: str,
+        model_profile: str,
+        status: str = "queued",
+        agent_run_id: int | None = None,
+    ) -> TeamAgentJob:
+        now = _now()
+        cur = self._conn.execute(
+            """
+            INSERT INTO team_agent_jobs (
+                team_run_id, role, model_profile, status, agent_run_id,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (team_run_id, role, model_profile, status, agent_run_id, now, now),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM team_agent_jobs WHERE id = ?",
+            (int(cur.lastrowid),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown team agent job id: {cur.lastrowid}")
+        return _row_to_team_agent_job(row)
+
+    def update_team_agent_job_status(self, job_id: int, status: str) -> None:
+        self._conn.execute(
+            "UPDATE team_agent_jobs SET status = ?, updated_at = ? WHERE id = ?",
+            (status, _now(), job_id),
+        )
+        self._conn.commit()
+
+    def record_team_context_packet(
+        self,
+        *,
+        team_run_id: int,
+        agent_job_id: int,
+        packet_json: dict[str, Any],
+        prompt_text: str,
+        prompt_tokens: int,
+    ) -> TeamContextPacketRecord:
+        cur = self._conn.execute(
+            """
+            INSERT INTO team_context_packets (
+                team_run_id, agent_job_id, packet_json, prompt_text,
+                prompt_tokens, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                team_run_id, agent_job_id,
+                json.dumps(packet_json, ensure_ascii=False),
+                prompt_text, prompt_tokens, _now(),
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM team_context_packets WHERE id = ?",
+            (int(cur.lastrowid),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown team context packet id: {cur.lastrowid}")
+        return _row_to_team_context_packet(row)
+
+    def get_team_context_packet_for_job(
+        self, agent_job_id: int
+    ) -> TeamContextPacketRecord | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM team_context_packets
+            WHERE agent_job_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (agent_job_id,),
+        ).fetchone()
+        return _row_to_team_context_packet(row) if row else None
+
+    def record_team_artifact(
+        self,
+        *,
+        team_run_id: int,
+        agent_job_id: int | None,
+        artifact_type: str,
+        summary: str,
+        payload: dict[str, Any],
+    ) -> TeamArtifact:
+        cur = self._conn.execute(
+            """
+            INSERT INTO team_artifacts (
+                team_run_id, agent_job_id, artifact_type, summary,
+                payload_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                team_run_id, agent_job_id, artifact_type, summary,
+                json.dumps(payload, ensure_ascii=False), _now(),
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM team_artifacts WHERE id = ?",
+            (int(cur.lastrowid),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown team artifact id: {cur.lastrowid}")
+        return _row_to_team_artifact(row)
+
+    def list_team_artifacts(self, team_run_id: int) -> list[TeamArtifact]:
+        rows = self._conn.execute(
+            "SELECT * FROM team_artifacts WHERE team_run_id = ? ORDER BY id ASC",
+            (team_run_id,),
+        ).fetchall()
+        return [_row_to_team_artifact(row) for row in rows]
+
+    def record_team_assignment(
+        self,
+        *,
+        team_run_id: int,
+        role: str,
+        model_profile: str,
+        selected_by: str,
+    ) -> TeamAssignment:
+        cur = self._conn.execute(
+            """
+            INSERT INTO team_assignments (
+                team_run_id, role, model_profile, selected_by, created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (team_run_id, role, model_profile, selected_by, _now()),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM team_assignments WHERE id = ?",
+            (int(cur.lastrowid),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown team assignment id: {cur.lastrowid}")
+        return _row_to_team_assignment(row)
+
+    def list_team_agent_jobs(self, team_run_id: int) -> list[TeamAgentJob]:
+        rows = self._conn.execute(
+            "SELECT * FROM team_agent_jobs WHERE team_run_id = ? ORDER BY id ASC",
+            (team_run_id,),
+        ).fetchall()
+        return [_row_to_team_agent_job(row) for row in rows]
+
+    def record_team_skill_activation(
+        self,
+        *,
+        team_run_id: int,
+        agent_job_id: int,
+        activation_type: str,
+        activation_id: str,
+        source: str,
+        token_cost: int,
+    ) -> TeamSkillActivation:
+        cur = self._conn.execute(
+            """
+            INSERT INTO team_skill_activations (
+                team_run_id, agent_job_id, activation_type, activation_id,
+                source, token_cost, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                team_run_id, agent_job_id, activation_type, activation_id,
+                source, token_cost, _now(),
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM team_skill_activations WHERE id = ?",
+            (int(cur.lastrowid),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown team skill activation id: {cur.lastrowid}")
+        return _row_to_team_skill_activation(row)
+
+    def list_team_skill_activations(
+        self, agent_job_id: int
+    ) -> list[TeamSkillActivation]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM team_skill_activations
+            WHERE agent_job_id = ?
+            ORDER BY id ASC
+            """,
+            (agent_job_id,),
+        ).fetchall()
+        return [_row_to_team_skill_activation(row) for row in rows]
+
+    def record_team_observation(
+        self,
+        *,
+        team_run_id: int,
+        domain: str,
+        summary: str,
+        evidence_refs: tuple[str, ...],
+        confidence: float,
+    ) -> TeamObservation:
+        cur = self._conn.execute(
+            """
+            INSERT INTO team_observations (
+                team_run_id, domain, summary, evidence_refs_json, confidence,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                team_run_id,
+                domain,
+                summary,
+                _evidence_refs_json(evidence_refs),
+                _clamp_confidence(confidence),
+                _now(),
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM team_observations WHERE id = ?",
+            (int(cur.lastrowid),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown team observation id: {cur.lastrowid}")
+        return _row_to_team_observation(row)
+
+    def list_team_observations(self, team_run_id: int) -> list[TeamObservation]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM team_observations
+            WHERE team_run_id = ?
+            ORDER BY id ASC
+            """,
+            (team_run_id,),
+        ).fetchall()
+        return [_row_to_team_observation(row) for row in rows]
+
+    def upsert_team_instinct(
+        self,
+        instinct: InstinctMemory | None = None,
+        *,
+        instinct_id: str | None = None,
+        scope: str | None = None,
+        workspace_alias: str | None = None,
+        role: str | None = None,
+        domain: str | None = None,
+        trigger: str | None = None,
+        action: str | None = None,
+        confidence: float | None = None,
+        evidence_refs: tuple[str, ...] | None = None,
+        status: str | None = None,
+        created_at: datetime | None = None,
+        last_validated_at: datetime | None = None,
+    ) -> TeamInstinct:
+        now = datetime.now(timezone.utc)
+        if instinct is not None:
+            values = {
+                "instinct_id": instinct.instinct_id,
+                "scope": instinct.scope,
+                "workspace_alias": instinct.workspace_alias,
+                "role": instinct.role,
+                "domain": instinct.domain,
+                "trigger": instinct.trigger,
+                "action": instinct.action,
+                "confidence": instinct.confidence,
+                "evidence_refs": instinct.evidence_refs,
+                "status": instinct.status,
+                "created_at": _utc_iso(instinct.created_at),
+                "last_validated_at": _utc_iso(instinct.last_validated_at),
+            }
+        else:
+            values = {
+                "instinct_id": instinct_id,
+                "scope": scope,
+                "workspace_alias": workspace_alias,
+                "role": role,
+                "domain": domain,
+                "trigger": trigger,
+                "action": action,
+                "confidence": confidence,
+                "evidence_refs": evidence_refs or (),
+                "status": status,
+                "created_at": _utc_iso(created_at or now),
+                "last_validated_at": _utc_iso(last_validated_at or now),
+            }
+        required = (
+            "instinct_id",
+            "scope",
+            "role",
+            "domain",
+            "trigger",
+            "action",
+            "confidence",
+            "status",
+        )
+        missing = [key for key in required if values[key] is None]
+        if missing:
+            raise ValueError(f"missing instinct fields: {', '.join(missing)}")
+
+        incoming_refs = _normalize_evidence_refs(values["evidence_refs"])
+        incoming_confidence = _clamp_confidence(values["confidence"])
+        incoming_status = str(values["status"])
+        existing = self._conn.execute(
+            "SELECT * FROM team_instincts WHERE instinct_id = ?",
+            (str(values["instinct_id"]),),
+        ).fetchone()
+        if existing is not None:
+            incoming_refs = _merge_evidence_refs(
+                _evidence_refs(existing["evidence_refs_json"]),
+                incoming_refs,
+            )
+            incoming_confidence = max(
+                _clamp_confidence(existing["confidence"]),
+                incoming_confidence,
+            )
+            existing_status = str(existing["status"])
+            if existing_status == "active" and incoming_status == "candidate":
+                incoming_status = "active"
+
+        self._conn.execute(
+            """
+            INSERT INTO team_instincts (
+                instinct_id, scope, workspace_alias, role, domain, trigger,
+                action, confidence, evidence_refs_json, status, created_at,
+                last_validated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(instinct_id) DO UPDATE SET
+                scope = excluded.scope,
+                workspace_alias = excluded.workspace_alias,
+                role = excluded.role,
+                domain = excluded.domain,
+                trigger = excluded.trigger,
+                action = excluded.action,
+                confidence = excluded.confidence,
+                evidence_refs_json = excluded.evidence_refs_json,
+                status = excluded.status,
+                last_validated_at = excluded.last_validated_at
+            """,
+            (
+                str(values["instinct_id"]),
+                str(values["scope"]),
+                values["workspace_alias"],
+                str(values["role"]),
+                str(values["domain"]),
+                str(values["trigger"]),
+                str(values["action"]),
+                incoming_confidence,
+                _evidence_refs_json(incoming_refs),
+                incoming_status,
+                str(values["created_at"]),
+                str(values["last_validated_at"]),
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM team_instincts WHERE instinct_id = ?",
+            (str(values["instinct_id"]),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown team instinct id: {values['instinct_id']}")
+        return _row_to_team_instinct(row)
+
+    def list_team_instincts(self, status: str = "active") -> list[TeamInstinct]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM team_instincts
+            WHERE status = ?
+            ORDER BY id ASC
+            """,
+            (status,),
+        ).fetchall()
+        return [_row_to_team_instinct(row) for row in rows]
+
+
     # --- Workbench carryovers ---
 
     def create_workbench_carryover(
@@ -1764,6 +2319,7 @@ class Ledger:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
         def _agent_agg(agent_filter: str) -> dict:
+            agent_where = f"{where} AND agent = ?" if where else "WHERE agent = ?"
             query = f"""
                 SELECT
                     COUNT(*) as requests,
@@ -1776,7 +2332,7 @@ class Ledger:
                     COALESCE(SUM(workflow_overhead_output_tokens), 0) as wf_overhead_output,
                     source
                 FROM usage_events
-                {where} AND agent = ?
+                {agent_where}
                 GROUP BY source
                 ORDER BY source
             """
@@ -2064,6 +2620,173 @@ def _orchestration_decision(row: sqlite3.Row) -> OrchestrationDecision:
         reason=str(row["reason"] or ""),
         next_agent=str(row["next_agent"] or ""),
         created_at=_dt(str(row["created_at"])),
+    )
+
+
+def _row_to_team_run(row: sqlite3.Row) -> TeamRun:
+    return TeamRun(
+        id=int(row["id"]),
+        conversation_id=int(row["conversation_id"]),
+        orchestration_run_id=(
+            int(row["orchestration_run_id"])
+            if row["orchestration_run_id"] is not None
+            else None
+        ),
+        goal=str(row["goal"]),
+        route=str(row["route"]),
+        risk_level=str(row["risk_level"]),
+        status=str(row["status"]),
+        created_at=_dt(str(row["created_at"])),
+        updated_at=_dt(str(row["updated_at"])),
+    )
+
+
+def _row_to_team_agent_job(row: sqlite3.Row) -> TeamAgentJob:
+    return TeamAgentJob(
+        id=int(row["id"]),
+        team_run_id=int(row["team_run_id"]),
+        role=str(row["role"]),
+        model_profile=str(row["model_profile"]),
+        status=str(row["status"]),
+        agent_run_id=int(row["agent_run_id"]) if row["agent_run_id"] is not None else None,
+        created_at=_dt(str(row["created_at"])),
+        updated_at=_dt(str(row["updated_at"])),
+    )
+
+
+def _row_to_team_context_packet(row: sqlite3.Row) -> TeamContextPacketRecord:
+    return TeamContextPacketRecord(
+        id=int(row["id"]),
+        team_run_id=int(row["team_run_id"]),
+        agent_job_id=int(row["agent_job_id"]),
+        packet=json.loads(str(row["packet_json"] or "{}")),
+        prompt_text=str(row["prompt_text"] or ""),
+        prompt_tokens=int(row["prompt_tokens"] or 0),
+        created_at=_dt(str(row["created_at"])),
+    )
+
+
+def _row_to_team_artifact(row: sqlite3.Row) -> TeamArtifact:
+    return TeamArtifact(
+        id=int(row["id"]),
+        team_run_id=int(row["team_run_id"]),
+        agent_job_id=int(row["agent_job_id"]) if row["agent_job_id"] is not None else None,
+        artifact_type=str(row["artifact_type"]),
+        summary=str(row["summary"] or ""),
+        payload=json.loads(str(row["payload_json"] or "{}")),
+        created_at=_dt(str(row["created_at"])),
+    )
+
+
+def _row_to_team_assignment(row: sqlite3.Row) -> TeamAssignment:
+    return TeamAssignment(
+        id=int(row["id"]),
+        team_run_id=int(row["team_run_id"]),
+        role=str(row["role"]),
+        model_profile=str(row["model_profile"]),
+        selected_by=str(row["selected_by"]),
+        created_at=_dt(str(row["created_at"])),
+    )
+
+
+def _row_to_team_skill_activation(row: sqlite3.Row) -> TeamSkillActivation:
+    return TeamSkillActivation(
+        id=int(row["id"]),
+        team_run_id=int(row["team_run_id"]),
+        agent_job_id=int(row["agent_job_id"]),
+        activation_type=str(row["activation_type"]),
+        activation_id=str(row["activation_id"]),
+        source=str(row["source"]),
+        token_cost=int(row["token_cost"] or 0),
+        created_at=_dt(str(row["created_at"])),
+    )
+
+
+def _clamp_confidence(value: object) -> float:
+    confidence = float(value)
+    return max(0.0, min(1.0, confidence))
+
+
+def _normalize_evidence_refs(evidence_refs: object) -> tuple[str, ...]:
+    if isinstance(evidence_refs, str):
+        raw_refs = (evidence_refs,)
+    else:
+        raw_refs = tuple(evidence_refs or ())
+    refs: list[str] = []
+    seen: set[str] = set()
+    for item in raw_refs:
+        ref = str(item).strip()
+        if not ref or ref in seen:
+            continue
+        refs.append(ref)
+        seen.add(ref)
+    return tuple(refs)
+
+
+def _merge_evidence_refs(*groups: object) -> tuple[str, ...]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for ref in _normalize_evidence_refs(group):
+            if ref in seen:
+                continue
+            merged.append(ref)
+            seen.add(ref)
+    return tuple(merged)
+
+
+def _aware_utc(value: datetime | str) -> datetime:
+    dt = value if isinstance(value, datetime) else _dt(str(value))
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _utc_iso(value: datetime | str) -> str:
+    return _aware_utc(value).isoformat()
+
+
+def _evidence_refs_json(evidence_refs: object) -> str:
+    refs = _normalize_evidence_refs(evidence_refs)
+    return json.dumps(list(refs), ensure_ascii=False)
+
+
+def _evidence_refs(value: object) -> tuple[str, ...]:
+    loaded = json.loads(str(value or "[]"))
+    if not isinstance(loaded, list):
+        return ()
+    return _normalize_evidence_refs(loaded)
+
+
+def _row_to_team_observation(row: sqlite3.Row) -> TeamObservation:
+    return TeamObservation(
+        id=int(row["id"]),
+        team_run_id=int(row["team_run_id"]),
+        domain=str(row["domain"]),
+        summary=str(row["summary"] or ""),
+        evidence_refs=_evidence_refs(row["evidence_refs_json"]),
+        confidence=_clamp_confidence(row["confidence"]),
+        created_at=_aware_utc(str(row["created_at"])),
+    )
+
+
+def _row_to_team_instinct(row: sqlite3.Row) -> TeamInstinct:
+    return TeamInstinct(
+        id=int(row["id"]),
+        instinct_id=str(row["instinct_id"]),
+        scope=str(row["scope"]),
+        workspace_alias=(
+            str(row["workspace_alias"]) if row["workspace_alias"] is not None else None
+        ),
+        role=str(row["role"]),
+        domain=str(row["domain"]),
+        trigger=str(row["trigger"]),
+        action=str(row["action"]),
+        confidence=_clamp_confidence(row["confidence"]),
+        evidence_refs=_evidence_refs(row["evidence_refs_json"]),
+        status=str(row["status"]),
+        created_at=_aware_utc(str(row["created_at"])),
+        last_validated_at=_aware_utc(str(row["last_validated_at"])),
     )
 
 

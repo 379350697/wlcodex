@@ -57,6 +57,7 @@ AUTO_FINAL_PLAN = "auto_final_plan"
 AUTO_SHOW_DRAFT = "auto_show_draft"
 AUTO_CANCEL = "auto_cancel"
 AUTO_SEND_TO_CLAUDE = "auto_send_to_claude"
+AUTO_SEND_TO_CODEX = "auto_send_to_codex"
 AUTO_CONTINUE_CONTEXT = "auto_continue_context"
 AUTO_REWRITE_PLAN = "auto_rewrite_plan"
 AUTO_CODEX_TAKEOVER = "auto_codex_takeover"
@@ -67,6 +68,8 @@ AUTO_REWRITE_REPAIR = "auto_rewrite_repair"
 AUTO_INTERRUPT_CLAUDE = "auto_interrupt_claude"
 AUTO_VIEW_DIFF = "auto_view_diff"
 AUTO_VIEW_STATUS = "auto_view_status"
+TEAM_VIEW_STATUS = "team_view_status"
+TEAM_VIEW_ARTIFACTS = "team_view_artifacts"
 
 # --- Agent run roles ---
 
@@ -108,8 +111,8 @@ def auto_stage_label(step: str) -> str:
     labels = {
         AUTO_COLLECTING_CONTEXT: "Codex 分析中（收集上下文）",
         AUTO_DRAFT_READY: "方案已就绪，等待用户决定",
-        AUTO_CLAUDE_RUNNING: "Claude 执行中",
-        AUTO_CLAUDE_DONE: "Claude 完成，等待验收",
+        AUTO_CLAUDE_RUNNING: "开发工程师执行中",
+        AUTO_CLAUDE_DONE: "实现完成，等待验收",
         AUTO_VERIFYING: "Codex 验收中",
         AUTO_RETRY_READY: "验收失败，等待用户决定",
         AUTO_CODEX_TAKEOVER_RUNNING: "Codex 接管修复中",
@@ -123,6 +126,7 @@ def build_auto_stage_buttons(
     stage: str,
     *,
     last_codex_analysis: str = "",
+    codex_implementer_enabled: bool = False,
 ) -> list[list[dict[str, str]]]:
     """Build inline buttons for the given auto stage.
 
@@ -141,6 +145,9 @@ def build_auto_stage_buttons(
             button("生成最终方案", AUTO_FINAL_PLAN),
             button("查看当前草稿", AUTO_SHOW_DRAFT),
         ], [
+            button("团队状态", TEAM_VIEW_STATUS),
+            button("团队证据", TEAM_VIEW_ARTIFACTS),
+        ], [
             button("取消", AUTO_CANCEL),
         ]]
 
@@ -149,21 +156,36 @@ def build_auto_stage_buttons(
             return [[
                 button("继续补充", AUTO_CONTINUE_CONTEXT),
                 button("结束任务", AUTO_CLOSE),
+            ], [
+                button("团队状态", TEAM_VIEW_STATUS),
+                button("团队证据", TEAM_VIEW_ARTIFACTS),
             ]]
-        return [[
-            button("交给 Claude 执行", AUTO_SEND_TO_CLAUDE),
-            button("继续补充", AUTO_CONTINUE_CONTEXT),
-        ], [
-            button("查看当前草稿", AUTO_SHOW_DRAFT),
-            button("Codex 接管修", AUTO_CODEX_TAKEOVER),
-        ], [
-            button("结束任务", AUTO_CLOSE),
-        ]]
+        handoff_buttons = [button("交给 Claude 执行", AUTO_SEND_TO_CLAUDE)]
+        if codex_implementer_enabled:
+            handoff_buttons.append(button("交给 Codex 执行", AUTO_SEND_TO_CODEX))
+        return [
+            handoff_buttons,
+            [
+                button("继续补充", AUTO_CONTINUE_CONTEXT),
+                button("查看当前草稿", AUTO_SHOW_DRAFT),
+            ],
+            [
+                button("团队状态", TEAM_VIEW_STATUS),
+                button("团队证据", TEAM_VIEW_ARTIFACTS),
+            ],
+            [
+                button("Codex 接管修", AUTO_CODEX_TAKEOVER),
+                button("结束任务", AUTO_CLOSE),
+            ],
+        ]
 
     if stage == AUTO_CLAUDE_RUNNING:
         return [[
             button("查看状态", AUTO_VIEW_STATUS),
-            button("打断 Claude", AUTO_INTERRUPT_CLAUDE),
+            button("打断执行", AUTO_INTERRUPT_CLAUDE),
+        ], [
+            button("团队状态", TEAM_VIEW_STATUS),
+            button("团队证据", TEAM_VIEW_ARTIFACTS),
         ]]
 
     if stage == AUTO_CLAUDE_DONE:
@@ -174,24 +196,43 @@ def build_auto_stage_buttons(
             button("发给 Claude 返工", AUTO_SEND_REPAIR_TO_CLAUDE),
             button("Codex 接管修", AUTO_CODEX_TAKEOVER),
         ], [
+            button("团队状态", TEAM_VIEW_STATUS),
+            button("团队证据", TEAM_VIEW_ARTIFACTS),
+        ], [
             button("结束任务", AUTO_CLOSE),
         ]]
 
     if stage == AUTO_VERIFYING:
         return [[
             button("查看状态", AUTO_VIEW_STATUS),
+        ], [
+            button("团队状态", TEAM_VIEW_STATUS),
+            button("团队证据", TEAM_VIEW_ARTIFACTS),
         ]]
 
     if stage == AUTO_RETRY_READY:
-        return [[
-            button("发给 Claude 返工", AUTO_SEND_REPAIR_TO_CLAUDE),
-            button("继续补充", AUTO_CONTINUE_CONTEXT),
-        ], [
-            button("重写返工提示词", AUTO_REWRITE_REPAIR),
-            button("Codex 接管修", AUTO_CODEX_TAKEOVER),
-        ], [
-            button("结束任务", AUTO_CLOSE),
-        ]]
+        handoff_buttons = [button("发给 Claude 返工", AUTO_SEND_REPAIR_TO_CLAUDE)]
+        if codex_implementer_enabled:
+            handoff_buttons.append(button("交给 Codex 执行", AUTO_SEND_TO_CODEX))
+        return [
+            handoff_buttons,
+            [
+                button("继续补充", AUTO_CONTINUE_CONTEXT),
+                button("重写返工提示词", AUTO_REWRITE_REPAIR),
+            ],
+            [
+                button("团队状态", TEAM_VIEW_STATUS),
+                button("团队证据", TEAM_VIEW_ARTIFACTS),
+            ],
+            [
+                button("Codex 接管修", AUTO_CODEX_TAKEOVER),
+                button("结束任务", AUTO_CLOSE),
+            ],
+        ]
 
     # Default: status view for unknown or completed stages.
-    return [[button("查看状态", AUTO_VIEW_STATUS)]]
+    return [[
+        button("查看状态", AUTO_VIEW_STATUS),
+        button("团队状态", TEAM_VIEW_STATUS),
+        button("团队证据", TEAM_VIEW_ARTIFACTS),
+    ]]

@@ -786,6 +786,16 @@ def test_main_resolves_auto_claude_binary_before_backend_construction(
         claude_enabled=True,
         claude_binary="auto",
     )
+    with config_path.open("a", encoding="utf-8") as fh:
+        fh.write(
+            """
+[adaptive_team.role_skills]
+auditor = ["custom-audit-skill"]
+
+[adaptive_team.role_capabilities]
+auditor = ["custom_read"]
+"""
+        )
 
     def fake_resolve(configured_binary: str) -> ClaudeBinaryResolution:
         captured["configured_binary"] = configured_binary
@@ -797,6 +807,11 @@ def test_main_resolves_auto_claude_binary_before_backend_construction(
     def fake_build(cfg, token, ctrl, lgr, appr, runtime_event_store=None,
                    outbox=None, terminal_manager=None,
                    execution_scheduler=None):
+        captured["adaptive_team_enabled"] = ctrl._adaptive_team_enabled
+        captured["implementer_model_profiles"] = ctrl._implementer_model_profiles
+        captured["architect_model_profile"] = ctrl._architect_model_profile
+        captured["role_skills"] = ctrl._adaptive_team_role_skills
+        captured["role_capabilities"] = ctrl._adaptive_team_role_capabilities
         fake_app = MagicMock()
         fake_app.bot = MagicMock()
         fake_app.updater = MagicMock()
@@ -825,3 +840,98 @@ def test_main_resolves_auto_claude_binary_before_backend_construction(
 
     assert captured["configured_binary"] == "auto"
     assert captured["binary"] == str(tmp_path / "resolved-claude")
+    assert captured["adaptive_team_enabled"] is True
+    assert captured["implementer_model_profiles"] == ("claude_deepseek", "codex_gpt")
+    assert captured["architect_model_profile"] == "codex_gpt"
+    assert captured["role_skills"]["auditor"] == ("custom-audit-skill",)
+    assert captured["role_capabilities"]["auditor"] == ("custom_read",)
+
+
+def test_main_wires_codex_implementer_from_model_profile_provider(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import asyncio as _asyncio
+    import sys as _sys
+    from asyncio import base_events as _base_events
+    from unittest.mock import MagicMock
+
+    import wlcodex.main as main_mod
+
+    captured = {}
+
+    def _make_fake_handlers():
+        fake = MagicMock()
+        fake.send_telegram = MagicMock()
+        fake.edit_telegram = MagicMock()
+        fake.create_interaction_renderer = MagicMock(return_value=None)
+        return fake
+
+    class FakeEventBridge:
+        def __init__(self, **kwargs):
+            captured["bridge_codex_implementer_enabled"] = kwargs.get(
+                "codex_implementer_enabled"
+            )
+
+        async def run(self):
+            return None
+
+    config_path = tmp_path / "test_provider_mapping.toml"
+    sqlite_path = tmp_path / "wlcodex_provider.sqlite3"
+    task_dir = tmp_path / "tasks_provider"
+    task_dir.mkdir(exist_ok=True)
+    _write_test_config_with_path(config_path, sqlite_path, task_dir)
+    with config_path.open("a", encoding="utf-8") as fh:
+        fh.write(
+            """
+[adaptive_team]
+enabled = true
+
+[adaptive_team.model_profiles]
+strong_codex = "codex"
+codex_gpt = "claude"
+
+[adaptive_team.assignments]
+implementer = ["strong_codex"]
+architect = ["strong_codex"]
+investigator = ["strong_codex"]
+tester = ["strong_codex"]
+auditor = ["strong_codex"]
+"""
+        )
+
+    def fake_build(cfg, token, ctrl, lgr, appr, runtime_event_store=None,
+                   outbox=None, terminal_manager=None,
+                   execution_scheduler=None):
+        captured["controller_codex_implementer_enabled"] = (
+            ctrl._codex_implementer_enabled()
+        )
+        captured["controller_implementer_model_profiles"] = (
+            ctrl._implementer_model_profiles
+        )
+        captured["controller_model_profiles"] = ctrl._adaptive_team_model_profiles
+        fake_app = MagicMock()
+        fake_app.bot = MagicMock()
+        fake_app.updater = MagicMock()
+        fake_app.updater.running = False
+        return fake_app, _make_fake_handlers()
+
+    monkeypatch.setattr(main_mod, "build_application", fake_build)
+    monkeypatch.setattr(main_mod, "EventBridge", FakeEventBridge)
+    monkeypatch.setattr(
+        _base_events.BaseEventLoop,
+        "run_until_complete",
+        lambda self, future: None,
+    )
+    monkeypatch.setattr(_asyncio, "new_event_loop", lambda: MagicMock())
+    monkeypatch.setattr(_asyncio, "set_event_loop", lambda loop: None)
+    monkeypatch.setattr(_sys, "argv", ["main.py", "--fake-backend", "--config", str(config_path)])
+    monkeypatch.setenv("WLCODEX_TELEGRAM_BOT_TOKEN", "test-main-composition-token")
+
+    main_mod.main()
+
+    assert captured["controller_implementer_model_profiles"] == ("strong_codex",)
+    assert captured["controller_model_profiles"]["strong_codex"] == "codex"
+    assert captured["controller_model_profiles"]["codex_gpt"] == "claude"
+    assert captured["controller_codex_implementer_enabled"] is True
+    assert captured["bridge_codex_implementer_enabled"] is True

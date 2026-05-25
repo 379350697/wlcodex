@@ -234,6 +234,103 @@ class OrchestrationDecision:
 
 
 @dataclass(frozen=True)
+class TeamRun:
+    id: int
+    conversation_id: int
+    orchestration_run_id: int | None
+    goal: str
+    route: str
+    risk_level: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class TeamAgentJob:
+    id: int
+    team_run_id: int
+    role: str
+    model_profile: str
+    status: str
+    agent_run_id: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class TeamContextPacketRecord:
+    id: int
+    team_run_id: int
+    agent_job_id: int
+    packet: dict[str, Any]
+    prompt_text: str
+    prompt_tokens: int
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class TeamArtifact:
+    id: int
+    team_run_id: int
+    agent_job_id: int | None
+    artifact_type: str
+    summary: str
+    payload: dict[str, Any]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class TeamAssignment:
+    id: int
+    team_run_id: int
+    role: str
+    model_profile: str
+    selected_by: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class TeamSkillActivation:
+    id: int
+    team_run_id: int
+    agent_job_id: int
+    activation_type: str
+    activation_id: str
+    source: str
+    token_cost: int
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class TeamObservation:
+    id: int
+    team_run_id: int
+    domain: str
+    summary: str
+    evidence_refs: tuple[str, ...]
+    confidence: float
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class TeamInstinct:
+    id: int
+    instinct_id: str
+    scope: str
+    workspace_alias: str | None
+    role: str
+    domain: str
+    trigger: str
+    action: str
+    confidence: float
+    evidence_refs: tuple[str, ...]
+    status: str
+    created_at: datetime
+    last_validated_at: datetime
+
+
+@dataclass(frozen=True)
 class WorkbenchCarryover:
     id: int
     chat_id: int

@@ -413,6 +413,16 @@ def main() -> None:
     execution_scheduler = ExecutionScheduler(task_service, ledger)
 
     # Controller
+    team_assignments = config.adaptive_team.assignments
+    team_model_profiles = config.adaptive_team.model_profiles
+    implementer_model_profiles = team_assignments.get(
+        "implementer",
+        ("claude_deepseek", "codex_gpt"),
+    )
+    codex_implementer_enabled = config.adaptive_team.enabled and any(
+        team_model_profiles.get(profile, profile).lower() == "codex"
+        for profile in implementer_model_profiles
+    )
     controller = CommandController(
         task_service, backend, inspector,
         ledger=ledger, claude_backend=claude_backend,
@@ -421,6 +431,23 @@ def main() -> None:
         default_workspace=config.conversation.default_workspace,
         runtime_event_store=runtime_store,
         execution_scheduler=execution_scheduler,
+        adaptive_team_enabled=config.adaptive_team.enabled,
+        implementer_model_profiles=implementer_model_profiles,
+        adaptive_team_model_profiles=team_model_profiles,
+        adaptive_team_role_skills=config.adaptive_team.role_skills,
+        adaptive_team_role_capabilities=config.adaptive_team.role_capabilities,
+        architect_model_profile=(
+            team_assignments.get("architect", ("codex_gpt",)) or ("codex_gpt",)
+        )[0],
+        investigator_model_profile=(
+            team_assignments.get("investigator", ("codex_gpt",)) or ("codex_gpt",)
+        )[0],
+        tester_model_profile=(
+            team_assignments.get("tester", ("codex_gpt",)) or ("codex_gpt",)
+        )[0],
+        auditor_model_profile=(
+            team_assignments.get("auditor", ("codex_gpt",)) or ("codex_gpt",)
+        )[0],
     )
 
     # Terminal surface — wire terminal session manager when enabled.
@@ -514,6 +541,7 @@ def main() -> None:
         interaction_renderer=interaction_renderer,
         runtime_event_store=runtime_store,
         on_workspace_freed=controller.process_queued_runs,
+        codex_implementer_enabled=codex_implementer_enabled,
     )
 
     loop = asyncio.new_event_loop()
