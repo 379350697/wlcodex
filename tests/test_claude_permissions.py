@@ -20,7 +20,7 @@ def test_normalize_claude_permission_mode_accepts_chinese_names() -> None:
 def test_claude_permission_state_rejects_unknown_mode() -> None:
     state = ClaudePermissionState("允许编辑")
 
-    with pytest.raises(ValueError, match="未知 Claude 权限模式"):
+    with pytest.raises(ValueError, match="未知 DeepSeek 开发工程师权限模式"):
         state.set("随便执行")
 
     assert state.get() == "acceptEdits"

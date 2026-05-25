@@ -50,7 +50,7 @@ summary_max_tokens = 800
 
 [orchestration]
 enabled = true
-max_verify_rounds = 3
+max_verify_rounds = 0
 auto_delegate_simple_edits = false
 
 [adaptive_team]

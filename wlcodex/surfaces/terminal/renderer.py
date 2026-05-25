@@ -16,7 +16,10 @@ from wlcodex.surfaces.terminal.models import TerminalFrame
 from wlcodex.surfaces.terminal.redaction import redact_terminal_text
 from wlcodex.surfaces.core.models import TerminalPolicy
 
-_AGENT_LABEL = {"claude": "Claude", "codex": "Codex"}
+_AGENT_LABEL = {
+    "claude": "DeepSeek 开发工程师",
+    "codex": "GPT 开发工程师",
+}
 
 _TRUNCATION_HINT = "\n\n输出已截断，使用 /terminal tail 查看最近片段。"
 

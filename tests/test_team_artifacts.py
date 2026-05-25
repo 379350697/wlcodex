@@ -46,14 +46,14 @@ def test_architecture_plan_gate_blocks_missing_acceptance_criteria():
     assert "acceptance_criteria" in result.missing
 
 
-def test_architecture_plan_payload_declares_investigator_v1_policy():
+def test_architecture_plan_payload_declares_diagnosis_policy():
     payload = architecture_plan_payload(
         summary="Plan includes diagnosis duties.",
         risk_level="medium",
         source="auto_context",
     )
 
-    assert payload["investigator_policy"] == "Architect performs investigator duties in v1"
+    assert "diagnosis evidence" in payload["investigator_policy"].lower()
     assert validate_architecture_plan(payload).passed is True
 
 

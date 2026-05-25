@@ -391,7 +391,7 @@ class RuntimeProjector:
         if etype == EventType.RUN_REQUESTED:
             self._upsert_orchestration_run(event)
             goal = str(payload.get("goal", ""))
-            max_rounds = int(payload.get("max_verify_rounds", 3))
+            max_rounds = int(payload.get("max_verify_rounds", 0))
             self._conn.execute(
                 "UPDATE orchestration_runs SET goal = ?, max_verify_rounds = ?, updated_at = ? WHERE id = ?",
                 (goal, max_rounds, _now(), orch_run_id),

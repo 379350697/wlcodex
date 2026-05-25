@@ -1,4 +1,4 @@
-from wlcodex.telegram_digest import render_auto_draft_digest
+from wlcodex.telegram_digest import render_auto_draft_digest, sanitize_telegram_user_text
 
 
 def test_auto_draft_digest_uses_chinese_fallback_for_english_only_output() -> None:
@@ -29,7 +29,7 @@ def test_auto_draft_digest_shows_only_brief_claude_handoff_task() -> None:
     )
 
     assert "下一步：" in digest
-    assert "交给 Claude 执行" in digest
+    assert "交给 DeepSeek 开发工程师执行" in digest
     assert "摘要卡" in digest
     assert "wlcodex/telegram_digest.py" not in digest
     assert "tests/test_telegram_digest.py" not in digest
@@ -145,3 +145,111 @@ def test_auto_draft_digest_prefers_final_verification_result_as_conclusion() -> 
 
     assert "结论：最新版部署后服务运行正常，但仍有业务状态异常" in digest
     assert "结论：最新版已部署并运行，旧的 Bybit" not in digest
+
+
+def test_auto_draft_digest_does_not_show_audit_report_protocol_lines() -> None:
+    digest = render_auto_draft_digest(
+        "我会做第三轮当前状态复核，使用 focused-validation 的审计口径。\n"
+        "{\n"
+        '  "audit_report": {\n'
+        '    "verdict": "PASS",\n'
+        '    "summary": "README 只有一行说明改动，验证证据可信。",\n'
+        '    "risk": "LOW",\n'
+        '    "passed_checks": [\n'
+        '      {"check": "diff_scope", "evidence": ["README.md 仅新增一行说明"]},\n'
+        '      {"check": "tests", "evidence": ["pytest tests/test_readme_flow.py passed"]}\n'
+        "    ],\n"
+        '    "recommended_next_action": "close"\n'
+        "  }\n"
+        "}"
+    )
+
+    assert "README 只有一行说明改动" in digest
+    assert "README.md 仅新增一行说明" in digest
+    assert "pytest tests/test_readme_flow.py passed" in digest
+    assert "audit_report" not in digest
+    assert "verdict" not in digest
+    assert '"PASS"' not in digest
+
+
+def test_auto_draft_digest_treats_task_scope_pass_with_warning_as_pass() -> None:
+    digest = render_auto_draft_digest(
+        "{\n"
+        '  "audit_report": {\n'
+        '    "verdict": "PASS_TASK_SCOPE_WITH_WORKTREE_WARNING",\n'
+        '    "summary": "README 任务范围审计通过，但工作区有旁路改动。",\n'
+        '    "risk": "LOW for README task; CRITICAL for full current worktree",\n'
+        '    "passed_checks": [\n'
+        '      {"check": "测试", "evidence": "编排包 command=pytest_q"}\n'
+        "    ],\n"
+        '    "recommended_next_action": "close"\n'
+        "  }\n"
+        "}"
+    )
+
+    assert "验收通过：README 任务范围审计通过" in digest
+    assert "pytest_q" in digest
+    assert "verdict" not in digest
+
+
+def test_auto_draft_digest_renders_implementation_report_as_human_summary() -> None:
+    digest = render_auto_draft_digest(
+        "Claude 返工完成：\n"
+        "```json\n"
+        "{\n"
+        '  "implementation_report": {\n'
+        '    "status": "completed",\n'
+        '    "change_summary": "README.md 第139行新增一行快速默认测试说明",\n'
+        '    "files_modified": ["README.md"],\n'
+        '    "change_location": {\n'
+        '      "file": "README.md",\n'
+        '      "line": 139,\n'
+        '      "content": "# Use the fast default run for routine verification before broader accep"\n'
+        "    }\n"
+        "  }\n"
+        "}\n"
+        "```"
+    )
+
+    assert "返工完成：README.md 第139行新增一行快速默认测试说明" in digest
+    assert "README.md" in digest
+    assert "可以重新验收" in digest
+    assert "implementation_report" not in digest
+    assert "files_modified" not in digest
+    assert "content" not in digest
+    assert "broader accep" not in digest
+
+
+def test_sanitize_telegram_user_text_rewrites_protocol_json_anywhere() -> None:
+    text = sanitize_telegram_user_text(
+        "Claude 执行完成。\n\n"
+        "第三轮复核：确认当前状态后重新验证。\n\n"
+        "```json\n"
+        "{\n"
+        '  "implementation_report": {\n'
+        '    "status": "completed",\n'
+        '    "change_summary": "README.md 第139行新增一行快速默认测试说明",\n'
+        '    "files_modified": ["README.md"],\n'
+        '    "change_location": {\n'
+        '      "file": "README.md",\n'
+        '      "line": 139,\n'
+        '      "content": "# Use the fast default run for routine verification before broader acceptan"\n'
+        "    }\n"
+        "  }\n"
+        "}\n"
+        "```\n\n"
+        "请选择下一步："
+    )
+
+    assert "返工完成：README.md 第139行新增一行快速默认测试说明" in text
+    assert "请选择下一步" in text
+    assert "implementation_report" not in text
+    assert "files_modified" not in text
+    assert "content" not in text
+    assert "broader acceptan" not in text
+
+
+def test_sanitize_telegram_user_text_leaves_normal_message_unchanged() -> None:
+    text = "实现完成。\n\n关键摘要：\n结论：README 已更新。\n下一步：可以重新验收。"
+
+    assert sanitize_telegram_user_text(text) == text

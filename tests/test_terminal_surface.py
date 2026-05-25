@@ -37,7 +37,7 @@ def test_terminal_frame_renders_agent_phase_prefix():
         sequence=7,
     )
     rendered = render_terminal_frame(frame)
-    assert rendered == "[Claude:implementation] Running pytest -q"
+    assert rendered == "[DeepSeek 开发工程师:implementation] Running pytest -q"
 
 
 def test_terminal_session_ref_keeps_strategy():
@@ -527,27 +527,27 @@ async def test_manager_integrates_with_codex_terminal_adapter():
 
 def test_render_onsite_header():
     assert "现场" in render_onsite_header("claude", "implementation")
-    assert "Claude" in render_onsite_header("claude", "implementation")
+    assert "DeepSeek 开发工程师" in render_onsite_header("claude", "implementation")
     assert "implementation" in render_onsite_header("claude", "implementation")
 
 
 def test_render_onsite_header_codex():
     text = render_onsite_header("codex", "analysis")
-    assert "Codex" in text
+    assert "GPT 开发工程师" in text
     assert "analysis" in text
 
 
 def test_render_start_card_default():
     text = render_start_card()
-    assert "启动 Claude 现场" in text
-    assert "启动 Codex 现场" in text
+    assert "启动 DeepSeek 开发工程师 现场" in text
+    assert "启动 GPT 开发工程师 现场" in text
     assert "回驾驶舱" in text
 
 
 def test_render_start_card_custom_agents():
     text = render_start_card(("claude",))
-    assert "启动 Claude 现场" in text
-    assert "Codex" not in text
+    assert "启动 DeepSeek 开发工程师 现场" in text
+    assert "GPT 开发工程师" not in text
 
 
 def test_render_start_card_no_dead_end():
@@ -566,7 +566,7 @@ def test_render_tail_output_with_frames():
         TerminalFrame(conversation_id=1, agent="claude", phase="impl", text="line 2"),
     ]
     text = render_tail_output(frames)
-    assert "[Claude:impl]" in text
+    assert "[DeepSeek 开发工程师:impl]" in text
     assert "line 1" in text
     assert "line 2" in text
 
@@ -609,7 +609,7 @@ def test_render_no_session_hint():
 
 def test_render_busy_selector_with_agent():
     text = render_busy_selector("codex")
-    assert "Codex" in text
+    assert "GPT 开发工程师" in text
 
 
 def test_render_busy_selector_no_agent():

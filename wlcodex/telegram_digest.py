@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 
@@ -83,6 +84,93 @@ _NOOP_NEXT_VALUES = {
     "null",
 }
 
+_STRUCTURED_REPORT_KEYS = {
+    "audit_report",
+    "implementation_report",
+    "change_location",
+    "change_summary",
+    "changed_files",
+    "decision",
+    "files_modified",
+    "verdict",
+    "status",
+    "conclusion",
+    "summary",
+    "risk",
+    "risk_level",
+    "recommended_next_action",
+    "test_evidence_refs",
+    "passed_checks",
+    "failed_checks",
+    "findings",
+}
+
+_PROTOCOL_FIELD_NAMES = {
+    "artifact_type",
+    "audit_report",
+    "changed_files",
+    "commands_run",
+    "confidence_score",
+    "implementation",
+    "implementation_report",
+    "needs_implementation",
+    "output_schema",
+    "passed_checks",
+    "recommended_next_action",
+    "required_output_schema",
+    "schema_version",
+    "test_evidence_refs",
+    "tests_attempted",
+    "verdict",
+}
+
+_DECISION_LABELS = {
+    "pass": "pass",
+    "passed": "pass",
+    "approve": "pass",
+    "approved": "pass",
+    "success": "pass",
+    "block": "block",
+    "blocked": "block",
+    "fail": "block",
+    "failed": "block",
+    "failure": "block",
+    "retry": "block",
+    "repair": "block",
+    "needs_repair": "block",
+    "need_repair": "block",
+    "needs_user": "need_user",
+    "need_user": "need_user",
+    "ask_user": "need_user",
+}
+
+_RISK_LABELS = {
+    "low": "低。",
+    "medium": "中。",
+    "high": "高。",
+    "critical": "严重。",
+}
+
+_NEXT_ACTION_LABELS = {
+    "close": "可以结束本次任务。",
+    "done": "可以结束本次任务。",
+    "finish": "可以结束本次任务。",
+    "repair": "可选：交给 DeepSeek 开发工程师或 GPT 开发工程师处理上述问题，也可继续补充或结束。",
+    "retry": "可选：交给 DeepSeek 开发工程师或 GPT 开发工程师处理上述问题，也可继续补充或结束。",
+    "send_back_to_claude": "可选：交给 DeepSeek 开发工程师或 GPT 开发工程师处理上述问题，也可继续补充或结束。",
+    "send_back_to_codex": "可选：交给 DeepSeek 开发工程师或 GPT 开发工程师处理上述问题，也可继续补充或结束。",
+    "ask_user": "请补充确认后再继续。",
+}
+
+_PROTOCOL_PAYLOAD_RE = re.compile(
+    r'"(?:audit_report|implementation_report|verdict|files_modified|'
+    r'commands_run|tests_attempted|test_evidence_refs|needs_implementation|'
+    r'changed_files|recommended_next_action)"\s*:'
+    r"|^(?:audit_report|implementation_report|commands_run|tests_attempted|"
+    r"changed_files|needs_implementation)\s*[:=]",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 def render_auto_draft_digest(
     text: str,
@@ -95,6 +183,14 @@ def render_auto_draft_digest(
     The full model output stays in the orchestration run. This function only
     prepares the Telegram-visible preview.
     """
+    structured = _render_structured_report_digest(
+        text,
+        max_chars=max_chars,
+        fallback_next=fallback_next,
+    )
+    if structured:
+        return structured
+
     lines = _clean_lines(text)
     if not lines:
         return "关键摘要：\n结论：暂无可展示内容。\n依据：未收到模型正文。\n风险：未知。\n下一步：请继续补充上下文。"
@@ -148,6 +244,41 @@ def render_auto_draft_digest(
     return rendered[: max_chars - 12].rstrip() + "\n...（已精简）"
 
 
+def sanitize_telegram_user_text(text: str) -> str:
+    """Last-mile guard for Telegram-visible text.
+
+    Higher-level flows should render human summaries themselves. This function
+    is the shared safety net at the actual Telegram send/edit boundary, so a
+    missed caller cannot leak artifact JSON or protocol field names to users.
+    """
+    if not text or not _contains_protocol_payload(text):
+        return text
+
+    digest = render_auto_draft_digest(text)
+    heading = _sanitize_heading(text)
+    suffix = "\n\n请选择下一步：" if "请选择下一步" in text else ""
+    if heading:
+        return f"{heading}\n\n{digest}{suffix}"
+    return f"{digest}{suffix}"
+
+
+def _contains_protocol_payload(text: str) -> bool:
+    if _PROTOCOL_PAYLOAD_RE.search(text):
+        return True
+    return any(_looks_like_protocol_line(line.strip()) for line in text.splitlines())
+
+
+def _sanitize_heading(text: str) -> str:
+    normalized = _normalize_sentence(text)
+    if "验收未通过" in normalized:
+        return "验收未通过。"
+    if "验收通过" in normalized:
+        return "验收通过。"
+    if "Claude 执行完成" in normalized or "返工完成" in normalized or "实现完成" in normalized:
+        return "实现完成。"
+    return ""
+
+
 def _clean_lines(text: str) -> list[str]:
     cleaned: list[str] = []
     in_code_block = False
@@ -162,9 +293,306 @@ def _clean_lines(text: str) -> list[str]:
         line = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)、]\s*)", "", line)
         line = re.sub(r"^\*\*(.+?)\*\*$", r"\1", line)
         line = line.strip()
-        if line:
+        if line and not _looks_like_protocol_line(line):
             cleaned.append(line)
     return cleaned
+
+
+def _render_structured_report_digest(
+    text: str,
+    *,
+    max_chars: int,
+    fallback_next: str | None,
+) -> str:
+    report = _extract_structured_report(text)
+    if report is None:
+        return ""
+
+    report_kind = str(report.get("__report_kind") or "")
+    if report_kind == "implementation_report":
+        return _render_implementation_report_digest(
+            report,
+            max_chars=max_chars,
+            fallback_next=fallback_next,
+        )
+
+    decision = _structured_decision(report)
+    summary = _structured_text(
+        report.get("summary")
+        or report.get("diagnosis")
+        or report.get("result")
+        or report.get("message")
+    )
+    if summary:
+        if decision == "pass" and "验收" not in summary[:8]:
+            conclusion = f"验收通过：{summary}"
+        elif decision == "block" and "验收" not in summary[:8]:
+            conclusion = f"验收未通过：{summary}"
+        else:
+            conclusion = summary
+    elif decision == "pass":
+        conclusion = "验收通过。"
+    elif decision == "block":
+        conclusion = "验收未通过。"
+    elif decision == "need_user":
+        conclusion = "需要你确认后继续。"
+    else:
+        conclusion = "已收到结构化验收结果。"
+
+    evidence = _structured_evidence(report)
+    risk = _structured_risk(report)
+    next_step = _structured_next_step(report, fallback_next=fallback_next)
+
+    rendered = _render_digest(conclusion, evidence, risk, next_step)
+    if len(rendered) <= max_chars:
+        return rendered
+    return _render_digest(
+        _trim_sentence(conclusion, 120),
+        [_trim_sentence(item, 100) for item in evidence[:2]],
+        _trim_sentence(risk, 100),
+        _trim_sentence(next_step, 100),
+    )
+
+
+def _extract_structured_report(text: str) -> dict[str, object] | None:
+    decoder = json.JSONDecoder()
+    reports: list[dict[str, object]] = []
+    for match in re.finditer(r"\{", text):
+        try:
+            parsed, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        report = _unwrap_structured_report(parsed)
+        if report is not None:
+            reports.append(report)
+    return reports[-1] if reports else None
+
+
+def _unwrap_structured_report(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    if isinstance(value.get("audit_report"), dict):
+        value = value["audit_report"]
+        report_kind = "audit_report"
+    elif isinstance(value.get("implementation_report"), dict):
+        value = value["implementation_report"]
+        report_kind = "implementation_report"
+    else:
+        report_kind = ""
+    if not isinstance(value, dict):
+        return None
+    if _STRUCTURED_REPORT_KEYS.isdisjoint(str(key) for key in value.keys()):
+        return None
+    report = dict(value)
+    if not report_kind and any(
+        key in report
+        for key in (
+            "change_summary",
+            "changed_files",
+            "files_modified",
+            "files_changed",
+            "modified_files",
+        )
+    ):
+        report_kind = "implementation_report"
+    if report_kind:
+        report["__report_kind"] = report_kind
+    return report
+
+
+def _render_implementation_report_digest(
+    report: dict[str, object],
+    *,
+    max_chars: int,
+    fallback_next: str | None,
+) -> str:
+    summary = _structured_text(
+        report.get("change_summary")
+        or report.get("summary")
+        or report.get("diff_summary")
+        or report.get("status")
+    )
+    conclusion = (
+        f"返工完成：{summary}"
+        if summary
+        else "返工已完成，等待重新验收。"
+    )
+    evidence = _implementation_report_evidence(report)
+    risk = "未明确风险。"
+    next_step = fallback_next or "可以重新验收。"
+    rendered = _render_digest(conclusion, evidence, risk, next_step)
+    if len(rendered) <= max_chars:
+        return rendered
+    return _render_digest(
+        _trim_sentence(conclusion, 120),
+        [_trim_sentence(item, 100) for item in evidence[:2]],
+        risk,
+        next_step,
+    )
+
+
+def _implementation_report_evidence(report: dict[str, object]) -> list[str]:
+    evidence: list[str] = []
+    changed_files = (
+        report.get("changed_files")
+        or report.get("files_modified")
+        or report.get("files_changed")
+        or report.get("modified_files")
+    )
+    files = []
+    if isinstance(changed_files, list | tuple):
+        files = [
+            path
+            for item in changed_files
+            if (path := _normalize_sentence(str(item)))
+        ]
+    if files:
+        evidence.append("改动文件：" + "、".join(files[:5]))
+
+    location = report.get("change_location")
+    if isinstance(location, dict):
+        file_name = _structured_text(location.get("file"))
+        line = _structured_text(location.get("line"))
+        if file_name and line:
+            evidence.append(f"位置：{file_name} 第 {line} 行")
+        elif file_name:
+            evidence.append(f"位置：{file_name}")
+
+    commands = _structured_items(report.get("commands_run"))
+    tests = _structured_items(report.get("tests_attempted"))
+    for item in [*commands[:2], *tests[:2]]:
+        if item and not _looks_like_protocol_line(item):
+            evidence.append(item)
+    return list(dict.fromkeys(evidence))[:5]
+
+
+def _structured_decision(report: dict[str, object]) -> str:
+    raw = _structured_text(
+        report.get("decision")
+        or report.get("verdict")
+        or report.get("status")
+        or report.get("conclusion")
+    )
+    normalized = raw.strip().lower().replace(" ", "_").replace("-", "_")
+    if normalized.startswith(("pass", "passed", "approve", "approved", "success")):
+        return "pass"
+    if normalized.startswith((
+        "block",
+        "blocked",
+        "fail",
+        "failed",
+        "failure",
+        "retry",
+        "repair",
+        "needs_repair",
+        "need_repair",
+    )):
+        return "block"
+    if normalized.startswith(("needs_user", "need_user", "ask_user")):
+        return "need_user"
+    return _DECISION_LABELS.get(normalized, "")
+
+
+def _structured_evidence(report: dict[str, object]) -> list[str]:
+    evidence: list[str] = []
+    for key in ("evidence", "test_evidence_refs"):
+        evidence.extend(_structured_items(report.get(key)))
+    for key in (
+        "passed_checks",
+        "failed_checks",
+        "checks",
+        "verification",
+        "verification_results",
+        "findings",
+    ):
+        evidence.extend(_structured_items(report.get(key)))
+
+    deduped: list[str] = []
+    for item in evidence:
+        item = _trim_sentence(item, 140)
+        if not item or _looks_like_protocol_line(item):
+            continue
+        if any(_same_key_point(item, existing) for existing in deduped):
+            continue
+        deduped.append(item)
+        if len(deduped) >= 5:
+            break
+    return deduped
+
+
+def _structured_items(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = _normalize_sentence(value)
+        return [] if _looks_like_protocol_line(text) else [text]
+    if isinstance(value, (int, float, bool)):
+        return []
+    if isinstance(value, list | tuple):
+        items: list[str] = []
+        for item in value:
+            items.extend(_structured_items(item))
+        return items
+    if isinstance(value, dict):
+        items: list[str] = []
+        for key in (
+            "evidence",
+            "evidence_ref",
+            "evidence_refs",
+            "test_evidence_refs",
+            "detail",
+            "details",
+            "message",
+            "summary",
+            "title",
+        ):
+            items.extend(_structured_items(value.get(key)))
+        return items
+    return []
+
+
+def _structured_risk(report: dict[str, object]) -> str:
+    raw = _structured_text(
+        report.get("risk")
+        or report.get("risk_level")
+        or report.get("confidence")
+        or report.get("confidence_reason")
+    )
+    if not raw:
+        return "未明确风险。"
+    normalized = raw.strip().lower().replace("_", " ")
+    return _RISK_LABELS.get(normalized, raw)
+
+
+def _structured_next_step(
+    report: dict[str, object],
+    *,
+    fallback_next: str | None,
+) -> str:
+    raw = _structured_text(
+        report.get("recommended_next_action")
+        or report.get("next_action")
+        or report.get("next_step")
+    )
+    normalized = raw.strip().lower().replace(" ", "_").replace("-", "_")
+    return _NEXT_ACTION_LABELS.get(normalized) or raw or fallback_next or "请继续补充上下文。"
+
+
+def _structured_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _normalize_sentence(value)
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list | tuple):
+        return "；".join(item for item in (_structured_text(v) for v in value) if item)
+    if isinstance(value, dict):
+        for key in ("summary", "message", "detail", "title"):
+            text = _structured_text(value.get(key))
+            if text:
+                return text
+    return ""
 
 
 def _find_section(lines: list[str], key: str) -> str:
@@ -345,9 +773,9 @@ def _with_claude_task(next_step: str, claude_task: str) -> str:
     if not claude_task:
         return next_step
     if _looks_like_generic_next_step(next_step):
-        return f"交给 Claude 执行：{claude_task}"
+        return f"交给 DeepSeek 开发工程师执行：{claude_task}"
     if "claude" not in next_step.lower():
-        return f"{next_step}；Claude 任务：{claude_task}"
+        return f"{next_step}；DeepSeek 开发工程师任务：{claude_task}"
     generic = re.sub(r"[。.!！\s]+$", "", next_step)
     if claude_task in generic:
         return next_step
@@ -381,7 +809,14 @@ def _looks_like_generic_next_step(next_step: str) -> bool:
         "按下方按钮继续" in next_step
         or "继续补充、重写或结束" in next_step
         or normalized.startswith("可选：交给 claude")
-        or _normalize_sentence(next_step) in {"交给 Claude 执行", "交给 Claude"}
+        or normalized.startswith("可选：交给 deepseek")
+        or normalized.startswith("可选：交给 deepseek 开发工程师")
+        or _normalize_sentence(next_step) in {
+            "交给 Claude 执行",
+            "交给 Claude",
+            "交给 DeepSeek 开发工程师执行",
+            "交给 DeepSeek 开发工程师",
+        }
     )
 
 
@@ -428,12 +863,12 @@ def _is_noop_instruction(text: str) -> bool:
 def _infer_next_step(key_points: list[str], conclusion: str, risk: str) -> str:
     combined = " ".join([*key_points, conclusion, risk]).lower()
     if any(token in combined for token in ("状态收敛", "本地状态", "真实交易所", "残留")):
-        return "可选：交给 Claude 或 Codex 处理状态收敛/残留仓位问题，也可继续补充或结束"
+        return "可选：交给 DeepSeek 开发工程师或 GPT 开发工程师处理状态收敛/残留仓位问题，也可继续补充或结束"
     if any(token in combined for token in ("平仓", "reduce-only", "http 400", "bad request")):
-        return "可选：交给 Claude 或 Codex 排查平仓失败，也可继续补充或结束"
+        return "可选：交给 DeepSeek 开发工程师或 GPT 开发工程师排查平仓失败，也可继续补充或结束"
     if any(token in combined for token in ("bug", "问题", "风险", "异常", "失败", "优化")):
-        return "可选：交给 Claude 或 Codex 处理上述问题，也可继续补充或结束"
-    return "可选：继续补充、交给 Claude/Codex 处理或结束"
+        return "可选：交给 DeepSeek 开发工程师或 GPT 开发工程师处理上述问题，也可继续补充或结束"
+    return "可选：继续补充、交给开发工程师处理或结束"
 
 
 def _looks_like_claude_prompt_boilerplate(part: str) -> bool:
@@ -477,6 +912,22 @@ def _looks_like_noise(line: str) -> bool:
     )
 
 
+def _looks_like_protocol_line(line: str) -> bool:
+    stripped = _normalize_sentence(line).rstrip(",")
+    lowered = stripped.lower()
+    if stripped in {"{", "}", "[", "]", "},", "],"}:
+        return True
+    if re.match(r'^[{}\[\]],?$', stripped):
+        return True
+    if re.match(r'^"[^"]+"\s*:', stripped):
+        return True
+    match = re.match(r"^([a-z][a-z0-9_ -]*)\s*[:=]\s*", lowered)
+    if not match:
+        return False
+    field = match.group(1).replace("-", "_").replace(" ", "_")
+    return field in _PROTOCOL_FIELD_NAMES
+
+
 def _render_digest(
     conclusion: str,
     evidence: list[str],
@@ -497,7 +948,29 @@ def _render_digest(
 
 
 def _normalize_sentence(text: str) -> str:
+    text = _role_label_text(text)
     return re.sub(r"\s+", " ", text).strip(" -:：")
+
+
+def _role_label_text(text: str) -> str:
+    replacements = (
+        ("Claude Code", "DeepSeek 开发工程师"),
+        ("Claude", "DeepSeek 开发工程师"),
+        ("Codex 验收", "审计工程师验收"),
+        ("Codex 分析", "诊断工程师分析"),
+        ("Codex 核验", "诊断工程师核验"),
+        ("Codex", "GPT 开发工程师"),
+        ("claude", "DeepSeek 开发工程师"),
+        ("codex", "GPT 开发工程师"),
+    )
+    for old, new in replacements:
+        text = text.replace(old, new)
+    text = re.sub(
+        r"(DeepSeek 开发工程师|GPT 开发工程师|审计工程师|诊断工程师)\s+(?=[\u4e00-\u9fff])",
+        r"\1",
+        text,
+    )
+    return text
 
 
 def _trim_sentence(text: str, max_chars: int) -> str:

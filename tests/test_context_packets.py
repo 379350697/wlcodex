@@ -66,7 +66,7 @@ def test_codex_analysis_packet_can_execute_user_query_without_handoff() -> None:
     rendered = packet.render()
     assert "真实执行必要的查询和核验" in rendered
     assert "不要只输出执行计划" in rendered
-    assert "不要输出 Claude 交接包" in rendered
+    assert "不要输出开发交接包" in rendered
     assert "只读分析" not in rendered
     assert "禁止创建、修改、删除任何工作区文件" not in rendered
     assert "禁止部署、重启、写配置" not in rendered
@@ -223,11 +223,11 @@ def test_build_codex_analysis_packet_is_analysis_only() -> None:
 
     rendered = packet.render()
 
-    assert "不要直接完成 Claude 的实现补丁" in rendered
+    assert "不要直接完成开发工程师的实现补丁" in rendered
     assert "可以调用 skill" in rendered
     assert "docs/ 或 .wlcodex/" in rendered
     assert "不要修改业务代码、测试代码、依赖锁或配置" in rendered
-    assert "交给 Claude" in rendered
+    assert "交给开发工程师" in rendered
 
 
 def test_build_codex_verification_packet() -> None:
@@ -431,7 +431,7 @@ def test_auto_final_plan_packet_answers_query_or_requests_claude_prompt() -> Non
 
     assert "最终方案" in rendered
     assert "查询/核验类任务" in rendered
-    assert "如果需要实现，再包含给 Claude 的执行提示词" in rendered
+    assert "如果需要实现，再包含给开发工程师的执行提示词" in rendered
     assert "acceptance_criteria" in rendered or "验收标准" in rendered.lower()
     assert "不要只输出下一步计划" in rendered
 

@@ -25,10 +25,10 @@ CLAUDE_PERMISSION_MODE_LABELS: dict[str, str] = {
 }
 
 CLAUDE_PERMISSION_MODE_DESCRIPTIONS: dict[str, str] = {
-    "acceptEdits": "允许 Claude 直接修改文件，适合日常实现闭环。",
-    "auto": "让 Claude 自动判断哪些操作可执行。",
-    "plan": "只让 Claude 给方案，不实际改文件。",
-    "default": "使用 Claude 默认确认策略。",
+    "acceptEdits": "允许 DeepSeek 开发工程师直接修改文件，适合日常实现闭环。",
+    "auto": "让 DeepSeek 开发工程师自动判断哪些操作可执行。",
+    "plan": "只让 DeepSeek 开发工程师给方案，不实际改文件。",
+    "default": "使用 DeepSeek 开发工程师默认确认策略。",
     "dontAsk": "遇到需要确认的操作直接不询问。",
     "bypassPermissions": "跳过权限检查，高风险，仅用于可信隔离环境。",
 }
@@ -64,7 +64,7 @@ def normalize_claude_permission_mode(value: str) -> str:
     mode = _ALIASES.get(raw) or _ALIASES.get(raw.lower())
     if mode is None:
         choices = "、".join(CLAUDE_PERMISSION_MODE_LABELS[m] for m in CLAUDE_PERMISSION_MODE_ORDER)
-        raise ValueError(f"未知 Claude 权限模式：{raw}。可选：{choices}")
+        raise ValueError(f"未知 DeepSeek 开发工程师权限模式：{raw}。可选：{choices}")
     return mode
 
 
@@ -91,7 +91,7 @@ class ClaudePermissionState:
 def render_claude_permission_status(mode: str) -> str:
     current = normalize_claude_permission_mode(mode)
     lines = [
-        "Claude 权限模式",
+        "DeepSeek 开发工程师权限模式",
         f"当前模式：{CLAUDE_PERMISSION_MODE_LABELS[current]}",
         "",
         "可选模式：",

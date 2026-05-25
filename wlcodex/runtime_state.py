@@ -130,7 +130,7 @@ class RuntimeOrchestrationState:
     status: str = "queued"
     current_phase: str = ""
     verify_round: int = 0
-    max_verify_rounds: int = 3
+    max_verify_rounds: int = 0
     conversation_id: int | None = None
     orchestration_run_id: int | None = None
     last_codex_analysis: str = ""

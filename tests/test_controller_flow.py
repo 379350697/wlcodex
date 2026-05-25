@@ -246,6 +246,35 @@ def ctrl_with_claude_permission_state(tmp_path: Path) -> CommandController:
     )
 
 
+def test_engineer_model_settings_render_and_persist(ctrl: CommandController) -> None:
+    response = ctrl.render_engineer_model_settings()
+
+    assert "工程师大模型" in response.text
+    assert "开发工程师：claude-deepseek-v4-pro、codex-gpt5.5" in response.text
+    flat_buttons = [button for row in response.buttons for button in row]
+    assert {
+        "text": "开发工程师",
+        "callback_data": "settings:engineer_models:implementer",
+    } in flat_buttons
+
+    updated = ctrl.set_engineer_model_assignment("implementer", "codex_gpt")
+
+    assert "已更新" in updated.text
+    assert "开发工程师大模型" in updated.text
+    assert ctrl._implementer_model_profiles == ("claude_deepseek",)
+    assert ctrl._ledger.get_runtime_setting(
+        "adaptive_team.assignment.implementer"
+    ) == '["claude_deepseek"]'
+
+    updated = ctrl.set_engineer_model_assignment("architect", "claude_deepseek")
+
+    assert "架构工程师大模型" in updated.text
+    assert ctrl._architect_model_profile == "claude_deepseek"
+    assert ctrl._ledger.get_runtime_setting(
+        "adaptive_team.assignment.architect"
+    ) == '["claude_deepseek"]'
+
+
 def test_build_team_context_packet_for_job_records_activation_inputs(
     ctrl: CommandController,
 ) -> None:
@@ -1255,7 +1284,7 @@ async def test_legacy_diff_command_with_id(ctrl: CommandController) -> None:
 async def test_help_shows_new_commands(ctrl: CommandController) -> None:
     response = await ctrl.handle("/help", {})
     assert "WLCodex" in response.text
-    assert "普通消息：Codex 分析/核验" in response.text
+    assert "普通消息：诊断工程师分析/核验" in response.text
     assert "Codex 主导闭环" in response.text or "/auto" in response.text
     assert "当前视图：驾驶舱" in response.text
     assert "[新工作台]" in response.text
@@ -1279,7 +1308,7 @@ async def test_status_shows_conversation_when_active(ctrl: CommandController) ->
     await ctrl.handle("/new", {"chat_id": 100, "user_id": 200})
     # Then check /status for that chat
     response = await ctrl.handle("/status", {"chat_id": 100, "user_id": 200})
-    assert "对话" in response.text or "Codex 直聊" in response.text
+    assert "对话" in response.text or "GPT 开发工程师直聊" in response.text
 
 
 @pytest.mark.asyncio
@@ -1608,6 +1637,29 @@ def ctrl_with_claude(tmp_path: Path) -> CommandController:
     ))
     inspector = TaskInspector(ledger, tmp_path / "logs")
     claude = FakeClaudeBackendForController()
+    claude._responses = [
+        (
+            "Fake Claude implementation result.\n"
+            "```json\n"
+            "{"
+            "\"implementation_evidence\":{"
+            "\"changed_files\":[\"tracked.txt\"],"
+            "\"diff_summary\":\"tracked.txt updated\","
+            "\"commands_run\":[{"
+            "\"command\":\"pytest tests/test_streaming.py -q\","
+            "\"exit_status\":0,"
+            "\"summary\":\"streaming tests passed\""
+            "}],"
+            "\"tests_attempted\":[{"
+            "\"command\":\"pytest tests/test_streaming.py -q\","
+            "\"exit_status\":0,"
+            "\"summary\":\"streaming tests passed\""
+            "}]"
+            "}"
+            "}\n"
+            "```"
+        )
+    ]
     store = RuntimeEventStore(ledger._conn)
     ctrl = CommandController(
         service,
@@ -1650,7 +1702,7 @@ async def test_claude_command_runs_claude_only_gate(ctrl_with_claude: CommandCon
         "/claude 修改 auth.py 添加空值检查",
         {"chat_id": 100, "user_id": 200},
     )
-    assert "让 Codex 验收" in response.text
+    assert "让审计工程师验收" in response.text
     await _drain_runtime_runner(ctrl_with_claude)
     claude = ctrl_with_claude._claude
     assert hasattr(claude, "calls")
@@ -1909,6 +1961,29 @@ async def test_staged_auto_starts_without_orchestration_runner(
     ))
     inspector = TaskInspector(ledger, tmp_path / "logs")
     claude = FakeClaudeBackendForController()
+    claude._responses = [
+        (
+            "Fake Claude implementation result.\n"
+            "```json\n"
+            "{"
+            "\"implementation_evidence\":{"
+            "\"changed_files\":[\"tracked.txt\"],"
+            "\"diff_summary\":\"tracked.txt updated\","
+            "\"commands_run\":[{"
+            "\"command\":\"pytest tests/test_streaming.py -q\","
+            "\"exit_status\":0,"
+            "\"summary\":\"streaming tests passed\""
+            "}],"
+            "\"tests_attempted\":[{"
+            "\"command\":\"pytest tests/test_streaming.py -q\","
+            "\"exit_status\":0,"
+            "\"summary\":\"streaming tests passed\""
+            "}]"
+            "}"
+            "}\n"
+            "```"
+        )
+    ]
     ctrl = CommandController(
         service,
         backend,
@@ -2344,7 +2419,7 @@ async def test_auto_mode_creates_architect_team_run_and_context_packet(
     assert packet.packet["model_profile"] == "codex_gpt"
     assert packet.packet["required_output_schema"] == "implementation_plan"
     assert any(
-        "Architect performs investigator duties in v1" in rule
+        "diagnosis evidence" in rule
         for rule in packet.packet["handoff_rules"]
     )
     assert packet.prompt_tokens > 0
@@ -2663,8 +2738,9 @@ async def test_auto_send_to_codex_blocks_team_run_when_gate_a_artifact_missing(
         ConversationCallback(conversation.id, AUTO_SEND_TO_CODEX)
     )
 
-    assert "Gate A" in response.text
-    assert "architecture_plan" in response.text
+    assert "验收前还缺少方案记录" in response.text
+    assert "Gate A" not in response.text
+    assert "architecture_plan" not in response.text
     assert ledger.list_team_agent_jobs(team_run.id) == []
     assert ledger.list_agent_runs(conversation.id) == []
     assert backend.turns == []
@@ -2749,7 +2825,7 @@ async def test_auto_send_to_codex_starts_implementer_with_team_context(
     context_packet = ledger.get_team_context_packet_for_job(implementer_job.id)
     activations = ledger.list_team_skill_activations(implementer_job.id)
 
-    assert "Codex 开始执行" in response.text
+    assert "GPT 开发工程师开始执行" in response.text
     assert AUTO_VIEW_STATUS in _callback_actions(response.buttons)
     assert updated_orch.status == "running"
     assert updated_orch.current_step == AUTO_CLAUDE_RUNNING
@@ -3185,6 +3261,29 @@ async def test_auto_send_to_claude_creates_implementer_context_before_backend_st
     ))
     inspector = TaskInspector(ledger, tmp_path / "logs")
     claude = FakeClaudeBackendForController()
+    claude._responses = [
+        (
+            "Fake Claude implementation result.\n"
+            "```json\n"
+            "{"
+            "\"implementation_evidence\":{"
+            "\"changed_files\":[\"tracked.txt\"],"
+            "\"diff_summary\":\"tracked.txt updated\","
+            "\"commands_run\":[{"
+            "\"command\":\"pytest tests/test_streaming.py -q\","
+            "\"exit_status\":0,"
+            "\"summary\":\"streaming tests passed\""
+            "}],"
+            "\"tests_attempted\":[{"
+            "\"command\":\"pytest tests/test_streaming.py -q\","
+            "\"exit_status\":0,"
+            "\"summary\":\"streaming tests passed\""
+            "}]"
+            "}"
+            "}\n"
+            "```"
+        )
+    ]
     ctrl = CommandController(
         service,
         backend,
@@ -3221,7 +3320,7 @@ async def test_auto_send_to_claude_creates_implementer_context_before_backend_st
         ConversationCallback(conversation.id, AUTO_SEND_TO_CLAUDE)
     )
 
-    assert "Claude 开始执行" in response.text
+    assert "DeepSeek 开发工程师开始执行" in response.text
     assert claude.calls == []
     implementer_job = ledger.list_team_agent_jobs(team_run.id)[0]
     context_packet = ledger.get_team_context_packet_for_job(implementer_job.id)
@@ -3257,7 +3356,9 @@ async def test_auto_send_to_claude_creates_implementer_context_before_backend_st
     assert updated_job.status == "done"
     assert len(implementation) == 1
     assert implementation[0].agent_job_id == updated_job.id
-    assert implementation[0].payload["summary"] == "Fake Claude implementation result."
+    assert implementation[0].payload["summary"].startswith(
+        "Fake Claude implementation result."
+    )
     assert implementation[0].payload["changed_files"]
     assert implementation[0].payload["diff_summary"]
     assert implementation[0].payload["source_agent"] == "claude"
@@ -3265,7 +3366,11 @@ async def test_auto_send_to_claude_creates_implementer_context_before_backend_st
     assert implementation[0].payload["tests_attempted"]
     assert implementation[0].payload["known_limitations"] == ["None known"]
     assert len(test_reports) == 1
-    assert test_reports[0].agent_job_id == updated_job.id
+    tester_job = [
+        job for job in ledger.list_team_agent_jobs(team_run.id) if job.role == "tester"
+    ][0]
+    assert tester_job.status == "done"
+    assert test_reports[0].agent_job_id == tester_job.id
 
 
 @pytest.mark.asyncio
@@ -3359,7 +3464,7 @@ async def test_claude_streaming_completion_accumulates_structured_evidence(
 async def test_claude_completion_records_report_evidence_from_active_run_hidden_task(
     tmp_path: Path,
 ) -> None:
-    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE, AUTO_CLAUDE_RUNNING
+    from wlcodex.auto_workflow import AUTO_CLAUDE_RUNNING, AUTO_RETRY_READY
 
     workspace = tmp_path / "workspace"
     _init_git_workspace(workspace)
@@ -3438,7 +3543,7 @@ async def test_claude_completion_records_report_evidence_from_active_run_hidden_
         if artifact.artifact_type == "implementation_report"
     ]
 
-    assert updated.current_step == AUTO_CLAUDE_DONE
+    assert updated.current_step == AUTO_RETRY_READY
     assert updated_job.status == "done"
     assert len(artifacts) == 1
     assert artifacts[0].agent_job_id == implementer_job.id
@@ -3450,6 +3555,80 @@ async def test_claude_completion_records_report_evidence_from_active_run_hidden_
     ]
     assert EventType.TEAM_ARTIFACT_RECORDED in event_types
     assert EventType.TEAM_AGENT_JOB_COMPLETED in event_types
+
+
+@pytest.mark.asyncio
+async def test_claude_completion_message_hides_implementation_report_protocol(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_CLAUDE_RUNNING
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    renderer = RecordingInteractionRenderer()
+    ctrl = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        claude_backend=FakeClaudeBackendForController(),
+        interaction_renderer=renderer,
+        implementer_model_profiles=("claude_deepseek",),
+        adaptive_team_model_profiles={"claude_deepseek": "claude"},
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(conversation.id, "修改 README")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_CLAUDE_RUNNING,
+    )
+
+    ctrl._transition_auto_claude_completed(
+        conversation.id,
+        agent_status="done",
+        completion_summary=(
+            "Claude 执行完成。\n\n"
+            "```json\n"
+            "{\n"
+            '  "implementation_report": {\n'
+            '    "status": "completed",\n'
+            '    "change_summary": "README.md 第139行新增一行快速默认测试说明",\n'
+            '    "files_modified": ["README.md"],\n'
+            '    "change_location": {\n'
+            '      "file": "README.md",\n'
+            '      "line": 139,\n'
+            '      "content": "# Use the fast default run for routine verification before broader acceptan"\n'
+            "    }\n"
+            "  }\n"
+            "}\n"
+            "```"
+        ),
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert renderer.events
+    text = renderer.events[-1].text
+    assert "开发完成，测试通过" in text
+    assert "返工完成：README.md 第139行新增一行快速默认测试说明" in text
+    assert "改动文件：README.md" in text
+    assert "implementation_report" not in text
+    assert "files_modified" not in text
+    assert "content" not in text
+    assert "broader acceptan" not in text
 
 
 @pytest.mark.asyncio
@@ -3509,7 +3688,7 @@ async def test_auto_send_repair_to_claude_creates_current_implementer_job_contex
         ConversationCallback(conversation.id, AUTO_SEND_REPAIR_TO_CLAUDE)
     )
 
-    assert "Claude 开始返工" in response.text
+    assert "DeepSeek 开发工程师开始返工" in response.text
     jobs = ledger.list_team_agent_jobs(team_run.id)
     assert len(jobs) == 1
     implementer_job = jobs[0]
@@ -3542,6 +3721,60 @@ async def test_auto_send_repair_to_claude_creates_current_implementer_job_contex
     assert implementation_reports[0].agent_job_id == updated_job.id
     assert len(test_reports) == 1
     assert test_reports[0].agent_job_id == updated_job.id
+
+
+@pytest.mark.asyncio
+async def test_auto_send_repair_to_claude_completed_run_refreshes_stale_button(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_COMPLETED
+    from wlcodex.conversation_callback import (
+        AUTO_SEND_REPAIR_TO_CLAUDE,
+        TEAM_VIEW_ARTIFACTS,
+        TEAM_VIEW_STATUS,
+        ConversationCallback,
+    )
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    backend = FakeCodexBackend()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    ctrl = CommandController(
+        service,
+        backend,
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        claude_backend=FakeClaudeBackendForController(),
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    orch_run = ledger.create_orchestration_run(conversation.id, "修改 README")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="needs_user",
+        current_step=AUTO_COMPLETED,
+        last_verification_result="decision: pass\nsummary: README 任务已验收通过。",
+    )
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_SEND_REPAIR_TO_CLAUDE)
+    )
+
+    assert "已经完成" in response.text
+    assert "当前阶段是 任务完成，不能返工" not in response.text
+    actions = _callback_actions(response.buttons or [])
+    assert AUTO_SEND_REPAIR_TO_CLAUDE not in actions
+    assert {TEAM_VIEW_STATUS, TEAM_VIEW_ARTIFACTS}.issubset(actions)
 
 
 @pytest.mark.asyncio
@@ -3738,7 +3971,7 @@ async def test_auto_verification_records_audit_artifact(
         if artifact.artifact_type == "verification_request"
     ]
 
-    assert "Codex 开始验收" in response.text
+    assert "审计工程师开始验收" in response.text
     assert updated.current_step == AUTO_VERIFYING
     assert auditor_job.role == "auditor"
     assert auditor_job.model_profile == "auditor_codex"
@@ -3749,13 +3982,13 @@ async def test_auto_verification_records_audit_artifact(
     assert context_packet.packet["model_profile"] == "auditor_codex"
     assert context_packet.packet["required_output_schema"] == "audit_report"
     assert any(
-        "Auditor performs tester duties in v1" in rule
+        "Audit only starts after implementation and test evidence" in rule
         for rule in context_packet.packet["handoff_rules"]
     )
     assert len(verification_request) == 1
     assert (
         verification_request[0].payload["tester_policy"]
-        == "Auditor performs tester duties in v1"
+        == "Audit starts only after current-round test evidence exists"
     )
     assert verification_request[0].agent_job_id == auditor_job.id
     assert verification_request[0].payload["goal"] == "修改 tracked.txt"
@@ -3917,7 +4150,7 @@ async def test_auto_verification_filters_workspace_diff_to_task_scope(
         if artifact.artifact_type == "verification_request"
     ][0]
 
-    assert "Codex 开始验收" in response.text
+    assert "审计工程师开始验收" in response.text
     assert updated.current_step == AUTO_VERIFYING
     assert verification_request.payload["changed_files"] == ["tracked.txt"]
     assert verification_request.payload["unrelated_changed_files"] == [
@@ -4111,7 +4344,7 @@ async def test_auto_verification_recovers_structured_evidence_from_report_summar
 
     assert "Gate B" not in response.text
     assert "Gate C" not in response.text
-    assert "Codex 开始验收" in response.text
+    assert "审计工程师开始验收" in response.text
     assert backend.turns
 
 
@@ -4349,7 +4582,7 @@ async def test_auto_codex_paths_without_team_run_do_not_create_team_records(
         ConversationCallback(conversation.id, AUTO_SEND_TO_CODEX)
     )
 
-    assert "Codex 开始执行" in implement_response.text
+    assert "GPT 开发工程师开始执行" in implement_response.text
     assert ledger._conn.execute("SELECT COUNT(*) FROM team_runs").fetchone()[0] == 0
     assert ledger._conn.execute("SELECT COUNT(*) FROM team_agent_jobs").fetchone()[0] == 0
     assert ledger._conn.execute("SELECT COUNT(*) FROM team_artifacts").fetchone()[0] == 0
@@ -4367,7 +4600,7 @@ async def test_auto_codex_paths_without_team_run_do_not_create_team_records(
         ConversationCallback(conversation.id, AUTO_CODEX_VERIFY)
     )
 
-    assert "Codex 开始验收" in verify_response.text
+    assert "审计工程师开始验收" in verify_response.text
     assert ledger._conn.execute("SELECT COUNT(*) FROM team_runs").fetchone()[0] == 0
     assert ledger._conn.execute("SELECT COUNT(*) FROM team_agent_jobs").fetchone()[0] == 0
     assert ledger._conn.execute("SELECT COUNT(*) FROM team_artifacts").fetchone()[0] == 0
@@ -4698,7 +4931,7 @@ async def test_auto_send_to_claude_rejects_missing_visible_final_plan(
         for button in row
     ]
     assert "没有可见的最终方案正文" in response.text
-    assert "交给 Claude 执行" not in labels
+    assert "交给 DeepSeek 开发工程师" not in labels
     assert "继续补充" in labels
     assert "重写方案" not in labels
     assert claude.prompts == []
@@ -4878,7 +5111,7 @@ async def test_auto_show_draft_returns_enough_final_plan_to_review(
         for row in (response.buttons or [])
         for button in row
     ]
-    assert "交给 Claude 执行" in labels
+    assert "交给 DeepSeek 开发工程师" in labels
 
 
 @pytest.mark.asyncio
@@ -5059,7 +5292,7 @@ async def test_claude_command_offers_explicit_codex_verification_action(
         "/claude 修改 auth.py",
         {"chat_id": 100, "user_id": 200},
     )
-    assert "让 Codex 验收" in response.text
+    assert "让审计工程师验收" in response.text
     assert response.buttons
     await _drain_runtime_runner(ctrl_with_claude)
 
@@ -5508,7 +5741,7 @@ async def test_exec_mode_command_updates_active_workbench_mode(
     )
 
     assert "已切换执行模式" in response.text
-    assert "Codex 直聊" in response.text
+    assert "GPT 开发工程师直聊" in response.text
     assert ctrl._ledger.get_conversation(conversation.id).mode == "codex_direct"
 
 

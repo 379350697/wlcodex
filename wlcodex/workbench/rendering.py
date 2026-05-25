@@ -29,11 +29,13 @@ def render_view_switch_notice(from_view: ViewMode, to_view: ViewMode) -> str:
 def render_session_library(sessions: list[AgentSessionSummary]) -> str:
     """Render a Workbench-level historical session library for the user."""
     if not sessions:
-        return "这个工作台还没有历史现场。你可以先让 Codex 分析，或让 Claude 开始执行。"
+        return "这个工作台还没有历史现场。你可以先让诊断工程师分析，或让开发工程师开始执行。"
 
     lines = ["历史现场", ""]
     for s in sessions:
-        agent_label = "Claude 现场" if s.agent == "claude" else "Codex 现场"
+        agent_label = (
+            "DeepSeek 开发现场" if s.agent == "claude" else "GPT 开发现场"
+        )
         lines.append(f"{agent_label} · {s.title} · {s.user_label}")
     return "\n".join(lines)
 

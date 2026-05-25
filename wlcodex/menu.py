@@ -8,8 +8,8 @@ from __future__ import annotations
 
 _PRIMARY_COMMANDS: list[tuple[str, str]] = [
     ("new", "新工作台"),
-    ("codex", "问 Codex"),
-    ("claude", "叫 Claude"),
+    ("codex", "问 GPT 工程师"),
+    ("claude", "叫 DeepSeek 工程师"),
     ("auto", "总工程师模式"),
     ("stop", "停止当前运行"),
     ("status", "当前状态"),
@@ -18,10 +18,10 @@ _PRIMARY_COMMANDS: list[tuple[str, str]] = [
     ("workspaces", "可用工作区"),
     ("switch", "切换工作区"),
     ("model", "切换模型"),
-    ("claude_mode", "Claude 权限"),
+    ("claude_mode", "DeepSeek 权限"),
     ("diff", "查看 diff"),
     ("files", "相关文件"),
-    ("verify", "Codex 验收"),
+    ("verify", "审计验收"),
     ("health", "系统健康"),
     ("help", "帮助"),
 ]

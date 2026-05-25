@@ -966,9 +966,9 @@ def _status_cn(status: str) -> str:
 
 def _phase_cn(phase: str) -> str:
     mapping = {
-        "running_analysis": "Codex 分析",
-        "running_implementation": "Claude 实施",
-        "running_verification": "Codex 验收",
+        "running_analysis": "诊断工程师分析",
+        "running_implementation": "开发工程师实施",
+        "running_verification": "审计工程师验收",
         "retrying_implementation": "重新实施",
         "analysis": "分析",
         "implementation": "实施",

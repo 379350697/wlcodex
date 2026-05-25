@@ -136,6 +136,7 @@ cp config/wlcodex.example.toml config/wlcodex.toml
 export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
 
 # Run fast default tests
+# Use the fast default run for routine verification before broader acceptance checks.
 .venv/bin/python -m pytest -q
 
 # Profile the full test suite with native pytest output

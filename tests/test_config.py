@@ -174,7 +174,7 @@ path = "/tmp/wlcodex"
     assert config.codex.codex_home == Path.home() / "wlcodex-codex-home"
     assert config.claude.stream_idle_timeout_seconds == 600
     assert config.context_budget.codex_to_claude_tokens == 1500
-    assert config.orchestration.max_verify_rounds == 3
+    assert config.orchestration.max_verify_rounds == 0
     assert config.streaming.edit_min_interval_seconds == 1.0
     assert config.menu.register_bot_commands is True
     assert config.backend.request_timeout_seconds == 60

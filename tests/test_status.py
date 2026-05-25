@@ -427,7 +427,7 @@ def test_render_conversation_status_defaults_to_product() -> None:
     text = render_conversation_status(session)
 
     assert "当前视图：驾驶舱" in text
-    assert "模式：Codex 直聊" in text
+    assert "模式：GPT 开发工程师直聊" in text
 
 
 def test_render_conversation_status_shows_terminal_agent() -> None:
@@ -442,7 +442,7 @@ def test_render_conversation_status_shows_terminal_agent() -> None:
         session, surface_mode="terminal", terminal_agent="claude")
 
     assert "当前视图：现场" in text
-    assert "现场 Agent：Claude" in text
+    assert "现场 Agent：DeepSeek 开发工程师" in text
 
 
 def test_render_conversation_status_unknown_surface_mode_falls_back() -> None:
@@ -456,7 +456,7 @@ def test_render_conversation_status_unknown_surface_mode_falls_back() -> None:
     text = render_conversation_status(session, surface_mode="unknown")
 
     assert "当前视图：驾驶舱" in text
-    assert "模式：Claude 直聊" in text
+    assert "模式：DeepSeek 开发工程师直聊" in text
 
 
 def test_role_aware_auto_status_lists_engineer_roles() -> None:
@@ -554,4 +554,4 @@ def test_render_prepared_carryover_mentions_next_user_goal() -> None:
 
     assert "准备从工作台 #36 接棒" in text
     assert "请发送新任务目标" in text
-    assert "不会启动 Claude" in text
+    assert "不会启动开发工程师" in text

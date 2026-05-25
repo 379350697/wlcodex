@@ -26,6 +26,7 @@ from wlcodex.interaction.renderer import InteractionRenderer
 from wlcodex.interaction.transport import TelegramTransport
 from wlcodex.runtime_events import safe_text_preview
 from wlcodex.streaming import StreamingRenderer
+from wlcodex.telegram_digest import sanitize_telegram_user_text
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +334,7 @@ class WlCodexHandlers:
         )
 
     async def send_telegram_preview(self, chat_id: int, text: str) -> int:
+        text = sanitize_telegram_user_text(text)
         if self._outbox is None:
             return await self._raw_send_message(chat_id, text)
         timeout = float(
@@ -379,6 +381,7 @@ class WlCodexHandlers:
         When the outbox is active, delivery events are recorded exclusively by
         the outbox; the raw send fn raises on failure so the outbox can retry.
         """
+        text = sanitize_telegram_user_text(text)
         if self._outbox is not None:
             self._outbox.enqueue_send(
                 chat_id, text, buttons,
@@ -418,6 +421,7 @@ class WlCodexHandlers:
         retries, and records all delivery events. This function is a pure
         Telegram API call.
         """
+        text = sanitize_telegram_user_text(text)
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         reply_markup = None
@@ -443,6 +447,7 @@ class WlCodexHandlers:
         When the outbox is active, delivery events are recorded exclusively by
         the outbox; the raw edit fn raises on failure so the outbox can retry.
         """
+        text = sanitize_telegram_user_text(text)
         if self._outbox is not None:
             self._outbox.enqueue_edit(
                 chat_id, message_id, text, buttons,
@@ -488,6 +493,7 @@ class WlCodexHandlers:
         retries, and records all delivery events.  Note: "message is not
         modified" is also raised so the outbox can handle it.
         """
+        text = sanitize_telegram_user_text(text)
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         reply_markup = None
@@ -509,6 +515,7 @@ class WlCodexHandlers:
         buttons: list[list[dict[str, str]]] | None = None,
     ) -> None:
         """Send a new message when edit fails with non-retryable error."""
+        text = sanitize_telegram_user_text(text)
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         reply_markup = None
@@ -695,22 +702,30 @@ class WlCodexHandlers:
     async def settings_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        text, buttons = self._settings_card()
         await self.send_telegram(
             update.effective_chat.id,
+            text,
+            buttons=buttons,
+        )
+
+    def _settings_card(self) -> tuple[str, list[list[dict[str, str]]]]:
+        return (
             "⚙️ 设置\n\n"
-            "普通消息：Codex 分析/核验\n"
-            "/auto：Codex → Claude → Codex\n"
+            "普通消息：诊断工程师分析/核验\n"
+            "/auto：诊断工程师 → 开发工程师 → 审计工程师\n"
             "当前视图：驾驶舱\n\n"
             "你可以调整：",
-            buttons=[
-                [{"text": "完整流程（/auto：Codex → Claude → Codex）",
+            [
+                [{"text": "完整流程（/auto：诊断 → 开发 → 审计）",
                   "callback_data": "settings:exec_mode:orchestrated"}],
-                [{"text": "只问 Codex",
+                [{"text": "只问诊断工程师",
                   "callback_data": "settings:exec_mode:codex_direct"}],
-                [{"text": "只叫 Claude",
+                [{"text": "只叫 DeepSeek 开发工程师",
                   "callback_data": "settings:exec_mode:claude_direct"}],
+                [{"text": "工程师大模型", "callback_data": "settings:engineer_models"}],
                 [{"text": "模型", "callback_data": "settings:model"}],
-                [{"text": "Claude 权限", "callback_data": "settings:claude_permission:normal"}],
+                [{"text": "DeepSeek 权限", "callback_data": "settings:claude_permission:normal"}],
                 [{"text": "工作区", "callback_data": "settings:workspace"}],
             ],
         )
@@ -1132,9 +1147,9 @@ class WlCodexHandlers:
         Callback data encodes *conversation_id* (Workbench identity), not chat_id.
         """
         return [
-            [{"text": "启动 Claude 现场",
+            [{"text": "启动 DeepSeek 开发现场",
               "callback_data": f"conv:{conversation_id}:start_claude_onsite"}],
-            [{"text": "启动 Codex 现场",
+            [{"text": "启动 GPT 开发现场",
               "callback_data": f"conv:{conversation_id}:start_codex_onsite"}],
             [{"text": "回驾驶舱",
               "callback_data": f"conv:{conversation_id}:return_cockpit"}],
@@ -1151,7 +1166,11 @@ class WlCodexHandlers:
 
         buttons: list[list[dict[str, str]]] = []
         for s in sessions:
-            agent_label = "Claude" if s.agent == "claude" else "Codex"
+            agent_label = (
+                "DeepSeek 开发工程师"
+                if s.agent == "claude"
+                else "GPT 开发工程师"
+            )
             row = [
                 {"text": f"查看{agent_label}回顾",
                  "callback_data": f"conv:{conversation_id}:review_session:{s.source_run_id}"},
@@ -1165,7 +1184,7 @@ class WlCodexHandlers:
                 row.append({"text": "从摘要新开",
                             "callback_data": f"conv:{conversation_id}:resume_from_summary:{s.source_run_id}"})
             if s.agent == "claude" and s.status == "done":
-                row.append({"text": "让 Codex 验收",
+                row.append({"text": "让审计工程师验收",
                             "callback_data": f"conv:{conversation_id}:codex_verify_session:{s.source_run_id}"})
             buttons.append(row)
         buttons.append([{"text": "回驾驶舱",
@@ -1202,7 +1221,11 @@ class WlCodexHandlers:
             await self._safe_callback_answer(query, "会话不存在或已被删除。")
             return
 
-        agent_label = "Claude" if session.agent == "claude" else "Codex"
+        agent_label = (
+            "DeepSeek 开发工程师"
+            if session.agent == "claude"
+            else "GPT 开发工程师"
+        )
 
         if kind == "review_session":
             lines = [
@@ -1226,7 +1249,7 @@ class WlCodexHandlers:
                 ])
             if session.agent == "claude" and session.status == "done":
                 action_buttons.append(
-                    {"text": "让 Codex 验收",
+                    {"text": "让审计工程师验收",
                      "callback_data": f"conv:{conversation_id}:codex_verify_session:{source_run_id}"}
                 )
             action_buttons.append(
@@ -1592,8 +1615,8 @@ class WlCodexHandlers:
                 ):
                     agent = str(getattr(session_ref, "agent", "") or "现场")
                     agent_label = {
-                        "codex": "Codex",
-                        "claude": "Claude",
+                        "codex": "GPT 开发工程师",
+                        "claude": "DeepSeek 开发工程师",
                     }.get(agent.lower(), agent)
                     response = await busy_handler(
                         active,
@@ -2110,7 +2133,7 @@ class WlCodexHandlers:
     async def _settings_callback_impl(
         self, update: Update, query: object, data: str
     ) -> None:
-        parts = data.split(":", 2)
+        parts = data.split(":")
         if len(parts) < 2:
             await self._safe_callback_answer(query, "无效的设置回调数据。")
             return
@@ -2122,6 +2145,38 @@ class WlCodexHandlers:
             controller_cmd = f"/exec_mode {parts[2]}"
         elif sub == "model":
             controller_cmd = "/model"
+        elif sub == "root":
+            text, buttons = self._settings_card()
+            await self._safe_callback_answer(query, "已打开")
+            await self._safe_callback_edit(update, query, text, buttons)
+            return
+        elif sub == "engineer_models":
+            render_settings = getattr(
+                self._controller, "render_engineer_model_settings", None
+            )
+            update_assignment = getattr(
+                self._controller, "set_engineer_model_assignment", None
+            )
+            if not callable(render_settings) or not callable(update_assignment):
+                await self._safe_callback_answer(query, "系统未完全初始化。")
+                return
+            if len(parts) == 2:
+                response = render_settings()
+                answer_text = "已打开"
+            elif len(parts) == 3:
+                response = render_settings(parts[2])
+                answer_text = "已打开"
+            elif len(parts) == 4:
+                response = update_assignment(parts[2], parts[3])
+                answer_text = "已更新"
+            else:
+                await self._safe_callback_answer(query, "无效的设置回调数据。")
+                return
+            await self._safe_callback_answer(query, answer_text)
+            await self._safe_callback_edit(
+                update, query, response.text, response.buttons
+            )
+            return
         elif sub == "workspace":
             if len(parts) == 3 and parts[2].strip():
                 controller_cmd = f"/switch {parts[2].strip()}"

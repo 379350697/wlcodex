@@ -86,6 +86,20 @@ async def test_orchestrator_stops_on_max_rounds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_zero_max_verify_rounds_means_unlimited() -> None:
+    fake_codex = FakeCodexForOrch()
+    fake_codex.verify_decisions = ["retry", "retry", "retry", "pass"]
+    fake_claude = FakeClaudeForOrch()
+
+    orchestrator = ChiefEngineerOrchestrator(fake_codex, fake_claude, max_verify_rounds=0)
+    result = await orchestrator.run("修复登录 bug")
+
+    assert result.status == "passed"
+    assert result.verify_round == 4
+    assert fake_claude.implement_call_count == 4
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_stops_immediately() -> None:
     fake_codex = FakeCodexForOrch()
     fake_codex.verify_decisions = ["stop"]
@@ -209,6 +223,40 @@ def test_verification_decision_parse_stop() -> None:
 def test_verification_decision_parse_need_user() -> None:
     d = VerificationDecision.parse("decision: need_user\n需要用户输入")
     assert d.decision == "need_user"
+
+
+def test_verification_decision_parse_json_verdict_pass() -> None:
+    d = VerificationDecision.parse(
+        '{"audit_report":{"verdict":"PASS","summary":"验收通过。"}}'
+    )
+    assert d.decision == "pass"
+    assert d.summary == "验收通过。"
+
+
+def test_verification_decision_parse_task_scope_pass_with_warning() -> None:
+    d = VerificationDecision.parse(
+        '{"audit_report":{"verdict":"PASS_TASK_SCOPE_WITH_WORKTREE_WARNING",'
+        '"summary":"README 任务范围审计通过，但工作区有旁路改动。"}}'
+    )
+
+    assert d.decision == "pass"
+    assert "README 任务范围审计通过" in d.summary
+
+
+def test_verification_decision_parse_json_verdict_block_as_retry() -> None:
+    d = VerificationDecision.parse(
+        '{"audit_report":{"verdict":"BLOCK","summary":"还需要补测试","repair_prompt":"补齐测试证据"}}'
+    )
+    assert d.decision == "retry"
+    assert d.required_fix == "补齐测试证据"
+
+
+def test_verification_decision_parse_json_conclusion_needs_user() -> None:
+    d = VerificationDecision.parse(
+        '{"audit_report":{"conclusion":"needs_user","summary":"需要用户确认范围。"}}'
+    )
+    assert d.decision == "need_user"
+    assert d.summary == "需要用户确认范围。"
 
 
 def test_verification_decision_parse_chinese() -> None:

@@ -68,16 +68,16 @@ def render_health_card(
 def render_help() -> str:
     return """WLCodex — 远程工作台驾驶舱
 
-普通消息：Codex 分析/核验
-/auto：Codex 主导闭环（分析 → 确认 → Claude 执行 → 确认 → 验收）
+普通消息：诊断工程师分析/核验
+/auto：工程团队闭环（诊断 → 确认 → 开发 → 确认 → 审计）
 
 驾驶舱与现场：
   /product — 回驾驶舱
   /terminal — 接管现场
-  /terminal claude — 接入 Claude 现场
-  /terminal codex — 接入 Codex 现场
-  /terminal agent claude — 接入 Claude 现场（显式）
-  /terminal agent codex — 接入 Codex 现场（显式）
+  /terminal claude — 接入 DeepSeek 开发现场
+  /terminal codex — 接入 GPT 开发现场
+  /terminal agent claude — 接入 DeepSeek 开发现场（显式）
+  /terminal agent codex — 接入 GPT 开发现场（显式）
   /terminal tail — 恢复现场推送 / 查看最新输出
   /terminal pause — 暂停现场推送但保留会话
   /terminal detach — 停止现场推送但保留会话
@@ -85,10 +85,10 @@ def render_help() -> str:
   /mode — 查看当前模式
 
 对话模式 — 直接发消息开始：
-  • 普通消息 — Codex 分析/核验
-  • /codex <提示> — 直接和 Codex 对话
-  • /claude <提示> — 直接叫 Claude Code 实施
-  • /auto <提示> — Codex 主导闭环：分析 → 确认 → Claude 执行 → 确认 → Codex 验收
+  • 普通消息 — 诊断工程师分析/核验
+  • /codex <提示> — 直接让 GPT 开发工程师处理
+  • /claude <提示> — 直接让 DeepSeek 开发工程师实施
+  • /auto <提示> — 工程团队闭环：诊断 → 确认 → 开发 → 确认 → 审计
 
 常用命令：
   /new — 开始新工作台
@@ -99,10 +99,10 @@ def render_help() -> str:
   /workspaces — 查看可用工作区
   /switch <工作区> — 切换工作区
   /model — 切换或查看当前模型
-  /claude_mode — 切换 Claude 权限模式
+  /claude_mode — 切换 DeepSeek 开发工程师权限模式
   /diff — 查看变更
   /files — 相关文件
-  /verify — Codex 验收
+  /verify — 审计工程师验收
   /health — 系统健康
   /help — 此帮助
 
@@ -110,7 +110,7 @@ def render_help() -> str:
   • 只允许私聊
   • 只允许白名单用户
   • 每个工作区同一时间只允许一个写执行
-  • 状态和日志永远不会回灌到 Codex 上下文"""
+  • 状态和日志永远不会回灌到模型上下文"""
 
 
 def render_inspection_result(title: str, body: str) -> str:
@@ -144,9 +144,9 @@ def _phase_cn(phase: str) -> str:
     if auto_label != phase:
         return auto_label
     mapping = {
-        "running_analysis": "Codex 分析",
+        "running_analysis": "诊断工程师分析",
         "running_implementation": "开发工程师实施",
-        "running_verification": "Codex 验收",
+        "running_verification": "审计工程师验收",
         "retrying_implementation": "重新实施",
     }
     return mapping.get(phase, phase)
@@ -217,8 +217,8 @@ def _duration_str(seconds: float) -> str:
 
 MODE_LABELS = {
     "chief_engineer": "总工程师",
-    "codex_direct": "Codex 直聊",
-    "claude_direct": "Claude 直聊",
+    "codex_direct": "GPT 开发工程师直聊",
+    "claude_direct": "DeepSeek 开发工程师直聊",
 }
 
 SURFACE_MODE_LABELS = {
@@ -369,7 +369,10 @@ def render_conversation_status(
 
     # Terminal agent line — only shown when in terminal mode
     if surface_mode == "terminal" and terminal_agent:
-        agent_label = {"codex": "Codex", "claude": "Claude"}.get(terminal_agent, terminal_agent)
+        agent_label = {
+            "codex": "GPT 开发工程师",
+            "claude": "DeepSeek 开发工程师",
+        }.get(terminal_agent, terminal_agent)
         lines.append(f"现场 Agent：{agent_label}")
 
     lines.append(f"工作区：{session.workspace_alias}")
@@ -405,12 +408,12 @@ def render_conversation_help(profile: str = "natural") -> str:
             [
                 "WLCodex 已连接",
                 "",
-                "普通消息：Codex 分析/核验",
-                "/auto：Codex 主导闭环（分析→确认→执行→确认→验收）",
+                "普通消息：诊断工程师分析/核验",
+                "/auto：工程团队闭环（诊断→确认→开发→确认→审计）",
                 "当前视图：驾驶舱",
                 "工作区：当前项目",
-                "Codex：可用",
-                "Claude：可用",
+                "GPT 开发工程师：可用",
+                "DeepSeek 开发工程师：可用",
                 "现场接管：可用",
                 "",
                 "直接发消息开始。",
@@ -420,15 +423,15 @@ def render_conversation_help(profile: str = "natural") -> str:
         )
     return """WLCodex — 远程工作台驾驶舱
 
-普通消息：Codex 分析/核验；/auto：Codex -> Claude -> Codex
+普通消息：诊断工程师分析/核验；/auto：诊断工程师 -> 开发工程师 -> 审计工程师
 
 驾驶舱与现场：
   • /product — 回驾驶舱
   • /terminal — 接管现场
-  • /terminal claude — 接入 Claude 现场
-  • /terminal codex — 接入 Codex 现场
-  • /terminal agent claude — 接入 Claude 现场（显式）
-  • /terminal agent codex — 接入 Codex 现场（显式）
+  • /terminal claude — 接入 DeepSeek 开发现场
+  • /terminal codex — 接入 GPT 开发现场
+  • /terminal agent claude — 接入 DeepSeek 开发现场（显式）
+  • /terminal agent codex — 接入 GPT 开发现场（显式）
   • /terminal tail — 恢复现场推送
   • /terminal pause — 暂停现场推送
   • /terminal detach — 停止现场推送但保留会话
@@ -436,11 +439,11 @@ def render_conversation_help(profile: str = "natural") -> str:
   • /mode — 查看当前模式
 
 对话模式：
-  • 直接发消息 — Codex 分析/核验
-  • /codex <prompt> — 直接和 Codex 对话
-  • /claude <prompt> — 直接叫 Claude Code 实施
-  • /auto <prompt> — Codex 主导闭环（分析→确认→执行→确认→验收）
-  • /verify — Codex 验收最新结果
+  • 直接发消息 — 诊断工程师分析/核验
+  • /codex <prompt> — 直接让 GPT 开发工程师处理
+  • /claude <prompt> — 直接让 DeepSeek 开发工程师实施
+  • /auto <prompt> — 工程团队闭环（诊断→确认→开发→确认→审计）
+  • /verify — 审计工程师验收最新结果
 
 常用命令：
   • /new — 开始新工作台
@@ -451,7 +454,7 @@ def render_conversation_help(profile: str = "natural") -> str:
   • /workspaces — 查看可用工作区
   • /switch <workspace> — 切换工作区
   • /model — 切换或查看当前模型
-  • /claude_mode — 切换 Claude 权限模式
+  • /claude_mode — 切换 DeepSeek 开发工程师权限模式
   • /diff — 查看变更
   • /files — 相关文件
   • /health — 系统健康
@@ -461,7 +464,7 @@ def render_conversation_help(profile: str = "natural") -> str:
   • 只允许私聊
   • 只允许白名单用户
   • 每个工作区同一时间只允许一个写执行
-  • 状态和日志永远不会回灌到 Codex 上下文"""
+  • 状态和日志永远不会回灌到模型上下文"""
 
 
 def render_workbench_history(sessions: Sequence[ConversationSession]) -> str:
@@ -617,7 +620,7 @@ def render_prepared_carryover(
         "",
         "请发送新任务目标。",
         "",
-        "说明：新工作台只继承接棒摘要，不继承旧会话全文、旧执行状态、旧权限或旧终端现场，也不会启动 Claude。",
+        "说明：新工作台只继承接棒摘要，不继承旧会话全文、旧执行状态、旧权限或旧终端现场，也不会启动开发工程师。",
     ])
 
 
@@ -636,7 +639,7 @@ def render_carryover_target_created(
     return (
         f"已从工作台 #{source_conversation_id} 接棒，创建新工作台：「{target_title}」\n"
         f"工作区：{workspace_alias}\n\n"
-        "接棒摘要已带入。直接发消息会让 Codex 基于当前目标分析；也可以使用 /auto。"
+        "接棒摘要已带入。直接发消息会让诊断工程师基于当前目标分析；也可以使用 /auto。"
     )
 
 

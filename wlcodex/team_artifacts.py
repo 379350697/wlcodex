@@ -590,7 +590,10 @@ def architecture_plan_payload(
         "implementation_steps": ["Follow the accepted architecture plan."],
         "acceptance_criteria": ["Satisfy the accepted plan and pass focused verification."],
         "parallelization_policy": "single implementer unless the plan explicitly decomposes scopes",
-        "investigator_policy": "Architect performs investigator duties in v1",
+        "investigator_policy": (
+            "Diagnosis evidence is captured inside the architecture handoff "
+            "when diagnosis and architecture run in one black-box step"
+        ),
         "source": source,
     }
 

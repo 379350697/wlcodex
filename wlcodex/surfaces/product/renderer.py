@@ -24,9 +24,9 @@ from wlcodex.surfaces.product.speaker import product_speaker_line
 
 _PHASE_LABELS = {
     "queued": "排队中",
-    "running_analysis": "Codex 正在分析",
-    "running_implementation": "Claude 正在实施",
-    "running_verification": "Codex 正在验收",
+    "running_analysis": "诊断工程师正在分析",
+    "running_implementation": "开发工程师正在实施",
+    "running_verification": "审计工程师正在验收",
     "retrying_implementation": "正在重新实施",
     "completed": "运行完成",
     "failed": "运行失败",
@@ -34,7 +34,10 @@ _PHASE_LABELS = {
     "waiting_for_approval": "等待审批",
 }
 
-_AGENT_LABELS = {"codex": "Codex", "claude": "Claude"}
+_AGENT_LABELS = {
+    "codex": "GPT 开发工程师",
+    "claude": "DeepSeek 开发工程师",
+}
 
 _KIND_LABELS = {"command": "命令", "file_change": "文件修改", "tool": "工具"}
 

@@ -97,8 +97,8 @@ class TeamRoleCatalog:
                     mission="查症状、日志、运行状态和根因假设。",
                     instructions=(
                         "Investigate evidence and produce hypotheses with references. "
-                        "In v1 this role is performed by the architect unless an "
-                        "independent investigator job is explicitly created."
+                        "When diagnosis and architecture are combined, keep the "
+                        "diagnosis evidence explicit inside the architecture handoff."
                     ),
                     skills=("systematic-debugging", "log-analysis"),
                     allowed_capabilities=("read", "shell_readonly", "logs"),
@@ -108,11 +108,11 @@ class TeamRoleCatalog:
                 RoleId.ARCHITECT: TeamRole(
                     role_id=RoleId.ARCHITECT,
                     display_name="架构工程师",
-                    mission="确定修复边界、影响面、方案和验收标准；v1 同时承担诊断工程师职责。",
+                    mission="确定修复边界、影响面、方案和验收标准；必要时承接诊断证据。",
                     instructions=(
                         "Define scope, impact, risk, implementation steps, and "
-                        "acceptance criteria. Architect performs investigator duties "
-                        "in v1 by collecting diagnosis evidence inside the plan."
+                        "acceptance criteria. If diagnosis was collected in the same "
+                        "black-box step, keep the diagnosis evidence inside the plan."
                     ),
                     skills=("gitnexus-impact-analysis", "system-design"),
                     allowed_capabilities=("read", "gitnexus", "shell_readonly"),
@@ -136,8 +136,8 @@ class TeamRoleCatalog:
                     mission="复现、补测试、跑验证，并给出测试证据。",
                     instructions=(
                         "Validate acceptance criteria and report command evidence. "
-                        "In v1 this role is performed by the auditor unless an "
-                        "independent tester job is explicitly created."
+                        "If testing fails, send the work back to the developer before "
+                        "the user is asked for audit approval."
                     ),
                     skills=("verification-before-completion", "test-driven-development"),
                     allowed_capabilities=("read", "write_tests", "shell_readonly", "tests"),
@@ -147,11 +147,11 @@ class TeamRoleCatalog:
                 RoleId.AUDITOR: TeamRole(
                     role_id=RoleId.AUDITOR,
                     display_name="审计工程师",
-                    mission="独立审查 diff、测试证据、风险和遗漏；v1 同时承担测试工程师职责。",
+                    mission="独立审查 diff、测试证据、风险和遗漏。",
                     instructions=(
                         "Review evidence and report pass, block, or needs_user. "
-                        "Auditor performs tester duties in v1: verify test_report "
-                        "evidence and block missing current-round test coverage."
+                        "Audit only starts after implementation and test evidence "
+                        "exist for the current round."
                     ),
                     skills=("code-review", "security-review"),
                     allowed_capabilities=("read", "git_diff", "shell_readonly"),

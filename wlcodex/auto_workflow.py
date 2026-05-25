@@ -1,13 +1,13 @@
 """Staged-auto workflow helpers — stage constants, callback actions,
 button builders, and run lookup predicates.
 
-The staged-auto workflow replaces the old eager /auto pipeline with a
-Codex-led, user-gated workflow that matches the user's local Codex-brain /
-Claude-executor loop.
+The staged-auto workflow is role-led: diagnosis/architecture, implementation,
+black-box testing, independent audit, and completion or rework. Model/backend
+names are implementation details behind those engineering roles.
 
 Safety invariants:
-- Claude never starts from /auto without a user click.
-- Codex never writes code in analysis or verification stages.
+- A developer never starts from /auto without a user click.
+- Diagnosis, architecture, testing, and audit stages do not write product code.
 - Plain text in collecting_context is context, not execution permission.
 - Trigger words do not grant execution permission.
 """
@@ -109,13 +109,13 @@ def is_auto_collecting_context(run: object | None) -> bool:
 def auto_stage_label(step: str) -> str:
     """Return a human-readable label for an auto stage step."""
     labels = {
-        AUTO_COLLECTING_CONTEXT: "Codex 分析中（收集上下文）",
+        AUTO_COLLECTING_CONTEXT: "诊断工程师分析中（收集上下文）",
         AUTO_DRAFT_READY: "方案已就绪，等待用户决定",
         AUTO_CLAUDE_RUNNING: "开发工程师执行中",
-        AUTO_CLAUDE_DONE: "实现完成，等待验收",
-        AUTO_VERIFYING: "Codex 验收中",
+        AUTO_CLAUDE_DONE: "开发完成，测试通过，等待验收",
+        AUTO_VERIFYING: "审计工程师验收中",
         AUTO_RETRY_READY: "验收失败，等待用户决定",
-        AUTO_CODEX_TAKEOVER_RUNNING: "Codex 接管修复中",
+        AUTO_CODEX_TAKEOVER_RUNNING: "GPT 开发工程师接管修复中",
         AUTO_COMPLETED: "任务完成",
     }
     return labels.get(step, step)
@@ -160,9 +160,9 @@ def build_auto_stage_buttons(
                 button("团队状态", TEAM_VIEW_STATUS),
                 button("团队证据", TEAM_VIEW_ARTIFACTS),
             ]]
-        handoff_buttons = [button("交给 Claude 执行", AUTO_SEND_TO_CLAUDE)]
+        handoff_buttons = [button("交给 DeepSeek 开发工程师", AUTO_SEND_TO_CLAUDE)]
         if codex_implementer_enabled:
-            handoff_buttons.append(button("交给 Codex 执行", AUTO_SEND_TO_CODEX))
+            handoff_buttons.append(button("交给 GPT 开发工程师", AUTO_SEND_TO_CODEX))
         return [
             handoff_buttons,
             [
@@ -174,7 +174,7 @@ def build_auto_stage_buttons(
                 button("团队证据", TEAM_VIEW_ARTIFACTS),
             ],
             [
-                button("Codex 接管修", AUTO_CODEX_TAKEOVER),
+                button("GPT 开发工程师接管", AUTO_CODEX_TAKEOVER),
                 button("结束任务", AUTO_CLOSE),
             ],
         ]
@@ -190,11 +190,11 @@ def build_auto_stage_buttons(
 
     if stage == AUTO_CLAUDE_DONE:
         return [[
-            button("Codex 验收", AUTO_CODEX_VERIFY),
+            button("审计工程师验收", AUTO_CODEX_VERIFY),
             button("查看 diff", AUTO_VIEW_DIFF),
         ], [
-            button("发给 Claude 返工", AUTO_SEND_REPAIR_TO_CLAUDE),
-            button("Codex 接管修", AUTO_CODEX_TAKEOVER),
+            button("DeepSeek 开发工程师返工", AUTO_SEND_REPAIR_TO_CLAUDE),
+            button("GPT 开发工程师接管", AUTO_CODEX_TAKEOVER),
         ], [
             button("团队状态", TEAM_VIEW_STATUS),
             button("团队证据", TEAM_VIEW_ARTIFACTS),
@@ -211,9 +211,9 @@ def build_auto_stage_buttons(
         ]]
 
     if stage == AUTO_RETRY_READY:
-        handoff_buttons = [button("发给 Claude 返工", AUTO_SEND_REPAIR_TO_CLAUDE)]
+        handoff_buttons = [button("DeepSeek 开发工程师返工", AUTO_SEND_REPAIR_TO_CLAUDE)]
         if codex_implementer_enabled:
-            handoff_buttons.append(button("交给 Codex 执行", AUTO_SEND_TO_CODEX))
+            handoff_buttons.append(button("交给 GPT 开发工程师", AUTO_SEND_TO_CODEX))
         return [
             handoff_buttons,
             [
@@ -225,7 +225,7 @@ def build_auto_stage_buttons(
                 button("团队证据", TEAM_VIEW_ARTIFACTS),
             ],
             [
-                button("Codex 接管修", AUTO_CODEX_TAKEOVER),
+                button("GPT 开发工程师接管", AUTO_CODEX_TAKEOVER),
                 button("结束任务", AUTO_CLOSE),
             ],
         ]

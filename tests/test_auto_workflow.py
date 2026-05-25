@@ -152,8 +152,8 @@ class TestBuildAutoStageButtons:
         assert "查看当前草稿" in labels
         assert "取消" in labels
         # Must NOT contain execution buttons
-        assert "交给 Claude 执行" not in labels
-        assert "Codex 验收" not in labels
+        assert "交给 DeepSeek 开发工程师" not in labels
+        assert "审计工程师验收" not in labels
         # Actions must be proper
         assert AUTO_FINAL_PLAN in actions
         assert AUTO_SHOW_DRAFT in actions
@@ -168,10 +168,10 @@ class TestBuildAutoStageButtons:
         labels = _labels(buttons)
         actions = _actions(buttons)
 
-        assert "交给 Claude 执行" in labels
+        assert "交给 DeepSeek 开发工程师" in labels
         assert "继续补充" in labels
         assert "查看当前草稿" in labels
-        assert "Codex 接管修" in labels
+        assert "GPT 开发工程师接管" in labels
         assert "结束任务" in labels
         assert AUTO_SEND_TO_CLAUDE in actions
         assert AUTO_CONTINUE_CONTEXT in actions
@@ -186,7 +186,7 @@ class TestBuildAutoStageButtons:
         labels = _labels(buttons)
         actions = _actions(buttons)
 
-        assert "交给 Claude 执行" not in labels
+        assert "交给 DeepSeek 开发工程师" not in labels
         assert AUTO_SEND_TO_CLAUDE not in actions
         assert "继续补充" in labels
         assert "结束任务" in labels
@@ -202,10 +202,10 @@ class TestBuildAutoStageButtons:
         labels = _labels(buttons)
         actions = _actions(buttons)
 
-        assert "交给 Claude 执行" in labels
+        assert "交给 DeepSeek 开发工程师" in labels
         assert "继续补充" in labels
         assert "查看当前草稿" in labels
-        assert "Codex 接管修" in labels
+        assert "GPT 开发工程师接管" in labels
         assert "结束任务" in labels
         assert AUTO_SEND_TO_CLAUDE in actions
         assert AUTO_CONTINUE_CONTEXT in actions
@@ -224,10 +224,10 @@ class TestBuildAutoStageButtons:
     def test_claude_done_buttons(self) -> None:
         buttons = build_auto_stage_buttons(42, AUTO_CLAUDE_DONE)
         labels = _labels(buttons)
-        assert "Codex 验收" in labels
+        assert "审计工程师验收" in labels
         assert "查看 diff" in labels
-        assert "发给 Claude 返工" in labels
-        assert "Codex 接管修" in labels
+        assert "DeepSeek 开发工程师返工" in labels
+        assert "GPT 开发工程师接管" in labels
         assert "结束任务" in labels
 
     def test_verifying_buttons(self) -> None:
@@ -240,10 +240,10 @@ class TestBuildAutoStageButtons:
         labels = _labels(buttons)
         actions = _actions(buttons)
 
-        assert "发给 Claude 返工" in labels
+        assert "DeepSeek 开发工程师返工" in labels
         assert "继续补充" in labels
         assert "重写返工提示词" in labels
-        assert "Codex 接管修" in labels
+        assert "GPT 开发工程师接管" in labels
         assert "结束任务" in labels
         assert AUTO_SEND_REPAIR_TO_CLAUDE in actions
         assert AUTO_CONTINUE_CONTEXT in actions
@@ -286,7 +286,7 @@ class TestBuildAutoStageButtons:
 
 class TestAutoStageLabel:
     def test_known_stages(self) -> None:
-        assert "Codex" in auto_stage_label(AUTO_COLLECTING_CONTEXT)
+        assert "诊断工程师" in auto_stage_label(AUTO_COLLECTING_CONTEXT)
         assert "收集" in auto_stage_label(AUTO_COLLECTING_CONTEXT)
         assert "方案" in auto_stage_label(AUTO_DRAFT_READY)
         assert "执行" in auto_stage_label(AUTO_CLAUDE_RUNNING)

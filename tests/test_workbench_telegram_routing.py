@@ -894,6 +894,84 @@ async def test_settings_exec_mode_callbacks_use_correct_controller_command():
 
 
 @pytest.mark.asyncio
+async def test_settings_card_includes_engineer_model_entry():
+    handlers = _make_handlers()
+    sent: list[tuple[int, str, object]] = []
+
+    async def fake_send(chat_id, text, buttons=None):
+        sent.append((chat_id, text, buttons))
+        return 1001
+
+    handlers.send_telegram = fake_send
+
+    await handlers.settings_cmd(_make_update("/settings"), None)
+
+    assert sent
+    buttons = sent[-1][2]
+    flat = [button for row in buttons for button in row]
+    assert {
+        "text": "工程师大模型",
+        "callback_data": "settings:engineer_models",
+    } in flat
+
+
+@pytest.mark.asyncio
+async def test_settings_engineer_model_callbacks_update_controller():
+    from wlcodex.controller import ControllerResponse
+
+    class Controller:
+        def __init__(self) -> None:
+            self.render_calls: list[str | None] = []
+            self.update_calls: list[tuple[str, str]] = []
+
+        def render_engineer_model_settings(self, role_id=None):
+            self.render_calls.append(role_id)
+            return ControllerResponse(
+                "工程师大模型",
+                buttons=[[{
+                    "text": "开发工程师",
+                    "callback_data": "settings:engineer_models:implementer",
+                }]],
+            )
+
+        def set_engineer_model_assignment(self, role_id, profile_id):
+            self.update_calls.append((role_id, profile_id))
+            return ControllerResponse(
+                "已更新。",
+                buttons=[[{
+                    "text": "codex-gpt5.5",
+                    "callback_data": "settings:engineer_models:implementer:codex_gpt",
+                }]],
+            )
+
+    controller = Controller()
+    handlers = _make_handlers(controller=controller)
+
+    for cb_data in (
+        "settings:engineer_models",
+        "settings:engineer_models:implementer",
+        "settings:engineer_models:implementer:codex_gpt",
+    ):
+        query = MagicMock()
+        query.data = cb_data
+        query.message = SimpleNamespace(
+            text="settings card", message_id=900,
+            chat=SimpleNamespace(id=100),
+        )
+        query.answer = AsyncMock()
+
+        cb_update = _make_update("/settings")
+        cb_update.callback_query = query
+
+        await handlers.callback_router(cb_update, None)
+
+        query.answer.assert_called()
+
+    assert controller.render_calls == [None, "implementer"]
+    assert controller.update_calls == [("implementer", "codex_gpt")]
+
+
+@pytest.mark.asyncio
 async def test_workbench_history_restore_buttons_use_titles_not_ids():
     """History restore buttons should be readable titles, not raw ids."""
     from datetime import datetime, timezone
@@ -1083,7 +1161,7 @@ async def test_start_card_buttons_identical_from_both_call_sites():
         f"  _apply_mode_switch:    {btns_2}"
     )
 
-    expected_labels = {"启动 Claude 现场", "启动 Codex 现场", "回驾驶舱"}
+    expected_labels = {"启动 DeepSeek 开发现场", "启动 GPT 开发现场", "回驾驶舱"}
     seen_labels = {b[0] for b in btns_1}
     assert seen_labels == expected_labels, (
         f"Expected labels {expected_labels}, got {seen_labels}"

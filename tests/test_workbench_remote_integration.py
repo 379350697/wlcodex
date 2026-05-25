@@ -673,7 +673,7 @@ class TestClosedLoop3_CodexOnly:
 #
 #   AC #3: "/claude <prompt> runs Claude-only and does not trigger
 #   automatic Codex analysis or verification."
-#   AC #4: "Claude-only completion offers a '让 Codex 验收' action."
+#   AC #4: "Claude-only completion offers a '让审计工程师验收' action."
 #
 #   Real chain: parse_command → ClaudeDirectCommand → controller.handle
 #   → handle_claude_direct → creates CLAUDE_DIRECT conversation →
@@ -747,7 +747,7 @@ class TestClosedLoop4_ClaudeOnlyWithVerify:
             f"Claude run status is {updated_claude[0].status!r}, expected 'done'"
         )
 
-        # (e) Verify affordance: "让 Codex 验收" button
+        # (e) Verify affordance: "让审计工程师验收" button
         has_verify = False
         for row in resp.buttons:
             for btn in row:
@@ -756,9 +756,9 @@ class TestClosedLoop4_ClaudeOnlyWithVerify:
                     has_verify = True
                     break
         if not has_verify:
-            has_verify = "让 Codex 验收" in resp.text
+            has_verify = "让审计工程师验收" in resp.text
         assert has_verify, (
-            f"Missing '让 Codex 验收' affordance. text={resp.text!r} buttons={resp.buttons!r}"
+            f"Missing '让审计工程师验收' affordance. text={resp.text!r} buttons={resp.buttons!r}"
         )
 
     @pytest.mark.asyncio
@@ -811,7 +811,7 @@ class TestClosedLoop4_ClaudeOnlyWithVerify:
         /product → Cockpit → verify affordance is reachable.
 
         This proves the full spec path: user works in Claude-only Onsite,
-        returns to Cockpit, and sees the '让 Codex 验收' action."""
+        returns to Cockpit, and sees the '让审计工程师验收' action."""
         from types import SimpleNamespace
         from wlcodex.conversation_callback import VERIFY, decode_conversation_callback
 
@@ -839,9 +839,9 @@ class TestClosedLoop4_ClaudeOnlyWithVerify:
         controller = MagicMock()
         controller.handle = AsyncMock()
         controller.handle_conversation_text = AsyncMock(return_value=SimpleNamespace(
-            text="这次直接交给 Claude 实施。完成后你可以点\"让 Codex 验收\"。",
+            text="这次直接交给 DeepSeek 开发工程师实施。完成后你可以点“让审计工程师验收”。",
             buttons=[[
-                {"text": "让 Codex 验收",
+                {"text": "让审计工程师验收",
                  "callback_data": f"conv:88:{VERIFY}"},
             ]],
             already_rendered=False,
@@ -946,7 +946,7 @@ class TestClosedLoop4_ClaudeOnlyWithVerify:
                     has_verify = True
                     break
         if not has_verify:
-            has_verify = "让 Codex 验收" in resp.text
+            has_verify = "让审计工程师验收" in resp.text
         assert has_verify, (
             f"Verify affordance missing in Claude-only Onsite→Cockpit path"
         )

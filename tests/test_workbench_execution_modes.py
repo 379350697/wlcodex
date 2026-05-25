@@ -5,7 +5,7 @@ Coverage per acceptance criteria:
 - /claude runs Claude-only, no auto Codex analysis or verification
 - Plain text defaults to read-only Codex analysis
 - /auto runs Codex -> Claude -> Codex
-- Claude-only completion offers "让 Codex 验收" action
+- Claude-only completion offers "让审计工程师验收" action
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def has_verify_button(response_text: str, buttons: list[list[dict[str, str]]]) -
             cb = decode_conversation_callback(btn["callback_data"])
             if cb is not None and cb.action == VERIFY:
                 return True
-    return "让 Codex 验收" in response_text
+    return "让审计工程师验收" in response_text
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ async def test_claude_direct_does_not_delegate_to_auto_mode(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_claude_direct_response_includes_verify_affordance(tmp_path: Path) -> None:
-    """Claude-only completion offers a '让 Codex 验收' action."""
+    """Claude-only completion offers a '让审计工程师验收' action."""
     claude = FakeClaudeBackend(enabled=True)
     runner = FakeOrchestrationRunner()
     ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)

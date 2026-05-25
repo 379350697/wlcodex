@@ -338,15 +338,15 @@ def test_route_terminal_legacy_commands_still_work():
 def test_render_onsite_header_shows_live_worksite_language():
     header = render_onsite_header(agent="claude", phase="implementation")
     assert "现场" in header
-    assert "claude" in header.lower()
+    assert "DeepSeek 开发工程师" in header
     assert "implementation" in header.lower()
 
 
 def test_render_start_card_has_next_actions():
     card = render_start_card()
     assert "没有可接管的现场" in card or "现场" in card
-    assert "Claude" in card or "claude" in card
-    assert "Codex" in card or "codex" in card
+    assert "DeepSeek 开发工程师" in card
+    assert "GPT 开发工程师" in card
     assert "驾驶舱" in card
 
 
@@ -366,13 +366,13 @@ def test_render_onsite_header_includes_running_status():
 def test_render_start_card_respects_available_agents():
     """Parameterized start card only lists the passed agents."""
     card = render_start_card(available_agents=("claude",))
-    assert "启动 Claude 现场" in card
-    assert "启动 Codex 现场" not in card
+    assert "启动 DeepSeek 开发工程师 现场" in card
+    assert "启动 GPT 开发工程师 现场" not in card
     assert "回驾驶舱" in card
 
     card2 = render_start_card(available_agents=("codex",))
-    assert "启动 Codex 现场" in card2
-    assert "启动 Claude 现场" not in card2
+    assert "启动 GPT 开发工程师 现场" in card2
+    assert "启动 DeepSeek 开发工程师 现场" not in card2
 
 
 def test_render_terminal_frame_still_works_for_raw_output():
@@ -385,8 +385,8 @@ def test_render_terminal_frame_still_works_for_raw_output():
         sequence=1,
     )
     rendered = render_terminal_frame(frame)
-    # Agent labels are now display names (Claude/Codex)
-    assert rendered.startswith("[Claude:implementation]")
+    # Agent labels are user-facing role names.
+    assert rendered.startswith("[DeepSeek 开发工程师:implementation]")
     assert "$ pytest -q" in rendered
 
 
@@ -403,7 +403,7 @@ def test_closed_loop_no_session_shows_start_card():
     assert decision.kind == OnsiteDecisionKind.START_CARD
     assert "claude" in decision.available_agents
     card = render_start_card()
-    assert "启动 Claude 现场" in card
+    assert "启动 DeepSeek 开发工程师 现场" in card
 
 
 def test_closed_loop_attach_open_tail_leave_reopen():

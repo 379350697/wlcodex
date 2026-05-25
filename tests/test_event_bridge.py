@@ -70,6 +70,67 @@ def test_parse_audit_report_accepts_conclusion_alias():
     assert payload["recommended_next_action"] == "send_back_to_claude"
 
 
+def test_parse_audit_report_derives_test_refs_from_passed_checks():
+    payload = _parse_audit_report_payload("""
+{
+  "audit_report": {
+    "verdict": "PASS",
+    "risk": "LOW",
+    "summary": "验收通过。",
+    "findings": [],
+    "passed_checks": [
+      {
+        "check": "测试证据",
+        "result": "PASS",
+        "evidence": "team_artifact=17"
+      }
+    ]
+  }
+}
+""")
+
+    assert payload["decision"] == "pass"
+    assert payload["test_evidence_refs"] == ["team_artifact=17"]
+
+
+def test_parse_audit_report_accepts_task_scope_pass_with_warning_from_truncated_text():
+    payload = _parse_audit_report_payload(
+        '''
+我会按第 5 轮审计处理。
+{
+  "audit_report": {
+    "verdict": "PASS_TASK_SCOPE_WITH_WORKTREE_WARNING",
+    "risk": "LOW for README task; CRITICAL for full current worktree",
+    "summary": "README 任务范围审计通过：目标说明行存在，README 专属 diff 只有 1 行。",
+    "passed_checks": [
+      {
+        "check": "README 专属 diff",
+        "result": "PASS",
+        "evidence": "git diff -- README.md",
+        "detail": "仅新增一行说明。"
+      },
+      {
+        "check": "测试",
+        "result": "PASS_REPORTED_NOT_RERUN",
+        "evidence": "编排包 command=pytest_q",
+        "detail": "结构化证据报告：all passing。"
+      }
+    ],
+    "verification_result": {
+      "commands_run_by_auditor": [
+        "git diff --check README.md",
+        "rg -n target README.md"
+      ],
+      "gitnexus_run_by_aud"
+'''
+    )
+
+    assert payload["decision"] == "pass"
+    assert payload["recommended_next_action"] == "close"
+    assert payload["test_evidence_refs"]
+    assert "pytest_q" in " ".join(payload["test_evidence_refs"])
+
+
 class IdleBackend:
     async def events(self):
         while True:
@@ -1151,8 +1212,8 @@ async def test_auto_final_plan_completion_shows_assembled_plan_before_claude_gat
         for row in (sent[-1][2] or [])
         for button in row
     ]
-    assert "交给 Claude 执行" in labels
-    assert "交给 Codex 执行" in labels
+    assert "交给 DeepSeek 开发工程师" in labels
+    assert "交给 GPT 开发工程师" in labels
     assert "auto_send_to_codex" in _button_actions(sent[-1][2])
 
 
@@ -1538,6 +1599,17 @@ async def test_auto_implementation_completion_marks_linked_implementer_job_done_
         },
     ))
     await bridge.process_event(BackendEvent(
+        "item_completed",
+        {
+            "threadId": "thread-implementation-team",
+            "item": {
+                "type": "commandExecution",
+                "status": "completed",
+                "command": "pytest tests/test_workflow.py -q",
+            },
+        },
+    ))
+    await bridge.process_event(BackendEvent(
         "turn_completed",
         {"threadId": "thread-implementation-team", "status": "completed"},
     ))
@@ -1551,6 +1623,293 @@ async def test_auto_implementation_completion_marks_linked_implementer_job_done_
     assert jobs_by_id[unrelated_job.id].status == "running"
     assert updated_team is not None
     assert updated_team.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_auto_implementation_completion_creates_tester_job_before_audit(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_CLAUDE_DONE,
+        AUTO_CLAUDE_RUNNING,
+        ROLE_AUTO_IMPLEMENTATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Implement final plan",
+        codex_thread_id="thread-implementation-tested",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "fix the workflow")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_CLAUDE_RUNNING,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_IMPLEMENTATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-implementation-tested",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="fix the workflow",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    implementer_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    ledger.add_event(task.id, "diff_updated", {"diff": "diff --git a/app.py b/app.py\n+ok"})
+
+    bridge = _bridge(service, IdleBackend(), ledger)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-implementation-tested", "turnId": "turn-tested"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "item_completed",
+        {
+            "threadId": "thread-implementation-tested",
+            "item": {
+                "type": "commandExecution",
+                "status": "completed",
+                "command": "pytest tests/test_app.py -q",
+            },
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-implementation-tested", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    jobs = ledger.list_team_agent_jobs(team_run.id)
+    tester_jobs = [job for job in jobs if job.role == "tester"]
+    test_reports = [
+        artifact
+        for artifact in ledger.list_team_artifacts(team_run.id)
+        if artifact.artifact_type == "test_report"
+    ]
+
+    assert updated.current_step == AUTO_CLAUDE_DONE
+    assert len(tester_jobs) == 1
+    assert tester_jobs[0].status == "done"
+    assert tester_jobs[0].agent_run_id == agent_run.id
+    assert test_reports[0].agent_job_id == tester_jobs[0].id
+    assert test_reports[0].payload["passed"] == ["pytest tests/test_app.py -q"]
+    assert ledger.list_team_agent_jobs(team_run.id)[0].id == implementer_job.id
+
+
+@pytest.mark.asyncio
+async def test_auto_implementation_completion_with_missing_tests_blocks_audit(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_CLAUDE_RUNNING,
+        AUTO_RETRY_READY,
+        ROLE_AUTO_IMPLEMENTATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Implement final plan",
+        codex_thread_id="thread-implementation-no-tests",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "fix the workflow")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_CLAUDE_RUNNING,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_IMPLEMENTATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-implementation-no-tests",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="fix the workflow",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-implementation-no-tests", "turnId": "turn-no-tests"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-implementation-no-tests", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    tester_job = [
+        job for job in ledger.list_team_agent_jobs(team_run.id) if job.role == "tester"
+    ][0]
+
+    assert updated.current_step == AUTO_RETRY_READY
+    assert "测试第 1/3 次未通过" in (updated.last_verification_result or "")
+    assert tester_job.status == "failed"
+    assert sent
+    assert "测试未通过" in sent[-1][1]
+    assert "审计工程师验收" not in str(sent[-1][2])
+
+
+@pytest.mark.asyncio
+async def test_auto_implementation_completion_stops_internal_test_loop_at_three(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_CLAUDE_RUNNING,
+        AUTO_RETRY_READY,
+        ROLE_AUTO_IMPLEMENTATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Implement final plan",
+        codex_thread_id="thread-implementation-third-test-fail",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "fix the workflow")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_CLAUDE_RUNNING,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_IMPLEMENTATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-implementation-third-test-fail",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="fix the workflow",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="tester",
+        model_profile="codex_gpt",
+        status="failed",
+        agent_run_id=None,
+    )
+    ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="tester",
+        model_profile="codex_gpt",
+        status="failed",
+        agent_run_id=None,
+    )
+    ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    bridge = _bridge(service, IdleBackend(), ledger)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {
+            "threadId": "thread-implementation-third-test-fail",
+            "turnId": "turn-third-test-fail",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {
+            "threadId": "thread-implementation-third-test-fail",
+            "status": "completed",
+        },
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    tester_jobs = [
+        job for job in ledger.list_team_agent_jobs(team_run.id) if job.role == "tester"
+    ]
+
+    assert updated.current_step == AUTO_RETRY_READY
+    assert len(tester_jobs) == 3
+    assert "测试连续 3 次未通过" in (updated.last_verification_result or "")
 
 
 @pytest.mark.asyncio
@@ -1794,7 +2153,7 @@ async def test_auto_final_plan_prioritizes_human_readable_plan_over_diagnose_jso
 
     # Human-readable plan must be the primary content
     assert "最终方案已生成" in text
-    assert "Claude" in text
+    assert "DeepSeek 开发工程师" in text
     assert "精准修复提示词" in text
     assert "展示层" in text
     assert "人话方案" in text
@@ -1831,7 +2190,7 @@ async def test_auto_final_plan_prioritizes_human_readable_plan_over_diagnose_jso
         for row in (sent[-1][2] or [])
         for button in row
     ]
-    assert "交给 Claude 执行" in labels
+    assert "交给 DeepSeek 开发工程师" in labels
 
 
 @pytest.mark.asyncio
@@ -2020,7 +2379,7 @@ async def test_auto_claude_done_sends_chinese_digest_not_raw_long_summary(
         for row in (sent[-1][2] or [])
         for button in row
     ]
-    assert "Codex 验收" in labels
+    assert "审计工程师验收" in labels
 
 
 @pytest.mark.asyncio
@@ -2100,12 +2459,12 @@ async def test_auto_codex_implementation_done_advances_to_claude_done(
     assert updated.status == "needs_user"
     assert updated.current_step == AUTO_CLAUDE_DONE
     assert "Codex 已完成实现" in updated.last_claude_summary
-    assert "Codex 验收" in [
+    assert "审计工程师验收" in [
         button["text"]
         for row in (sent[-1][2] or [])
         for button in row
     ]
-    assert "实现完成" in sent[-1][1]
+    assert "开发完成，测试通过" in sent[-1][1]
     assert "Claude 执行完成" not in sent[-1][1]
 
 
@@ -2690,6 +3049,153 @@ async def test_auto_completed_message_includes_final_synthesis_from_team_artifac
 
 
 @pytest.mark.asyncio
+async def test_auto_verification_json_verdict_pass_completes_team_run(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COMPLETED,
+        AUTO_VERIFYING,
+        ROLE_AUTO_VERIFICATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run Codex verification",
+        codex_thread_id="thread-verification-json-pass",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "verify with codex")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_VERIFYING,
+        last_codex_analysis="方案：让 Codex 验收。",
+        last_claude_summary="实现完成。",
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_VERIFICATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-verification-json-pass",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="verify with codex",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    implementer_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="implementer",
+        model_profile="codex_gpt",
+        status="done",
+        agent_run_id=None,
+    )
+    test_report = ledger.record_team_artifact(
+        team_run_id=team_run.id,
+        agent_job_id=implementer_job.id,
+        artifact_type="test_report",
+        summary="Focused tests passed.",
+        payload={
+            "summary": "Focused tests passed.",
+            "commands_run": [
+                {
+                    "command": "pytest tests/test_event_bridge.py -q",
+                    "exit_status": 0,
+                    "summary": "event bridge tests passed",
+                }
+            ],
+            "passed": ["pytest tests/test_event_bridge.py -q"],
+            "failed": ["None"],
+            "coverage_of_acceptance_criteria": [
+                {
+                    "criterion": "Focused verification passes",
+                    "status": "covered",
+                    "evidence": "pytest tests/test_event_bridge.py -q",
+                }
+            ],
+            "failure_evidence": ["None"],
+        },
+    )
+    ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="auditor",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=agent_run.id,
+    )
+    bridge = _bridge(service, IdleBackend(), ledger)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {
+            "threadId": "thread-verification-json-pass",
+            "turnId": "turn-verification-json-pass",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-verification-json-pass",
+            "turnId": "turn-verification-json-pass",
+            "delta": (
+                '{\n'
+                '  "audit_report": {\n'
+                '    "verdict": "PASS",\n'
+                '    "risk": "LOW",\n'
+                '    "summary": "Reviewed focused pytest evidence.",\n'
+                '    "findings": [],\n'
+                '    "passed_checks": [\n'
+                '      {"check": "测试证据", "result": "PASS", '
+                f'"evidence": "team_artifact={test_report.id}"}}\n'
+                '    ]\n'
+                '  }\n'
+                '}'
+            ),
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {
+            "threadId": "thread-verification-json-pass",
+            "status": "completed",
+        },
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    updated_team = ledger.get_team_run(team_run.id)
+    audit_report = [
+        artifact for artifact in ledger.list_team_artifacts(team_run.id)
+        if artifact.artifact_type == "audit_report"
+    ][0]
+
+    assert updated.current_step == AUTO_COMPLETED
+    assert updated_team is not None
+    assert updated_team.status == "completed"
+    assert audit_report.payload["decision"] == "pass"
+    assert audit_report.payload["test_evidence_refs"] == [
+        f"team_artifact={test_report.id}"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_auto_final_plan_completion_without_body_hides_claude_gate(
     tmp_path: Path,
 ) -> None:
@@ -2760,7 +3266,7 @@ async def test_auto_final_plan_completion_without_body_hides_claude_gate(
         for row in (sent[-1][2] or [])
         for button in row
     ]
-    assert "交给 Claude 执行" not in labels
+    assert "交给 DeepSeek 开发工程师" not in labels
     assert "继续补充" in labels
     assert "重写方案" not in labels
 

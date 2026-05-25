@@ -89,7 +89,7 @@ class ConversationConfig:
 @dataclass(frozen=True)
 class OrchestrationConfig:
     enabled: bool = True
-    max_verify_rounds: int = 3
+    max_verify_rounds: int = 0
     auto_delegate_simple_edits: bool = False
 
 
@@ -403,7 +403,7 @@ def load_config(path: Path) -> AppConfig:
         ),
         orchestration=OrchestrationConfig(
             enabled=bool(orch_raw.get("enabled", True)),
-            max_verify_rounds=int(orch_raw.get("max_verify_rounds", 3)),
+            max_verify_rounds=int(orch_raw.get("max_verify_rounds", 0)),
             auto_delegate_simple_edits=bool(orch_raw.get("auto_delegate_simple_edits", False)),
         ),
         adaptive_team=_adaptive_team_config(adaptive_team_raw),

@@ -1,6 +1,6 @@
 """Conversation callback protocol — inline button actions for Workbench UX.
 
-These handle post-completion actions like "查看 diff", "Codex 验收",
+These handle post-completion actions like "查看 diff", "审计工程师验收",
 "继续修改".
 """
 

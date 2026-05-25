@@ -162,10 +162,21 @@ from wlcodex.status import (
     render_help,
 )
 from wlcodex.task_service import TaskService
+from wlcodex.telegram_digest import render_auto_draft_digest
+from wlcodex.team_model_settings import (
+    encode_assignment,
+    is_multi_select_role,
+    normalize_assignment,
+    ordered_model_profiles,
+    ordered_team_roles,
+    role_display_name,
+    runtime_assignment_key,
+)
 
 logger = logging.getLogger(__name__)
 
 HELP_TEXT = render_conversation_help()
+MAX_INTERNAL_TEST_ATTEMPTS = 3
 
 
 def _changed_files_from_inspection_body(body: str) -> list[str]:
@@ -284,6 +295,10 @@ def _human_gate_field_name(field: str) -> str:
         "passed": "是否通过",
         "coverage_of_acceptance_criteria": "验收标准覆盖情况",
         "decision": "验收结论",
+        "architecture_plan": "方案记录",
+        "implementation_report": "实现记录",
+        "test_report": "测试记录",
+        "audit_report": "验收记录",
         "test_evidence_refs": "测试证据引用",
         "implementation_report_current_agent_job": "本轮开发任务的实现记录",
         "test_report_current_agent_job": "本轮开发任务的测试记录",
@@ -335,6 +350,7 @@ class CommandController:
         adaptive_team_model_profiles: dict[str, str] | None = None,
         adaptive_team_role_skills: dict[str, tuple[str, ...]] | None = None,
         adaptive_team_role_capabilities: dict[str, tuple[str, ...]] | None = None,
+        director_model_profile: str = "codex_gpt",
         architect_model_profile: str = "codex_gpt",
         investigator_model_profile: str = "codex_gpt",
         tester_model_profile: str = "codex_gpt",
@@ -382,6 +398,7 @@ class CommandController:
                     "invalid adaptive team role capabilities: "
                     + "; ".join(capability_findings)
                 )
+        self._director_model_profile = director_model_profile
         self._architect_model_profile = architect_model_profile
         self._investigator_model_profile = investigator_model_profile
         self._tester_model_profile = tester_model_profile
@@ -945,7 +962,10 @@ class CommandController:
         tester_note = ""
         if gate_name == "Gate C":
             tester_note = "\n说明：当前由验收员一并检查测试证据，测试记录仍需要对应本轮实现。"
-        retry_note = "\n已进入返工阶段，可交给 Claude 或 Codex 补齐后重新验收。" if failure_step else ""
+        retry_note = (
+            "\n已进入返工阶段，可交给 DeepSeek 开发工程师或 GPT 开发工程师补齐后重新验收。"
+            if failure_step else ""
+        )
         return ControllerResponse(
             f"验收前还缺少{artifact_label}：{missing_text}。\n"
             "请先让开发团队补齐这些证据，再进入下一步。"
@@ -1637,7 +1657,7 @@ class CommandController:
                     )
                     buttons = build_auto_stage_buttons(active.id, AUTO_COLLECTING_CONTEXT)
                     return ControllerResponse(
-                        f"已补充到当前 Codex 分析：{text[:100]}",
+                        f"已补充到当前诊断工程师分析：{text[:100]}",
                         buttons=buttons,
                     )
             except Exception:
@@ -1896,9 +1916,9 @@ class CommandController:
 
     def _busy_append_agent_label(self, convo: object, fallback: str = "现场") -> str:
         if getattr(convo, "active_codex_task_id", None):
-            return "Codex"
+            return "GPT 开发工程师"
         if getattr(convo, "active_claude_run_id", None):
-            return "Claude"
+            return "DeepSeek 开发工程师"
         return fallback
 
     async def _direct_command_busy_response(
@@ -1984,7 +2004,7 @@ class CommandController:
                     task.active_turn_id,
                     prompt,
                 )
-                return ControllerResponse("已发给当前 Codex。")
+                return ControllerResponse("已发给当前 GPT 开发工程师。")
 
         run_id = getattr(convo, "active_claude_run_id", None)
         if run_id and self._claude is not None:
@@ -1998,7 +2018,7 @@ class CommandController:
                 text = getattr(result, "text", "") if result is not None else ""
                 if text:
                     return ControllerResponse(text)
-                return ControllerResponse("已发给当前 Claude。")
+                return ControllerResponse("已发给当前 DeepSeek 开发工程师。")
 
         return None
 
@@ -2171,7 +2191,7 @@ class CommandController:
         busy = await self._direct_command_busy_response(
             active=active,
             original_text=f"/codex {command.prompt}".strip(),
-            agent_label="Codex",
+            agent_label="GPT 开发工程师",
         )
         if busy is not None:
             return busy
@@ -2216,7 +2236,7 @@ class CommandController:
         self._ledger.update_conversation_summary(
             active.id,
             trim_to_budget(
-                f"Codex 单智能体干活：{command.prompt[:200]}",
+                f"GPT 开发工程师独立处理：{command.prompt[:200]}",
                 ContextBudget().conversation_summary_tokens,
             ),
         )
@@ -2240,21 +2260,23 @@ class CommandController:
         ]]
 
         return ControllerResponse(
-            "这次只交给 Codex 独立干活，不会调用 Claude 或进入 /auto 编排。",
+            "这次只交给 GPT 开发工程师独立处理，不会调用其他开发工程师或进入 /auto 编排。",
             buttons=buttons,
         )
 
     async def handle_claude_direct(
         self, command: ClaudeDirectCommand, ctx: dict[str, Any] | None = None
     ) -> ControllerResponse:
-        """Claude Direct Mode — Claude-only implementation, no automatic Codex
-        analysis or verification.  Offers a 让 Codex 验收 action after completion."""
+        """DeepSeek direct mode: developer-only implementation.
+
+        No automatic diagnosis or audit. Offers an audit action after completion.
+        """
         if self._ledger is None:
             return ControllerResponse("系统未完全初始化。请检查配置。")
 
         if self._claude is None or not getattr(self._claude, "enabled", False):
             return ControllerResponse(
-                "Claude Code 未启用。请在配置中设置 claude.enabled = true 后重试。"
+                "DeepSeek 开发工程师未启用。请在配置中设置 claude.enabled = true 后重试。"
             )
 
         chat_id = ctx.get("chat_id", 0) if ctx else 0
@@ -2274,7 +2296,7 @@ class CommandController:
         busy = await self._direct_command_busy_response(
             active=active,
             original_text=f"/claude {command.prompt}".strip(),
-            agent_label="Claude",
+            agent_label="DeepSeek 开发工程师",
         )
         if busy is not None:
             return busy
@@ -2287,12 +2309,12 @@ class CommandController:
         active: object,
         ctx: dict[str, Any] | None = None,
     ) -> ControllerResponse:
-        """Claude-only direct run — no Codex pre-analysis, no auto Codex verify.
+        """DeepSeek direct run: no pre-analysis, no automatic audit.
 
-        Creates a Claude agent run and task, then launches Claude as a
+        Creates a developer agent run and task, then launches the backend as a
         background asyncio task so the controller can return immediately.
-        The response includes a 让 Codex 验收 button so the user can
-        explicitly request verification after Claude completes.
+        The response includes an audit button so the user can explicitly request
+        verification after development completes.
         """
         chat_id = ctx.get("chat_id", 0) if ctx else 0
         budget = ContextBudget()
@@ -2318,7 +2340,7 @@ class CommandController:
         self._ledger.update_conversation_summary(
             active.id,
             trim_to_budget(
-                f"Claude 直接实施：{command.prompt[:200]}",
+                f"DeepSeek 开发工程师直接实施：{command.prompt[:200]}",
                 budget.conversation_summary_tokens,
             ),
         )
@@ -2377,7 +2399,7 @@ class CommandController:
         buttons: list[list[dict[str, str]]] = [
             [
                 {
-                    "text": "让 Codex 验收",
+                    "text": "让审计工程师验收",
                     "callback_data": encode_conversation_callback(active.id, VERIFY),
                 },
             ],
@@ -2389,7 +2411,7 @@ class CommandController:
             ],
         ]
         return ControllerResponse(
-            "这次直接交给 Claude 实施。完成后你可以点\"让 Codex 验收\"。",
+            "这次直接交给 DeepSeek 开发工程师实施。完成后你可以点“让审计工程师验收”。",
             buttons=buttons,
         )
 
@@ -2530,7 +2552,7 @@ class CommandController:
             self._ledger.update_agent_run_status(
                 agent_run_id,
                 "done",
-                completion_summary=completion_summary or "Claude 执行完成",
+            completion_summary=completion_summary or "DeepSeek 开发工程师执行完成",
                 external_session_id=claude_session_id or None,
             )
             if claude_session_id:
@@ -2540,14 +2562,14 @@ class CommandController:
             # Update staged-auto orchestration run if applicable
             self._transition_auto_claude_completed(
                 conversation_id, agent_status="done",
-                completion_summary=completion_summary or "Claude 执行完成",
+                completion_summary=completion_summary or "DeepSeek 开发工程师执行完成",
             )
             try:
                 self._ledger.set_task_status(
                     task_id,
                     TaskStatus.DONE,
                     phase="claude_direct",
-                    summary=completion_summary or "Claude 执行完成",
+                    summary=completion_summary or "DeepSeek 开发工程师执行完成",
                 )
                 self._ledger.add_event(
                     task_id,
@@ -2904,9 +2926,9 @@ class CommandController:
             },
         ]]
         start_text = (
-            "Codex 开始分析。你可以继续补充信息，"
+            "诊断工程师开始分析。你可以继续补充信息，"
             "分析完成后会显示「生成最终方案」。\n\n"
-            "注意：当前不会启动 Claude；Codex 会按任务需要执行查询和核验。"
+            "注意：当前不会启动开发工程师；诊断工程师会按任务需要执行查询和核验。"
         )
 
         if self._interaction_renderer is not None:
@@ -3129,6 +3151,8 @@ class CommandController:
             current_step=new_step,
             last_claude_summary=completion_summary[:5000],
         )
+        test_gate_passed: bool | None = None
+        internal_repair_started = False
         if agent_status == "done" and hasattr(
             self._ledger, "get_team_run_for_orchestration"
         ):
@@ -3167,6 +3191,7 @@ class CommandController:
                                 structured_implementation_evidence_from_text,
                                 test_command_evidence,
                                 test_report_payload_from_implementation,
+                                validate_test_report,
                             )
 
                             task_events = (
@@ -3203,10 +3228,10 @@ class CommandController:
                                 agent_job_id=job.id,
                                 artifact_type="implementation_report",
                                 summary=completion_summary[:2000]
-                                or "Claude implementation completed.",
+                                or "DeepSeek 开发工程师已完成实现。",
                                 payload=implementation_report_payload(
                                     summary=completion_summary
-                                    or "Claude implementation completed.",
+                                    or "DeepSeek 开发工程师已完成实现。",
                                     changed_files=changed_files,
                                     diff_summary=diff_summary,
                                     source_agent="claude",
@@ -3227,41 +3252,93 @@ class CommandController:
                                     "artifact_type": artifact.artifact_type,
                                 },
                             )
+                            tester_job = None
+                            if hasattr(self._ledger, "create_team_agent_job"):
+                                tester_job = self._ledger.create_team_agent_job(
+                                    team_run_id=team_run.id,
+                                    role="tester",
+                                    model_profile=self._tester_model_profile,
+                                    status="running",
+                                    agent_run_id=agent_run_id,
+                                )
+                                if hasattr(self._ledger, "record_team_assignment"):
+                                    self._ledger.record_team_assignment(
+                                        team_run_id=team_run.id,
+                                        role="tester",
+                                        model_profile=self._tester_model_profile,
+                                        selected_by="policy",
+                                    )
+                                self._emit_team_runtime_event(
+                                    EventType.TEAM_AGENT_JOB_STARTED,
+                                    conversation_id=conversation_id,
+                                    orchestration_run_id=orch_run.id,
+                                    team_run_id=team_run.id,
+                                    agent_job_id=tester_job.id,
+                                    agent_run_id=agent_run_id,
+                                    task_id=task_id,
+                                    payload={
+                                        "role": "tester",
+                                        "model_profile": self._tester_model_profile,
+                                    },
+                                )
                             test_existing = [
                                 artifact
                                 for artifact in self._ledger.list_team_artifacts(team_run.id)
                                 if artifact.artifact_type == "test_report"
-                                and artifact.agent_job_id == job.id
+                                and tester_job is not None
+                                and artifact.agent_job_id == tester_job.id
                             ]
-                            if not test_existing:
+                            if tester_job is not None and not test_existing:
                                 acceptance_criteria = acceptance_criteria_from_artifacts(
                                     self._ledger.list_team_artifacts(team_run.id)
                                 )
+                                test_payload = test_report_payload_from_implementation(
+                                    summary="测试工程师已收集测试结果。",
+                                    implementation_artifact_id=artifact.id,
+                                    commands_run=tests_attempted,
+                                    acceptance_criteria=acceptance_criteria,
+                                )
                                 test_artifact = self._ledger.record_team_artifact(
                                     team_run_id=team_run.id,
-                                    agent_job_id=job.id,
+                                    agent_job_id=tester_job.id,
                                     artifact_type="test_report",
-                                    summary="Implementation test evidence collected.",
-                                    payload=test_report_payload_from_implementation(
-                                        summary=(
-                                            "Implementation test evidence collected."
-                                        ),
-                                        implementation_artifact_id=artifact.id,
-                                        commands_run=tests_attempted,
-                                        acceptance_criteria=acceptance_criteria,
-                                    ),
+                                    summary="测试工程师已收集测试结果。",
+                                    payload=test_payload,
                                 )
                                 self._emit_team_runtime_event(
                                     EventType.TEAM_ARTIFACT_RECORDED,
                                     conversation_id=conversation_id,
                                     orchestration_run_id=orch_run.id,
                                     team_run_id=team_run.id,
-                                    agent_job_id=job.id,
+                                    agent_job_id=tester_job.id,
                                     agent_run_id=agent_run_id,
                                     task_id=task_id,
                                     payload={
                                         "artifact_id": test_artifact.id,
                                         "artifact_type": test_artifact.artifact_type,
+                                    },
+                                )
+                                test_gate_passed = validate_test_report(test_payload).passed
+                                tester_status = "done" if test_gate_passed else "failed"
+                                if hasattr(
+                                    self._ledger, "update_team_agent_job_status"
+                                ):
+                                    self._ledger.update_team_agent_job_status(
+                                        tester_job.id, tester_status
+                                    )
+                                self._emit_team_runtime_event(
+                                    EventType.TEAM_AGENT_JOB_COMPLETED
+                                    if test_gate_passed
+                                    else EventType.TEAM_AGENT_JOB_FAILED,
+                                    conversation_id=conversation_id,
+                                    orchestration_run_id=orch_run.id,
+                                    team_run_id=team_run.id,
+                                    agent_job_id=tester_job.id,
+                                    agent_run_id=agent_run_id,
+                                    task_id=task_id,
+                                    payload={
+                                        "role": "tester",
+                                        "status": tester_status,
                                     },
                                 )
                     if hasattr(self._ledger, "update_team_agent_job_status"):
@@ -3279,9 +3356,44 @@ class CommandController:
                             },
                         )
                     break
+            if test_gate_passed is False:
+                attempt_count = self._tester_attempt_count(team_run)
+                new_step = AUTO_RETRY_READY
+                self._ledger.update_orchestration_run(
+                    orch_run.id,
+                    status="needs_user",
+                    current_step=new_step,
+                    last_claude_summary=completion_summary[:5000],
+                    last_verification_result=self._internal_test_failure_text(
+                        attempt_count
+                    ),
+                )
+                if attempt_count < MAX_INTERNAL_TEST_ATTEMPTS:
+                    internal_task = asyncio.create_task(
+                        self._run_internal_test_repair(
+                            conversation_id=conversation_id,
+                            attempt_count=attempt_count,
+                        ),
+                        name=f"auto-internal-test-repair-{conversation_id}-{attempt_count}",
+                    )
+                    self._background_tasks.add(internal_task)
+                    internal_task.add_done_callback(self._background_tasks.discard)
+                    internal_repair_started = True
+            elif test_gate_passed is True:
+                self._ledger.update_orchestration_run(
+                    orch_run.id,
+                    status="needs_user",
+                    current_step=AUTO_CLAUDE_DONE,
+                    last_claude_summary=completion_summary[:5000],
+                    last_verification_result="开发完成，测试通过。",
+                )
 
         # Send stage buttons to Telegram
-        if self._interaction_renderer is not None and agent_status == "done":
+        if (
+            self._interaction_renderer is not None
+            and agent_status == "done"
+            and not internal_repair_started
+        ):
             try:
                 convo = self._ledger.get_conversation(conversation_id)
                 chat_id = convo.chat_id
@@ -3293,17 +3405,88 @@ class CommandController:
                 codex_implementer_enabled=self._codex_implementer_enabled(),
             )
             from wlcodex.interaction.events import InteractionEvent
+            digest = render_auto_draft_digest(
+                completion_summary or "结论：DeepSeek 开发工程师已完成实现。"
+            )
+            if new_step == AUTO_RETRY_READY:
+                attempt_count = (
+                    self._tester_attempt_count_for_conversation(conversation_id) or 1
+                )
+                text = (
+                    "测试未通过。\n\n"
+                    f"{digest}\n\n"
+                    f"{self._internal_test_failure_text(attempt_count)}"
+                )
+            else:
+                text = f"开发完成，测试通过。\n\n{digest}\n\n请选择下一步："
             asyncio.create_task(
                 self._interaction_renderer.handle(
                     InteractionEvent(
                         event_type="run_completed",
                         chat_id=chat_id,
                         conversation_id=conversation_id,
-                        text=f"Claude 执行完成。\n\n{completion_summary[:500]}\n\n请选择下一步：",
+                        text=text,
                         buttons=buttons,
                     )
                 )
             )
+
+    async def _run_internal_test_repair(
+        self, *, conversation_id: int, attempt_count: int
+    ) -> None:
+        try:
+            await self._handle_auto_send_repair_to_claude(
+                ConversationCallback(conversation_id, AUTO_SEND_REPAIR_TO_CLAUDE)
+            )
+        except Exception as exc:
+            try:
+                orch_run = self._latest_active_auto_run(conversation_id)
+                if orch_run is not None:
+                    self._ledger.update_orchestration_run(
+                        orch_run.id,
+                        status="needs_user",
+                        current_step=AUTO_RETRY_READY,
+                        last_verification_result=(
+                            self._internal_test_failure_text(attempt_count)
+                            + f"\n内部返工启动失败：{classify_user_error(exc)}"
+                        ),
+                    )
+            except Exception:
+                logger.exception("Failed to record internal test repair failure")
+            logger.warning("Internal test repair failed: %s", exc)
+
+    def _tester_attempt_count(self, team_run: object) -> int:
+        if not hasattr(self._ledger, "list_team_agent_jobs"):
+            return 0
+        return sum(
+            1
+            for job in self._ledger.list_team_agent_jobs(team_run.id)
+            if job.role == "tester"
+        )
+
+    def _tester_attempt_count_for_conversation(self, conversation_id: int) -> int:
+        try:
+            orch_run = self._latest_active_auto_run(conversation_id)
+            if orch_run is None or not hasattr(
+                self._ledger, "get_team_run_for_orchestration"
+            ):
+                return 0
+            team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
+            return self._tester_attempt_count(team_run) if team_run is not None else 0
+        except Exception:
+            return 0
+
+    def _internal_test_failure_text(self, attempt_count: int) -> str:
+        attempt = max(1, attempt_count)
+        if attempt >= MAX_INTERNAL_TEST_ATTEMPTS:
+            return (
+                f"测试连续 {MAX_INTERNAL_TEST_ATTEMPTS} 次未通过或缺少测试证据，"
+                "已停止内部返工循环。请查看测试证据后决定返工、接管或结束。"
+            )
+        return (
+            f"测试第 {attempt}/{MAX_INTERNAL_TEST_ATTEMPTS} 次未通过或缺少测试证据，"
+            f"最多还会内部返工 {MAX_INTERNAL_TEST_ATTEMPTS - attempt} 次。"
+        )
 
     async def _handle_auto_final_plan(
         self, callback: ConversationCallback
@@ -3326,7 +3509,7 @@ class CommandController:
         ]]
         if orch_run.current_step == AUTO_COLLECTING_CONTEXT and orch_run.status != "needs_user":
             return ControllerResponse(
-                "Codex 正在生成最终方案，请等待完成。",
+                "架构工程师正在生成最终方案，请等待完成。",
                 buttons=wait_buttons,
             )
         rewrite_from_draft = (
@@ -3392,15 +3575,17 @@ class CommandController:
             return ControllerResponse(classify_user_error(exc))
 
         return ControllerResponse(
-            "Codex 正在生成最终方案，完成后将显示方案和执行按钮。",
+            "架构工程师正在生成最终方案，完成后将显示方案和执行按钮。",
             buttons=wait_buttons,
         )
 
     async def _handle_auto_send_to_claude(
         self, callback: ConversationCallback
     ) -> ControllerResponse:
-        """User clicked '交给 Claude 执行': start Claude with the Codex-generated
-        prompt. Exactly one Claude run is started. Does not auto-verify."""
+        """Start the DeepSeek developer from the generated architecture prompt.
+
+        Exactly one developer run is started. Audit never starts automatically.
+        """
         convo = self._ledger.get_conversation(callback.conversation_id)
         orch_run = self._latest_active_auto_run(callback.conversation_id)
         if orch_run is None:
@@ -3408,19 +3593,19 @@ class CommandController:
         if orch_run.current_step not in (AUTO_DRAFT_READY, AUTO_RETRY_READY):
             return ControllerResponse(
                 f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
-                "不能启动 Claude 执行。"
+                "不能启动 DeepSeek 开发工程师执行。"
             )
 
         if self._claude is None or not getattr(self._claude, "enabled", False):
             return ControllerResponse(
-                "Claude Code 未启用。请在配置中设置 claude.enabled = true 后重试。"
+                "DeepSeek 开发工程师未启用。请在配置中设置 claude.enabled = true 后重试。"
             )
 
-        # Extract the Claude execution prompt from the orchestration run's analysis
+        # Extract the developer execution prompt from the orchestration run's analysis.
         claude_prompt = (orch_run.last_codex_analysis or "").strip()
         if not claude_prompt:
             return ControllerResponse(
-                "没有可见的最终方案正文，不能交给 Claude 执行。\n"
+                "没有可见的最终方案正文，不能交给 DeepSeek 开发工程师执行。\n"
                 "请先继续补充上下文。",
                 buttons=build_auto_stage_buttons(
                     convo.id,
@@ -3601,7 +3786,10 @@ class CommandController:
         bg_task.add_done_callback(self._background_tasks.discard)
 
         buttons = build_auto_stage_buttons(convo.id, AUTO_CLAUDE_RUNNING)
-        return ControllerResponse("Claude 开始执行。完成后请点「Codex 验收」。", buttons=buttons)
+        return ControllerResponse(
+            "DeepSeek 开发工程师开始执行。完成后请点「审计工程师验收」。",
+            buttons=buttons,
+        )
 
     async def _handle_auto_send_to_codex(
         self, callback: ConversationCallback
@@ -3613,18 +3801,17 @@ class CommandController:
         if orch_run.current_step not in (AUTO_DRAFT_READY, AUTO_RETRY_READY):
             return ControllerResponse(
                 f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
-                "不能启动 Codex 执行。"
+                "不能启动 GPT 开发工程师执行。"
             )
         if not self._codex_implementer_enabled():
             return ControllerResponse(
-                "Codex 实施者未启用。请在 Adaptive Team 配置中启用 Codex "
-                "provider 的 implementer 后重试。"
+                "GPT 开发工程师未启用。请在团队配置中启用 GPT 开发工程师后重试。"
             )
 
         plan_text = (orch_run.last_codex_analysis or "").strip()
         if not plan_text:
             return ControllerResponse(
-                "没有可见的最终方案正文，不能交给 Codex 执行。\n"
+                "没有可见的最终方案正文，不能交给 GPT 开发工程师执行。\n"
                 "请先继续补充上下文。",
                 buttons=build_auto_stage_buttons(
                     convo.id,
@@ -3637,8 +3824,7 @@ class CommandController:
         model_profile = self._codex_implementer_model_profile()
         if not model_profile:
             return ControllerResponse(
-                "Codex 实施者未启用。请在 Adaptive Team 配置中启用 Codex "
-                "provider 的 implementer 后重试。"
+                "GPT 开发工程师未启用。请在团队配置中启用 GPT 开发工程师后重试。"
             )
         team_run = None
         if self._adaptive_team_enabled and hasattr(
@@ -3826,12 +4012,15 @@ class CommandController:
             return ControllerResponse(classify_user_error(exc))
 
         buttons = build_auto_stage_buttons(convo.id, AUTO_CLAUDE_RUNNING)
-        return ControllerResponse("Codex 开始执行。完成后请点「Codex 验收」。", buttons=buttons)
+        return ControllerResponse(
+            "GPT 开发工程师开始执行。完成后请点「审计工程师验收」。",
+            buttons=buttons,
+        )
 
     async def _handle_auto_codex_verify(
         self, callback: ConversationCallback
     ) -> ControllerResponse:
-        """User clicked 'Codex 验收': start Codex read-only verification.
+        """Start read-only audit verification.
         Only starts after explicit click, never automatically."""
         convo = self._ledger.get_conversation(callback.conversation_id)
         orch_run = self._latest_active_auto_run(callback.conversation_id)
@@ -3840,7 +4029,7 @@ class CommandController:
         if orch_run.current_step not in (AUTO_CLAUDE_DONE, AUTO_RETRY_READY):
             return ControllerResponse(
                 f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
-                "不是等待验收阶段。请等 Claude 完成后再点「Codex 验收」。"
+                "不是等待验收阶段。请等开发工程师完成后再点「审计工程师验收」。"
             )
 
         goal = orch_run.goal
@@ -4034,7 +4223,9 @@ class CommandController:
                         "unrelated_changed_files": unrelated_changed_files[:20],
                         "diff_summary": diff_summary[:1500],
                         "verify_round": verify_round,
-                        "tester_policy": "Auditor performs tester duties in v1",
+                        "tester_policy": (
+                            "Audit starts only after current-round test evidence exists"
+                        ),
                     },
                 )
                 self._emit_team_runtime_event(
@@ -4149,7 +4340,7 @@ class CommandController:
             return ControllerResponse(classify_user_error(exc))
 
         buttons = build_auto_stage_buttons(convo.id, AUTO_VERIFYING)
-        return ControllerResponse("Codex 开始验收，完成后将显示验收结果。", buttons=buttons)
+        return ControllerResponse("审计工程师开始验收，完成后将显示验收结果。", buttons=buttons)
 
     async def _handle_auto_codex_takeover(
         self, callback: ConversationCallback
@@ -4179,12 +4370,12 @@ class CommandController:
 
         budget = ContextBudget()
         prompt = (
-            f"Codex 接管修复任务\n\n"
+            f"GPT 开发工程师接管修复任务\n\n"
             f"原始目标：{goal}\n\n"
-            f"Codex 方案：{analysis[:500]}\n\n"
-            f"Claude 产出：{claude_summary[:300]}\n\n"
+            f"架构方案：{analysis[:500]}\n\n"
+            f"开发工程师产出：{claude_summary[:300]}\n\n"
             f"验收结果：{verification[:300]}\n\n"
-            f"用户明确要求 Codex 直接修复，请直接修改代码完成目标。"
+            f"用户明确要求 GPT 开发工程师直接修复，请直接修改代码完成目标。"
         )
 
         chat_id = convo.chat_id
@@ -4221,17 +4412,21 @@ class CommandController:
             return ControllerResponse(classify_user_error(exc))
 
         buttons = build_auto_stage_buttons(convo.id, AUTO_CODEX_TAKEOVER_RUNNING)
-        return ControllerResponse("Codex 开始直接修复。", buttons=buttons)
+        return ControllerResponse("GPT 开发工程师开始直接修复。", buttons=buttons)
 
     async def _handle_auto_send_repair_to_claude(
         self, callback: ConversationCallback
     ) -> ControllerResponse:
-        """User clicked '发给 Claude 返工' or '发给 Claude 返工' from retry_ready:
-        start Claude repair with Codex-generated repair prompt."""
+        """Start developer rework from retry_ready with a generated repair prompt."""
         convo = self._ledger.get_conversation(callback.conversation_id)
         orch_run = self._latest_active_auto_run(callback.conversation_id)
         if orch_run is None:
             return ControllerResponse("没有活跃的自动工作流。请用 /auto 开始。")
+        if orch_run.current_step == AUTO_COMPLETED:
+            return ControllerResponse(
+                "这条任务已经完成，不能再返工。你可以查看状态或开始新的任务。",
+                buttons=build_auto_stage_buttons(convo.id, AUTO_COMPLETED),
+            )
         if orch_run.current_step not in (AUTO_CLAUDE_DONE, AUTO_RETRY_READY):
             return ControllerResponse(
                 f"当前阶段是 {auto_stage_label(orch_run.current_step)}，"
@@ -4240,7 +4435,7 @@ class CommandController:
 
         if self._claude is None or not getattr(self._claude, "enabled", False):
             return ControllerResponse(
-                "Claude Code 未启用。请在配置中设置 claude.enabled = true 后重试。"
+                "DeepSeek 开发工程师未启用。请在配置中设置 claude.enabled = true 后重试。"
             )
 
         goal = orch_run.goal
@@ -4411,7 +4606,10 @@ class CommandController:
         bg_task.add_done_callback(self._background_tasks.discard)
 
         buttons = build_auto_stage_buttons(convo.id, AUTO_CLAUDE_RUNNING)
-        return ControllerResponse("Claude 开始返工。完成后请点「Codex 验收」。", buttons=buttons)
+        return ControllerResponse(
+            "DeepSeek 开发工程师开始返工。完成后请点「审计工程师验收」。",
+            buttons=buttons,
+        )
 
     async def _handle_auto_close(self, callback: ConversationCallback) -> ControllerResponse:
         """User clicked '结束任务': mark the auto run as completed."""
@@ -4548,12 +4746,12 @@ class CommandController:
                 task = self._service.get_task(active.active_codex_task_id)
                 if task.codex_thread_id:
                     await self._backend.start_turn(task.codex_thread_id, packet.render())
-                    verification_text = f"已向 Codex 发送验收请求。\n" \
+                    verification_text = f"已向审计工程师发送验收请求。\n" \
                                         f"对话：{active.title}\n" \
                                         f"变更文件：{len(changed_files)} 个\n" \
-                                        f"验收证据：Codex 分析计划 + Claude 输出摘要 + diff"
+                                        f"验收证据：架构方案 + 开发工程师输出摘要 + diff"
                 else:
-                    verification_text = "Codex 线程未就绪，无法发送验收。"
+                    verification_text = "审计工程师线程未就绪，无法发送验收。"
             else:
                 workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
                 thread_id = await self._backend.create_thread(workspace_path)
@@ -4566,16 +4764,16 @@ class CommandController:
                 )
                 self._service.set_task_thread(task.id, thread_id)
                 await self._backend.start_turn(thread_id, packet.render())
-                verification_text = "已向 Codex 发送验收请求。\n" \
+                verification_text = "已向审计工程师发送验收请求。\n" \
                                     f"对话：{active.title}\n" \
                                     f"验收内容：{verify_payload}\n" \
                                     f"变更文件：{len(changed_files)} 个"
         except Exception as exc:
             logger.warning("verify: Codex call failed: %s", exc)
-            verification_text = f"Codex 验收请求失败：{exc}"
+            verification_text = f"审计工程师验收请求失败：{exc}"
 
         return ControllerResponse(
-            f"Codex 验收 — 对话「{active.title}」\n\n"
+            f"审计工程师验收 — 对话「{active.title}」\n\n"
             f"最近运行：#{latest_claude_run.id}（{latest_claude_run.agent}/{latest_claude_run.status}）\n"
             f"输入摘要：{latest_claude_run.prompt_packet_summary[:200]}\n"
             f"输出摘要：{completion[:200] if completion else '(无)'}\n"
@@ -5098,7 +5296,7 @@ class CommandController:
                     except Exception as exc:
                         logger.warning("interrupt_turn failed: %s", exc)
                 self._service.abort_task(active.active_codex_task_id)
-                stopped_items.append("Codex 执行")
+                stopped_items.append("GPT 开发工程师执行")
             except KeyError:
                 pass
 
@@ -5112,7 +5310,7 @@ class CommandController:
             self._ledger.update_agent_run_status(
                 active.active_claude_run_id, "aborted"
             )
-            stopped_items.append(f"Claude 运行 #{active.active_claude_run_id}")
+            stopped_items.append(f"DeepSeek 开发工程师运行 #{active.active_claude_run_id}")
 
         detail = "；".join(stopped_items) if stopped_items else "无活跃执行"
         return ControllerResponse(
@@ -5163,9 +5361,9 @@ class CommandController:
 
         text = render_claude_permission_status(current)
         if command.mode_name:
-            text = f"已切换 Claude 权限模式。\n\n{text}"
+            text = f"已切换 DeepSeek 开发工程师权限模式。\n\n{text}"
         if self._claude is None or not getattr(self._claude, "enabled", False):
-            text += "\n\n提示：Claude 后端当前未启用，此设置会在启用后生效。"
+            text += "\n\n提示：DeepSeek 开发工程师当前未启用，此设置会在启用后生效。"
         return ControllerResponse(
             text,
             buttons=build_claude_permission_buttons(current),
@@ -5189,6 +5387,142 @@ class CommandController:
         if self._ledger is not None and hasattr(self._ledger, "set_runtime_setting"):
             self._ledger.set_runtime_setting(RUNTIME_CLAUDE_PERMISSION_MODE_KEY, current)
         return current
+
+    def render_engineer_model_settings(
+        self, role_id: str | None = None
+    ) -> ControllerResponse:
+        assignments = self._engineer_model_assignments()
+        available_profiles = self._available_engineer_model_profiles()
+        if role_id is not None and role_id not in assignments:
+            return ControllerResponse("没有这个工程师配置。")
+
+        if role_id is None:
+            lines = ["工程师大模型", ""]
+            for role in ordered_team_roles(assignments):
+                profiles = self._format_engineer_profiles(assignments[role])
+                lines.append(f"{role_display_name(role)}：{profiles}")
+            lines.extend(["", "选择工程师后可调整使用的大模型。"])
+            buttons = [
+                [{
+                    "text": role_display_name(role),
+                    "callback_data": f"settings:engineer_models:{role}",
+                }]
+                for role in ordered_team_roles(assignments)
+            ]
+            buttons.append([{
+                "text": "返回设置",
+                "callback_data": "settings:root",
+            }])
+            return ControllerResponse("\n".join(lines), buttons=buttons)
+
+        selected = set(assignments[role_id])
+        mode = "多选" if is_multi_select_role(role_id) else "单选"
+        lines = [
+            f"{role_display_name(role_id)}大模型",
+            "",
+            f"当前：{self._format_engineer_profiles(assignments[role_id])}",
+            f"模式：{mode}",
+        ]
+        buttons: list[list[dict[str, str]]] = []
+        for profile in available_profiles:
+            marker = "✅ " if profile in selected else ""
+            buttons.append([{
+                "text": marker + self._engineer_model_profile_label(profile),
+                "callback_data": f"settings:engineer_models:{role_id}:{profile}",
+            }])
+        buttons.append([{
+            "text": "返回工程师大模型",
+            "callback_data": "settings:engineer_models",
+        }])
+        return ControllerResponse("\n".join(lines), buttons=buttons)
+
+    def set_engineer_model_assignment(
+        self, role_id: str, profile_id: str
+    ) -> ControllerResponse:
+        assignments = self._engineer_model_assignments()
+        if role_id not in assignments:
+            return ControllerResponse("没有这个工程师配置。")
+
+        available_profiles = self._available_engineer_model_profiles()
+        if profile_id not in available_profiles:
+            return ControllerResponse("没有这个大模型选项。")
+
+        current = list(assignments[role_id])
+        if is_multi_select_role(role_id):
+            if profile_id in current:
+                if len(current) == 1:
+                    text = "开发工程师至少保留一个大模型。"
+                    response = self.render_engineer_model_settings(role_id)
+                    return ControllerResponse(
+                        f"{text}\n\n{response.text}", response.buttons
+                    )
+                current.remove(profile_id)
+            else:
+                current.append(profile_id)
+            next_profiles = tuple(current)
+        else:
+            next_profiles = (profile_id,)
+
+        next_profiles = normalize_assignment(
+            role_id,
+            next_profiles,
+            available_profiles,
+            assignments[role_id],
+        )
+        self._apply_engineer_model_assignment(role_id, next_profiles)
+        if self._ledger is not None and hasattr(self._ledger, "set_runtime_setting"):
+            self._ledger.set_runtime_setting(
+                runtime_assignment_key(role_id),
+                encode_assignment(next_profiles),
+            )
+        response = self.render_engineer_model_settings(role_id)
+        return ControllerResponse(f"已更新。\n\n{response.text}", response.buttons)
+
+    def _available_engineer_model_profiles(self) -> tuple[str, ...]:
+        return ordered_model_profiles(self._adaptive_team_model_profiles)
+
+    def _engineer_model_assignments(self) -> dict[str, tuple[str, ...]]:
+        return {
+            "director": (self._director_model_profile,),
+            "investigator": (self._investigator_model_profile,),
+            "architect": (self._architect_model_profile,),
+            "implementer": tuple(self._implementer_model_profiles),
+            "tester": (self._tester_model_profile,),
+            "auditor": (self._auditor_model_profile,),
+        }
+
+    def _apply_engineer_model_assignment(
+        self, role_id: str, profiles: tuple[str, ...]
+    ) -> None:
+        if role_id == "director":
+            self._director_model_profile = profiles[0]
+        elif role_id == "investigator":
+            self._investigator_model_profile = profiles[0]
+        elif role_id == "architect":
+            self._architect_model_profile = profiles[0]
+        elif role_id == "implementer":
+            self._implementer_model_profiles = profiles
+        elif role_id == "tester":
+            self._tester_model_profile = profiles[0]
+        elif role_id == "auditor":
+            self._auditor_model_profile = profiles[0]
+
+    def _format_engineer_profiles(self, profiles: tuple[str, ...]) -> str:
+        return "、".join(
+            self._engineer_model_profile_label(profile) for profile in profiles
+        )
+
+    def _engineer_model_profile_label(self, profile_id: str) -> str:
+        provider = self._adaptive_team_model_profiles.get(profile_id, profile_id).lower()
+        if provider == "codex":
+            return "codex-gpt5.5"
+        if provider == "claude":
+            model = "deepseek-v4-pro"
+            config = getattr(self._claude, "_config", None)
+            if config is not None and getattr(config, "model", None):
+                model = str(getattr(config, "model"))
+            return f"claude-{model}"
+        return f"{provider}-{profile_id}"
 
     async def handle_model(
         self, command: ModelCommand, ctx: dict[str, Any] | None = None
@@ -5340,7 +5674,7 @@ class CommandController:
                     self._claude.interrupt()
                 except Exception:
                     pass
-            return ControllerResponse("已请求打断 Claude。", buttons=[[{
+            return ControllerResponse("已请求打断 DeepSeek 开发工程师。", buttons=[[{
                 "text": "查看状态",
                 "callback_data": encode_conversation_callback(callback.conversation_id, STATUS),
             }]])
@@ -5481,7 +5815,7 @@ class CommandController:
                 occurred_at=now_iso(),
                 conversation_id=conversation_id,
             ))
-            return ControllerResponse("已追加到当前执行。当前阶段结束后由 Codex 判断处理。")
+            return ControllerResponse("已追加到当前执行。当前阶段结束后由总工程师判断处理。")
 
         elif action == BUSY_INTERRUPT:
             self._emit_event(RuntimeEvent(

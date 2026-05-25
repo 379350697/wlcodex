@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import inspect
+import itertools
 import json
 import logging
 from pathlib import Path
@@ -570,6 +571,35 @@ class VerificationDecision:
 
     @classmethod
     def parse(cls, text: str) -> "VerificationDecision":
+        parsed = _parse_last_complete_json(text)
+        if isinstance(parsed, dict):
+            report = parsed.get("audit_report", parsed)
+            if isinstance(report, dict):
+                raw_decision = str(
+                    report.get("decision")
+                    or report.get("verdict")
+                    or report.get("status")
+                    or report.get("conclusion")
+                    or ""
+                ).strip().lower()
+                normalized = _normalize_verification_decision_value(raw_decision)
+                if normalized:
+                    summary = str(report.get("summary") or text).strip()
+                    required_fix = str(
+                        report.get("required_fix")
+                        or report.get("repair_prompt")
+                        or report.get("next_action")
+                        or ""
+                    ).strip()
+                    if normalized == "retry" and not required_fix:
+                        required_fix = summary
+                    return cls(
+                        decision=normalized,
+                        summary=summary,
+                        required_fix=required_fix,
+                        confidence=str(report.get("confidence") or "").strip(),
+                    )
+
         decision = "need_user"
         summary = text
         required_fix = ""
@@ -611,6 +641,29 @@ class VerificationDecision:
             decision = "pass"
 
         return cls(decision=decision, summary=summary, required_fix=required_fix)
+
+
+def _normalize_verification_decision_value(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    normalized = raw.replace("-", "_").replace(" ", "_")
+    if normalized.startswith(("pass", "passed", "approve", "approved", "success")):
+        return "pass"
+    if normalized.startswith((
+        "retry",
+        "repair",
+        "block",
+        "blocked",
+        "fail",
+        "failed",
+        "needs_repair",
+        "need_repair",
+    )):
+        return "retry"
+    if normalized.startswith(("stop", "stopped")):
+        return "stop"
+    if normalized.startswith(("needs_user", "need_user", "ask_user")):
+        return "need_user"
+    return ""
 
 
 def _build_retry_analysis(
@@ -668,6 +721,14 @@ class ChiefEngineerOrchestrator:
         self._last_claude_drift_findings: list[str] = []
         self._pending_user_context = pending_user_context
 
+    def _verification_rounds(self):
+        if self._max_verify_rounds > 0:
+            return range(1, self._max_verify_rounds + 1)
+        return itertools.count(1)
+
+    def _is_final_verify_round(self, round_num: int) -> bool:
+        return self._max_verify_rounds > 0 and round_num >= self._max_verify_rounds
+
     def set_pending_user_context(self, context: str) -> None:
         """Set pending user context for the next verification round."""
         self._pending_user_context = context
@@ -719,7 +780,7 @@ class ChiefEngineerOrchestrator:
             return result
 
         # Step 2-3: Implementation + verification loop
-        for round_num in range(1, self._max_verify_rounds + 1):
+        for round_num in self._verification_rounds():
             result.verify_round = round_num
 
             # Claude implementation
@@ -761,7 +822,7 @@ class ChiefEngineerOrchestrator:
                     decision="retry",
                     summary=decision.summary,
                     required_fix=(
-                        "Codex 验收文本中检测到直接 Telegram delivery / token access: "
+                        "审计工程师验收文本中检测到直接 Telegram delivery / token access: "
                         + "; ".join(verification_drift)
                     ),
                 )
@@ -789,7 +850,7 @@ class ChiefEngineerOrchestrator:
                 result.verification_summary = decision.summary
                 return result
             elif decision.decision == "retry":
-                if round_num >= self._max_verify_rounds:
+                if self._is_final_verify_round(round_num):
                     result.status = "failed"
                     result.verification_summary = (
                         f"Max verification rounds ({self._max_verify_rounds}) reached. "
@@ -915,10 +976,10 @@ class ChiefEngineerOrchestrator:
             if len(forbidden) > 8:
                 preview = f"{preview}, +{len(forbidden) - 8} more"
             raise RuntimeError(
-                "Codex 总工程师轮期间工作区出现非授权实现文件变更，已停止闭环："
-                f"{preview}。可能是 Codex 越界写入，也可能是同一工作区内"
+                "总工程师轮期间工作区出现非授权实现文件变更，已停止闭环："
+                f"{preview}。可能是诊断/审计阶段越界写入，也可能是同一工作区内"
                 "其他并发修改污染了验收快照；请把这些代码/测试/配置改动"
-                "交给 Claude 执行或隔离到独立 worktree 后重试。"
+                "交给开发工程师执行或隔离到独立 worktree 后重试。"
             )
         return result
 
@@ -978,7 +1039,7 @@ class ChiefEngineerOrchestrator:
         # Phase 1: Codex analysis
         yield OrchestrationProgress(
             phase=OrchestrationProgress.ANALYSIS_STARTED,
-            text="Codex 正在分析需求...",
+            text="诊断工程师正在分析需求...",
             agent="codex",
         )
         try:
@@ -1064,7 +1125,7 @@ class ChiefEngineerOrchestrator:
             return
 
         # Phase 2-3: Implementation + verification loop
-        for round_num in range(1, self._max_verify_rounds + 1):
+        for round_num in self._verification_rounds():
             result.verify_round = round_num
 
             # Claude implementation (streaming)
@@ -1143,7 +1204,7 @@ class ChiefEngineerOrchestrator:
             # Codex verification
             yield OrchestrationProgress(
                 phase=OrchestrationProgress.VERIFY_STARTED,
-                text="Codex 正在验收...",
+                text="审计工程师正在验收...",
                 agent="codex",
                 round_num=round_num,
             )
@@ -1162,7 +1223,7 @@ class ChiefEngineerOrchestrator:
                 result.verification_summary = f"Codex verification failed: {exc}"
                 yield OrchestrationProgress(
                     phase=OrchestrationProgress.FAILED,
-                    text=f"Codex 验收失败：{exc}",
+                    text=f"审计工程师验收失败：{exc}",
                     full_text=str(exc),
                     agent="codex",
                     round_num=round_num,
@@ -1193,7 +1254,7 @@ class ChiefEngineerOrchestrator:
                     decision="retry",
                     summary=decision.summary,
                     required_fix=(
-                        "Codex 验收文本中检测到直接 Telegram delivery / token access: "
+                        "审计工程师验收文本中检测到直接 Telegram delivery / token access: "
                         + "; ".join(verification_drift)
                     ),
                 )
@@ -1245,7 +1306,7 @@ class ChiefEngineerOrchestrator:
                 )
                 return
             elif decision.decision == "retry":
-                if round_num >= self._max_verify_rounds:
+                if self._is_final_verify_round(round_num):
                     result.status = "failed"
                     result.verification_summary = (
                         f"Max verification rounds ({self._max_verify_rounds}) reached. "

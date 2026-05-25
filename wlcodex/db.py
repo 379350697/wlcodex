@@ -218,7 +218,7 @@ class Ledger:
                 status TEXT NOT NULL DEFAULT 'running',
                 current_step TEXT NOT NULL DEFAULT '',
                 verify_round INTEGER NOT NULL DEFAULT 0,
-                max_verify_rounds INTEGER NOT NULL DEFAULT 3,
+                max_verify_rounds INTEGER NOT NULL DEFAULT 0,
                 last_codex_analysis TEXT NOT NULL DEFAULT '',
                 last_claude_summary TEXT NOT NULL DEFAULT '',
                 last_verification_result TEXT NOT NULL DEFAULT '',
@@ -1450,7 +1450,7 @@ class Ledger:
         self,
         conversation_id: int,
         goal: str,
-        max_verify_rounds: int = 3,
+        max_verify_rounds: int = 0,
     ) -> OrchestrationRun:
         now = _now()
         cur = self._conn.execute(
@@ -2602,7 +2602,7 @@ def _orchestration_run(row: sqlite3.Row) -> OrchestrationRun:
         status=str(row["status"]),
         current_step=str(row["current_step"] or ""),
         verify_round=int(row["verify_round"] or 0),
-        max_verify_rounds=int(row["max_verify_rounds"] or 3),
+        max_verify_rounds=int(row["max_verify_rounds"] or 0),
         last_codex_analysis=str(row["last_codex_analysis"] or ""),
         last_claude_summary=str(row["last_claude_summary"] or ""),
         last_verification_result=str(row["last_verification_result"] or ""),

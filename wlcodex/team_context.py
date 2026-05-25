@@ -53,20 +53,20 @@ class TeamContextPacket:
             "Downstream roles must treat prior artifacts as advisory until confirmed by current evidence.",
         ]
         if role.role_id.value == "auditor" and not any(
-            "Auditor performs tester duties in v1" in rule for rule in handoff_rules
-        ):
-            handoff_rules.append(
-                "Auditor performs tester duties in v1: verify test_report evidence, "
-                "call out missing test coverage, and do not pass without current test evidence."
-            )
-        if role.role_id.value == "architect" and not any(
-            "Architect performs investigator duties in v1" in rule
+            "Audit only starts after implementation and test evidence" in rule
             for rule in handoff_rules
         ):
             handoff_rules.append(
-                "Architect performs investigator duties in v1: gather runtime/code "
-                "evidence and capture diagnosis notes inside architecture_plan until "
-                "a separate investigator job is introduced."
+                "Audit only starts after implementation and test evidence exist; "
+                "do not pass without current-round test evidence."
+            )
+        if role.role_id.value == "architect" and not any(
+            "diagnosis evidence" in rule
+            for rule in handoff_rules
+        ):
+            handoff_rules.append(
+                "If diagnosis and architecture are combined, gather diagnosis evidence "
+                "from runtime/code checks and capture it inside architecture_plan."
             )
         return {
             "team_run_id": self.data.team_run_id,

@@ -185,26 +185,127 @@ def _extract_list_after_heading(lines: list[str], heading: str) -> list[str]:
     return [item for item in items if item]
 
 
+def _audit_evidence_refs_from_json(report: dict[str, object]) -> list[str]:
+    refs = _audit_evidence_ref_items(report.get("test_evidence_refs"))
+    refs.extend(_audit_evidence_ref_items(report.get("evidence_refs")))
+    for key in ("passed_checks", "checks", "verification", "verification_results"):
+        refs.extend(_audit_evidence_refs_from_value(report.get(key)))
+    return list(dict.fromkeys(refs))
+
+
+def _audit_evidence_refs_from_value(value: object) -> list[str]:
+    refs: list[str] = []
+    if isinstance(value, list):
+        for item in value:
+            refs.extend(_audit_evidence_refs_from_value(item))
+        return refs
+    if isinstance(value, dict):
+        for key in ("evidence", "evidence_ref", "evidence_refs", "test_evidence_refs"):
+            refs.extend(_audit_evidence_ref_items(value.get(key)))
+        for nested_key, nested_value in value.items():
+            if nested_key in {"evidence", "evidence_ref", "evidence_refs", "test_evidence_refs"}:
+                continue
+            if isinstance(nested_value, (list, dict)):
+                refs.extend(_audit_evidence_refs_from_value(nested_value))
+        return refs
+    return []
+
+
+def _audit_evidence_ref_items(value: object) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    return _normalize_audit_list(value)
+
+
+def _normalize_audit_decision_value(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    normalized = raw.replace("-", "_").replace(" ", "_")
+    if normalized.startswith(("pass", "passed", "approve", "approved", "success")):
+        return "pass"
+    if normalized.startswith((
+        "block",
+        "blocked",
+        "fail",
+        "failed",
+        "retry",
+        "repair",
+        "needs_repair",
+        "need_repair",
+    )):
+        return "block"
+    if normalized.startswith(("needs_user", "need_user", "ask_user")):
+        return "needs_user"
+    return ""
+
+
+def _normalize_audit_risk_value(value: object, *, decision: str) -> str:
+    raw = str(value or "").strip().lower()
+    normalized = raw.replace("-", "_").replace(" ", "_")
+    for risk in ("low", "medium", "high", "critical"):
+        if normalized.startswith(risk):
+            return risk
+    return "low" if decision == "pass" else "medium"
+
+
+def _json_string_literal(value: str) -> str:
+    try:
+        parsed = json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value
+    return str(parsed)
+
+
+def _audit_evidence_refs_from_text(text: str) -> list[str]:
+    refs: list[str] = []
+    for match in re.finditer(
+        r'"(?:evidence|evidence_ref|test_evidence_refs)"\s*:\s*"((?:\\.|[^"\\])*)"',
+        text,
+        re.IGNORECASE,
+    ):
+        value = _json_string_literal(match.group(1)).strip()
+        if value:
+            refs.append(value)
+    for match in re.finditer(
+        r'"(?:evidence|evidence_refs|test_evidence_refs)"\s*:\s*\[(.*?)\]',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        for item in re.finditer(r'"((?:\\.|[^"\\])*)"', match.group(1)):
+            value = _json_string_literal(item.group(1)).strip()
+            if value:
+                refs.append(value)
+    return list(dict.fromkeys(refs))
+
+
 def _parse_audit_report_payload(text: str) -> dict[str, object]:
     json_report = _extract_audit_report_json(text)
     if json_report is not None:
         return json_report
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     lowered = text.lower()
-    if "decision: pass" in lowered or "decision:pass" in lowered:
+    decision = ""
+    decision_field = re.search(
+        r'"(?:decision|verdict|status|conclusion)"\s*:\s*"([^"]+)"',
+        text,
+        re.IGNORECASE,
+    )
+    if decision_field:
+        decision = _normalize_audit_decision_value(decision_field.group(1))
+    if not decision:
+        legacy_decision = re.search(
+            r"\bdecision\s*:\s*([a-zA-Z0-9_ -]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if legacy_decision:
+            decision = _normalize_audit_decision_value(legacy_decision.group(1))
+    if not decision and "验收通过" in text and "不能验收通过" not in text:
         decision = "pass"
-    elif re.search(r'"(?:decision|verdict|status|conclusion)"\s*:\s*"(?:pass|passed|approve|approved)"', text, re.IGNORECASE):
-        decision = "pass"
-    elif "decision: block" in lowered or "decision:block" in lowered:
+    if not decision and any(token in lowered for token in ("decision: block", "decision:block")):
         decision = "block"
-    elif re.search(r'"(?:decision|verdict|status|conclusion)"\s*:\s*"(?:block|blocked|fail|failed|retry|repair|needs_repair|need_repair)"', text, re.IGNORECASE):
-        decision = "block"
-    elif "decision: needs_user" in lowered or "decision:needs_user" in lowered:
+    if not decision and any(token in lowered for token in ("decision: needs_user", "decision:needs_user")):
         decision = "needs_user"
-    elif re.search(r'"(?:decision|verdict|status|conclusion)"\s*:\s*"(?:needs_user|need_user|needs user)"', text, re.IGNORECASE):
-        decision = "needs_user"
-    else:
-        decision = ""
     summary = text[:2000]
     for line in lines:
         if line.lower().startswith("summary:"):
@@ -213,12 +314,13 @@ def _parse_audit_report_payload(text: str) -> dict[str, object]:
     json_summary = re.search(r'"summary"\s*:\s*"([^"]+)"', text)
     if json_summary:
         summary = json_summary.group(1).strip() or summary
-    risk_match = re.search(r'"(?:risk_level|risk)"\s*:\s*"(low|medium|high|critical)"', text, re.IGNORECASE)
-    risk_level = (
-        risk_match.group(1).lower()
-        if risk_match
-        else ("low" if decision == "pass" else "medium")
+    risk_match = re.search(r'"(?:risk_level|risk)"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
+    risk_level = _normalize_audit_risk_value(
+        risk_match.group(1) if risk_match else "",
+        decision=decision,
     )
+    evidence_refs = _extract_list_after_heading(lines, "test_evidence_refs")
+    evidence_refs.extend(_audit_evidence_refs_from_text(text))
     return {
         "summary": summary,
         "decision": decision,
@@ -228,7 +330,7 @@ def _parse_audit_report_payload(text: str) -> dict[str, object]:
         or ["None"],
         "risk_level": risk_level,
         "recommended_next_action": "close" if decision == "pass" else "repair",
-        "test_evidence_refs": _extract_list_after_heading(lines, "test_evidence_refs"),
+        "test_evidence_refs": list(dict.fromkeys(evidence_refs)),
         "raw_result": text,
     }
 
@@ -259,29 +361,13 @@ def _extract_audit_report_json(text: str) -> dict[str, object] | None:
             or report.get("conclusion")
             or ""
         ).strip().lower()
-        decision_map = {
-            "pass": "pass",
-            "passed": "pass",
-            "approve": "pass",
-            "approved": "pass",
-            "block": "block",
-            "blocked": "block",
-            "fail": "block",
-            "failed": "block",
-            "retry": "block",
-            "repair": "block",
-            "needs_repair": "block",
-            "need_repair": "block",
-            "needs_user": "needs_user",
-            "need_user": "needs_user",
-            "needs user": "needs_user",
-        }
-        normalized_decision = decision_map.get(decision, "")
+        normalized_decision = _normalize_audit_decision_value(decision)
         if not normalized_decision:
             continue
-        risk_level = str(report.get("risk_level") or report.get("risk") or "").strip().lower()
-        if not risk_level:
-            risk_level = "low" if normalized_decision == "pass" else "medium"
+        risk_level = _normalize_audit_risk_value(
+            report.get("risk_level") or report.get("risk") or "",
+            decision=normalized_decision,
+        )
         findings = (
             _normalize_audit_list(report.get("findings"))
             or _normalize_audit_list(report.get("issues"))
@@ -293,7 +379,7 @@ def _extract_audit_report_json(text: str) -> dict[str, object] | None:
             or _normalize_audit_list(report.get("missing"))
             or ["None"]
         )
-        test_evidence_refs = _normalize_audit_list(report.get("test_evidence_refs"))
+        test_evidence_refs = _audit_evidence_refs_from_json(report)
         recommended = str(
             report.get("recommended_next_action")
             or report.get("next_action")
@@ -337,6 +423,7 @@ def _normalize_audit_list(value: object) -> list[str]:
 
 EXPIRY_SCAN_INTERVAL_SECONDS = 60
 TASK_WATCHDOG_INTERVAL_SECONDS = 60
+MAX_INTERNAL_TEST_ATTEMPTS = 3
 # Callback: send_telegram(chat_id, text, buttons) -> message_id
 SendTelegram = Callable[[int, str, list[list[dict[str, str]]] | None], Coroutine[Any, Any, int]]
 # Callback: edit_telegram(chat_id, message_id, text, buttons=None) -> None
@@ -857,7 +944,7 @@ class EventBridge:
         - auto_analysis/auto_final_plan completion → draft_ready (needs_user)
         - auto_verification pass → completed (needs_user)
         - auto_verification fail → retry_ready (needs_user)
-        - auto_implementation/auto_repair completion → claude_done (needs_user)
+        - auto_implementation/auto_repair completion → tested implementation or retry
         - auto_codex_takeover completion → completed (needs_user)
         """
         from wlcodex.auto_workflow import (
@@ -947,15 +1034,7 @@ class EventBridge:
             self._mark_architect_team_job_done(auto_run, agent_run_id=agent_run_id)
 
         elif agent_role in ("auto_implementation", "auto_repair") and agent_status == "done":
-            # Claude implementation completed → advance to claude_done
-            new_step = AUTO_CLAUDE_DONE
-            self._ledger.update_orchestration_run(
-                auto_run.id,
-                status="needs_user",
-                current_step=new_step,
-                last_claude_summary=completion_summary[:5000] if completion_summary else "",
-            )
-            self._record_implementation_report_artifact(
+            test_gate_passed = self._record_implementation_report_artifact(
                 auto_run,
                 agent_run_id=agent_run_id,
                 task_id=task_id,
@@ -967,6 +1046,26 @@ class EventBridge:
                 role="implementer",
                 agent_run_id=agent_run_id,
             )
+            if test_gate_passed is False:
+                attempt_count = self._tester_attempt_count_for_auto_run(auto_run)
+                retry_text = self._internal_test_failure_text(attempt_count)
+                new_step = AUTO_RETRY_READY
+                self._ledger.update_orchestration_run(
+                    auto_run.id,
+                    status="needs_user",
+                    current_step=new_step,
+                    last_claude_summary=completion_summary[:5000] if completion_summary else "",
+                    last_verification_result=retry_text,
+                )
+            else:
+                new_step = AUTO_CLAUDE_DONE
+                self._ledger.update_orchestration_run(
+                    auto_run.id,
+                    status="needs_user",
+                    current_step=new_step,
+                    last_claude_summary=completion_summary[:5000] if completion_summary else "",
+                    last_verification_result="开发完成，测试通过。",
+                )
 
         elif agent_role in ("auto_implementation", "auto_repair") and agent_status == "failed":
             self._ledger.update_orchestration_run(
@@ -982,10 +1081,9 @@ class EventBridge:
 
         elif agent_role == "auto_verification" and agent_status == "done":
             # Codex verification completed → check pass/fail
-            summary_lower = completion_summary.lower()
             verification_passed = (
-                "decision: pass" in summary_lower
-                or "decision:pass" in summary_lower
+                _parse_audit_report_payload(completion_summary).get("decision")
+                == "pass"
             )
             gate_d_passed = self._record_audit_report_artifact(
                 auto_run,
@@ -1277,10 +1375,10 @@ class EventBridge:
         task_id: int | None,
         completion_summary: str,
         source_agent: str,
-    ) -> None:
+    ) -> bool | None:
         team_run = self._team_run_for_auto_run(auto_run)
         if team_run is None or not hasattr(self._ledger, "record_team_artifact"):
-            return
+            return None
         job = self._running_team_job(
             team_run,
             role="implementer",
@@ -1291,7 +1389,7 @@ class EventBridge:
             artifact_type="implementation_report",
             agent_job_id=job.id,
         ):
-            return
+            return None
         summary = completion_summary or f"{source_agent} implementation completed."
         changed_files, diff_summary = self._collect_task_evidence(task_id)
         from wlcodex.team_artifacts import (
@@ -1301,6 +1399,7 @@ class EventBridge:
             structured_implementation_evidence_from_text,
             test_command_evidence,
             test_report_payload_from_implementation,
+            validate_test_report,
         )
 
         task_events = self._ledger.list_events(task_id, limit=1000) if task_id else []
@@ -1342,31 +1441,38 @@ class EventBridge:
                 "artifact_type": artifact.artifact_type,
             },
         )
-        if not self._has_team_artifact(
+        tester_job = self._ensure_tester_job(
+            auto_run,
+            team_run=team_run,
+            agent_run_id=agent_run_id,
+        )
+        test_gate_passed: bool | None = None
+        if tester_job is not None and not self._has_team_artifact(
             team_run.id,
             artifact_type="test_report",
-            agent_job_id=job.id,
+            agent_job_id=tester_job.id,
         ):
             acceptance_criteria = acceptance_criteria_from_artifacts(
                 self._ledger.list_team_artifacts(team_run.id)
             )
+            test_payload = test_report_payload_from_implementation(
+                summary="测试工程师已收集测试结果。",
+                implementation_artifact_id=artifact.id,
+                commands_run=tests_attempted,
+                acceptance_criteria=acceptance_criteria,
+            )
             test_artifact = self._ledger.record_team_artifact(
                 team_run_id=team_run.id,
-                agent_job_id=job.id,
+                agent_job_id=tester_job.id,
                 artifact_type="test_report",
-                summary="Implementation test evidence collected.",
-                payload=test_report_payload_from_implementation(
-                    summary="Implementation test evidence collected.",
-                    implementation_artifact_id=artifact.id,
-                    commands_run=tests_attempted,
-                    acceptance_criteria=acceptance_criteria,
-                ),
+                summary="测试工程师已收集测试结果。",
+                payload=test_payload,
             )
             self._append_team_runtime_event(
                 auto_run,
                 EventType.TEAM_ARTIFACT_RECORDED,
                 team_run_id=team_run.id,
-                agent_job_id=job.id,
+                agent_job_id=tester_job.id,
                 agent_run_id=agent_run_id,
                 task_id=task_id,
                 payload={
@@ -1374,6 +1480,112 @@ class EventBridge:
                     "artifact_type": test_artifact.artifact_type,
                 },
             )
+            test_gate_passed = validate_test_report(test_payload).passed
+            self._mark_tester_job_for_gate(
+                auto_run,
+                team_run=team_run,
+                tester_job=tester_job,
+                agent_run_id=agent_run_id,
+                passed=test_gate_passed,
+            )
+        return test_gate_passed
+
+    def _ensure_tester_job(
+        self,
+        auto_run: object,
+        *,
+        team_run: object,
+        agent_run_id: int | None,
+    ) -> object | None:
+        if not hasattr(self._ledger, "list_team_agent_jobs") or not hasattr(
+            self._ledger, "create_team_agent_job"
+        ):
+            return None
+        for job in self._ledger.list_team_agent_jobs(team_run.id):
+            if job.role == "tester" and job.agent_run_id == agent_run_id:
+                return job
+        tester_job = self._ledger.create_team_agent_job(
+            team_run_id=team_run.id,
+            role="tester",
+            model_profile="codex_gpt",
+            status="running",
+            agent_run_id=agent_run_id,
+        )
+        if hasattr(self._ledger, "record_team_assignment"):
+            self._ledger.record_team_assignment(
+                team_run_id=team_run.id,
+                role="tester",
+                model_profile="codex_gpt",
+                selected_by="policy",
+            )
+        from wlcodex.runtime_events import EventType
+
+        self._append_team_runtime_event(
+            auto_run,
+            EventType.TEAM_AGENT_JOB_STARTED,
+            team_run_id=team_run.id,
+            agent_job_id=tester_job.id,
+            agent_run_id=agent_run_id,
+            payload={
+                "role": "tester",
+                "model_profile": "codex_gpt",
+            },
+        )
+        return tester_job
+
+    def _mark_tester_job_for_gate(
+        self,
+        auto_run: object,
+        *,
+        team_run: object,
+        tester_job: object,
+        agent_run_id: int | None,
+        passed: bool,
+    ) -> None:
+        if not hasattr(self._ledger, "update_team_agent_job_status"):
+            return
+        status = "done" if passed else "failed"
+        self._ledger.update_team_agent_job_status(tester_job.id, status)
+        from wlcodex.runtime_events import EventType
+
+        event_type = (
+            EventType.TEAM_AGENT_JOB_COMPLETED
+            if passed
+            else EventType.TEAM_AGENT_JOB_FAILED
+        )
+        self._append_team_runtime_event(
+            auto_run,
+            event_type,
+            team_run_id=team_run.id,
+            agent_job_id=tester_job.id,
+            agent_run_id=agent_run_id,
+            payload={
+                "role": "tester",
+                "status": status,
+            },
+        )
+
+    def _tester_attempt_count_for_auto_run(self, auto_run: object) -> int:
+        team_run = self._team_run_for_auto_run(auto_run)
+        if team_run is None or not hasattr(self._ledger, "list_team_agent_jobs"):
+            return 0
+        return sum(
+            1
+            for job in self._ledger.list_team_agent_jobs(team_run.id)
+            if job.role == "tester"
+        )
+
+    def _internal_test_failure_text(self, attempt_count: int) -> str:
+        attempt = max(1, attempt_count)
+        if attempt >= MAX_INTERNAL_TEST_ATTEMPTS:
+            return (
+                f"测试连续 {MAX_INTERNAL_TEST_ATTEMPTS} 次未通过或缺少测试证据，"
+                "已停止内部返工循环。请查看测试证据后决定返工、接管或结束。"
+            )
+        return (
+            f"测试第 {attempt}/{MAX_INTERNAL_TEST_ATTEMPTS} 次未通过或缺少测试证据，"
+            f"最多还会内部返工 {MAX_INTERNAL_TEST_ATTEMPTS - attempt} 次。"
+        )
 
     def _record_audit_report_artifact(
         self,
@@ -1788,19 +2000,24 @@ class EventBridge:
         elif new_stage == "draft_ready":
             text = (
                 "最终方案生成完成，但没有收到方案正文。\n\n"
-                "为避免黑盒执行，暂不提供 Claude 执行入口。\n"
+                "为避免黑盒执行，暂不提供开发工程师执行入口。\n"
                 "请继续补充上下文。"
             )
         elif new_stage == "claude_done":
             digest = render_auto_draft_digest(auto_run.last_claude_summary or "结论：完成。")
-            text = f"实现完成。\n\n{digest}\n\n请选择下一步："
+            text = f"开发完成，测试通过。\n\n{digest}\n\n请选择下一步："
         elif new_stage == "completed":
             text = self._final_synthesis_text(auto_run)
         elif new_stage == "retry_ready":
             digest = render_auto_draft_digest(
                 auto_run.last_verification_result or "结论：验收未通过。"
             )
-            text = f"验收未通过。\n\n{digest}\n\n请选择下一步："
+            title = (
+                "测试未通过。"
+                if "测试" in (auto_run.last_verification_result or "")
+                else "验收未通过。"
+            )
+            text = f"{title}\n\n{digest}\n\n请选择下一步："
         else:
             text = f"阶段：{stage_label}\n\n请选择下一步："
 

@@ -251,24 +251,24 @@ def build_codex_analysis_packet(
     bgt = budget or ContextBudget()
     if handoff:
         analysis_only_constraints = [
-            "Codex 本轮是总工程师分析/方案/交接，不要直接完成 Claude 的实现补丁。",
+            "本轮是总工程师分析/方案/交接，不要直接完成开发工程师的实现补丁。",
             "可以调用 skill、GitNexus、只读上下文检索和必要的方案验证工具。",
             "可以生成或写入 docs/ 或 .wlcodex/ 下的设计、评审、部署、验收类文档。",
             "不要修改业务代码、测试代码、依赖锁或配置，不要进入改代码/跑实现测试闭环。",
-            "把实现交给 Claude，输出交接包：目标、文件、步骤、验收标准和禁止事项。",
+            "把实现交给开发工程师，输出交接包：目标、文件、步骤、验收标准和禁止事项。",
         ]
         requested_output = (
-            "Chief-engineer Claude handoff packet: root cause, files_to_touch, "
+            "Chief-engineer developer handoff packet: root cause, files_to_touch, "
             "implementation_steps, acceptance_criteria, verification_plan, "
             "prohibited_changes. Do not implement code changes yourself."
         )
     else:
         analysis_only_constraints = [
-            "本轮是 Codex 分析/查询，不是 Claude 交接。",
+            "本轮是诊断工程师分析/查询，不是开发交接。",
             "真实执行必要的查询和核验，不要只输出执行计划。",
             "可以按用户目标使用本地命令、GitNexus、ssh/curl/systemctl/journalctl/"
             "git log/docker ps 等方式确认事实。",
-            "不要输出 Claude 交接包，不要把工作交给 Claude；直接回答结论、依据、"
+            "不要输出开发交接包，不要把工作交给开发工程师；直接回答结论、依据、"
             "风险和建议下一步。",
             "如果用户明确要求修改、部署、清理或跑实现闭环，可以按 Codex 当前能力执行；"
             "不确定时先说明风险并等待确认。",
@@ -445,7 +445,7 @@ def build_auto_final_plan_packet(
 ) -> CodexAnalysisPacket:
     """Build a final plan packet for the auto draft_ready stage.
 
-    Codex produces: diagnosis, confidence, files, Claude execution prompt,
+    The architecture role produces: diagnosis, confidence, files, developer prompt,
     acceptance criteria, prohibited changes, and verification plan.
     """
     bgt = budget or ContextBudget()
@@ -454,8 +454,8 @@ def build_auto_final_plan_packet(
         [
             "输出 /auto 的最终方案或最终结论。",
             "查询/核验类任务必须基于已执行证据给最终结论，不要只输出下一步计划。",
-            "如果需要实现，再包含给 Claude 的执行提示词。",
-            "如果无需实现，明确写 needs_implementation: false，并说明不要交给 Claude。",
+            "如果需要实现，再包含给开发工程师的执行提示词。",
+            "如果无需实现，明确写 needs_implementation: false，并说明不要交给开发工程师。",
             "保留用户补充的约束和禁止事项。",
             "如果涉及 LightFeeV2 线上排障/状态检查，必须先运行 python scripts/diagnose_live.py --json",
             "并将输出的 diagnose JSON 完整嵌入 ```json 代码块，作为 evidence manifest。",
@@ -464,7 +464,7 @@ def build_auto_final_plan_packet(
     )
     requested_output = (
         "中文最终结论/方案，包含 diagnosis, evidence, confidence, files_to_touch, "
-        "claude_prompt（仅实现类任务需要）, acceptance_criteria, verification_result。"
+        "developer_prompt（仅实现类任务需要）, acceptance_criteria, verification_result。"
     )
     if _is_lightfeev2_workspace(workspace):
         requested_output += "LightFeeV2 bug 修复场景必须包含精准修复提示词。"

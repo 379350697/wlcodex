@@ -346,7 +346,7 @@ class FakeStreamingOrchestrator:
     ):
         yield OrchestrationProgress(
             phase=OrchestrationProgress.ANALYSIS_STARTED,
-            text="Codex 正在分析需求...",
+            text="诊断工程师正在分析需求...",
             agent="codex",
         )
         yield OrchestrationProgress(
@@ -376,7 +376,7 @@ class FakeStreamingOrchestrator:
         )
         yield OrchestrationProgress(
             phase=OrchestrationProgress.VERIFY_STARTED,
-            text="Codex 正在验收...",
+            text="审计工程师正在验收...",
             agent="codex",
             round_num=1,
         )
@@ -642,7 +642,7 @@ async def test_orchestration_runner_humanizes_telegram_progress_without_raw_mode
         event.text for event in renderer.events if event.event_type == "text_delta"
     )
     assert "RAW_" not in visible_text
-    assert "交给 Claude" in visible_text
+    assert "交给 DeepSeek 开发工程师" in visible_text
     assert "验收" in visible_text
 
     updated_run = ledger.get_orchestration_run(orch_run.id)
@@ -1395,7 +1395,7 @@ async def test_telegram_deterministic_progress_no_raw_model_text(
         event.text for event in renderer.events if event.event_type == "text_delta"
     )
     assert "RAW_" not in visible_text
-    assert "交给 Claude" in visible_text or "Claude" in visible_text
+    assert "交给 DeepSeek 开发工程师" in visible_text or "DeepSeek 开发工程师" in visible_text
 
     # Runtime events store the full raw text (as payload/record)
     events = store.list_by_correlation("test-cid-005")

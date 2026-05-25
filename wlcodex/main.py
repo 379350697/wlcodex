@@ -34,6 +34,7 @@ from wlcodex.runtime_diagnostics import (
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_projector import RuntimeProjector
 from wlcodex.task_service import TaskService
+from wlcodex.team_model_settings import load_runtime_assignments
 from wlcodex.telegram_app import build_application
 from wlcodex.watchdog import TaskLivenessConfig, TaskWatchdog
 
@@ -414,7 +415,11 @@ def main() -> None:
     execution_scheduler = ExecutionScheduler(task_service, ledger)
 
     # Controller
-    team_assignments = config.adaptive_team.assignments
+    team_assignments = load_runtime_assignments(
+        ledger,
+        config.adaptive_team.assignments,
+        config.adaptive_team.model_profiles,
+    )
     team_model_profiles = config.adaptive_team.model_profiles
     implementer_model_profiles = team_assignments.get(
         "implementer",
@@ -437,6 +442,9 @@ def main() -> None:
         adaptive_team_model_profiles=team_model_profiles,
         adaptive_team_role_skills=config.adaptive_team.role_skills,
         adaptive_team_role_capabilities=config.adaptive_team.role_capabilities,
+        director_model_profile=(
+            team_assignments.get("director", ("codex_gpt",)) or ("codex_gpt",)
+        )[0],
         architect_model_profile=(
             team_assignments.get("architect", ("codex_gpt",)) or ("codex_gpt",)
         )[0],

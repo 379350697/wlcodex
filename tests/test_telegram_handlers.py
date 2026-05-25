@@ -296,6 +296,88 @@ async def test_send_telegram_returns_send_failed_on_network_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_raw_send_message_sanitizes_protocol_json() -> None:
+    from wlcodex.telegram_app import WlCodexHandlers
+
+    class Bot:
+        def __init__(self) -> None:
+            self.text = ""
+
+        async def send_message(self, **kwargs):
+            self.text = kwargs["text"]
+            return SimpleNamespace(message_id=42)
+
+    bot = Bot()
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=object(),
+        ledger=SimpleNamespace(),
+        approval_service=object(),
+        bot=bot,
+    )
+
+    await handlers._raw_send_message(
+        123,
+        "Claude 执行完成。\n\n"
+        "```json\n"
+        '{"implementation_report":{"status":"completed","change_summary":"README.md 第139行新增一行快速默认测试说明","files_modified":["README.md"],"change_location":{"file":"README.md","line":139,"content":"# Use the fast default run for routine verification before broader acceptan"}}}'
+        "\n```\n\n"
+        "请选择下一步：",
+    )
+
+    assert "返工完成：README.md 第139行新增一行快速默认测试说明" in bot.text
+    assert "请选择下一步" in bot.text
+    assert "implementation_report" not in bot.text
+    assert "files_modified" not in bot.text
+    assert "content" not in bot.text
+    assert "broader acceptan" not in bot.text
+
+
+@pytest.mark.asyncio
+async def test_raw_edit_message_sanitizes_protocol_json() -> None:
+    from wlcodex.telegram_app import WlCodexHandlers
+
+    class Bot:
+        def __init__(self) -> None:
+            self.text = ""
+
+        async def edit_message_text(self, **kwargs):
+            self.text = kwargs["text"]
+
+    bot = Bot()
+    handlers = WlCodexHandlers(
+        config=SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=frozenset({123}))),
+        controller=object(),
+        ledger=SimpleNamespace(),
+        approval_service=object(),
+        bot=bot,
+    )
+
+    await handlers._raw_edit_message(
+        123,
+        456,
+        "验收未通过。\n\n"
+        "{\n"
+        '  "audit_report": {\n'
+        '    "verdict": "BLOCK",\n'
+        '    "summary": "README 任务还缺少测试证据。",\n'
+        '    "risk": "MEDIUM",\n'
+        '    "findings": [{"detail": "缺少 pytest 证据"}],\n'
+        '    "recommended_next_action": "repair"\n'
+        "  }\n"
+        "}\n\n"
+        "请选择下一步：",
+    )
+
+    assert "验收未通过：README 任务还缺少测试证据" in bot.text
+    assert "缺少 pytest 证据" in bot.text
+    assert "请选择下一步" in bot.text
+    assert "audit_report" not in bot.text
+    assert "verdict" not in bot.text
+    assert '"BLOCK"' not in bot.text
+
+
+@pytest.mark.asyncio
 async def test_send_telegram_reraises_non_network_telegram_error() -> None:
     """send_telegram must re-raise non-network TelegramError (e.g. 403 Forbidden)."""
     from telegram.error import Forbidden
@@ -1036,7 +1118,7 @@ async def test_claude_cmd_starts_claude_direct_without_renderer() -> None:
 
     response = await controller.handle("/claude fix bug", {"chat_id": 456, "user_id": 123})
     assert not response.already_rendered
-    assert "让 Codex 验收" in response.text
+    assert "让审计工程师验收" in response.text
     await asyncio.gather(*list(controller._background_tasks), return_exceptions=True)
     assert not runner.calls
     assert claude.send_calls == 1
