@@ -1061,6 +1061,16 @@ class EventBridge:
             return job
         return None
 
+    def _single_running_team_job(self, team_run: object, *, role: str) -> object | None:
+        if not hasattr(self._ledger, "list_team_agent_jobs"):
+            return None
+        matches = [
+            job
+            for job in self._ledger.list_team_agent_jobs(team_run.id)
+            if job.role == role and job.status == "running"
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def _has_team_artifact(
         self,
         team_run_id: int,
@@ -1100,6 +1110,8 @@ class EventBridge:
                 if candidate.role == "architect" and candidate.agent_run_id == agent_run_id:
                     job = candidate
                     break
+        if job is None:
+            job = self._single_running_team_job(team_run, role="architect")
         agent_job_id = job.id if job is not None else None
         if self._has_team_artifact(
             team_run.id,
@@ -1379,10 +1391,33 @@ class EventBridge:
         *,
         agent_run_id: int | None = None,
     ) -> None:
-        self._mark_team_agent_job_done(
+        marked = self._mark_team_agent_job_done(
             auto_run,
             role="architect",
             agent_run_id=agent_run_id,
+        )
+        if marked:
+            return
+        team_run = self._team_run_for_auto_run(auto_run)
+        if team_run is None or not hasattr(self._ledger, "update_team_agent_job_status"):
+            return
+        job = self._single_running_team_job(team_run, role="architect")
+        if job is None:
+            return
+        self._ledger.update_team_agent_job_status(job.id, "done")
+        from wlcodex.runtime_events import EventType
+
+        self._append_team_runtime_event(
+            auto_run,
+            EventType.TEAM_AGENT_JOB_COMPLETED,
+            team_run_id=team_run.id,
+            agent_job_id=job.id,
+            agent_run_id=agent_run_id,
+            payload={
+                "role": "architect",
+                "status": "done",
+                "linked_agent_run_id": job.agent_run_id,
+            },
         )
 
     def _mark_team_agent_job_done(
@@ -1391,14 +1426,14 @@ class EventBridge:
         *,
         role: str,
         agent_run_id: int | None = None,
-    ) -> None:
+    ) -> bool:
         if not hasattr(self._ledger, "get_team_run_for_orchestration"):
-            return
+            return False
         team_run = self._ledger.get_team_run_for_orchestration(auto_run.id)
         if team_run is None or not hasattr(self._ledger, "list_team_agent_jobs"):
-            return
+            return False
         if not hasattr(self._ledger, "update_team_agent_job_status"):
-            return
+            return False
         for job in self._ledger.list_team_agent_jobs(team_run.id):
             if job.role != role or job.status != "running":
                 continue
@@ -1420,6 +1455,8 @@ class EventBridge:
                     "status": "done",
                 },
             )
+            return True
+        return False
 
     def _mark_team_agent_job_failed(
         self,

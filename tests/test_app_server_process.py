@@ -1,5 +1,7 @@
 """App-server process manager tests."""
 
+import subprocess
+
 import pytest
 
 from wlcodex.app_server_process import AppServerProcess, AppServerProcessConfig, BackendHealth
@@ -72,3 +74,51 @@ def test_backend_health_external_process_can_be_healthy() -> None:
         external_process=True,
     )
     assert health.is_healthy
+
+
+def test_start_sets_configured_codex_home(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs["env"]
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    codex_home = tmp_path / "codex-home"
+    proc = AppServerProcess(
+        AppServerProcessConfig(
+            binary="codex",
+            host="127.0.0.1",
+            port=17431,
+            codex_home=codex_home,
+        )
+    )
+
+    proc.start()
+
+    assert codex_home.is_dir()
+    assert captured["command"] == [
+        "codex",
+        "app-server",
+        "--listen",
+        "ws://127.0.0.1:17431",
+    ]
+    assert captured["env"]["CODEX_HOME"] == str(codex_home)
+
+
+@pytest.mark.asyncio
+async def test_configured_codex_home_does_not_reuse_external_process(tmp_path) -> None:
+    proc = AppServerProcess(
+        AppServerProcessConfig(
+            binary="codex",
+            host="127.0.0.1",
+            port=17431,
+            codex_home=tmp_path / "codex-home",
+        )
+    )
+
+    assert await proc.wait_ready_async() is False

@@ -124,6 +124,49 @@ def _normalize_command_entry(entry: Any) -> dict[str, Any] | None:
     }
 
 
+def _normalize_changed_file_entry(entry: Any) -> tuple[str | None, str]:
+    if isinstance(entry, Mapping):
+        path = str(entry.get("path", entry.get("file", ""))).strip()
+        action = str(entry.get("action", "")).strip()
+        evidence = str(entry.get("evidence", "")).strip()
+        details = " ".join(part for part in (action, path) if part)
+        if evidence:
+            details = f"{details}: {evidence}" if details else evidence
+        return (path or None), details
+    text = str(entry).strip()
+    return (text or None), text
+
+
+def _acceptance_verification_command(entry: Any) -> dict[str, Any] | None:
+    if not isinstance(entry, Mapping):
+        return None
+    command = str(entry.get("command", "")).strip()
+    if not command:
+        return None
+    checks = entry.get("checks")
+    result = str(entry.get("result", "")).strip()
+    result_lower = result.lower()
+    checks_passed = (
+        isinstance(checks, Mapping)
+        and bool(checks)
+        and all(bool(value) for value in checks.values())
+    )
+    passed = checks_passed or any(
+        marker in result_lower
+        for marker in ("pass", "passed", "success", "succeeded", "all checks passed")
+    )
+    summary = result or (
+        "acceptance verification passed"
+        if passed
+        else "acceptance verification failed"
+    )
+    return {
+        "command": command,
+        "exit_status": 0 if passed else 1,
+        "summary": summary,
+    }
+
+
 def structured_implementation_evidence_from_text(text: str) -> dict[str, Any]:
     """Extract a compact implementation evidence JSON block from result text."""
     if not text:
@@ -136,20 +179,38 @@ def structured_implementation_evidence_from_text(text: str) -> dict[str, Any]:
             continue
         if not isinstance(parsed, Mapping):
             continue
-        evidence = parsed.get("implementation_evidence", parsed)
+        evidence = parsed.get("implementation_evidence")
+        if not isinstance(evidence, Mapping):
+            evidence = parsed.get("implementation_report")
+        if not isinstance(evidence, Mapping):
+            evidence = parsed
         if not isinstance(evidence, Mapping):
             continue
-        keys = {"changed_files", "diff_summary", "commands_run", "tests_attempted"}
+        keys = {
+            "changed_files",
+            "files_changed",
+            "diff_summary",
+            "commands_run",
+            "tests_attempted",
+            "acceptance_verification",
+        }
         if not keys.intersection(evidence.keys()):
             continue
         normalized: dict[str, Any] = {}
-        changed_files = evidence.get("changed_files")
+        changed_files = evidence.get("changed_files", evidence.get("files_changed"))
         if isinstance(changed_files, list):
-            normalized["changed_files"] = [
-                str(item).strip()
-                for item in changed_files
-                if str(item).strip()
-            ]
+            paths: list[str] = []
+            diff_parts: list[str] = []
+            for item in changed_files:
+                path, details = _normalize_changed_file_entry(item)
+                if path:
+                    paths.append(path)
+                if details:
+                    diff_parts.append(details)
+            if paths:
+                normalized["changed_files"] = paths
+            if diff_parts and not evidence.get("diff_summary"):
+                normalized["diff_summary"] = "; ".join(diff_parts)
         if evidence.get("diff_summary"):
             normalized["diff_summary"] = str(evidence["diff_summary"]).strip()
         for field in ("commands_run", "tests_attempted"):
@@ -160,6 +221,12 @@ def structured_implementation_evidence_from_text(text: str) -> dict[str, Any]:
             ]
             if entries:
                 normalized[field] = entries
+        acceptance_command = _acceptance_verification_command(
+            evidence.get("acceptance_verification")
+        )
+        if acceptance_command is not None:
+            normalized.setdefault("commands_run", []).append(acceptance_command)
+            normalized.setdefault("tests_attempted", []).append(acceptance_command)
         return normalized
     return {}
 

@@ -7,6 +7,7 @@ private_chat_only = true
 binary = "codex"
 app_server_host = "127.0.0.1"
 app_server_port = 17431
+codex_home = "~/.local/state/wlcodex/codex-home"
 approval_policy = "never"
 sandbox = "danger-full-access"
 
@@ -51,6 +52,35 @@ summary_max_tokens = 800
 enabled = true
 max_verify_rounds = 3
 auto_delegate_simple_edits = false
+
+[adaptive_team]
+enabled = true
+
+[adaptive_team.model_profiles]
+codex_gpt = "codex"
+claude_deepseek = "claude"
+
+[adaptive_team.assignments]
+director = ["codex_gpt"]
+investigator = ["codex_gpt"]
+architect = ["codex_gpt"]
+implementer = ["claude_deepseek", "codex_gpt"]
+tester = ["codex_gpt"]
+auditor = ["codex_gpt"]
+
+[adaptive_team.role_skills]
+investigator = ["systematic-debugging", "gitnexus-exploring"]
+architect = ["gitnexus-impact-analysis", "karpathy-guidelines"]
+implementer = ["test-driven-development", "verification-before-completion"]
+tester = ["test-driven-development", "verification-before-completion"]
+auditor = ["github:gh-address-comments", "gitnexus-pr-review"]
+
+[adaptive_team.role_capabilities]
+investigator = ["read", "shell_readonly", "logs", "gitnexus"]
+architect = ["read", "shell_readonly", "gitnexus"]
+implementer = ["read", "write", "shell", "tests"]
+tester = ["read", "write_tests", "shell_readonly", "tests"]
+auditor = ["read", "git_diff", "shell_readonly", "gitnexus"]
 
 [context_budget]
 codex_analysis_tokens = 2500

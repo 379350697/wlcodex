@@ -696,6 +696,7 @@ class CommandController:
         orchestration_run_id: int,
         agent_job_id: int | None = None,
         bind_agent_job: bool = False,
+        failure_step: str | None = None,
     ) -> ControllerResponse | None:
         if bind_agent_job and agent_job_id is None:
             artifact_id = None
@@ -740,14 +741,32 @@ class CommandController:
                 "missing": list(missing),
             },
         )
+        buttons = None
+        if failure_step:
+            self._ledger.update_orchestration_run(
+                orchestration_run_id,
+                status="needs_user",
+                current_step=failure_step,
+            )
+            orch_run = self._ledger.get_orchestration_run(orchestration_run_id)
+            buttons = build_auto_stage_buttons(
+                conversation_id,
+                failure_step,
+                last_codex_analysis=(
+                    getattr(orch_run, "last_codex_analysis", "") if orch_run else ""
+                ),
+                codex_implementer_enabled=self._codex_implementer_enabled(),
+            )
         missing_text = ", ".join(missing)
         tester_note = ""
         if gate_name == "Gate C":
             tester_note = "\n说明：Auditor performs tester duties in v1；测试证据仍必须绑定本轮实现。"
+        retry_note = "\n已进入返工阶段，可交给 Claude 或 Codex 补齐后重新验收。" if failure_step else ""
         return ControllerResponse(
             f"{gate_name} 阻断：{artifact_type} 缺少必填字段：{missing_text}。\n"
             "请先补齐上游角色 artifact，再进入下一角色阶段。"
-            f"{tester_note}"
+            f"{tester_note}{retry_note}",
+            buttons=buttons,
         )
 
     def _new_correlation_id(self) -> str:
@@ -3671,6 +3690,7 @@ class CommandController:
                 orchestration_run_id=orch_run.id,
                 agent_job_id=implementer_job_id,
                 bind_agent_job=True,
+                failure_step=AUTO_RETRY_READY,
             )
             if gate_response is not None:
                 return gate_response
@@ -3683,6 +3703,7 @@ class CommandController:
                 orchestration_run_id=orch_run.id,
                 agent_job_id=implementer_job_id,
                 bind_agent_job=True,
+                failure_step=AUTO_RETRY_READY,
             )
             if gate_response is not None:
                 return gate_response

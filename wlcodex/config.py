@@ -29,6 +29,7 @@ class CodexConfig:
     app_server_port: int
     approval_policy: str
     sandbox: str
+    codex_home: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -337,6 +338,7 @@ def load_config(path: Path) -> AppConfig:
             app_server_port=int(codex.get("app_server_port", 17431)),
             approval_policy=str(codex.get("approval_policy", "on-request")),
             sandbox=str(codex.get("sandbox", "workspace-write")),
+            codex_home=_optional_path(codex.get("codex_home")),
         ),
         storage=StorageConfig(
             sqlite_path=Path(storage["sqlite_path"]),
@@ -550,6 +552,15 @@ def _workspace(data: dict[str, object]) -> WorkspaceConfig:
         path=Path(str(data["path"])),
         allow_write=bool(data.get("allow_write", True)),
     )
+
+
+def _optional_path(value: object) -> Path | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return Path(os.path.expanduser(text))
 
 
 def _workspace_discovery(raw: dict) -> WorkspaceDiscoveryConfig:

@@ -281,6 +281,7 @@ def main() -> None:
             host=config.codex.app_server_host,
             port=config.codex.app_server_port,
             startup_timeout_seconds=config.backend.startup_timeout_seconds,
+            codex_home=config.codex.codex_home,
         ))
         backend = AppServerCodexBackend(
             endpoint=process.endpoint,

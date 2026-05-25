@@ -54,6 +54,16 @@ def _attach_runtime_runner(
     return runner
 
 
+def _button_actions(buttons: object) -> set[str]:
+    actions: set[str] = set()
+    for row in buttons or []:
+        for button in row or []:
+            callback_data = button.get("callback_data", "")
+            if isinstance(callback_data, str) and ":" in callback_data:
+                actions.add(callback_data.rsplit(":", 1)[-1])
+    return actions
+
+
 async def _drain_runtime_runner(controller: CommandController) -> None:
     runner = controller._orchestration_runner
     assert runner is not None
@@ -3720,7 +3730,7 @@ async def test_auto_verification_records_audit_artifact(
 async def test_auto_verification_blocks_team_run_when_gate_b_report_missing(
     tmp_path: Path,
 ) -> None:
-    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE
+    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE, AUTO_RETRY_READY
     from wlcodex.conversation_callback import AUTO_CODEX_VERIFY, ConversationCallback
 
     workspace = tmp_path / "workspace"
@@ -3766,8 +3776,12 @@ async def test_auto_verification_blocks_team_run_when_gate_b_report_missing(
         ConversationCallback(conversation.id, AUTO_CODEX_VERIFY)
     )
 
+    updated = ledger.get_orchestration_run(orch_run.id)
     assert "Gate B" in response.text
     assert "implementation_report" in response.text
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_RETRY_READY
+    assert "auto_send_to_codex" in _button_actions(response.buttons)
     assert ledger.list_team_agent_jobs(team_run.id) == []
     assert ledger.list_agent_runs(conversation.id) == []
     assert backend.turns == []

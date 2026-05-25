@@ -1200,6 +1200,110 @@ async def test_auto_final_plan_completion_marks_architect_job_done_but_team_run_
 
 
 @pytest.mark.asyncio
+async def test_auto_final_plan_completion_closes_existing_architect_job_when_final_plan_uses_new_agent_run(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_ANALYSIS,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate final plan",
+        codex_thread_id="thread-final-plan-existing-architect",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "fix the workflow")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    analysis_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_ANALYSIS,
+        hidden_task_id=task.id,
+        external_session_id="thread-analysis-existing-architect",
+    )
+    final_plan_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-final-plan-existing-architect",
+    )
+    ledger.update_agent_run_status(final_plan_run.id, "running")
+    team_run = ledger.create_team_run(
+        conversation_id=conversation.id,
+        orchestration_run_id=orch_run.id,
+        goal="fix the workflow",
+        route="staged_auto",
+        risk_level="medium",
+    )
+    architect_job = ledger.create_team_agent_job(
+        team_run_id=team_run.id,
+        role="architect",
+        model_profile="codex_gpt",
+        status="running",
+        agent_run_id=analysis_run.id,
+    )
+
+    bridge = _bridge(service, IdleBackend(), ledger)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {
+            "threadId": "thread-final-plan-existing-architect",
+            "turnId": "turn-final-plan-existing-architect",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-final-plan-existing-architect",
+            "turnId": "turn-final-plan-existing-architect",
+            "delta": "最终方案：\n1. 修改入口校验。\n",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-final-plan-existing-architect", "status": "completed"},
+    ))
+
+    updated = ledger.get_orchestration_run(orch_run.id)
+    updated_job = ledger.list_team_agent_jobs(team_run.id)[0]
+    artifacts = [
+        artifact for artifact in ledger.list_team_artifacts(team_run.id)
+        if artifact.artifact_type == "architecture_plan"
+    ]
+
+    assert updated.status == "needs_user"
+    assert updated.current_step == AUTO_DRAFT_READY
+    assert updated_job.id == architect_job.id
+    assert updated_job.status == "done"
+    assert len(artifacts) == 1
+    assert artifacts[0].agent_job_id == architect_job.id
+
+
+@pytest.mark.asyncio
 async def test_replayed_auto_final_plan_completion_does_not_duplicate_architecture_plan(
     tmp_path: Path,
 ) -> None:

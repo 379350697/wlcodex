@@ -7,6 +7,9 @@ private_chat_only = true
 binary = "codex"
 app_server_host = "127.0.0.1"
 app_server_port = 17431
+# Optional: isolate WLCodex's app-server from VS Code's ~/.codex/.tmp cache.
+# Populate this home with auth/config/skills/plugins links as needed.
+# codex_home = "~/.local/state/wlcodex/codex-home"
 approval_policy = "on-request"
 sandbox = "workspace-write"
 

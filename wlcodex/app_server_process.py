@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
+from pathlib import Path
 import shlex
 import subprocess
 import time
@@ -17,6 +19,7 @@ class AppServerProcessConfig:
     host: str = "127.0.0.1"
     port: int = 17431
     startup_timeout_seconds: float = 15
+    codex_home: Path | None = None
 
     @property
     def endpoint(self) -> str:
@@ -25,6 +28,13 @@ class AppServerProcessConfig:
     @property
     def command(self) -> list[str]:
         return [self.binary, "app-server", "--listen", self.endpoint]
+
+    def environment(self) -> dict[str, str]:
+        env = os.environ.copy()
+        if self.codex_home is not None:
+            self.codex_home.mkdir(parents=True, exist_ok=True)
+            env["CODEX_HOME"] = str(self.codex_home)
+        return env
 
 
 @dataclass
@@ -74,6 +84,7 @@ class AppServerProcess:
             self._config.command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=self._config.environment(),
         )
 
     def wait_ready(self) -> bool:
@@ -98,6 +109,9 @@ class AppServerProcess:
         import websockets
 
         from wlcodex.codex_backend import _WEBSOCKET_MAX_SIZE_BYTES
+
+        if self._process is None and self._config.codex_home is not None:
+            return False
 
         deadline = time.monotonic() + self._config.startup_timeout_seconds
         last_error = None

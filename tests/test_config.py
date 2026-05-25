@@ -138,6 +138,40 @@ path = "/tmp/wlcodex"
     assert config.claude.model == "deepseek-v4-pro"
     assert config.claude.effort == "max"
     assert config.claude.request_timeout_seconds == 3600
+
+
+def test_codex_home_config_is_optional_and_expanded(tmp_path: Path) -> None:
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        """
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+
+[codex]
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+codex_home = "~/wlcodex-codex-home"
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "wlcodex"
+path = "/tmp/wlcodex"
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.codex.codex_home == Path.home() / "wlcodex-codex-home"
     assert config.claude.stream_idle_timeout_seconds == 600
     assert config.context_budget.codex_to_claude_tokens == 1500
     assert config.orchestration.max_verify_rounds == 3

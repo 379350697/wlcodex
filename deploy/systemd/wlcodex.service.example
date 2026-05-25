@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/media/wl/新加卷/codex/wlcodex
 EnvironmentFile=%h/.config/wlcodex/env
-Environment=PATH=/home/wl/.nvm/versions/node/v22.22.2/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=/home/wl/.local/bin:/home/wl/.nvm/versions/node/v22.22.2/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/media/wl/新加卷/codex/wlcodex/.venv/bin/wlcodex --config /media/wl/新加卷/codex/wlcodex/config/wlcodex.toml
 Restart=always
 RestartSec=5

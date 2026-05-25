@@ -3,6 +3,7 @@ from wlcodex.team_artifacts import (
     _missing,
     architecture_plan_payload,
     implementation_report_payload,
+    structured_implementation_evidence_from_text,
     test_report_payload_from_implementation as build_test_report_payload_from_implementation,
     validate_architecture_plan,
     validate_audit_report,
@@ -242,6 +243,56 @@ def test_implementation_payload_records_explicit_missing_evidence_instead_of_emp
         "commands_run",
         "tests_attempted",
     }
+
+
+def test_claude_implementation_report_shape_becomes_gate_ready_evidence():
+    text = """
+```json
+{
+  "implementation_report": {
+    "files_changed": [
+      {
+        "path": "docs/manual-aet-e2e.md",
+        "action": "created",
+        "evidence": "AET_MANUAL_E2E_V1 low-risk documentation artifact"
+      }
+    ],
+    "acceptance_verification": {
+      "command": "test -f docs/manual-aet-e2e.md && grep -Fq AET_MANUAL_E2E_V1 docs/manual-aet-e2e.md",
+      "result": "ALL CHECKS PASSED",
+      "checks": {
+        "file_exists": true,
+        "AET_MANUAL_E2E_V1": true
+      }
+    },
+    "no_other_files_modified": true
+  }
+}
+```
+"""
+
+    evidence = structured_implementation_evidence_from_text(text)
+    payload = implementation_report_payload(
+        summary="Claude implementation completed.",
+        changed_files=evidence.get("changed_files", []),
+        diff_summary=evidence.get("diff_summary", ""),
+        source_agent="claude",
+        commands_run=evidence.get("commands_run", []),
+        tests_attempted=evidence.get("tests_attempted", []),
+    )
+    test_payload = build_test_report_payload_from_implementation(
+        summary="Implementation test evidence collected.",
+        implementation_artifact_id=2,
+        commands_run=evidence.get("tests_attempted", []),
+        acceptance_criteria=["docs/manual-aet-e2e.md contains required phrases"],
+    )
+
+    assert evidence["changed_files"] == ["docs/manual-aet-e2e.md"]
+    assert "created docs/manual-aet-e2e.md" in evidence["diff_summary"]
+    assert evidence["commands_run"][0]["exit_status"] == 0
+    assert evidence["tests_attempted"] == evidence["commands_run"]
+    assert validate_implementation_report(payload).passed is True
+    assert validate_test_report(test_payload).passed is True
 
 
 def test_test_report_gate_blocks_placeholder_evidence():
