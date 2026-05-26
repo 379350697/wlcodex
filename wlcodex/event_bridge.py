@@ -14,6 +14,7 @@ import re
 import subprocess
 from collections.abc import Callable, Coroutine
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from wlcodex.codex_backend import BackendEvent
@@ -23,7 +24,11 @@ from wlcodex.inspection import TaskInspector
 from wlcodex.models import TaskStatus
 from wlcodex.status import render_approval_card
 from wlcodex.task_service import TaskService, drain_workspace
-from wlcodex.telegram_digest import render_auto_draft_digest, render_auto_diagnose_digest
+from wlcodex.telegram_digest import (
+    render_auto_diagnose_digest,
+    render_auto_draft_digest,
+    render_missing_diagnose_digest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +155,61 @@ def _extract_diagnose_json(text: str) -> str:
             # Valid diagnose JSON — return the raw string
             return block
     return ""
+
+
+def _auto_run_expects_diagnose_json(auto_run: Any, agent_runs: list[Any]) -> bool:
+    has_diagnose_role = any(
+        getattr(agent_run, "role", "") in ("auto_analysis", "auto_final_plan")
+        for agent_run in agent_runs
+    )
+    if not has_diagnose_role:
+        return False
+
+    goal = str(getattr(auto_run, "goal", "") or "").lower()
+    analysis = str(getattr(auto_run, "last_codex_analysis", "") or "").lower()
+    if any(term in goal for term in (
+        "只改文档",
+        "文档-only",
+        "docs-only",
+        "documentation-only",
+        "doc-only",
+    )):
+        return False
+    combined = " ".join((goal, analysis))
+
+    domain_terms = (
+        "lightfee",
+        "交易",
+        "交易所",
+        "实盘",
+        "仓位",
+        "持仓",
+        "开仓",
+        "平仓",
+        "挂单",
+        "订单",
+        "binance",
+        "bybit",
+        "gate",
+        "reduce-only",
+    )
+    diagnose_terms = (
+        "diagnose_live",
+        "production diagnosis",
+        "line diagnosis",
+        "线上排障",
+        "生产诊断",
+        "诊断",
+        "排障",
+        "核验",
+        "检查",
+        "verify",
+    )
+    return (
+        any(term in combined for term in domain_terms)
+        and any(term in combined for term in diagnose_terms)
+    )
+
 
 def _brief_diagnose_supplement(diagnose_digest: str) -> str:
     """Short supplement for final-plan stages — diagnose evidence reference only.
@@ -1002,10 +1062,19 @@ class EventBridge:
         # Advance based on agent role and completion
         if agent_role in (ROLE_AUTO_ANALYSIS, ROLE_AUTO_CONTEXT_SUPPLEMENT) and agent_status == "done":
             new_step = AUTO_COLLECTING_CONTEXT
-            # Primary: deterministic subprocess. Fallback: regex from model output.
-            diagnose_json = _try_collect_diagnose_json_sync(self, auto_run)
-            if not diagnose_json:
-                diagnose_json = _extract_diagnose_json(completion_summary)
+            diagnose_json = ""
+            diagnose_probe = SimpleNamespace(
+                goal=getattr(auto_run, "goal", ""),
+                last_codex_analysis=completion_summary,
+            )
+            if _auto_run_expects_diagnose_json(
+                diagnose_probe,
+                [SimpleNamespace(role=agent_role)],
+            ):
+                # Primary: deterministic subprocess. Fallback: regex from model output.
+                diagnose_json = _try_collect_diagnose_json_sync(self, auto_run)
+                if not diagnose_json:
+                    diagnose_json = _extract_diagnose_json(completion_summary)
             self._ledger.update_orchestration_run(
                 auto_run.id,
                 status="needs_user",
@@ -1016,9 +1085,18 @@ class EventBridge:
 
         elif agent_role == "auto_final_plan" and agent_status == "done":
             new_step = AUTO_DRAFT_READY
-            diagnose_json = _try_collect_diagnose_json_sync(self, auto_run)
-            if not diagnose_json:
-                diagnose_json = _extract_diagnose_json(completion_summary)
+            diagnose_json = ""
+            diagnose_probe = SimpleNamespace(
+                goal=getattr(auto_run, "goal", ""),
+                last_codex_analysis=completion_summary,
+            )
+            if _auto_run_expects_diagnose_json(
+                diagnose_probe,
+                [SimpleNamespace(role=agent_role)],
+            ):
+                diagnose_json = _try_collect_diagnose_json_sync(self, auto_run)
+                if not diagnose_json:
+                    diagnose_json = _extract_diagnose_json(completion_summary)
             self._ledger.update_orchestration_run(
                 auto_run.id,
                 status="needs_user",
@@ -1914,9 +1992,20 @@ class EventBridge:
             decision = str(audit_report.payload.get("decision", "")).strip()
             risk = str(audit_report.payload.get("risk_level", "")).strip()
             summary = str(audit_report.payload.get("summary", "")).strip()
-            audit_line = "审计结论：" + (decision or "unknown")
+            decision_label = {
+                "pass": "验收通过",
+                "block": "验收未通过",
+                "needs_user": "需要你确认",
+            }.get(decision, "未明确")
+            risk_label = {
+                "low": "低",
+                "medium": "中",
+                "high": "高",
+                "critical": "严重",
+            }.get(risk, risk)
+            audit_line = "审计结论：" + decision_label
             if risk:
-                audit_line += f" / 风险：{risk}"
+                audit_line += f" / 风险：{risk_label}"
             lines.append(audit_line)
             if summary:
                 lines.append("主要结论：" + summary[:240])
@@ -1983,21 +2072,10 @@ class EventBridge:
                 agent_runs = self._ledger.list_agent_runs(
                     auto_run.conversation_id,
                 )
-                has_diagnose_role = any(
-                    ar.role in ("auto_analysis", "auto_final_plan")
-                    for ar in agent_runs
+                diagnose_expected = _auto_run_expects_diagnose_json(
+                    auto_run,
+                    agent_runs,
                 )
-                if has_diagnose_role:
-                    goal_lower = (auto_run.goal or "").lower()
-                    analysis_lower = (auto_run.last_codex_analysis or "").lower()
-                    diagnose_keywords = (
-                        "lightfee", "diagnose_live", "diagnose",
-                        "production diagnosis", "line diagnosis",
-                        "线上排障", "生产诊断", "schema_version",
-                    )
-                    if any(kw in goal_lower or kw in analysis_lower
-                           for kw in diagnose_keywords):
-                        diagnose_expected = True
             except Exception:
                 pass
 
@@ -2015,16 +2093,7 @@ class EventBridge:
                 if structured_digest:
                     digest = structured_digest
                 elif diagnose_expected:
-                    digest = (
-                        "关键摘要：\n"
-                        "结论：诊断 JSON 未采集到，无法输出确定性交易结论。\n"
-                        "依据：\n"
-                        "- diagnose_json=missing\n"
-                        "- confidence=low\n"
-                        "- 请手动运行 python scripts/diagnose_live.py --json\n"
-                        "风险：高 — 缺乏结构化证据，不得推送或执行交易操作。\n"
-                        "下一步：重新触发诊断采集，或检查 Codex 日志。"
-                    )
+                    digest = render_missing_diagnose_digest()
                 else:
                     digest = render_auto_draft_digest(
                         auto_run.last_codex_analysis,
@@ -2046,8 +2115,8 @@ class EventBridge:
                 supplement = _brief_diagnose_supplement(structured_digest)
             elif diagnose_expected:
                 supplement = (
-                    "诊断 JSON 未采集到，缺少结构化证据。"
-                    "请手动运行 python scripts/diagnose_live.py --json"
+                    "结构化诊断证据未采集到；最终方案缺少自动诊断旁证。"
+                    "请重新触发诊断采集，或检查诊断日志后再继续。"
                 )
             if supplement:
                 text = "最终方案已生成。\n\n{}\n\n{}\n\n请选择下一步：".format(digest, supplement)

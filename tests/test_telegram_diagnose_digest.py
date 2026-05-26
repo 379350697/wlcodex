@@ -530,7 +530,7 @@ def test_multiple_http_status_codes_in_digest():
 def test_no_diagnose_json_returns_empty():
     """When diagnose JSON is missing/unparseable, render returns empty string.
 
-    Caller must detect this and show diagnose_json=missing, confidence=low.
+    Caller must detect this and show a human-readable low-confidence warning.
     """
     # Empty string
     assert render_auto_diagnose_digest("") == ""

@@ -9,6 +9,10 @@ import uuid
 from collections.abc import Callable
 
 from wlcodex.agent_backend import AgentRequest
+from wlcodex.codex_thread_policy import (
+    can_reuse_codex_thread,
+    codex_thread_policy_fingerprint,
+)
 from wlcodex.codex_runtime_source import CodexRuntimeSource
 from wlcodex.context_packets import ContextBudget, approx_tokens, trim_to_budget
 from wlcodex.interaction.events import InteractionEvent
@@ -592,6 +596,16 @@ class OrchestrationRunner:
         phase_started_at: dict[str, float] = {"running_analysis": loop.time()}
         codex_active_command = ""
         codex_command_started_at: float | None = None
+        current_codex_policy = codex_thread_policy_fingerprint(self._codex)
+        reusable_codex_thread_id = (
+            codex_thread_id
+            if can_reuse_codex_thread(
+                codex_thread_id,
+                getattr(conversation, "codex_thread_policy", "") or "",
+                current_codex_policy,
+            )
+            else ""
+        )
 
         def _mark_phase_started(phase: str) -> None:
             phase_started_at[phase] = loop.time()
@@ -710,10 +724,10 @@ class OrchestrationRunner:
             conversation_id=conversation.id,
             orchestration_run_id=orchestration_run_id,
             runtime_activity_callback=_codex_runtime_activity,
-            codex_thread_id=codex_thread_id,
+            codex_thread_id=reusable_codex_thread_id,
             on_codex_thread_bound=(
                 lambda thread_id: self._ledger.set_conversation_codex_thread(
-                    conversation.id, thread_id
+                    conversation.id, thread_id, current_codex_policy
                 )
             ),
         )

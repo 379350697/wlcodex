@@ -212,11 +212,20 @@ def render_auto_draft_digest(
 
     if not conclusion:
         conclusion = _first_informative_line(lines)
-    conclusion = _brief_conclusion(conclusion)
+    raw_conclusion = conclusion
+    conclusion = _brief_conclusion(
+        conclusion,
+        completion_heading=_completion_heading(lines, conclusion),
+    )
     if key_points:
         evidence = _merge_evidence(key_points, evidence)
     elif not evidence or _is_low_value_evidence(evidence):
         evidence = key_points
+    evidence = _drop_duplicate_evidence(
+        evidence,
+        raw_conclusion=raw_conclusion,
+        conclusion=conclusion,
+    )
     if not evidence:
         evidence = _fallback_evidence(lines, skip={conclusion, risk, next_step})
     if not risk:
@@ -242,6 +251,18 @@ def render_auto_draft_digest(
     if len(rendered) <= max_chars:
         return rendered
     return rendered[: max_chars - 12].rstrip() + "\n...（已精简）"
+
+
+def render_missing_diagnose_digest() -> str:
+    return (
+        "关键摘要：\n"
+        "结论：结构化诊断证据没有采集成功，暂时不能给出确定的线上交易判断。\n"
+        "依据：\n"
+        "- 缺少诊断脚本产出的结构化结果\n"
+        "- 当前只能确认诊断采集失败，不能确认交易状态\n"
+        "风险：高。证据不完整，置信度低，不要推送或执行交易操作。\n"
+        "下一步：请重新触发诊断采集，或检查诊断日志后再继续。"
+    )
 
 
 def sanitize_telegram_user_text(text: str) -> str:
@@ -525,7 +546,9 @@ def _structured_items(value: object) -> list[str]:
         return []
     if isinstance(value, str):
         text = _normalize_sentence(value)
-        return [] if _looks_like_protocol_line(text) else [text]
+        if _looks_like_protocol_line(text) or _looks_like_internal_ref(text):
+            return []
+        return [text]
     if isinstance(value, (int, float, bool)):
         return []
     if isinstance(value, list | tuple):
@@ -595,6 +618,15 @@ def _structured_text(value: object) -> str:
     return ""
 
 
+def _looks_like_internal_ref(text: str) -> bool:
+    return bool(
+        re.match(
+            r"^(?:team_artifact|agent_job|team_run|conversation|orchestration_run|task)=",
+            _normalize_sentence(text).lower(),
+        )
+    )
+
+
 def _find_section(lines: list[str], key: str) -> str:
     pattern = _SECTION_PATTERNS[key]
     for idx, line in enumerate(lines):
@@ -617,8 +649,17 @@ def _find_conclusion(lines: list[str]) -> str:
     return ""
 
 
-def _brief_conclusion(text: str) -> str:
+def _brief_conclusion(text: str, *, completion_heading: str = "") -> str:
     text = re.sub(r"^(?:最终结论是|最终结论)\s*[:：]\s*", "", _normalize_sentence(text))
+    if completion_heading and re.match(r"^(?:我会|我将|会先|先把)", text):
+        return completion_heading
+    if (
+        "文档-only" in text
+        and "只改文档" in text
+        and "最小验证" in text
+        and re.match(r"^(?:我会|我将|会先|先把)", text)
+    ):
+        return "文档-only小任务已收敛为只改文档并做最小验证。"
     text = re.sub(r"旧的[^。；;]*没有复现[。；;]?", "", text)
     text = re.sub(r"之前的[^。；;]*没有(?:按原形)?复现[。；;]?", "", text)
     if "新的问题是" in text:
@@ -629,14 +670,106 @@ def _brief_conclusion(text: str) -> str:
     return _trim_sentence(text, 180)
 
 
+def _completion_heading(lines: list[str], conclusion: str) -> str:
+    if not lines:
+        return ""
+    first = _normalize_sentence(lines[0])
+    if not re.search(r"(?:开发|实现|任务).*(?:完成|通过)|测试通过", first):
+        return ""
+    if "文档-only" in conclusion or "只改文档" in conclusion:
+        return "文档-only小任务已完成，测试通过。"
+    return _trim_sentence(first, 80)
+
+
 def _find_evidence(lines: list[str]) -> list[str]:
-    evidence = _find_section(lines, "evidence")
-    if not evidence:
-        evidence = _find_section(lines, "executed_check")
-    if not evidence:
+    evidence_items = _collect_section_lines(lines, "evidence")
+    if not evidence_items:
+        evidence_items = _collect_section_lines(lines, "executed_check")
+    if not evidence_items:
         return []
-    parts = re.split(r"[；;]\s*", evidence)
-    return [_trim_sentence(part, 140) for part in parts if part.strip()][:3]
+
+    parts: list[str] = []
+    for evidence in evidence_items:
+        parts.extend(part for part in re.split(r"[；;]\s*", evidence) if part.strip())
+
+    rendered: list[str] = []
+    for part in parts:
+        item = _humanize_evidence_item(part)
+        if not item:
+            continue
+        if any(_same_key_point(item, existing) for existing in rendered):
+            continue
+        rendered.append(_trim_sentence(item, 140))
+        if len(rendered) >= 5:
+            break
+    return rendered[:3]
+
+
+def _drop_duplicate_evidence(
+    evidence: list[str],
+    *,
+    raw_conclusion: str,
+    conclusion: str,
+) -> list[str]:
+    filtered: list[str] = []
+    for item in evidence:
+        normalized = _normalize_sentence(item)
+        if normalized in {"推荐方案"}:
+            continue
+        if raw_conclusion and _same_key_point(normalized, raw_conclusion):
+            continue
+        if conclusion and _same_key_point(normalized, conclusion):
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def _collect_section_lines(lines: list[str], key: str) -> list[str]:
+    pattern = _SECTION_PATTERNS[key]
+    for idx, line in enumerate(lines):
+        match = pattern.match(line)
+        if not match:
+            continue
+        value = (match.group(1) or "").strip()
+        if value:
+            return [_normalize_sentence(value)]
+        collected: list[str] = []
+        for candidate in lines[idx + 1 :]:
+            if any(section_pattern.match(candidate) for section_pattern in _SECTION_PATTERNS.values()):
+                break
+            normalized = _normalize_sentence(candidate)
+            if normalized:
+                collected.append(normalized)
+        return collected
+    return []
+
+
+def _humanize_evidence_item(text: str) -> str:
+    normalized = _normalize_sentence(text)
+    lowered = normalized.lower()
+    if any(field in lowered for field in (
+        "needs_implementation",
+        "files_to_touch",
+        "implementation_steps",
+    )):
+        if (
+            re.search(r"needs_implementation\s*=\s*false", lowered)
+            or "needs_implementation:false" in lowered
+        ) and (
+            re.search(r"files_to_touch\s*=\s*\[\]", lowered)
+            or "files_to_touch:[]" in lowered
+        ):
+            return "任务包没有给出明确的代码改动范围或执行步骤。"
+        return "任务包包含内部执行字段，需先转成明确的人类任务说明。"
+    if "无错误栈" in normalized or "无失败日志" in normalized:
+        return "没有错误栈或失败日志。"
+    if "git status --short" in lowered and "无未提交改动" in normalized:
+        return "工作区没有未提交改动。"
+    if lowered.startswith("gitnexus://") and "落后 head" in lowered:
+        return "代码索引可用于导航，但落后当前代码；执行前需要以本地文件为准。"
+    if "diagnosis_report schema" in lowered:
+        return "诊断报告还需要补齐症状、预期、证据、根因、修复计划和回归测试。"
+    return normalized
 
 
 def _find_key_points(lines: list[str]) -> list[str]:

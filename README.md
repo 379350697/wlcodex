@@ -38,6 +38,17 @@ when you need raw visibility.
 | Codex-only | `/codex <prompt>` | Codex only, no Claude |
 | Claude-only | `/claude <prompt>` | Claude only, no automatic Codex analysis or verification |
 
+**Documentation-only tasks** should keep the write scope limited to
+`README.md` or files under `docs/`. Do not touch `wlcodex/`, `tests/`,
+`runtime/`, configuration files, or generated artifacts unless the task
+explicitly expands beyond documentation. Before handing the result back, verify
+the scope with:
+
+```bash
+git diff --name-only
+git diff -- README.md docs/
+```
+
 Codex-only sends the prompt directly to Codex without Claude or /auto gates.
 Claude-only is for direct hands-on implementation; Cockpit will offer a
 "让 Codex 验收" action after Claude-only work completes.

@@ -14,7 +14,12 @@ from wlcodex.auto_workflow import (
     AUTO_COMPLETED,
     AUTO_DRAFT_READY,
     AUTO_RETRY_READY,
+    AUTO_ROUTE_SELECT,
     AUTO_VERIFYING,
+    AUTO_ROUTE_DIAGNOSE,
+    AUTO_ROUTE_DESIGN,
+    AUTO_ROUTE_CODEX_EXECUTE,
+    AUTO_ROUTE_CLAUDE_EXECUTE,
     AUTO_FINAL_PLAN,
     AUTO_SEND_TO_CLAUDE,
     AUTO_CONTINUE_CONTEXT,
@@ -143,6 +148,22 @@ class TestIsAutoCollectingContext:
 
 
 class TestBuildAutoStageButtons:
+    def test_route_select_buttons_choose_user_intent_first(self) -> None:
+        buttons = build_auto_stage_buttons(
+            42,
+            AUTO_ROUTE_SELECT,
+            codex_implementer_enabled=True,
+        )
+        labels = _labels(buttons)
+        actions = _actions(buttons)
+
+        assert labels[:4] == ["诊断", "设计", "GPT 执行", "DeepSeek 执行"]
+        assert AUTO_ROUTE_DIAGNOSE in actions
+        assert AUTO_ROUTE_DESIGN in actions
+        assert AUTO_ROUTE_CODEX_EXECUTE in actions
+        assert AUTO_ROUTE_CLAUDE_EXECUTE in actions
+        assert AUTO_FINAL_PLAN not in actions
+
     def test_collecting_context_buttons_are_non_executing(self) -> None:
         buttons = build_auto_stage_buttons(42, AUTO_COLLECTING_CONTEXT)
         labels = _labels(buttons)

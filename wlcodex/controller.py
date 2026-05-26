@@ -66,9 +66,14 @@ from wlcodex.auto_workflow import (
     AUTO_CLAUDE_DONE,
     AUTO_VERIFYING,
     AUTO_RETRY_READY,
+    AUTO_ROUTE_SELECT,
     AUTO_CODEX_TAKEOVER_RUNNING,
     AUTO_COMPLETED,
     AUTO_FINAL_PLAN,
+    AUTO_ROUTE_DIAGNOSE,
+    AUTO_ROUTE_DESIGN,
+    AUTO_ROUTE_CODEX_EXECUTE,
+    AUTO_ROUTE_CLAUDE_EXECUTE,
     AUTO_SHOW_DRAFT,
     AUTO_CANCEL,
     AUTO_SEND_TO_CLAUDE,
@@ -96,6 +101,10 @@ from wlcodex.auto_workflow import (
     build_auto_stage_buttons,
     is_active_auto_stage,
     is_auto_collecting_context,
+)
+from wlcodex.codex_thread_policy import (
+    can_reuse_codex_thread,
+    codex_thread_policy_fingerprint,
 )
 from wlcodex.claude_permissions import (
     DEFAULT_CLAUDE_PERMISSION_MODE,
@@ -1559,7 +1568,9 @@ class CommandController:
         interaction_mode: str = "general",
     ) -> str:
         thread_id = str(getattr(active, "codex_thread_id", "") or "")
-        if thread_id:
+        current_policy = codex_thread_policy_fingerprint(self._backend)
+        stored_policy = str(getattr(active, "codex_thread_policy", "") or "")
+        if can_reuse_codex_thread(thread_id, stored_policy, current_policy):
             self._service.set_task_thread(task.id, thread_id)
             continue_prompt_turn = getattr(self._backend, "continue_prompt_turn", None)
             continue_turn = getattr(self._backend, "continue_turn", None)
@@ -1577,7 +1588,9 @@ class CommandController:
         else:
             thread_id = await self._backend.create_thread(workspace_path)
         self._service.set_task_thread(task.id, thread_id)
-        self._ledger.set_conversation_codex_thread(active.id, thread_id)
+        self._ledger.set_conversation_codex_thread(
+            active.id, thread_id, current_policy
+        )
         start_prompt_turn = getattr(self._backend, "start_prompt_turn", None)
         if interaction_mode != "general" and callable(start_prompt_turn):
             await start_prompt_turn(thread_id, prompt, interaction_mode)
@@ -2744,272 +2757,218 @@ class CommandController:
         )
         self._ledger.update_orchestration_run(
             orch_run.id,
-            status="running",
-            current_step=AUTO_COLLECTING_CONTEXT,
+            status="needs_user",
+            current_step=AUTO_ROUTE_SELECT,
         )
-        team_run = None
-        if self._adaptive_team_enabled and hasattr(self._ledger, "create_team_run"):
-            team_run = self._ledger.create_team_run(
-                conversation_id=active.id,
-                orchestration_run_id=orch_run.id,
-                goal=command.prompt,
-                route="staged_auto",
-                risk_level="medium",
+        self._ledger.update_conversation_summary(
+            active.id,
+            trim_to_budget(f"[Auto] {command.prompt[:200]}", ContextBudget().conversation_summary_tokens),
+        )
+        buttons = build_auto_stage_buttons(
+            active.id,
+            AUTO_ROUTE_SELECT,
+            codex_implementer_enabled=self._codex_implementer_enabled(),
+        )
+        return ControllerResponse(
+            "请选择执行路线：\n\n"
+            "诊断：先查问题、找根因、收集证据，不直接改代码。\n"
+            "设计：先出方案和交接提示，不直接改代码。\n"
+            "GPT 执行：直接交给 GPT 开发工程师处理轻量任务。\n"
+            "DeepSeek 执行：直接交给 DeepSeek 开发工程师处理轻量任务。",
+            buttons=buttons,
+        )
+
+    # --- Staged-auto callback handlers ---
+
+    async def _handle_auto_route_direct(
+        self, callback: ConversationCallback, *, target: str
+    ) -> ControllerResponse:
+        orch_run = self._latest_active_auto_run(callback.conversation_id)
+        if orch_run is None:
+            return ControllerResponse("没有活跃的自动工作流。请用 /auto 开始。")
+        if orch_run.current_step != AUTO_ROUTE_SELECT:
+            return ControllerResponse(
+                f"当前阶段是 {auto_stage_label(orch_run.current_step)}，不能选择执行路线。"
             )
-            self._emit_event(RuntimeEvent(
-                schema_version=1,
-                event_type=EventType.TEAM_RUN_STARTED,
-                aggregate_type=AggregateType.ORCHESTRATION_RUN,
-                aggregate_id=str(orch_run.id),
-                correlation_id=cid,
-                source=EventSource.CONTROLLER,
-                actor="controller",
-                visibility=Visibility.OPERATOR,
-                payload={
-                    "team_run_id": team_run.id,
-                    "route": "staged_auto",
-                    "risk_level": "medium",
-                },
-                occurred_at=now_iso(),
-                conversation_id=active.id,
-                orchestration_run_id=orch_run.id,
-            ))
+        if target == "codex" and not self._codex_implementer_enabled():
+            return ControllerResponse(
+                "GPT 开发工程师未启用。请选择其他路线，或先启用 GPT 开发工程师。",
+                buttons=build_auto_stage_buttons(
+                    callback.conversation_id,
+                    AUTO_ROUTE_SELECT,
+                    codex_implementer_enabled=self._codex_implementer_enabled(),
+                ),
+            )
+        if target == "claude" and (
+            self._claude is None or not getattr(self._claude, "enabled", False)
+        ):
+            return ControllerResponse(
+                "DeepSeek 开发工程师未启用。请选择其他路线，或先启用 DeepSeek 开发工程师。",
+                buttons=build_auto_stage_buttons(
+                    callback.conversation_id,
+                    AUTO_ROUTE_SELECT,
+                    codex_implementer_enabled=self._codex_implementer_enabled(),
+                ),
+            )
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="needs_user",
+            current_step=AUTO_DRAFT_READY,
+            last_codex_analysis=orch_run.goal,
+        )
+        if target == "codex":
+            return await self._handle_auto_send_to_codex(callback)
+        return await self._handle_auto_send_to_claude(callback)
 
-        from wlcodex.team_roles import TeamRouteKind, classify_team_route
+    async def _handle_auto_route_analysis(
+        self, callback: ConversationCallback, *, route_kind: str
+    ) -> ControllerResponse:
+        convo = self._ledger.get_conversation(callback.conversation_id)
+        orch_run = self._latest_active_auto_run(callback.conversation_id)
+        if orch_run is None:
+            return ControllerResponse("没有活跃的自动工作流。请用 /auto 开始。")
+        if orch_run.current_step != AUTO_ROUTE_SELECT:
+            return ControllerResponse(
+                f"当前阶段是 {auto_stage_label(orch_run.current_step)}，不能选择执行路线。"
+            )
 
-        route_decision = classify_team_route(command.prompt)
-        first_role = route_decision.first_role.value
+        is_diagnosis = route_kind == "bug"
+        first_role = "investigator" if is_diagnosis else "architect"
         first_model_profile = (
-            self._architect_model_profile
-            if route_decision.kind == TeamRouteKind.FEATURE
-            else self._investigator_model_profile
+            self._investigator_model_profile
+            if is_diagnosis
+            else self._architect_model_profile
         )
-        first_output_schema = (
-            "architecture_plan"
-            if route_decision.kind == TeamRouteKind.FEATURE
-            else "diagnosis_report"
-        )
-        first_role_display = (
-            "架构工程师"
-            if route_decision.kind == TeamRouteKind.FEATURE
-            else "诊断工程师"
-        )
-        first_job = None
-        # Start Codex in read-only analysis mode (NOT the eager orchestration runner)
-        budget = ContextBudget()
-        packet = build_auto_context_packet(
-            user_goal=command.prompt,
-            conversation_summary=trim_to_budget(
-                active.conversation_summary, budget.conversation_summary_tokens
-            ),
-            workspace=active.workspace_alias,
-            budget=budget,
-        )
-        codex_prompt = packet.render()
+        first_output_schema = "diagnosis_report" if is_diagnosis else "architecture_plan"
+        first_role_display = "诊断工程师" if is_diagnosis else "架构工程师"
+        reason = "用户选择诊断路线" if is_diagnosis else "用户选择设计路线"
 
+        chat_id = convo.chat_id
+        goal = orch_run.goal
         task = self._reserve_execution_lease(
-            conversation_id=active.id,
-            workspace_alias=active.workspace_alias,
-            prompt=command.prompt,
+            conversation_id=convo.id,
+            workspace_alias=convo.workspace_alias,
+            prompt=goal,
             telegram_chat_id=chat_id,
             purpose="auto_analysis",
         )
-
-        codex_analysis_run = self._ledger.create_agent_run(
-            conversation_id=active.id,
+        packet = build_auto_context_packet(
+            user_goal=goal,
+            conversation_summary=trim_to_budget(
+                convo.conversation_summary,
+                ContextBudget().conversation_summary_tokens,
+            ),
+            workspace=convo.workspace_alias,
+            budget=ContextBudget(),
+        )
+        codex_prompt = packet.render()
+        agent_run = self._ledger.create_agent_run(
+            conversation_id=convo.id,
             agent="codex",
             role=ROLE_AUTO_ANALYSIS,
             hidden_task_id=task.id,
             prompt_packet_summary=packet.summary(),
         )
-        self._ledger.update_agent_run_status(codex_analysis_run.id, "running")
-        if team_run is not None:
-            try:
-                first_job = self._ledger.create_team_agent_job(
-                    team_run_id=team_run.id,
-                    role=first_role,
-                    model_profile=first_model_profile,
-                    status="running",
-                    agent_run_id=codex_analysis_run.id,
-                )
-                self._ledger.record_team_assignment(
-                    team_run_id=team_run.id,
-                    role=first_role,
-                    model_profile=first_model_profile,
-                    selected_by="policy",
-                )
-                if hasattr(self._ledger, "record_team_artifact"):
-                    self._ledger.record_team_artifact(
-                        team_run_id=team_run.id,
-                        agent_job_id=first_job.id,
-                        artifact_type="routing_decision",
-                        summary=(
-                            f"{first_role_display}路线：{route_decision.reason}"
-                        ),
-                        payload={
-                            "route_kind": route_decision.kind.value,
-                            "first_role": first_role,
-                            "reason": route_decision.reason,
-                            "matched_signals": list(route_decision.matched_signals),
-                        },
-                    )
-                self._emit_event(RuntimeEvent(
-                    schema_version=1,
-                    event_type=EventType.TEAM_AGENT_JOB_STARTED,
-                    aggregate_type=AggregateType.AGENT_RUN,
-                    aggregate_id=str(codex_analysis_run.id),
-                    correlation_id=cid,
-                    source=EventSource.CONTROLLER,
-                    actor="controller",
-                    visibility=Visibility.OPERATOR,
-                    payload={
-                        "team_run_id": team_run.id,
-                        "agent_job_id": first_job.id,
-                        "role": first_role,
-                        "model_profile": first_model_profile,
-                    },
-                    occurred_at=now_iso(),
-                    conversation_id=active.id,
-                    orchestration_run_id=orch_run.id,
-                    agent_run_id=codex_analysis_run.id,
-                ))
-                context_packet = self._build_team_context_packet_for_job(
-                    team_run=team_run,
-                    agent_job=first_job,
-                    role=first_role,
-                    model_profile=first_model_profile,
-                    resume_state="staged auto context collection starting",
-                    output_schema=first_output_schema,
-                )
-                prompt_text = context_packet.render()
-                codex_prompt = prompt_text
-                packet_record = self._ledger.record_team_context_packet(
-                    team_run_id=team_run.id,
-                    agent_job_id=first_job.id,
-                    packet_json=context_packet.as_json(),
-                    prompt_text=prompt_text,
-                    prompt_tokens=approx_tokens(prompt_text),
-                )
-                self._emit_event(RuntimeEvent(
-                    schema_version=1,
-                    event_type=EventType.TEAM_CONTEXT_PACKET_RECORDED,
-                    aggregate_type=AggregateType.AGENT_RUN,
-                    aggregate_id=str(codex_analysis_run.id),
-                    correlation_id=cid,
-                    source=EventSource.CONTROLLER,
-                    actor="controller",
-                    visibility=Visibility.OPERATOR,
-                    payload={
-                        "team_run_id": team_run.id,
-                        "agent_job_id": first_job.id,
-                        "context_packet_id": packet_record.id,
-                        "prompt_tokens": packet_record.prompt_tokens,
-                    },
-                    occurred_at=now_iso(),
-                    conversation_id=active.id,
-                    orchestration_run_id=orch_run.id,
-                    agent_run_id=codex_analysis_run.id,
-                ))
-            except Exception as exc:
-                task = self._service.fail_task(task.id, str(exc))
-                self._ledger.update_agent_run_status(
-                    codex_analysis_run.id,
-                    "failed",
-                    completion_summary=str(exc)[:2000],
-                )
-                self._ledger.update_orchestration_run(
-                    orch_run.id,
-                    status="failed",
-                    last_codex_analysis=str(exc)[:5000],
-                )
-                self._mark_auto_team_failed(
-                    team_run=team_run,
-                    architect_job=first_job,
-                )
-                return ControllerResponse(classify_user_error(exc))
+        self._ledger.update_agent_run_status(agent_run.id, "running")
 
-        workspace_path = str(self._service.get_workspace(active.workspace_alias).path)
+        team_run = None
+        first_job = None
+        if self._adaptive_team_enabled and hasattr(self._ledger, "create_team_run"):
+            team_run = self._ledger.create_team_run(
+                conversation_id=convo.id,
+                orchestration_run_id=orch_run.id,
+                goal=goal,
+                route="staged_auto",
+                risk_level="medium",
+            )
+            first_job = self._ledger.create_team_agent_job(
+                team_run_id=team_run.id,
+                role=first_role,
+                model_profile=first_model_profile,
+                status="running",
+                agent_run_id=agent_run.id,
+            )
+            self._ledger.record_team_assignment(
+                team_run_id=team_run.id,
+                role=first_role,
+                model_profile=first_model_profile,
+                selected_by="user",
+            )
+            self._ledger.record_team_artifact(
+                team_run_id=team_run.id,
+                agent_job_id=first_job.id,
+                artifact_type="routing_decision",
+                summary=f"{first_role_display}路线：{reason}",
+                payload={
+                    "route_kind": route_kind,
+                    "first_role": first_role,
+                    "reason": reason,
+                    "matched_signals": ["user_button"],
+                },
+            )
+            context_packet = self._build_team_context_packet_for_job(
+                team_run=team_run,
+                agent_job=first_job,
+                role=first_role,
+                model_profile=first_model_profile,
+                resume_state="staged auto route selected by user",
+                output_schema=first_output_schema,
+            )
+            codex_prompt = context_packet.render()
+            self._ledger.record_team_context_packet(
+                team_run_id=team_run.id,
+                agent_job_id=first_job.id,
+                packet_json=context_packet.as_json(),
+                prompt_text=codex_prompt,
+                prompt_tokens=approx_tokens(codex_prompt),
+            )
 
-        self._emit_event(RuntimeEvent(
-            schema_version=1,
-            event_type=EventType.RUN_REQUESTED,
-            aggregate_type=AggregateType.ORCHESTRATION_RUN,
-            aggregate_id=str(orch_run.id),
-            correlation_id=cid,
-            source=EventSource.CONTROLLER,
-            actor="controller",
-            visibility=Visibility.OPERATOR,
-            payload={"goal": command.prompt, "stage": AUTO_COLLECTING_CONTEXT},
-            occurred_at=now_iso(),
-            conversation_id=active.id,
-            orchestration_run_id=orch_run.id,
-        ))
-
+        self._ledger.update_orchestration_run(
+            orch_run.id,
+            status="running",
+            current_step=AUTO_COLLECTING_CONTEXT,
+        )
+        workspace_path = str(self._service.get_workspace(convo.workspace_alias).path)
         try:
             await self._start_codex_turn_for_conversation(
-                active=active,
+                active=convo,
                 task=task,
                 workspace_path=workspace_path,
                 prompt=codex_prompt,
                 interaction_mode="general",
             )
         except Exception as exc:
-            task = self._service.fail_task(task.id, str(exc))
+            self._service.fail_task(task.id, str(exc))
             self._ledger.update_agent_run_status(
-                codex_analysis_run.id, "failed", completion_summary=str(exc)[:2000],
+                agent_run.id,
+                "failed",
+                completion_summary=str(exc)[:2000],
             )
             self._ledger.update_orchestration_run(
                 orch_run.id,
                 status="failed",
                 last_codex_analysis=str(exc)[:5000],
             )
-            self._mark_auto_team_failed(
-                team_run=team_run,
-                architect_job=first_job,
-            )
+            if team_run is not None and hasattr(self._ledger, "update_team_run_status"):
+                self._ledger.update_team_run_status(team_run.id, "failed")
+            if first_job is not None and hasattr(self._ledger, "update_team_agent_job_status"):
+                self._ledger.update_team_agent_job_status(first_job.id, "failed")
             return ControllerResponse(classify_user_error(exc))
 
-        self._ledger.update_conversation_summary(
-            active.id,
-            trim_to_budget(
-                f"[Auto] {command.prompt[:200]}",
-                budget.conversation_summary_tokens,
-            ),
+        return ControllerResponse(
+            f"{first_role_display}开始分析。完成后会显示「生成最终方案」。\n\n"
+            "当前不会启动开发工程师。",
+            buttons=[[
+                {
+                    "text": "查看状态",
+                    "callback_data": encode_conversation_callback(convo.id, AUTO_VIEW_STATUS),
+                },
+                {
+                    "text": "取消",
+                    "callback_data": encode_conversation_callback(convo.id, AUTO_CANCEL),
+                },
+            ]],
         )
-
-        buttons = [[
-            {
-                "text": "查看状态",
-                "callback_data": encode_conversation_callback(active.id, AUTO_VIEW_STATUS),
-            },
-            {
-                "text": "取消",
-                "callback_data": encode_conversation_callback(active.id, AUTO_CANCEL),
-            },
-        ]]
-        start_text = (
-            f"{first_role_display}开始分析。你可以继续补充信息，"
-            "分析完成后会显示「生成最终方案」。\n\n"
-            f"注意：当前不会启动开发工程师；{first_role_display}会按任务需要执行查询和核验。"
-        )
-
-        if self._interaction_renderer is not None:
-            from wlcodex.interaction.events import InteractionEvent
-            await self._interaction_renderer.handle(
-                InteractionEvent(
-                    event_type="run_started",
-                    chat_id=chat_id,
-                    task_id=task.id,
-                    conversation_id=active.id,
-                    text=start_text,
-                    buttons=buttons,
-                )
-            )
-            return ControllerResponse("", already_rendered=True)
-
-        return ControllerResponse(start_text, buttons=buttons)
-
-    # --- Staged-auto callback handlers ---
 
     def _latest_active_auto_run(self, conversation_id: int) -> object | None:
         """Find the latest orchestration run for this conversation that is
@@ -5736,7 +5695,15 @@ class CommandController:
             return ControllerResponse("对话不存在或已被删除。")
 
         # --- Staged-auto callback actions ---
-        if callback.action == AUTO_FINAL_PLAN:
+        if callback.action == AUTO_ROUTE_DIAGNOSE:
+            return await self._handle_auto_route_analysis(callback, route_kind="bug")
+        elif callback.action == AUTO_ROUTE_DESIGN:
+            return await self._handle_auto_route_analysis(callback, route_kind="feature")
+        elif callback.action == AUTO_ROUTE_CODEX_EXECUTE:
+            return await self._handle_auto_route_direct(callback, target="codex")
+        elif callback.action == AUTO_ROUTE_CLAUDE_EXECUTE:
+            return await self._handle_auto_route_direct(callback, target="claude")
+        elif callback.action == AUTO_FINAL_PLAN:
             return await self._handle_auto_final_plan(callback)
         elif callback.action == AUTO_SHOW_DRAFT:
             orch_run = self._latest_active_auto_run(callback.conversation_id)
@@ -6189,7 +6156,15 @@ class CommandController:
                 codex_analysis_run_id=codex_analysis_run.id,
                 chat_id=conv.chat_id,
                 workspace_path=workspace_path,
-                codex_thread_id=getattr(conv, "codex_thread_id", "") or "",
+                codex_thread_id=(
+                    getattr(conv, "codex_thread_id", "") or ""
+                    if can_reuse_codex_thread(
+                        getattr(conv, "codex_thread_id", "") or "",
+                        getattr(conv, "codex_thread_policy", "") or "",
+                        codex_thread_policy_fingerprint(self._backend),
+                    )
+                    else ""
+                ),
                 claude_session_id=getattr(conv, "claude_session_id", "") or "",
                 correlation_id=cid,
             )

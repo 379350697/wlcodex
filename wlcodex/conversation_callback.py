@@ -31,6 +31,10 @@ CARRY_CANCEL = "carry_cancel"
 # callback-data encoding). These are re-exported here so that controller.py
 # and telegram_app.py can import them from one location.
 AUTO_FINAL_PLAN = "auto_final_plan"
+AUTO_ROUTE_DIAGNOSE = "auto_route_diagnose"
+AUTO_ROUTE_DESIGN = "auto_route_design"
+AUTO_ROUTE_CODEX_EXECUTE = "auto_route_codex_execute"
+AUTO_ROUTE_CLAUDE_EXECUTE = "auto_route_claude_execute"
 AUTO_SHOW_DRAFT = "auto_show_draft"
 AUTO_CANCEL = "auto_cancel"
 AUTO_SEND_TO_CLAUDE = "auto_send_to_claude"
@@ -49,7 +53,10 @@ TEAM_VIEW_STATUS = "team_view_status"
 TEAM_VIEW_ARTIFACTS = "team_view_artifacts"
 
 AUTO_CALLBACK_ACTIONS = {
-    AUTO_FINAL_PLAN, AUTO_SHOW_DRAFT, AUTO_CANCEL,
+    AUTO_FINAL_PLAN,
+    AUTO_ROUTE_DIAGNOSE, AUTO_ROUTE_DESIGN,
+    AUTO_ROUTE_CODEX_EXECUTE, AUTO_ROUTE_CLAUDE_EXECUTE,
+    AUTO_SHOW_DRAFT, AUTO_CANCEL,
     AUTO_SEND_TO_CLAUDE, AUTO_CONTINUE_CONTEXT,
     AUTO_REWRITE_PLAN, AUTO_CODEX_TAKEOVER, AUTO_CLOSE,
     AUTO_CODEX_VERIFY, AUTO_SEND_TO_CODEX, AUTO_SEND_REPAIR_TO_CLAUDE,

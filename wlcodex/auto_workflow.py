@@ -17,6 +17,7 @@ from __future__ import annotations
 # --- Stage constants ---
 
 AUTO_COLLECTING_CONTEXT = "collecting_context"
+AUTO_ROUTE_SELECT = "route_select"
 AUTO_DRAFT_READY = "draft_ready"
 AUTO_CLAUDE_RUNNING = "claude_running"
 AUTO_CLAUDE_DONE = "claude_done"
@@ -26,6 +27,7 @@ AUTO_CODEX_TAKEOVER_RUNNING = "codex_takeover_running"
 AUTO_COMPLETED = "completed"
 
 AUTO_STAGE_STEPS = {
+    AUTO_ROUTE_SELECT,
     AUTO_COLLECTING_CONTEXT,
     AUTO_DRAFT_READY,
     AUTO_CLAUDE_RUNNING,
@@ -46,6 +48,7 @@ AUTO_RUNNING_STAGES = {
 
 # Stages where the orchestration run is waiting for a user button click.
 AUTO_WAITING_STAGES = {
+    AUTO_ROUTE_SELECT,
     AUTO_DRAFT_READY,
     AUTO_CLAUDE_DONE,
     AUTO_RETRY_READY,
@@ -54,6 +57,10 @@ AUTO_WAITING_STAGES = {
 # --- Callback actions ---
 
 AUTO_FINAL_PLAN = "auto_final_plan"
+AUTO_ROUTE_DIAGNOSE = "auto_route_diagnose"
+AUTO_ROUTE_DESIGN = "auto_route_design"
+AUTO_ROUTE_CODEX_EXECUTE = "auto_route_codex_execute"
+AUTO_ROUTE_CLAUDE_EXECUTE = "auto_route_claude_execute"
 AUTO_SHOW_DRAFT = "auto_show_draft"
 AUTO_CANCEL = "auto_cancel"
 AUTO_SEND_TO_CLAUDE = "auto_send_to_claude"
@@ -110,6 +117,7 @@ def auto_stage_label(step: str) -> str:
     """Return a human-readable label for an auto stage step."""
     labels = {
         AUTO_COLLECTING_CONTEXT: "工程师正在分析中",
+        AUTO_ROUTE_SELECT: "等待选择执行路线",
         AUTO_DRAFT_READY: "方案已就绪，等待用户决定",
         AUTO_CLAUDE_RUNNING: "开发工程师执行中",
         AUTO_CLAUDE_DONE: "开发完成，测试通过，等待验收",
@@ -140,6 +148,20 @@ def build_auto_stage_buttons(
         return {"text": text, "callback_data": f"conv:{conversation_id}:{action}"}
 
     has_visible_plan = bool(last_codex_analysis.strip())
+    if stage == AUTO_ROUTE_SELECT:
+        buttons = [
+            button("诊断", AUTO_ROUTE_DIAGNOSE),
+            button("设计", AUTO_ROUTE_DESIGN),
+            button("GPT 执行", AUTO_ROUTE_CODEX_EXECUTE),
+        ]
+        buttons.append(button("DeepSeek 执行", AUTO_ROUTE_CLAUDE_EXECUTE))
+        return [
+            buttons,
+            [
+                button("取消", AUTO_CANCEL),
+            ],
+        ]
+
     if stage == AUTO_COLLECTING_CONTEXT:
         return [[
             button("生成最终方案", AUTO_FINAL_PLAN),

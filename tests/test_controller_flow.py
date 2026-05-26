@@ -1979,17 +1979,73 @@ async def test_staged_auto_does_not_start_claude_or_eager_pipeline(
         {"chat_id": 100, "user_id": 200},
     )
 
-    # Must start collecting_context, not Claude
+    from wlcodex.auto_workflow import (
+        AUTO_ROUTE_CLAUDE_EXECUTE,
+        AUTO_ROUTE_CODEX_EXECUTE,
+        AUTO_ROUTE_DESIGN,
+        AUTO_ROUTE_DIAGNOSE,
+        AUTO_ROUTE_SELECT,
+    )
+
+    # Must stop at route selection, not start any agent.
     assert len(claude.calls) == 0
     active = ledger.get_active_conversation(100)
     assert active is not None
     runs = ledger.list_orchestration_runs(active.id, limit=1)
     assert len(runs) == 1
-    assert runs[0].current_step == "collecting_context"
-    assert runs[0].status == "running"
-    # Agent run must be codex auto_analysis
+    assert runs[0].current_step == AUTO_ROUTE_SELECT
+    assert runs[0].status == "needs_user"
     agent_runs = ledger.list_agent_runs(active.id, limit=5)
-    assert any(run.role == "auto_analysis" for run in agent_runs)
+    assert agent_runs == []
+    actions = _callback_actions(response.buttons)
+    assert AUTO_ROUTE_DIAGNOSE in actions
+    assert AUTO_ROUTE_DESIGN in actions
+    assert AUTO_ROUTE_CODEX_EXECUTE in actions
+    assert AUTO_ROUTE_CLAUDE_EXECUTE in actions
+
+
+@pytest.mark.asyncio
+async def test_auto_route_deepseek_execute_starts_single_agent_without_design(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_CLAUDE_RUNNING, AUTO_ROUTE_CLAUDE_EXECUTE
+    from wlcodex.conversation_callback import ConversationCallback
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    claude = FakeClaudeBackendForController()
+    controller = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        claude_backend=claude,
+    )
+
+    await controller.handle(
+        "/auto 做一个只改文档的小任务",
+        {"chat_id": 100, "user_id": 200},
+    )
+    active = ledger.get_active_conversation(100)
+    assert active is not None
+
+    response = await controller.handle_conversation_callback(
+        ConversationCallback(active.id, AUTO_ROUTE_CLAUDE_EXECUTE)
+    )
+
+    orch_run = ledger.list_orchestration_runs(active.id, limit=1)[0]
+    assert orch_run.current_step == AUTO_CLAUDE_RUNNING
+    assert "DeepSeek 开发工程师开始执行" in response.text
+    assert ledger.get_team_run_for_orchestration(orch_run.id) is None
+    agent_runs = ledger.list_agent_runs(active.id, limit=5)
+    assert [(run.agent, run.role) for run in agent_runs] == [
+        ("claude", "auto_implementation")
+    ]
 
 
 @pytest.mark.asyncio
@@ -2457,6 +2513,8 @@ async def test_auto_final_plan_offers_claude_and_codex_implementers(
 async def test_auto_mode_creates_architect_team_run_and_context_packet(
     tmp_path: Path,
 ) -> None:
+    from wlcodex.auto_workflow import AUTO_ROUTE_DESIGN
+    from wlcodex.conversation_callback import ConversationCallback
     from wlcodex.router import AutoModeCommand
 
     workspace = tmp_path / "workspace"
@@ -2484,6 +2542,9 @@ async def test_auto_mode_creates_architect_team_run_and_context_packet(
 
     convo = ledger.get_active_conversation(123)
     assert convo is not None
+    await ctrl.handle_conversation_callback(
+        ConversationCallback(convo.id, AUTO_ROUTE_DESIGN)
+    )
     orch_run = ledger.list_orchestration_runs(convo.id, limit=1)[0]
     team_run = ledger.get_team_run_for_orchestration(orch_run.id)
     assert team_run is not None
@@ -2527,7 +2588,7 @@ async def test_auto_mode_creates_architect_team_run_and_context_packet(
     assert dict(assignment) == {
         "role": "architect",
         "model_profile": "codex_gpt",
-        "selected_by": "policy",
+        "selected_by": "user",
     }
 
 
@@ -2535,14 +2596,19 @@ async def test_auto_mode_creates_architect_team_run_and_context_packet(
 async def test_auto_bug_route_creates_diagnostician_context_before_final_handoff(
     ctrl: CommandController,
 ) -> None:
+    from wlcodex.auto_workflow import AUTO_ROUTE_DIAGNOSE
+    from wlcodex.conversation_callback import ConversationCallback
     from wlcodex.router import AutoModeCommand
 
-    response = await ctrl.handle_auto_mode(
+    await ctrl.handle_auto_mode(
         AutoModeCommand("Telegram 验收失败，本地通过，定位原因"),
         {"chat_id": 123, "user_id": 456},
     )
 
     conversation = ctrl._ledger.get_active_conversation(123)
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_ROUTE_DIAGNOSE)
+    )
     orch_run = ctrl._latest_active_auto_run(conversation.id)
     team_run = ctrl._ledger.get_team_run_for_orchestration(orch_run.id)
     jobs = ctrl._ledger.list_team_agent_jobs(team_run.id)
@@ -2555,14 +2621,19 @@ async def test_auto_bug_route_creates_diagnostician_context_before_final_handoff
 async def test_auto_feature_route_creates_architect_context_before_final_handoff(
     ctrl: CommandController,
 ) -> None:
+    from wlcodex.auto_workflow import AUTO_ROUTE_DESIGN
+    from wlcodex.conversation_callback import ConversationCallback
     from wlcodex.router import AutoModeCommand
 
-    response = await ctrl.handle_auto_mode(
+    await ctrl.handle_auto_mode(
         AutoModeCommand("新增专家判断模式，支持复杂需求走架构方案"),
         {"chat_id": 123, "user_id": 456},
     )
 
     conversation = ctrl._ledger.get_active_conversation(123)
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_ROUTE_DESIGN)
+    )
     orch_run = ctrl._latest_active_auto_run(conversation.id)
     team_run = ctrl._ledger.get_team_run_for_orchestration(orch_run.id)
     jobs = ctrl._ledger.list_team_agent_jobs(team_run.id)

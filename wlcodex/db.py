@@ -183,6 +183,7 @@ class Ledger:
                 conversation_summary TEXT NOT NULL DEFAULT '',
                 current_model TEXT NOT NULL DEFAULT '',
                 codex_thread_id TEXT NOT NULL DEFAULT '',
+                codex_thread_policy TEXT NOT NULL DEFAULT '',
                 claude_session_id TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -520,6 +521,10 @@ class Ledger:
         self._add_column_if_missing(
             "conversation_sessions", "codex_thread_id",
             "codex_thread_id TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "conversation_sessions", "codex_thread_policy",
+            "codex_thread_policy TEXT NOT NULL DEFAULT ''",
         )
         self._add_column_if_missing(
             "conversation_sessions", "claude_session_id",
@@ -1253,12 +1258,29 @@ class Ledger:
         return self.get_conversation(conversation_id)
 
     def set_conversation_codex_thread(
-        self, conversation_id: int, thread_id: str
+        self,
+        conversation_id: int,
+        thread_id: str,
+        policy_fingerprint: str | None = None,
     ) -> ConversationSession:
-        self._conn.execute(
-            "UPDATE conversation_sessions SET codex_thread_id = ?, updated_at = ? WHERE id = ?",
-            (thread_id, _now(), conversation_id),
-        )
+        if policy_fingerprint is None:
+            self._conn.execute(
+                """
+                UPDATE conversation_sessions
+                SET codex_thread_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (thread_id, _now(), conversation_id),
+            )
+        else:
+            self._conn.execute(
+                """
+                UPDATE conversation_sessions
+                SET codex_thread_id = ?, codex_thread_policy = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (thread_id, policy_fingerprint, _now(), conversation_id),
+            )
         self._conn.commit()
         return self.get_conversation(conversation_id)
 
@@ -2572,6 +2594,7 @@ def _conversation(row: sqlite3.Row) -> ConversationSession:
         updated_at=_dt(str(row["updated_at"])),
         archived_at=_dt(str(row["archived_at"])) if row["archived_at"] else None,
         codex_thread_id=str(row["codex_thread_id"] or ""),
+        codex_thread_policy=str(row["codex_thread_policy"] or ""),
         claude_session_id=str(row["claude_session_id"] or ""),
     )
 

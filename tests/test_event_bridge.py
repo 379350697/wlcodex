@@ -1,12 +1,17 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from wlcodex.codex_backend import BackendEvent
 from wlcodex.config import WorkspaceConfig
 from wlcodex.db import Ledger
-from wlcodex.event_bridge import EventBridge, _parse_audit_report_payload
+from wlcodex.event_bridge import (
+    EventBridge,
+    _auto_run_expects_diagnose_json,
+    _parse_audit_report_payload,
+)
 from wlcodex.task_service import TaskService
 
 pytestmark = pytest.mark.slow
@@ -129,6 +134,30 @@ def test_parse_audit_report_accepts_task_scope_pass_with_warning_from_truncated_
     assert payload["recommended_next_action"] == "close"
     assert payload["test_evidence_refs"]
     assert "pytest_q" in " ".join(payload["test_evidence_refs"])
+
+
+def test_auto_run_expects_diagnose_json_ignores_docs_only_schema_mentions():
+    auto_run = SimpleNamespace(
+        goal="做一个只改文档的小任务",
+        last_codex_analysis=(
+            "结论：这是文档-only 方案。\n"
+            "依据：diagnosis_report schema_version 只是报告格式说明。\n"
+            "下一步：生成最终方案。"
+        ),
+    )
+    agent_runs = [SimpleNamespace(role="auto_analysis")]
+
+    assert not _auto_run_expects_diagnose_json(auto_run, agent_runs)
+
+
+def test_auto_run_expects_diagnose_json_for_lightfee_trading_diagnostics():
+    auto_run = SimpleNamespace(
+        goal="LightFee 线上排障，检查实盘仓位和平仓失败",
+        last_codex_analysis="结论：需要运行 diagnose_live 采集交易所证据。",
+    )
+    agent_runs = [SimpleNamespace(role="auto_analysis")]
+
+    assert _auto_run_expects_diagnose_json(auto_run, agent_runs)
 
 
 class IdleBackend:
@@ -1112,6 +1141,106 @@ async def test_auto_context_supplement_completion_sends_digest_without_raw_strea
     assert "关键摘要" in text
     assert "ALTUSDT 平仓卡住" in text
     assert "local L2 stale/rebuild" in text
+
+
+@pytest.mark.asyncio
+async def test_auto_docs_only_task_does_not_show_missing_trading_diagnose(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from wlcodex.auto_workflow import AUTO_COLLECTING_CONTEXT, ROLE_AUTO_ANALYSIS
+
+    diagnose_calls = 0
+
+    def fake_collect(bridge, auto_run):
+        nonlocal diagnose_calls
+        diagnose_calls += 1
+        return ""
+
+    monkeypatch.setattr(
+        "wlcodex.event_bridge._try_collect_diagnose_json_sync",
+        fake_collect,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Docs-only auto task",
+        codex_thread_id="thread-auto-docs-only",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(
+        conversation.id,
+        "做一个只改文档的小任务",
+    )
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_ANALYSIS,
+        hidden_task_id=task.id,
+        external_session_id="thread-auto-docs-only",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(
+        service,
+        IdleBackend(),
+        ledger,
+        send_telegram=send_telegram,
+        codex_implementer_enabled=True,
+    )
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-auto-docs-only", "turnId": "turn-auto-docs-only"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-auto-docs-only",
+            "turnId": "turn-auto-docs-only",
+            "delta": (
+                "结论：这是只改文档的小任务，可以生成最终方案。\n"
+                "依据：diagnosis_report schema_version 只是团队报告格式说明；"
+                "工作区无需采集交易证据。\n"
+                "风险：低。\n"
+            ),
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-auto-docs-only", "status": "completed"},
+    ))
+
+    assert diagnose_calls == 0
+    text = sent[-1][1]
+    assert "只改文档的小任务" in text
+    assert "结构化诊断证据" not in text
+    assert "交易判断" not in text
+    assert "诊断 JSON" not in text
+    assert "diagnose_json" not in text
 
 
 @pytest.mark.asyncio
@@ -2191,7 +2320,7 @@ async def test_auto_final_plan_prioritizes_human_readable_plan_over_diagnose_jso
     ledger.set_conversation_active_task(conversation.id, task.id)
     orch_run = ledger.create_orchestration_run(
         conversation.id,
-        "最终方案出来了，下一步你生成精准修复的给 Claude 看的提示词",
+        "LightFee 线上排障最终方案出来了，下一步你生成精准修复的给 Claude 看的提示词",
     )
     ledger.update_orchestration_run(
         orch_run.id,
@@ -3152,7 +3281,9 @@ async def test_auto_completed_message_includes_final_synthesis_from_team_artifac
     assert "最终综合" in sent[-1]
     assert "tracked.txt" in sent[-1]
     assert "pytest tests/test_event_bridge.py -q" in sent[-1]
-    assert "pass" in sent[-1]
+    assert "审计结论：验收通过" in sent[-1]
+    assert "风险：低" in sent[-1]
+    assert "审计结论：pass" not in sent[-1]
 
 
 @pytest.mark.asyncio

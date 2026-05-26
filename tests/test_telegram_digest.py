@@ -1,4 +1,8 @@
-from wlcodex.telegram_digest import render_auto_draft_digest, sanitize_telegram_user_text
+from wlcodex.telegram_digest import (
+    render_auto_draft_digest,
+    render_missing_diagnose_digest,
+    sanitize_telegram_user_text,
+)
 
 
 def test_auto_draft_digest_uses_chinese_fallback_for_english_only_output() -> None:
@@ -116,6 +120,85 @@ def test_auto_draft_digest_ignores_noop_next_and_keeps_readable_actions() -> Non
     assert "不需要" not in digest
     assert "下一步：无" not in digest
     assert "；" not in digest
+
+
+def test_auto_draft_digest_humanizes_protocol_fields_inside_evidence() -> None:
+    digest = render_auto_draft_digest(
+        "结论：未发现可复现的产品缺陷；当前症状更像是任务包信息不足，需要把下游执行范围收敛为文档-only方案。\n"
+        "依据：\n"
+        "- runtime/tasks/67.log: 当前任务摘要为 wlGPT 开发工程师 telegram live ok，"
+        "needs_implementation=false，files_to_touch=[]，implementation_steps=[]，acceptance_criteria=[]。\n"
+        "- runtime/tasks/16.log: 仅记录会话启动规则读取，无错误栈或失败日志。\n"
+        "- git status --short: 工作区无未提交改动。\n"
+        "- gitnexus://repo/wlGPT 开发工程师/context: 索引可用，但落后 HEAD 2 个提交，适合导航但执行前需以当前文件为准。\n"
+        "- tests/test_team_artifacts.py: diagnosis_report schema 要求 symptom、expected_behavior、evidence、root_cause、minimal_fix_plan、regression_tests 等字段。\n"
+        "风险：低。\n"
+        "下一步：继续补充信息，或点击生成最终方案。"
+    )
+
+    assert "任务包没有给出明确的代码改动范围" in digest
+    assert "没有错误栈或失败日志" in digest
+    assert "工作区没有未提交改动" in digest
+    assert "needs_implementation" not in digest
+    assert "files_to_touch" not in digest
+    assert "implementation_steps" not in digest
+    assert "acceptance_criteria" not in digest
+    assert "diagnosis_report schema" not in digest
+
+
+def test_auto_draft_digest_hides_internal_artifact_evidence_refs() -> None:
+    digest = render_auto_draft_digest(
+        "{\n"
+        '  "audit_report": {\n'
+        '    "verdict": "PASS",\n'
+        '    "summary": "README 任务范围审计通过。",\n'
+        '    "risk": "LOW",\n'
+        '    "test_evidence_refs": ["team_artifact=17", "agent_job=42"],\n'
+        '    "passed_checks": [{"check": "测试", "evidence": "pytest tests/test_readme_flow.py passed"}],\n'
+        '    "recommended_next_action": "close"\n'
+        "  }\n"
+        "}"
+    )
+
+    assert "pytest tests/test_readme_flow.py passed" in digest
+    assert "team_artifact=17" not in digest
+    assert "agent_job=42" not in digest
+    assert "test_evidence_refs" not in digest
+
+
+def test_missing_diagnose_digest_is_human_readable() -> None:
+    digest = render_missing_diagnose_digest()
+
+    assert "结构化诊断证据没有采集成功" in digest
+    assert "置信度低" in digest
+    assert "diagnose_json=missing" not in digest
+    assert "confidence=low" not in digest
+    assert "schema_version" not in digest
+
+
+def test_auto_draft_digest_summarizes_docs_only_completion_without_duplicate_evidence() -> None:
+    repeated = (
+        "我会用 `superpowers:brainstorming` 先把这个文档-only小任务收敛成可执行范围，"
+        "然后只改文档并做最小验证；不会碰当前已有的产品代码或测试改动。"
+        "`rtk proxy` 在当前沙箱里读文件触发了 bwrap 网络地址错误；"
+        "我会改用普通 `rtk` 包装的只读命令继续，保持同样的只读边界。当前"
+    )
+    digest = render_auto_draft_digest(
+        "开发完成，测试通过。\n\n"
+        "关键摘要：\n"
+        f"结论：{repeated}。\n"
+        "依据：\n"
+        f"- {repeated}。\n"
+        "- 推荐方案。\n"
+        "- 在 `README.md` 的 Remote Workbench/Execution modes 附近补一小节，说明“文档-only任务”的执行规则。\n"
+        "风险：未明确风险。\n"
+        "下一步：可选：交给 DeepSeek 开发工程师或 GPT 开发工程师处理上述问题，也可继续补充或结束。"
+    )
+
+    assert "结论：文档-only小任务已完成，测试通过。" in digest
+    assert repeated not in digest
+    assert "当前…。" not in digest
+    assert digest.count("只改文档") <= 1
 
 
 def test_auto_draft_digest_removes_rewrite_plan_from_visible_next_step() -> None:

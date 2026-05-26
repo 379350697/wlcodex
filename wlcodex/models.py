@@ -186,6 +186,7 @@ class ConversationSession:
     updated_at: datetime
     archived_at: datetime | None
     codex_thread_id: str = ""
+    codex_thread_policy: str = ""
     claude_session_id: str = ""
 
 

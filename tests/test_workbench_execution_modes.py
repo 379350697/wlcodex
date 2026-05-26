@@ -489,6 +489,35 @@ async def test_codex_thread_is_scoped_to_workbench_until_new(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_codex_thread_policy_change_starts_fresh_thread(tmp_path: Path) -> None:
+    """A legacy thread without a matching sandbox policy must not be reused."""
+    claude = FakeClaudeBackend(enabled=True)
+    ctrl = build_controller(tmp_path, claude=claude)
+    ctx = {"chat_id": 42, "user_id": 1}
+
+    await ctrl.handle("/new", ctx)
+    await ctrl.handle_conversation_text("先分析当前问题", ctx)
+    active = ctrl._ledger.get_active_conversation(42)
+    assert active is not None
+    old_thread = active.codex_thread_id
+    assert old_thread
+    mark_active_task_done(ctrl, 42)
+
+    ctrl._backend.approval_policy = "never"
+    ctrl._backend.sandbox = "danger-full-access"
+
+    await ctrl.handle("/codex 继续处理同一个工作台", ctx)
+
+    updated = ctrl._ledger.get_active_conversation(42)
+    assert updated is not None
+    assert updated.codex_thread_id
+    assert updated.codex_thread_id != old_thread
+    assert updated.codex_thread_policy == (
+        "approval_policy=never;sandbox=danger-full-access"
+    )
+
+
+@pytest.mark.asyncio
 async def test_auto_starts_staged_codex_analysis_in_workbench(tmp_path: Path) -> None:
     """``/auto`` starts a read-only Codex analysis in the current workbench,
     not an eager pipeline. It reuses the codex thread if one exists."""
