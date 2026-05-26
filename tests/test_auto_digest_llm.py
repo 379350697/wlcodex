@@ -338,6 +338,53 @@ async def test_llm_digest_prioritizes_source_change_files_over_extra_model_items
 
 
 @pytest.mark.asyncio
+async def test_llm_digest_adds_workspace_full_paths_and_verification_command() -> None:
+    async def client(*, model: str, prompt: str, timeout_seconds: float) -> str:
+        return (
+            '{"title":"执行摘要","primary_label":"结果","primary":"文档-only小任务已完成，测试通过。",'
+            '"evidence_label":"改动",'
+            '"evidence_items":['
+            '"新增计划文档：2026-05-26-production-health-read-only-evidence-implementation-plan.md。",'
+            '"修改 docs/ops/production-health-runbook.md，新增 Capture Read-Only Evidence 小节。"],'
+            '"risk_label":"验证",'
+            '"risk":"smoke 验证通过：compileall 通过，git diff --check 通过，Validation passed。",'
+            '"next_label":"下一步","next":"可以结束任务，或继续补充。"}'
+        )
+
+    source = (
+        "已完成一个新的只改文档小任务。\n\n"
+        "生成的最终方案：\n"
+        "[2026-05-26-production-health-read-only-evidence-implementation-plan.md]"
+        "(/media/wl/新加卷/codex/LightFeeV2/docs/superpowers/plans/"
+        "2026-05-26-production-health-read-only-evidence-implementation-plan.md:1)\n\n"
+        "Codex 已按方案执行：\n"
+        "[docs/ops/production-health-runbook.md]"
+        "(/media/wl/新加卷/codex/LightFeeV2/docs/ops/production-health-runbook.md:21) "
+        "新增 `Capture Read-Only Evidence` 小节。\n\n"
+        "验证已跑：\n"
+        "```bash\n"
+        "rtk python3 scripts/validate_change.py --profile smoke\n"
+        "```\n\n"
+        "结果：`compileall` 通过，`git diff --check` 通过，`Validation passed`。\n"
+        "当前变更范围：\n"
+        " M docs/ops/production-health-runbook.md\n"
+        "?? docs/superpowers/plans/2026-05-26-production-health-read-only-evidence-implementation-plan.md\n"
+    )
+
+    digest = await render_auto_draft_digest_with_llm(
+        source,
+        digest_kind="implementation",
+        config=DeepSeekDigestConfig(enabled=True),
+        client=client,
+    )
+
+    assert "仓库：LightFeeV2" in digest
+    assert "docs/superpowers/plans/2026-05-26-production-health-read-only-evidence-implementation-plan.md" in digest
+    assert "验证：命令：rtk python3 scripts/validate_change.py --profile smoke；" in digest
+    assert "Validation passed" in digest
+
+
+@pytest.mark.asyncio
 async def test_llm_digest_preserves_failed_attempt_status_in_usage() -> None:
     usage_records: list[DeepSeekDigestUsage] = []
 

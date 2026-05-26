@@ -213,6 +213,9 @@ def _build_prompt(
         "- evidence_items 只能放文件改动、验证命令、真实问题、真实风险，不要重复 primary。\n"
         "- 如果原文出现当前变更范围、git status 或 diff 里的文件路径，implementation 的改动必须覆盖这些文件。\n"
         "- implementation 场景优先写结果、改动、验证。\n"
+        "- 如果原文能看出 workspace 或 repo，摘要必须保留仓库名，便于复核。\n"
+        "- 验证字段必须优先保留原文中的实际验证命令。\n"
+        "- 改动字段必须优先使用完整相对路径，不要只写文件名。\n"
         "- implementation 已完成且验证通过时，next 固定为“可以结束任务，或继续补充。”。\n"
         "- 不要把“交给 DeepSeek/GPT 开发工程师处理”写进完成态下一步。\n"
         "- design 场景不要写“结论：我会...”。\n\n"
@@ -416,6 +419,11 @@ def _render_model_digest(
 
     primary = _clean_value(_field(payload, "primary"))
     risk = _clean_value(_field(payload, "risk"))
+    risk = _merge_source_verification_command(
+        risk,
+        digest_kind=digest_kind,
+        source_text=source_text,
+    )
     next_step = _clean_value(_field(payload, "next"))
     next_step = _sanitize_next_step(
         next_step,
@@ -459,6 +467,7 @@ def _render_model_digest(
         risk,
         next_label,
         next_step,
+        workspace=_extract_workspace_name(source_text),
     )
     if len(rendered) > max_chars:
         return ""
@@ -525,9 +534,13 @@ def _merge_source_change_facts(
     *,
     limit: int,
 ) -> list[str]:
+    evidence = list(evidence)
     source_facts: list[tuple[str, str]] = []
     for path, action in _extract_changed_paths(source_text):
-        if any(path in existing for existing in evidence):
+        matching_index = _find_evidence_index_for_path(evidence, path)
+        if matching_index is not None:
+            if path not in evidence[matching_index]:
+                evidence[matching_index] = f"{action} {path}"
             continue
         source_facts.append((path, f"{action} {path}"))
     if not source_facts:
@@ -546,6 +559,14 @@ def _merge_source_change_facts(
             break
         merged.append(fact)
     return merged
+
+
+def _find_evidence_index_for_path(evidence: list[str], path: str) -> int | None:
+    basename = path.rsplit("/", 1)[-1]
+    for index, item in enumerate(evidence):
+        if path in item or (basename and basename in item):
+            return index
+    return None
 
 
 def _extract_changed_paths(source_text: str) -> list[tuple[str, str]]:
@@ -574,6 +595,56 @@ def _extract_changed_paths(source_text: str) -> list[tuple[str, str]]:
         seen.add(path)
         paths.append((path, _context_action(context)))
     return paths
+
+
+def _merge_source_verification_command(
+    risk: str,
+    *,
+    digest_kind: str,
+    source_text: str,
+) -> str:
+    if digest_kind != "implementation":
+        return risk
+    command = _extract_verification_command(source_text)
+    if not command or command in risk:
+        return risk
+    return f"命令：{command}；{risk}"
+
+
+def _extract_verification_command(source_text: str) -> str:
+    for block in re.findall(r"```(?:bash|sh|shell)?\s*\n(.*?)```", source_text, re.DOTALL | re.IGNORECASE):
+        for line in block.splitlines():
+            command = _clean_command(line)
+            if _looks_like_verification_command(command):
+                return command
+    for line in source_text.splitlines():
+        command = _clean_command(line)
+        if _looks_like_verification_command(command):
+            return command
+    return ""
+
+
+def _clean_command(line: str) -> str:
+    return line.strip().strip("`").strip()
+
+
+def _looks_like_verification_command(command: str) -> bool:
+    if not command or command.startswith("#"):
+        return False
+    return bool(
+        re.search(
+            r"\b(validate_change\.py|pytest|npm\s+test|cargo\s+(?:test|check)|compileall|git\s+diff\s+--check)\b",
+            command,
+        )
+    )
+
+
+def _extract_workspace_name(source_text: str) -> str:
+    match = re.search(r"/codex/([^/\s)]+)/", source_text)
+    if match:
+        return match.group(1)
+    match = re.search(r"/([^/\s)]+)/(?=(?:docs|README\.md|config|wlcodex|tests|scripts)/)", source_text)
+    return match.group(1) if match else ""
 
 
 def _normalize_change_path(raw_path: str) -> str:
@@ -640,10 +711,13 @@ def _format_digest(
     risk: str,
     next_label: str,
     next_step: str,
+    workspace: str = "",
 ) -> str:
     evidence_text = "\n" + "\n".join(f"- {_ensure_sentence(item)}" for item in evidence)
+    workspace_text = f"仓库：{workspace}\n" if workspace else ""
     return (
         f"{title}：\n"
+        f"{workspace_text}"
         f"{primary_label}：{_ensure_sentence(primary)}\n"
         f"{evidence_label}：{evidence_text}\n"
         f"{risk_label}：{_ensure_sentence(risk)}\n"
