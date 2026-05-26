@@ -34,6 +34,11 @@ _PROCESS_NOISE_RE = re.compile(
 
 _BAD_ENDING_RE = re.compile(r"(?:当前|然后|基于当前|并|以及|，|、|；|:|：)$")
 
+_IMPLEMENTATION_NEXT_NOISE_RE = re.compile(
+    r"(?:交给|转交).*(?:DeepSeek|GPT|开发工程师|执行)|处理上述问题|上述问题",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class DeepSeekDigestConfig:
@@ -153,6 +158,7 @@ async def render_auto_draft_digest_with_llm(
             completion.content,
             digest_kind=digest_kind,
             max_chars=max_chars,
+            source_text=text,
         )
         if completion.usage is not None:
             status, failure_reason = _usage_result_status(
@@ -205,7 +211,10 @@ def _build_prompt(
         "- 不展示内部字段，例如 team_artifact=、agent_job=、diagnose_json=missing、confidence=low。\n"
         "- 不要硬截断半句话；长句要改写成短句。\n"
         "- evidence_items 只能放文件改动、验证命令、真实问题、真实风险，不要重复 primary。\n"
+        "- 如果原文出现当前变更范围、git status 或 diff 里的文件路径，implementation 的改动必须覆盖这些文件。\n"
         "- implementation 场景优先写结果、改动、验证。\n"
+        "- implementation 已完成且验证通过时，next 固定为“可以结束任务，或继续补充。”。\n"
+        "- 不要把“交给 DeepSeek/GPT 开发工程师处理”写进完成态下一步。\n"
         "- design 场景不要写“结论：我会...”。\n\n"
         f"本地规则草稿：\n{fallback}\n\n"
         f"原文：\n{clipped}"
@@ -383,7 +392,13 @@ def _elapsed_ms(started: float) -> int:
     return max(0, int((time.monotonic() - started) * 1000))
 
 
-def _render_model_digest(response: str, *, digest_kind: str, max_chars: int) -> str:
+def _render_model_digest(
+    response: str,
+    *,
+    digest_kind: str,
+    max_chars: int,
+    source_text: str = "",
+) -> str:
     payload = _parse_json_object(response)
     if not payload:
         return ""
@@ -402,6 +417,13 @@ def _render_model_digest(response: str, *, digest_kind: str, max_chars: int) -> 
     primary = _clean_value(_field(payload, "primary"))
     risk = _clean_value(_field(payload, "risk"))
     next_step = _clean_value(_field(payload, "next"))
+    next_step = _sanitize_next_step(
+        next_step,
+        digest_kind=digest_kind,
+        primary=primary,
+        risk=risk,
+        source_text=source_text,
+    )
     if not primary or not risk or not next_step:
         return ""
     if any(_invalid_visible_text(value) for value in (primary, risk, next_step)):
@@ -422,6 +444,8 @@ def _render_model_digest(response: str, *, digest_kind: str, max_chars: int) -> 
         evidence.append(cleaned)
         if len(evidence) >= 5:
             break
+    if digest_kind == "implementation":
+        evidence = _merge_source_change_facts(evidence, source_text, limit=5)
     if not evidence:
         return ""
 
@@ -469,6 +493,128 @@ def _invalid_visible_text(text: str) -> bool:
         or _BAD_ENDING_RE.search(normalized)
         or len(normalized) > 180
     )
+
+
+def _sanitize_next_step(
+    next_step: str,
+    *,
+    digest_kind: str,
+    primary: str,
+    risk: str,
+    source_text: str,
+) -> str:
+    if digest_kind != "implementation":
+        return next_step
+    if not _looks_completed_with_validation(primary, risk, source_text):
+        return next_step
+    if _IMPLEMENTATION_NEXT_NOISE_RE.search(next_step):
+        return "可以结束任务，或继续补充。"
+    return next_step
+
+
+def _looks_completed_with_validation(primary: str, risk: str, source_text: str) -> bool:
+    combined = "\n".join((primary, risk, source_text))
+    has_done = bool(re.search(r"完成|已完成|开发完成|落地", combined))
+    has_passed = bool(re.search(r"测试通过|验证通过|Validation passed|passed|通过", combined, re.IGNORECASE))
+    return has_done and has_passed
+
+
+def _merge_source_change_facts(
+    evidence: list[str],
+    source_text: str,
+    *,
+    limit: int,
+) -> list[str]:
+    source_facts: list[tuple[str, str]] = []
+    for path, action in _extract_changed_paths(source_text):
+        if any(path in existing for existing in evidence):
+            continue
+        source_facts.append((path, f"{action} {path}"))
+    if not source_facts:
+        return evidence[:limit]
+
+    preserved: list[str] = []
+    slots_for_model_items = max(0, limit - len(source_facts))
+    for item in evidence:
+        if len(preserved) >= slots_for_model_items:
+            break
+        preserved.append(item)
+
+    merged = preserved[:]
+    for _, fact in source_facts:
+        if len(merged) >= limit:
+            break
+        merged.append(fact)
+    return merged
+
+
+def _extract_changed_paths(source_text: str) -> list[tuple[str, str]]:
+    paths: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for line in source_text.splitlines():
+        match = re.match(
+            r"^\s*(?P<status>\?\?|A|M|D|R|C|U)\s+(?P<path>[A-Za-z0-9_./@+-]+)",
+            line,
+        )
+        if not match:
+            continue
+        path = _normalize_change_path(match.group("path"))
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append((path, _status_action(match.group("status"))))
+
+    for match in re.finditer(r"\((?P<target>[^)\s]+)\)", source_text):
+        context = source_text[max(0, match.start() - 80) : match.start()]
+        if not re.search(r"新增|更新|修改|落地|生成|变更", context):
+            continue
+        path = _normalize_change_path(match.group("target"))
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append((path, _context_action(context)))
+    return paths
+
+
+def _normalize_change_path(raw_path: str) -> str:
+    path = raw_path.strip().strip("`'\"),.;:")
+    path = re.sub(r":\d+$", "", path)
+    path = re.sub(r"^[ab]/", "", path)
+    for marker in (
+        "/docs/",
+        "/README.md",
+        "/config/",
+        "/wlcodex/",
+        "/tests/",
+        "/scripts/",
+    ):
+        index = path.find(marker)
+        if index >= 0:
+            path = path[index + 1 :]
+            break
+    if re.match(r"^(docs|README\.md|config|wlcodex|tests|scripts)/?", path):
+        return path
+    return ""
+
+
+def _status_action(status: str) -> str:
+    return {
+        "??": "新增",
+        "A": "新增",
+        "M": "更新",
+        "D": "删除",
+        "R": "重命名",
+        "C": "新增",
+        "U": "更新",
+    }.get(status, "更新")
+
+
+def _context_action(context: str) -> str:
+    if re.search(r"新增|生成|落地", context):
+        return "新增"
+    if "删除" in context:
+        return "删除"
+    return "更新"
 
 
 def _same_fact(left: str, right: str) -> bool:

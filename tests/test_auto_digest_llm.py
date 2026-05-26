@@ -272,6 +272,72 @@ async def test_llm_digest_records_deepseek_token_usage_for_long_to_short_summary
 
 
 @pytest.mark.asyncio
+async def test_llm_digest_completes_missing_implementation_change_files_from_source() -> None:
+    async def client(*, model: str, prompt: str, timeout_seconds: float) -> str:
+        return (
+            '{"title":"执行摘要","primary_label":"结果","primary":"文档-only小任务已完成，测试通过。",'
+            '"evidence_label":"改动",'
+            '"evidence_items":["更新验证策略文档：docs/testing-validation-strategy.md，新增 Documentation-Only Changes 小节。"],'
+            '"risk_label":"验证","risk":"运行 smoke profile 验证通过：compileall 通过，git diff --check 通过，Validation passed。",'
+            '"next_label":"下一步",'
+            '"next":"可选：交给 DeepSeek 开发工程师或 GPT 开发工程师处理上述问题，也可继续补充或结束。"}'
+        )
+
+    source = (
+        "开发完成，测试通过。\n\n"
+        "生成并落地了最终方案：[2026-05-26-doc-only-validation-guidance-implementation-plan.md]"
+        "(/media/wl/新加卷/codex/LightFeeV2/docs/superpowers/plans/"
+        "2026-05-26-doc-only-validation-guidance-implementation-plan.md:1)\n\n"
+        "同时更新了验证策略文档：[docs/testing-validation-strategy.md]"
+        "(/media/wl/新加卷/codex/LightFeeV2/docs/testing-validation-strategy.md:43)，"
+        "新增 `Documentation-Only Changes` 小节。\n\n"
+        "当前变更范围：\n"
+        "```text\n"
+        " M docs/testing-validation-strategy.md\n"
+        "?? docs/superpowers/plans/2026-05-26-doc-only-validation-guidance-implementation-plan.md\n"
+        "```\n"
+    )
+
+    digest = await render_auto_draft_digest_with_llm(
+        source,
+        digest_kind="implementation",
+        config=DeepSeekDigestConfig(enabled=True),
+        client=client,
+    )
+
+    assert "docs/testing-validation-strategy.md" in digest
+    assert "docs/superpowers/plans/2026-05-26-doc-only-validation-guidance-implementation-plan.md" in digest
+    assert "交给 DeepSeek 开发工程师" not in digest
+    assert "处理上述问题" not in digest
+    assert "下一步：可以结束任务，或继续补充。" in digest
+
+
+@pytest.mark.asyncio
+async def test_llm_digest_prioritizes_source_change_files_over_extra_model_items() -> None:
+    async def client(*, model: str, prompt: str, timeout_seconds: float) -> str:
+        return (
+            '{"title":"执行摘要","primary_label":"结果","primary":"文档-only小任务已完成，测试通过。",'
+            '"evidence_label":"改动",'
+            '"evidence_items":["补充说明 A。","补充说明 B。","补充说明 C。","补充说明 D。","补充说明 E。"],'
+            '"risk_label":"验证","risk":"Validation passed。",'
+            '"next_label":"下一步","next":"可以结束任务，或继续补充。"}'
+        )
+
+    digest = await render_auto_draft_digest_with_llm(
+        "开发完成，测试通过。\n当前变更范围：\n"
+        " M docs/testing-validation-strategy.md\n"
+        "?? docs/superpowers/plans/doc-only-plan.md\n",
+        digest_kind="implementation",
+        config=DeepSeekDigestConfig(enabled=True),
+        client=client,
+    )
+
+    assert "docs/testing-validation-strategy.md" in digest
+    assert "docs/superpowers/plans/doc-only-plan.md" in digest
+    assert digest.count("- ") <= 5
+
+
+@pytest.mark.asyncio
 async def test_llm_digest_preserves_failed_attempt_status_in_usage() -> None:
     usage_records: list[DeepSeekDigestUsage] = []
 

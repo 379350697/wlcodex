@@ -51,6 +51,83 @@ async def test_backend_steer_turn_does_not_add_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_app_server_general_turn_explicitly_sends_backend_policy() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        approval_policy="never",
+        sandbox="danger-full-access",
+        request_timeout_seconds=0.3,
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    class RecordingClient:
+        async def request(
+            self, method: str, params: dict[str, object] | None = None
+        ) -> dict[str, object]:
+            requests.append((method, params or {}))
+            if method == "turn/start":
+                return {"turnId": "turn-high-trust"}
+            raise AssertionError(method)
+
+    backend._client = RecordingClient()
+
+    turn_id = await backend.start_turn("thread-1", "Run rtk status")
+
+    assert turn_id == "turn-high-trust"
+    assert requests == [
+        (
+            "turn/start",
+            {
+                "threadId": "thread-1",
+                "input": [{"type": "text", "text": "Run rtk status"}],
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "dangerFullAccess"},
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_app_server_continue_turn_keeps_backend_policy_after_resume() -> None:
+    backend = AppServerCodexBackend(
+        endpoint="ws://127.0.0.1:17431",
+        approval_policy="never",
+        sandbox="danger-full-access",
+        request_timeout_seconds=0.3,
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    class RecordingClient:
+        async def request(
+            self, method: str, params: dict[str, object] | None = None
+        ) -> dict[str, object]:
+            requests.append((method, params or {}))
+            if method == "thread/resume":
+                return {}
+            if method == "turn/start":
+                return {"turnId": "turn-resumed-high-trust"}
+            raise AssertionError(method)
+
+    backend._client = RecordingClient()
+
+    turn_id = await backend.continue_turn("thread-1", "Read through rtk")
+
+    assert turn_id == "turn-resumed-high-trust"
+    assert requests == [
+        ("thread/resume", {"threadId": "thread-1"}),
+        (
+            "turn/start",
+            {
+                "threadId": "thread-1",
+                "input": [{"type": "text", "text": "Read through rtk"}],
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "dangerFullAccess"},
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_backend_injects_events_for_testing() -> None:
     backend = FakeCodexBackend()
     backend.inject_event(BackendEvent("test_event", {"key": "value"}))
@@ -460,7 +537,9 @@ async def test_app_server_send_codex_analysis_prompt_uses_planning_overrides() -
     assert thread_params["approvalPolicy"] == "on-request"
     assert thread_params["sandbox"] == "workspace-write"
     assert "可以调用 skill" in str(thread_params["developerInstructions"])
-    assert "不要抢 Claude 的代码实现职责" in str(thread_params["developerInstructions"])
+    assert "不要抢开发工程师的代码实现职责" in str(
+        thread_params["developerInstructions"]
+    )
     assert thread_params["config"] == {
         "model": "gpt-5.5",
         "model_reasoning_effort": "xhigh",
@@ -522,7 +601,8 @@ async def test_app_server_read_only_analysis_prompt_inherits_high_trust_policy()
     assert result == "只读结论"
     _, thread_params = requests[0]
     _, turn_params = requests[1]
-    assert "Codex 分析/核验" in str(thread_params["developerInstructions"])
+    assert "分析/核验" in str(thread_params["developerInstructions"])
+    assert "诊断工程师" in str(thread_params["developerInstructions"])
     instructions = str(thread_params["developerInstructions"])
     assert "禁止创建、修改、删除" not in instructions
     assert "真实执行必要的查询" in instructions

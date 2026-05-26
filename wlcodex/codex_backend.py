@@ -833,7 +833,12 @@ class AppServerCodexBackend:
         client = await self._ensure_client()
         result = await client.request(
             "turn/start",
-            build_turn_start_params(thread_id, prompt),
+            build_turn_start_params(
+                thread_id,
+                prompt,
+                approval_policy=self.approval_policy,
+                sandbox_policy=_planning_sandbox_policy(self.sandbox),
+            ),
         )
         return parse_turn_response(result)
 
@@ -874,7 +879,12 @@ class AppServerCodexBackend:
         await client.request("thread/resume", {"threadId": thread_id})
         result = await client.request(
             "turn/start",
-            build_turn_start_params(thread_id, prompt),
+            build_turn_start_params(
+                thread_id,
+                prompt,
+                approval_policy=self.approval_policy,
+                sandbox_policy=_planning_sandbox_policy(self.sandbox),
+            ),
         )
         return parse_turn_response(result)
 
