@@ -865,7 +865,7 @@ class TaskService:
                 self._ledger.add_event(
                     task.id,
                     "agent_message_delta",
-                    {"delta": delta[:2000], "summary": summary},
+                    {"delta": delta, "summary": summary},
                 )
                 self._append_task_log(task.id, delta)
 

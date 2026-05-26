@@ -155,6 +155,18 @@ semantic_max_chars = 3200
 final_chunk_chars = 3900
 terminal_block_idle_seconds = 2.0
 
+# Optional /auto digest rewriting:
+# - Default: rule-based local digest only, no network call.
+# - Set WLCODEX_DEEPSEEK_API_KEY to enable project-scoped DeepSeek rewriting.
+# - Or set WLCODEX_AUTO_DIGEST_LLM=1 with DEEPSEEK_API_KEY.
+# - Flash is tried first, Pro is used only if Flash output fails validation.
+# - DeepSeek usage is recorded in usage_events with request_kind=telegram_digest.
+# Optional model overrides:
+#   WLCODEX_AUTO_DIGEST_FLASH_MODEL=deepseek-v4-flash
+#   WLCODEX_AUTO_DIGEST_PRO_MODEL=deepseek-v4-pro
+#   WLCODEX_AUTO_DIGEST_TIMEOUT_SECONDS=8
+#   WLCODEX_AUTO_DIGEST_MAX_INPUT_CHARS=0  # 0 means pass full Codex/Claude output
+
 [menu]
 # Register daily-menu commands with Telegram: 新工作台 状态 接管现场 变更 设置 帮助
 register_bot_commands = true

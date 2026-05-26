@@ -171,7 +171,10 @@ from wlcodex.status import (
     render_help,
 )
 from wlcodex.task_service import TaskService
-from wlcodex.telegram_digest import render_auto_draft_digest
+from wlcodex.auto_digest_llm import (
+    DeepSeekDigestUsage,
+    render_auto_draft_digest_with_llm,
+)
 from wlcodex.team_model_settings import (
     encode_assignment,
     is_multi_select_role,
@@ -984,13 +987,13 @@ class CommandController:
                 current_step=failure_step,
             )
             orch_run = self._ledger.get_orchestration_run(orchestration_run_id)
-            buttons = build_auto_stage_buttons(
+            buttons = self._auto_stage_buttons(
                 conversation_id,
                 failure_step,
+                orch_run=orch_run,
                 last_codex_analysis=(
                     getattr(orch_run, "last_codex_analysis", "") if orch_run else ""
                 ),
-                codex_implementer_enabled=self._codex_implementer_enabled(),
             )
         missing_text = "、".join(_human_gate_field_name(field) for field in missing)
         artifact_label = _human_artifact_type(artifact_type)
@@ -1082,13 +1085,11 @@ class CommandController:
                         buttons: list[list[dict[str, str]]] = []
                         auto_run = self._latest_active_auto_run(active.id)
                         if auto_run is not None:
-                            buttons = build_auto_stage_buttons(
+                            buttons = self._auto_stage_buttons(
                                 active.id,
                                 auto_run.current_step,
+                                orch_run=auto_run,
                                 last_codex_analysis=auto_run.last_codex_analysis or "",
-                                codex_implementer_enabled=(
-                                    self._codex_implementer_enabled()
-                                ),
                             )
                             orch_run = auto_run
                         status_text = render_conversation_status(
@@ -1476,11 +1477,11 @@ class CommandController:
                             ContextBudget().conversation_summary_tokens,
                         ),
                     )
-                    buttons = build_auto_stage_buttons(
+                    buttons = self._auto_stage_buttons(
                         active.id,
                         step,
+                        orch_run=auto_run,
                         last_codex_analysis=auto_run.last_codex_analysis or "",
-                        codex_implementer_enabled=self._codex_implementer_enabled(),
                     )
                     return ControllerResponse(
                         f"已记录备注：{text[:100]}",
@@ -1696,7 +1697,11 @@ class CommandController:
                         task.active_turn_id,
                         text,
                     )
-                    buttons = build_auto_stage_buttons(active.id, AUTO_COLLECTING_CONTEXT)
+                    buttons = self._auto_stage_buttons(
+                        active.id,
+                        AUTO_COLLECTING_CONTEXT,
+                        orch_run=auto_run,
+                    )
                     return ControllerResponse(
                         f"已补充到当前诊断工程师分析：{text[:100]}",
                         buttons=buttons,
@@ -1749,7 +1754,11 @@ class CommandController:
             )
             return ControllerResponse(classify_user_error(exc))
 
-        buttons = build_auto_stage_buttons(active.id, AUTO_COLLECTING_CONTEXT)
+        buttons = self._auto_stage_buttons(
+            active.id,
+            AUTO_COLLECTING_CONTEXT,
+            orch_run=auto_run,
+        )
         return ControllerResponse(
             f"已补充信息到当前 /auto 分析。{text[:100]}",
             buttons=buttons,
@@ -2552,7 +2561,7 @@ class CommandController:
                 self._ledger.update_agent_run_status(
                     agent_run_id,
                     "failed",
-                    completion_summary=error_text[:2000],
+                    completion_summary=error_text,
                     external_session_id=claude_session_id or None,
                 )
                 if claude_session_id:
@@ -2562,7 +2571,7 @@ class CommandController:
                 # Update staged-auto orchestration run if applicable
                 self._transition_auto_claude_completed(
                     conversation_id, agent_status="failed",
-                    completion_summary=error_text[:5000],
+                    completion_summary=error_text,
                 )
                 self._emit_event(RuntimeEvent(
                     schema_version=1,
@@ -2585,11 +2594,11 @@ class CommandController:
             completion_summary = ""
             if result is not None:
                 try:
-                    completion_summary = result.text[:2000]
+                    completion_summary = result.text
                 except Exception:
                     completion_summary = ""
             if not completion_summary and stream_chunks:
-                completion_summary = "".join(stream_chunks).strip()[:5000]
+                completion_summary = "".join(stream_chunks).strip()
             self._ledger.update_agent_run_status(
                 agent_run_id,
                 "done",
@@ -2645,11 +2654,11 @@ class CommandController:
             self._ledger.update_agent_run_status(
                 agent_run_id,
                 "failed",
-                completion_summary=str(exc)[:2000],
+                completion_summary=str(exc),
             )
             self._transition_auto_claude_completed(
                 conversation_id, agent_status="failed",
-                completion_summary=str(exc)[:5000],
+                completion_summary=str(exc),
             )
             self._emit_event(RuntimeEvent(
                 schema_version=1,
@@ -2947,7 +2956,7 @@ class CommandController:
             self._ledger.update_orchestration_run(
                 orch_run.id,
                 status="failed",
-                last_codex_analysis=str(exc)[:5000],
+                last_codex_analysis=str(exc),
             )
             if team_run is not None and hasattr(self._ledger, "update_team_run_status"):
                 self._ledger.update_team_run_status(team_run.id, "failed")
@@ -2977,12 +2986,42 @@ class CommandController:
             return None
         return self._ledger.get_latest_active_auto_run(conversation_id)
 
+    def _auto_run_has_team(self, orch_run: object | None) -> bool:
+        if (
+            orch_run is None
+            or self._ledger is None
+            or not hasattr(self._ledger, "get_team_run_for_orchestration")
+        ):
+            return False
+        return self._ledger.get_team_run_for_orchestration(orch_run.id) is not None
+
+    def _auto_stage_buttons(
+        self,
+        conversation_id: int,
+        stage: str,
+        *,
+        orch_run: object | None = None,
+        last_codex_analysis: str = "",
+    ) -> list[list[dict[str, str]]]:
+        if orch_run is None:
+            orch_run = self._latest_active_auto_run(conversation_id)
+        return build_auto_stage_buttons(
+            conversation_id,
+            stage,
+            last_codex_analysis=last_codex_analysis,
+            codex_implementer_enabled=self._codex_implementer_enabled(),
+            include_team_controls=self._auto_run_has_team(orch_run),
+        )
+
     def _latest_team_run(self, conversation_id: int) -> object | None:
         if self._ledger is None or not hasattr(
             self._ledger,
             "get_team_run_for_orchestration",
         ):
             return None
+        active_auto_run = self._latest_active_auto_run(conversation_id)
+        if active_auto_run is not None:
+            return self._ledger.get_team_run_for_orchestration(active_auto_run.id)
         for orch_run in self._ledger.list_orchestration_runs(conversation_id, limit=20):
             team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
             if team_run is not None:
@@ -3011,11 +3050,11 @@ class CommandController:
                     TEAM_VIEW_ARTIFACTS,
                 ),
             }]]
-        return build_auto_stage_buttons(
+        return self._auto_stage_buttons(
             conversation_id,
             orch_run.current_step,
+            orch_run=orch_run,
             last_codex_analysis=orch_run.last_codex_analysis or "",
-            codex_implementer_enabled=self._codex_implementer_enabled(),
         )
 
     async def _handle_team_view_status(
@@ -3147,6 +3186,68 @@ class CommandController:
         active_codex_task_id = getattr(convo, "active_codex_task_id", None)
         return int(active_codex_task_id) if active_codex_task_id is not None else None
 
+    def _auto_digest_usage_recorder(
+        self,
+        *,
+        conversation_id: int,
+        orchestration_run_id: int,
+        task_id: int | None = None,
+        agent_run_id: int | None = None,
+    ):
+        def record(usage: DeepSeekDigestUsage) -> None:
+            self._record_auto_digest_usage(
+                conversation_id=conversation_id,
+                orchestration_run_id=orchestration_run_id,
+                task_id=task_id,
+                agent_run_id=agent_run_id,
+                usage=usage,
+            )
+
+        return record
+
+    def _record_auto_digest_usage(
+        self,
+        *,
+        conversation_id: int,
+        orchestration_run_id: int,
+        usage: DeepSeekDigestUsage,
+        task_id: int | None = None,
+        agent_run_id: int | None = None,
+    ) -> None:
+        if self._ledger is None or not hasattr(self._ledger, "record_usage_event"):
+            return
+        metadata = {
+            "digest_kind": usage.digest_kind,
+            "source_chars": usage.source_chars,
+            "prompt_chars": usage.prompt_chars,
+            "response_chars": usage.response_chars,
+            "digest_chars": usage.digest_chars,
+            "failure_reason": usage.failure_reason,
+        }
+        try:
+            self._ledger.record_usage_event(
+                agent="deepseek",
+                role="auto_digest",
+                phase=usage.digest_kind,
+                request_kind="telegram_digest",
+                model=usage.model,
+                source="exact" if usage.total_tokens else "derived",
+                input_tokens=usage.input_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                output_tokens=usage.output_tokens,
+                reasoning_output_tokens=usage.reasoning_output_tokens,
+                total_tokens=usage.total_tokens,
+                latency_ms=usage.latency_ms,
+                status=usage.status,
+                conversation_id=conversation_id,
+                orchestration_run_id=orchestration_run_id,
+                agent_run_id=agent_run_id,
+                task_id=task_id,
+                metadata_json=json.dumps(metadata, ensure_ascii=False),
+            )
+        except Exception:
+            logger.debug("Failed to record DeepSeek digest token usage", exc_info=True)
+
     def _transition_auto_claude_completed(
         self,
         conversation_id: int,
@@ -3170,21 +3271,22 @@ class CommandController:
             orch_run.id,
             status=new_status,
             current_step=new_step,
-            last_claude_summary=completion_summary[:5000],
+            last_claude_summary=completion_summary,
         )
         test_gate_passed: bool | None = None
         internal_repair_started = False
+        agent_run_id = None
+        try:
+            agent_run_id = self._ledger.get_conversation(
+                conversation_id
+            ).active_claude_run_id
+        except Exception:
+            agent_run_id = None
+        implementation_task_id = self._hidden_task_id_for_agent_run(agent_run_id)
         if agent_status == "done" and hasattr(
             self._ledger, "get_team_run_for_orchestration"
         ):
             team_run = self._ledger.get_team_run_for_orchestration(orch_run.id)
-            agent_run_id = None
-            try:
-                agent_run_id = self._ledger.get_conversation(
-                    conversation_id
-                ).active_claude_run_id
-            except Exception:
-                agent_run_id = None
             if team_run is not None and hasattr(self._ledger, "list_team_agent_jobs"):
                 for job in self._ledger.list_team_agent_jobs(team_run.id):
                     if job.role != "implementer" or job.status != "running":
@@ -3389,7 +3491,7 @@ class CommandController:
                     orch_run.id,
                     status="needs_user",
                     current_step=new_step,
-                    last_claude_summary=completion_summary[:5000],
+                    last_claude_summary=completion_summary,
                     last_verification_result=self._internal_test_failure_text(
                         attempt_count
                     ),
@@ -3410,7 +3512,7 @@ class CommandController:
                     orch_run.id,
                     status="needs_user",
                     current_step=AUTO_CLAUDE_DONE,
-                    last_claude_summary=completion_summary[:5000],
+                    last_claude_summary=completion_summary,
                     last_verification_result="开发完成，测试通过。",
                 )
 
@@ -3425,28 +3527,39 @@ class CommandController:
                 chat_id = convo.chat_id
             except Exception:
                 return
-            buttons = build_auto_stage_buttons(
+            buttons = self._auto_stage_buttons(
                 conversation_id, new_step,
+                orch_run=orch_run,
                 last_codex_analysis=orch_run.last_codex_analysis or "",
-                codex_implementer_enabled=self._codex_implementer_enabled(),
             )
             from wlcodex.interaction.events import InteractionEvent
-            digest = render_auto_draft_digest(
-                completion_summary or "结论：DeepSeek 开发工程师已完成实现。"
-            )
-            if new_step == AUTO_RETRY_READY:
-                attempt_count = (
-                    self._tester_attempt_count_for_conversation(conversation_id) or 1
+
+            async def send_stage_update() -> None:
+                digest_kind = (
+                    "diagnosis" if new_step == AUTO_RETRY_READY else "implementation"
                 )
-                text = (
-                    "测试未通过。\n\n"
-                    f"{digest}\n\n"
-                    f"{self._internal_test_failure_text(attempt_count)}"
+                digest = await render_auto_draft_digest_with_llm(
+                    completion_summary or "结论：DeepSeek 开发工程师已完成实现。",
+                    digest_kind=digest_kind,
+                    usage_recorder=self._auto_digest_usage_recorder(
+                        conversation_id=conversation_id,
+                        orchestration_run_id=orch_run.id,
+                        task_id=implementation_task_id,
+                        agent_run_id=agent_run_id,
+                    ),
                 )
-            else:
-                text = f"开发完成，测试通过。\n\n{digest}\n\n请选择下一步："
-            asyncio.create_task(
-                self._interaction_renderer.handle(
+                if new_step == AUTO_RETRY_READY:
+                    attempt_count = (
+                        self._tester_attempt_count_for_conversation(conversation_id) or 1
+                    )
+                    text = (
+                        "测试未通过。\n\n"
+                        f"{digest}\n\n"
+                        f"{self._internal_test_failure_text(attempt_count)}"
+                    )
+                else:
+                    text = f"开发完成，测试通过。\n\n{digest}\n\n请选择下一步："
+                await self._interaction_renderer.handle(
                     InteractionEvent(
                         event_type="run_completed",
                         chat_id=chat_id,
@@ -3455,7 +3568,8 @@ class CommandController:
                         buttons=buttons,
                     )
                 )
-            )
+
+            asyncio.create_task(send_stage_update())
 
     async def _run_internal_test_repair(
         self, *, conversation_id: int, attempt_count: int
@@ -3650,11 +3764,11 @@ class CommandController:
             return ControllerResponse(
                 "没有可见的最终方案正文，不能交给 DeepSeek 开发工程师执行。\n"
                 "请先继续补充上下文。",
-                buttons=build_auto_stage_buttons(
+                buttons=self._auto_stage_buttons(
                     convo.id,
                     orch_run.current_step,
+                    orch_run=orch_run,
                     last_codex_analysis=orch_run.last_codex_analysis or "",
-                    codex_implementer_enabled=self._codex_implementer_enabled(),
                 ),
             )
         team_run = None
@@ -3798,7 +3912,7 @@ class CommandController:
                 self._ledger.update_orchestration_run(
                     orch_run.id,
                     status="failed",
-                    last_claude_summary=str(exc)[:5000],
+                    last_claude_summary=str(exc),
                 )
                 if hasattr(self._ledger, "update_team_run_status"):
                     self._ledger.update_team_run_status(team_run.id, "failed")
@@ -3830,7 +3944,11 @@ class CommandController:
         self._background_tasks.add(bg_task)
         bg_task.add_done_callback(self._background_tasks.discard)
 
-        buttons = build_auto_stage_buttons(convo.id, AUTO_CLAUDE_RUNNING)
+        buttons = self._auto_stage_buttons(
+            convo.id,
+            AUTO_CLAUDE_RUNNING,
+            orch_run=orch_run,
+        )
         return ControllerResponse(
             "DeepSeek 开发工程师开始执行。完成后请点「审计工程师验收」。",
             buttons=buttons,
@@ -3858,11 +3976,11 @@ class CommandController:
             return ControllerResponse(
                 "没有可见的最终方案正文，不能交给 GPT 开发工程师执行。\n"
                 "请先继续补充上下文。",
-                buttons=build_auto_stage_buttons(
+                buttons=self._auto_stage_buttons(
                     convo.id,
                     orch_run.current_step,
+                    orch_run=orch_run,
                     last_codex_analysis=orch_run.last_codex_analysis or "",
-                    codex_implementer_enabled=self._codex_implementer_enabled(),
                 ),
             )
 
@@ -4005,7 +4123,7 @@ class CommandController:
                 self._ledger.update_orchestration_run(
                     orch_run.id,
                     status="failed",
-                    last_claude_summary=str(exc)[:5000],
+                    last_claude_summary=str(exc),
                 )
                 if team_run is not None and hasattr(
                     self._ledger,
@@ -4041,7 +4159,7 @@ class CommandController:
             self._ledger.update_orchestration_run(
                 orch_run.id,
                 status="failed",
-                last_claude_summary=str(exc)[:5000],
+                last_claude_summary=str(exc),
             )
             if team_run is not None and hasattr(
                 self._ledger,
@@ -4058,7 +4176,11 @@ class CommandController:
                 )
             return ControllerResponse(classify_user_error(exc))
 
-        buttons = build_auto_stage_buttons(convo.id, AUTO_CLAUDE_RUNNING)
+        buttons = self._auto_stage_buttons(
+            convo.id,
+            AUTO_CLAUDE_RUNNING,
+            orch_run=orch_run,
+        )
         return ControllerResponse(
             "GPT 开发工程师开始执行。完成后请点「审计工程师验收」。",
             buttons=buttons,
@@ -4342,7 +4464,7 @@ class CommandController:
                 self._ledger.update_orchestration_run(
                     orch_run.id,
                     status="failed",
-                    last_verification_result=str(exc)[:5000],
+                    last_verification_result=str(exc),
                 )
                 if hasattr(self._ledger, "update_team_run_status"):
                     self._ledger.update_team_run_status(team_run.id, "failed")
@@ -4374,7 +4496,7 @@ class CommandController:
             self._ledger.update_orchestration_run(
                 orch_run.id,
                 status="failed",
-                last_verification_result=str(exc)[:5000],
+                last_verification_result=str(exc),
             )
             if team_run is not None and hasattr(
                 self._ledger,
@@ -4391,7 +4513,11 @@ class CommandController:
                 )
             return ControllerResponse(classify_user_error(exc))
 
-        buttons = build_auto_stage_buttons(convo.id, AUTO_VERIFYING)
+        buttons = self._auto_stage_buttons(
+            convo.id,
+            AUTO_VERIFYING,
+            orch_run=orch_run,
+        )
         return ControllerResponse("审计工程师开始验收，完成后将显示验收结果。", buttons=buttons)
 
     async def _handle_auto_codex_takeover(
@@ -4463,7 +4589,11 @@ class CommandController:
             )
             return ControllerResponse(classify_user_error(exc))
 
-        buttons = build_auto_stage_buttons(convo.id, AUTO_CODEX_TAKEOVER_RUNNING)
+        buttons = self._auto_stage_buttons(
+            convo.id,
+            AUTO_CODEX_TAKEOVER_RUNNING,
+            orch_run=orch_run,
+        )
         return ControllerResponse("GPT 开发工程师开始直接修复。", buttons=buttons)
 
     async def _handle_auto_send_repair_to_claude(
@@ -4477,7 +4607,11 @@ class CommandController:
         if orch_run.current_step == AUTO_COMPLETED:
             return ControllerResponse(
                 "这条任务已经完成，不能再返工。你可以查看状态或开始新的任务。",
-                buttons=build_auto_stage_buttons(convo.id, AUTO_COMPLETED),
+                buttons=self._auto_stage_buttons(
+                    convo.id,
+                    AUTO_COMPLETED,
+                    orch_run=orch_run,
+                ),
             )
         if orch_run.current_step not in (AUTO_CLAUDE_DONE, AUTO_RETRY_READY):
             return ControllerResponse(
@@ -4626,7 +4760,7 @@ class CommandController:
                 self._ledger.update_orchestration_run(
                     orch_run.id,
                     status="failed",
-                    last_claude_summary=str(exc)[:5000],
+                    last_claude_summary=str(exc),
                 )
                 if hasattr(self._ledger, "update_team_run_status"):
                     self._ledger.update_team_run_status(team_run.id, "failed")
@@ -4657,7 +4791,11 @@ class CommandController:
         self._background_tasks.add(bg_task)
         bg_task.add_done_callback(self._background_tasks.discard)
 
-        buttons = build_auto_stage_buttons(convo.id, AUTO_CLAUDE_RUNNING)
+        buttons = self._auto_stage_buttons(
+            convo.id,
+            AUTO_CLAUDE_RUNNING,
+            orch_run=orch_run,
+        )
         return ControllerResponse(
             "DeepSeek 开发工程师开始返工。完成后请点「审计工程师验收」。",
             buttons=buttons,
@@ -5710,10 +5848,10 @@ class CommandController:
             if orch_run and orch_run.last_codex_analysis:
                 return ControllerResponse(
                     f"当前方案：\n\n{orch_run.last_codex_analysis[:3500]}",
-                    buttons=build_auto_stage_buttons(
+                    buttons=self._auto_stage_buttons(
                         callback.conversation_id, orch_run.current_step,
+                        orch_run=orch_run,
                         last_codex_analysis=orch_run.last_codex_analysis or "",
-                        codex_implementer_enabled=self._codex_implementer_enabled(),
                     ),
                 )
             return ControllerResponse("暂无方案草稿。")
@@ -5736,8 +5874,10 @@ class CommandController:
                 )
                 return ControllerResponse(
                     "已回到上下文收集阶段。请补充信息，然后点「生成最终方案」。",
-                    buttons=build_auto_stage_buttons(
-                        callback.conversation_id, AUTO_COLLECTING_CONTEXT
+                    buttons=self._auto_stage_buttons(
+                        callback.conversation_id,
+                        AUTO_COLLECTING_CONTEXT,
+                        orch_run=orch_run,
                     ),
                 )
             return ControllerResponse(

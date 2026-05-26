@@ -1687,6 +1687,18 @@ class StreamingClaudeError:
         yield AgentStreamEvent(delta="Claude binary not found", event_type="error")
 
 
+class StreamingClaudeLongError:
+    enabled = True
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.prompts: list[str] = []
+
+    async def send_streaming(self, request):
+        self.prompts.append(request.prompt)
+        yield AgentStreamEvent(delta=self.text, event_type="error")
+
+
 def _init_git_workspace(path: Path) -> None:
     path.mkdir()
     (path / "tracked.txt").write_text("initial\n", encoding="utf-8")
@@ -2009,6 +2021,7 @@ async def test_auto_route_deepseek_execute_starts_single_agent_without_design(
     tmp_path: Path,
 ) -> None:
     from wlcodex.auto_workflow import AUTO_CLAUDE_RUNNING, AUTO_ROUTE_CLAUDE_EXECUTE
+    from wlcodex.conversation_callback import TEAM_VIEW_ARTIFACTS, TEAM_VIEW_STATUS
     from wlcodex.conversation_callback import ConversationCallback
 
     workspace = tmp_path / "workspace"
@@ -2046,6 +2059,9 @@ async def test_auto_route_deepseek_execute_starts_single_agent_without_design(
     assert [(run.agent, run.role) for run in agent_runs] == [
         ("claude", "auto_implementation")
     ]
+    actions = _callback_actions(response.buttons)
+    assert TEAM_VIEW_STATUS not in actions
+    assert TEAM_VIEW_ARTIFACTS not in actions
 
 
 @pytest.mark.asyncio
@@ -4033,6 +4049,186 @@ async def test_claude_completion_message_hides_implementation_report_protocol(
     assert "files_modified" not in text
     assert "content" not in text
     assert "broader acceptan" not in text
+
+
+@pytest.mark.asyncio
+async def test_claude_completion_deepseek_digest_uses_full_text_and_records_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wlcodex.auto_digest_llm import (
+        DeepSeekDigestCompletion,
+        DeepSeekDigestUsage,
+    )
+    from wlcodex.auto_workflow import AUTO_CLAUDE_RUNNING
+
+    monkeypatch.setenv("WLCODEX_DEEPSEEK_API_KEY", "sk-test")
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    renderer = RecordingInteractionRenderer()
+    ctrl = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        claude_backend=FakeClaudeBackendForController(),
+        interaction_renderer=renderer,
+        implementer_model_profiles=("claude_deepseek",),
+        adaptive_team_model_profiles={"claude_deepseek": "claude"},
+    )
+    task = service.start_task(
+        "wlcodex",
+        "Run Claude implementation",
+        codex_thread_id="thread-controller-full-digest",
+        telegram_chat_id=100,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "claude",
+        "auto_implementation",
+        hidden_task_id=task.id,
+    )
+    ledger.set_conversation_active_claude_run(conversation.id, agent_run.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "修改 README")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_CLAUDE_RUNNING,
+    )
+    tail_marker = "CONTROLLER_FULL_COMPLETION_TAIL_AFTER_5000"
+    completion_summary = "实现完成，测试通过。\n" + ("执行细节。" * 700) + tail_marker
+
+    async def fake_deepseek_call(
+        *,
+        model: str,
+        prompt: str,
+        timeout_seconds: float,
+        config=None,
+    ) -> DeepSeekDigestCompletion:
+        assert tail_marker in prompt
+        return DeepSeekDigestCompletion(
+            content=(
+                '{"title":"执行摘要","primary_label":"结果","primary":"实现完成，测试通过。",'
+                '"evidence_label":"改动","evidence_items":["完整 completion 文本已进入模型 prompt。"],'
+                '"risk_label":"验证","risk":"测试通过。",'
+                '"next_label":"下一步","next":"可以验收。"}'
+            ),
+            usage=DeepSeekDigestUsage(
+                model=model,
+                input_tokens=3456,
+                output_tokens=123,
+                total_tokens=3579,
+                latency_ms=654,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "wlcodex.auto_digest_llm._call_deepseek",
+        fake_deepseek_call,
+        raising=False,
+    )
+
+    ctrl._transition_auto_claude_completed(
+        conversation.id,
+        agent_status="done",
+        completion_summary=completion_summary,
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert renderer.events
+    assert "完整 completion 文本已进入模型 prompt" in renderer.events[-1].text
+    usage_events = ledger.list_usage_events(
+        conversation_id=conversation.id,
+        agent="deepseek",
+    )
+    assert len(usage_events) == 1
+    assert usage_events[0].request_kind == "telegram_digest"
+    assert usage_events[0].input_tokens == 3456
+    assert usage_events[0].output_tokens == 123
+    assert usage_events[0].total_tokens == 3579
+
+
+@pytest.mark.asyncio
+async def test_claude_direct_failure_preserves_full_error_text_for_auto_state(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.auto_workflow import AUTO_CLAUDE_RUNNING
+
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+
+    tail_marker = "FULL_FAILURE_TAIL_AFTER_5000"
+    error_text = "Claude 执行失败。\n" + ("错误上下文。" * 700) + tail_marker
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(ledger, (
+        WorkspaceConfig("wlcodex", workspace, True),
+    ))
+    renderer = RecordingInteractionRenderer()
+    ctrl = CommandController(
+        service,
+        FakeCodexBackend(),
+        TaskInspector(ledger, tmp_path / "logs"),
+        ledger=ledger,
+        claude_backend=StreamingClaudeLongError(error_text),
+        interaction_renderer=renderer,
+        implementer_model_profiles=("claude_deepseek",),
+        adaptive_team_model_profiles={"claude_deepseek": "claude"},
+    )
+    task = service.start_task(
+        "wlcodex",
+        "Run Claude implementation",
+        codex_thread_id="thread-controller-long-failure",
+        telegram_chat_id=100,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=100,
+        user_id=200,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="wlcodex",
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "claude",
+        "auto_implementation",
+        hidden_task_id=task.id,
+    )
+    ledger.set_conversation_active_claude_run(conversation.id, agent_run.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "修改 README")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_CLAUDE_RUNNING,
+    )
+
+    await ctrl._run_claude_direct_async(
+        agent_run_id=agent_run.id,
+        task_id=task.id,
+        conversation_id=conversation.id,
+        prompt="执行实现",
+        workspace_path=str(workspace),
+        chat_id=100,
+    )
+
+    updated_run = ledger.get_agent_run(agent_run.id)
+    updated_orch = ledger.get_orchestration_run(orch_run.id)
+    assert tail_marker in updated_run.completion_summary
+    assert tail_marker in updated_orch.last_claude_summary
 
 
 @pytest.mark.asyncio

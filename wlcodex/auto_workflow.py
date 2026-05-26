@@ -135,6 +135,7 @@ def build_auto_stage_buttons(
     *,
     last_codex_analysis: str = "",
     codex_implementer_enabled: bool = False,
+    include_team_controls: bool = True,
 ) -> list[list[dict[str, str]]]:
     """Build inline buttons for the given auto stage.
 
@@ -146,6 +147,14 @@ def build_auto_stage_buttons(
     """
     def button(text: str, action: str) -> dict[str, str]:
         return {"text": text, "callback_data": f"conv:{conversation_id}:{action}"}
+
+    def team_buttons() -> list[dict[str, str]]:
+        if not include_team_controls:
+            return []
+        return [
+            button("团队状态", TEAM_VIEW_STATUS),
+            button("团队证据", TEAM_VIEW_ARTIFACTS),
+        ]
 
     has_visible_plan = bool(last_codex_analysis.strip())
     if stage == AUTO_ROUTE_SELECT:
@@ -163,98 +172,95 @@ def build_auto_stage_buttons(
         ]
 
     if stage == AUTO_COLLECTING_CONTEXT:
-        return [[
+        rows = [[
             button("生成最终方案", AUTO_FINAL_PLAN),
             button("查看当前草稿", AUTO_SHOW_DRAFT),
-        ], [
-            button("团队状态", TEAM_VIEW_STATUS),
-            button("团队证据", TEAM_VIEW_ARTIFACTS),
-        ], [
-            button("取消", AUTO_CANCEL),
         ]]
+        if team_buttons():
+            rows.append(team_buttons())
+        rows.append([
+            button("取消", AUTO_CANCEL),
+        ])
+        return rows
 
     if stage == AUTO_DRAFT_READY:
         if not has_visible_plan:
-            return [[
+            rows = [[
                 button("继续补充", AUTO_CONTINUE_CONTEXT),
                 button("结束任务", AUTO_CLOSE),
-            ], [
-                button("团队状态", TEAM_VIEW_STATUS),
-                button("团队证据", TEAM_VIEW_ARTIFACTS),
             ]]
+            if team_buttons():
+                rows.append(team_buttons())
+            return rows
         handoff_buttons = [button("交给 DeepSeek 开发工程师", AUTO_SEND_TO_CLAUDE)]
         if codex_implementer_enabled:
             handoff_buttons.append(button("交给 GPT 开发工程师", AUTO_SEND_TO_CODEX))
-        return [
+        rows = [
             handoff_buttons,
             [
                 button("继续补充", AUTO_CONTINUE_CONTEXT),
                 button("查看当前草稿", AUTO_SHOW_DRAFT),
             ],
             [
-                button("团队状态", TEAM_VIEW_STATUS),
-                button("团队证据", TEAM_VIEW_ARTIFACTS),
-            ],
-            [
                 button("GPT 开发工程师接管", AUTO_CODEX_TAKEOVER),
                 button("结束任务", AUTO_CLOSE),
             ],
         ]
+        if team_buttons():
+            rows.insert(2, team_buttons())
+        return rows
 
     if stage == AUTO_CLAUDE_RUNNING:
-        return [[
+        rows = [[
             button("查看状态", AUTO_VIEW_STATUS),
             button("打断执行", AUTO_INTERRUPT_CLAUDE),
-        ], [
-            button("团队状态", TEAM_VIEW_STATUS),
-            button("团队证据", TEAM_VIEW_ARTIFACTS),
         ]]
+        if team_buttons():
+            rows.append(team_buttons())
+        return rows
 
     if stage == AUTO_CLAUDE_DONE:
-        return [[
+        rows = [[
             button("审计工程师验收", AUTO_CODEX_VERIFY),
             button("查看 diff", AUTO_VIEW_DIFF),
         ], [
             button("DeepSeek 开发工程师返工", AUTO_SEND_REPAIR_TO_CLAUDE),
             button("GPT 开发工程师接管", AUTO_CODEX_TAKEOVER),
         ], [
-            button("团队状态", TEAM_VIEW_STATUS),
-            button("团队证据", TEAM_VIEW_ARTIFACTS),
-        ], [
             button("结束任务", AUTO_CLOSE),
         ]]
+        if team_buttons():
+            rows.insert(2, team_buttons())
+        return rows
 
     if stage == AUTO_VERIFYING:
-        return [[
+        rows = [[
             button("查看状态", AUTO_VIEW_STATUS),
-        ], [
-            button("团队状态", TEAM_VIEW_STATUS),
-            button("团队证据", TEAM_VIEW_ARTIFACTS),
         ]]
+        if team_buttons():
+            rows.append(team_buttons())
+        return rows
 
     if stage == AUTO_RETRY_READY:
         handoff_buttons = [button("DeepSeek 开发工程师返工", AUTO_SEND_REPAIR_TO_CLAUDE)]
         if codex_implementer_enabled:
             handoff_buttons.append(button("交给 GPT 开发工程师", AUTO_SEND_TO_CODEX))
-        return [
+        rows = [
             handoff_buttons,
             [
                 button("继续补充", AUTO_CONTINUE_CONTEXT),
                 button("重写返工提示词", AUTO_REWRITE_REPAIR),
             ],
             [
-                button("团队状态", TEAM_VIEW_STATUS),
-                button("团队证据", TEAM_VIEW_ARTIFACTS),
-            ],
-            [
                 button("GPT 开发工程师接管", AUTO_CODEX_TAKEOVER),
                 button("结束任务", AUTO_CLOSE),
             ],
         ]
+        if team_buttons():
+            rows.insert(2, team_buttons())
+        return rows
 
     # Default: status view for unknown or completed stages.
-    return [[
-        button("查看状态", AUTO_VIEW_STATUS),
-        button("团队状态", TEAM_VIEW_STATUS),
-        button("团队证据", TEAM_VIEW_ARTIFACTS),
-    ]]
+    default_buttons = [button("查看状态", AUTO_VIEW_STATUS)]
+    default_buttons.extend(team_buttons())
+    return [default_buttons]

@@ -26,8 +26,11 @@ from wlcodex.status import render_approval_card
 from wlcodex.task_service import TaskService, drain_workspace
 from wlcodex.telegram_digest import (
     render_auto_diagnose_digest,
-    render_auto_draft_digest,
     render_missing_diagnose_digest,
+)
+from wlcodex.auto_digest_llm import (
+    DeepSeekDigestUsage,
+    render_auto_draft_digest_with_llm,
 )
 
 logger = logging.getLogger(__name__)
@@ -550,6 +553,14 @@ class EventBridge:
         self._runtime_causation_by_agent_run: dict[int, int] = {}
         self._running = False
 
+    def _auto_run_has_team(self, auto_run: Any | None) -> bool:
+        if auto_run is None or not hasattr(
+            self._ledger,
+            "get_team_run_for_orchestration",
+        ):
+            return False
+        return self._ledger.get_team_run_for_orchestration(auto_run.id) is not None
+
     async def run(self) -> None:
         """Run the event loop until cancelled.
 
@@ -912,14 +923,14 @@ class EventBridge:
             self._ledger.update_agent_run_status(
                 int(row["id"]),
                 agent_status,
-                completion_summary=str(summary)[:5000],
+                completion_summary=str(summary),
             )
             self._append_direct_agent_terminal_event(
                 task,
                 agent_run_id=int(row["id"]),
                 agent_status=agent_status,
                 role=str(row["role"] or "implementation"),
-                summary=str(summary)[:5000],
+                summary=str(summary),
             )
 
     def _append_direct_agent_terminal_event(
@@ -1079,7 +1090,7 @@ class EventBridge:
                 auto_run.id,
                 status="needs_user",
                 current_step=new_step,
-                last_codex_analysis=completion_summary[:5000] if completion_summary else "",
+                last_codex_analysis=completion_summary if completion_summary else "",
                 diagnose_json=diagnose_json,
             )
 
@@ -1101,7 +1112,7 @@ class EventBridge:
                 auto_run.id,
                 status="needs_user",
                 current_step=new_step,
-                last_codex_analysis=completion_summary[:5000] if completion_summary else "",
+                last_codex_analysis=completion_summary if completion_summary else "",
                 diagnose_json=diagnose_json,
             )
             self._record_architecture_plan_artifact(
@@ -1132,7 +1143,7 @@ class EventBridge:
                     auto_run.id,
                     status="needs_user",
                     current_step=new_step,
-                    last_claude_summary=completion_summary[:5000] if completion_summary else "",
+                    last_claude_summary=completion_summary if completion_summary else "",
                     last_verification_result=retry_text,
                 )
             else:
@@ -1141,7 +1152,7 @@ class EventBridge:
                     auto_run.id,
                     status="needs_user",
                     current_step=new_step,
-                    last_claude_summary=completion_summary[:5000] if completion_summary else "",
+                    last_claude_summary=completion_summary if completion_summary else "",
                     last_verification_result="开发完成，测试通过。",
                 )
 
@@ -1149,7 +1160,7 @@ class EventBridge:
             self._ledger.update_orchestration_run(
                 auto_run.id,
                 status="failed",
-                last_claude_summary=completion_summary[:5000] if completion_summary else "",
+                last_claude_summary=completion_summary if completion_summary else "",
             )
             self._mark_team_agent_job_failed(
                 auto_run,
@@ -1179,7 +1190,7 @@ class EventBridge:
                     auto_run.id,
                     status="needs_user",
                     current_step=new_step,
-                    last_verification_result=completion_summary[:5000] if completion_summary else "",
+                    last_verification_result=completion_summary if completion_summary else "",
                 )
             else:
                 new_step = AUTO_RETRY_READY
@@ -1187,7 +1198,7 @@ class EventBridge:
                     auto_run.id,
                     status="needs_user",
                     current_step=new_step,
-                    last_verification_result=completion_summary[:5000] if completion_summary else "",
+                    last_verification_result=completion_summary if completion_summary else "",
                 )
             self._mark_team_agent_job_done(
                 auto_run,
@@ -1205,7 +1216,7 @@ class EventBridge:
             self._ledger.update_orchestration_run(
                 auto_run.id,
                 status="failed",
-                last_verification_result=completion_summary[:5000] if completion_summary else "",
+                last_verification_result=completion_summary if completion_summary else "",
             )
             self._mark_team_agent_job_failed(
                 auto_run,
@@ -1220,7 +1231,7 @@ class EventBridge:
                 auto_run.id,
                 status="passed",
                 current_step=new_step,
-                last_codex_analysis=completion_summary[:5000] if completion_summary else "",
+                last_codex_analysis=completion_summary if completion_summary else "",
             )
 
         return new_step
@@ -2023,6 +2034,55 @@ class EventBridge:
         except Exception:
             return ""
 
+    def _auto_digest_usage_recorder(
+        self,
+        auto_run: Any,
+        task: object,
+    ) -> Callable[[DeepSeekDigestUsage], None]:
+        def record(usage: DeepSeekDigestUsage) -> None:
+            self._record_auto_digest_usage(auto_run, task, usage)
+
+        return record
+
+    def _record_auto_digest_usage(
+        self,
+        auto_run: Any,
+        task: object,
+        usage: DeepSeekDigestUsage,
+    ) -> None:
+        if not hasattr(self._ledger, "record_usage_event"):
+            return
+        metadata = {
+            "digest_kind": usage.digest_kind,
+            "source_chars": usage.source_chars,
+            "prompt_chars": usage.prompt_chars,
+            "response_chars": usage.response_chars,
+            "digest_chars": usage.digest_chars,
+            "failure_reason": usage.failure_reason,
+        }
+        try:
+            self._ledger.record_usage_event(
+                agent="deepseek",
+                role="auto_digest",
+                phase=usage.digest_kind,
+                request_kind="telegram_digest",
+                model=usage.model,
+                source="exact" if usage.total_tokens else "derived",
+                input_tokens=usage.input_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                output_tokens=usage.output_tokens,
+                reasoning_output_tokens=usage.reasoning_output_tokens,
+                total_tokens=usage.total_tokens,
+                latency_ms=usage.latency_ms,
+                status=usage.status,
+                conversation_id=int(getattr(auto_run, "conversation_id")),
+                orchestration_run_id=int(getattr(auto_run, "id")),
+                task_id=int(getattr(task, "id")),
+                metadata_json=json.dumps(metadata, ensure_ascii=False),
+            )
+        except Exception:
+            logger.debug("Failed to record DeepSeek digest token usage", exc_info=True)
+
     async def _send_auto_stage_buttons(
         self, task: object, new_stage: str
     ) -> None:
@@ -2053,6 +2113,7 @@ class EventBridge:
             conversation_id, new_stage,
             last_codex_analysis=auto_run.last_codex_analysis or "",
             codex_implementer_enabled=self._codex_implementer_enabled,
+            include_team_controls=self._auto_run_has_team(auto_run),
         )
         # Include orch run data in the message for draft_ready
         stage_label = auto_stage_label(new_stage)
@@ -2095,9 +2156,13 @@ class EventBridge:
                 elif diagnose_expected:
                     digest = render_missing_diagnose_digest()
                 else:
-                    digest = render_auto_draft_digest(
+                    digest = await render_auto_draft_digest_with_llm(
                         auto_run.last_codex_analysis,
                         fallback_next="继续补充信息，或点击生成最终方案。",
+                        usage_recorder=self._auto_digest_usage_recorder(
+                            auto_run,
+                            task,
+                        ),
                     )
                 text = "Codex 已更新分析。\n\n{}\n\n请选择下一步：".format(digest)
             else:
@@ -2109,7 +2174,13 @@ class EventBridge:
             # Primary: always render the human-readable plan from
             # last_codex_analysis. Diagnose JSON, if present, is only a
             # supplementary evidence note — it must never replace the plan.
-            digest = render_auto_draft_digest(auto_run.last_codex_analysis)
+            team_run = self._team_run_for_auto_run(auto_run)
+            route_kind = self._team_route_kind(team_run)
+            digest = await render_auto_draft_digest_with_llm(
+                auto_run.last_codex_analysis,
+                digest_kind="diagnosis" if route_kind == "bug" else "design",
+                usage_recorder=self._auto_digest_usage_recorder(auto_run, task),
+            )
             supplement = ""
             if structured_digest:
                 supplement = _brief_diagnose_supplement(structured_digest)
@@ -2129,13 +2200,18 @@ class EventBridge:
                 "请继续补充上下文。"
             )
         elif new_stage == "claude_done":
-            digest = render_auto_draft_digest(auto_run.last_claude_summary or "结论：完成。")
+            digest = await render_auto_draft_digest_with_llm(
+                auto_run.last_claude_summary or "结论：完成。",
+                digest_kind="implementation",
+                usage_recorder=self._auto_digest_usage_recorder(auto_run, task),
+            )
             text = f"开发完成，测试通过。\n\n{digest}\n\n请选择下一步："
         elif new_stage == "completed":
             text = self._final_synthesis_text(auto_run)
         elif new_stage == "retry_ready":
-            digest = render_auto_draft_digest(
-                auto_run.last_verification_result or "结论：验收未通过。"
+            digest = await render_auto_draft_digest_with_llm(
+                auto_run.last_verification_result or "结论：验收未通过。",
+                usage_recorder=self._auto_digest_usage_recorder(auto_run, task),
             )
             title = (
                 "测试未通过。"

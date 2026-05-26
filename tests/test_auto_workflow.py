@@ -242,6 +242,19 @@ class TestBuildAutoStageButtons:
         assert "查看状态" in labels
         assert "打断执行" in labels
 
+    def test_single_agent_running_buttons_hide_team_controls(self) -> None:
+        buttons = build_auto_stage_buttons(
+            42,
+            AUTO_CLAUDE_RUNNING,
+            include_team_controls=False,
+        )
+        labels = _labels(buttons)
+
+        assert "查看状态" in labels
+        assert "打断执行" in labels
+        assert "团队状态" not in labels
+        assert "团队证据" not in labels
+
     def test_claude_done_buttons(self) -> None:
         buttons = build_auto_stage_buttons(42, AUTO_CLAUDE_DONE)
         labels = _labels(buttons)

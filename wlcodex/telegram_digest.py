@@ -84,6 +84,12 @@ _NOOP_NEXT_VALUES = {
     "null",
 }
 
+_DIGEST_LABELS = {
+    "diagnosis": ("关键摘要", "结论", "依据", "风险", "下一步"),
+    "design": ("方案摘要", "方案", "依据", "风险", "下一步"),
+    "implementation": ("执行摘要", "结果", "改动", "验证", "下一步"),
+}
+
 _STRUCTURED_REPORT_KEYS = {
     "audit_report",
     "implementation_report",
@@ -177,6 +183,7 @@ def render_auto_draft_digest(
     *,
     max_chars: int = 700,
     fallback_next: str | None = None,
+    digest_kind: str = "diagnosis",
 ) -> str:
     """Render a short Chinese digest for /auto draft_ready cockpit cards.
 
@@ -193,7 +200,13 @@ def render_auto_draft_digest(
 
     lines = _clean_lines(text)
     if not lines:
-        return "关键摘要：\n结论：暂无可展示内容。\n依据：未收到模型正文。\n风险：未知。\n下一步：请继续补充上下文。"
+        return _render_digest(
+            "暂无可展示内容。",
+            ["未收到模型正文。"],
+            "未知。",
+            "请继续补充上下文。",
+            digest_kind=digest_kind,
+        )
     if not _contains_cjk(" ".join(lines)):
         return (
             "关键摘要：\n"
@@ -237,7 +250,16 @@ def render_auto_draft_digest(
     next_step = _with_claude_task(next_step, claude_task)
     next_step = _sanitize_next_step(next_step)
 
-    rendered = _render_digest(conclusion, evidence, risk, next_step)
+    if digest_kind == "implementation" and _is_unspecified_risk(risk):
+        risk = _implementation_verification(lines)
+
+    rendered = _render_digest(
+        conclusion,
+        evidence,
+        risk,
+        next_step,
+        digest_kind=digest_kind,
+    )
     if len(rendered) <= max_chars:
         return rendered
 
@@ -247,6 +269,7 @@ def render_auto_draft_digest(
         [_trim_sentence(item, 100) for item in evidence],
         _trim_sentence(risk, 100),
         _trim_sentence(next_step, 100),
+        digest_kind=digest_kind,
     )
     if len(rendered) <= max_chars:
         return rendered
@@ -681,6 +704,25 @@ def _completion_heading(lines: list[str], conclusion: str) -> str:
     return _trim_sentence(first, 80)
 
 
+def _is_unspecified_risk(text: str) -> bool:
+    normalized = _normalize_sentence(text)
+    return normalized in {
+        "未明确风险",
+        "未明确风险。",
+        "未知",
+        "未知。",
+    }
+
+
+def _implementation_verification(lines: list[str]) -> str:
+    first = _normalize_sentence(lines[0]) if lines else ""
+    if "测试通过" in first:
+        return "测试通过。"
+    if "验证通过" in first:
+        return "验证通过。"
+    return "未明确验证结果。"
+
+
 def _find_evidence(lines: list[str]) -> list[str]:
     evidence_items = _collect_section_lines(lines, "evidence")
     if not evidence_items:
@@ -1066,17 +1108,22 @@ def _render_digest(
     evidence: list[str],
     risk: str,
     next_step: str,
+    *,
+    digest_kind: str = "diagnosis",
 ) -> str:
+    title_label, conclusion_label, evidence_label, risk_label, next_label = (
+        _DIGEST_LABELS.get(digest_kind) or _DIGEST_LABELS["diagnosis"]
+    )
     if evidence:
         evidence_text = "\n" + "\n".join(f"- {_ensure_sentence(item)}" for item in evidence)
     else:
         evidence_text = "未提取到明确证据。"
     return (
-        "关键摘要：\n"
-        f"结论：{_ensure_sentence(conclusion)}\n"
-        f"依据：{evidence_text}\n"
-        f"风险：{_ensure_sentence(risk)}\n"
-        f"下一步：{_ensure_sentence(next_step)}"
+        f"{title_label}：\n"
+        f"{conclusion_label}：{_ensure_sentence(conclusion)}\n"
+        f"{evidence_label}：{evidence_text}\n"
+        f"{risk_label}：{_ensure_sentence(risk)}\n"
+        f"{next_label}：{_ensure_sentence(next_step)}"
     )
 
 

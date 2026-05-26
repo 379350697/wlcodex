@@ -5,6 +5,17 @@ machine runs the work. The phone shows two views of the same live workbench:
 **Cockpit** (驾驶舱) for concise progress and decisions, and **Onsite** (现场)
 for raw terminal-style live control.
 
+## Documentation Map
+
+| Area | Start here | Use when |
+|------|------------|----------|
+| End-to-end manual | `docs/manual-aet-e2e.md` | Running or checking the adaptive engineering team flow |
+| Protocol notes | `docs/protocol/codex-app-server-spike.md` | Reviewing Codex app-server protocol experiments |
+| Smoke checks | `docs/smoke/` | Replaying focused manual checks for interaction modes |
+| Design specs | `docs/superpowers/specs/` | Reading approved feature designs before implementation |
+| Implementation plans | `docs/superpowers/plans/` | Executing task-by-task plans with agentic workers |
+| Reviews and reports | `docs/superpowers/reviews/`, `docs/superpowers/reports/` | Checking review findings, acceptance notes, and analysis artifacts |
+
 ## Remote Workbench
 
 **Plain text default**: Codex read-only analysis.

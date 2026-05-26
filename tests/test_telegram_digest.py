@@ -201,6 +201,50 @@ def test_auto_draft_digest_summarizes_docs_only_completion_without_duplicate_evi
     assert digest.count("只改文档") <= 1
 
 
+def test_auto_draft_digest_can_render_design_template() -> None:
+    digest = render_auto_draft_digest(
+        "最终方案：在 README 新增 Documentation Map，帮助用户找到 docs 下的手册、协议和报告。\n"
+        "依据：README 是入口文档；docs 目录已有 manual、protocol、smoke、specs。\n"
+        "风险：低，只改文档。\n"
+        "下一步：按方案更新 README。",
+        digest_kind="design",
+    )
+
+    assert digest.startswith("方案摘要：")
+    assert "方案：在 README 新增 Documentation Map" in digest
+    assert "依据：" in digest
+    assert "风险：" in digest
+    assert "结论：" not in digest
+    assert "关键摘要：" not in digest
+
+
+def test_auto_draft_digest_can_render_single_agent_completion_template() -> None:
+    process_line = (
+        "我会按项目要求先用 GitNexus 了解文档结构，并用 writing-plans 形成可执行方案；"
+        "这次是只改文档，所以不会触碰代码符号。GitNexus 索引提示落后 HEAD 3 个提交。"
+    )
+    digest = render_auto_draft_digest(
+        "开发完成，测试通过。\n\n"
+        "关键摘要：\n"
+        f"结论：{process_line}\n"
+        "依据：\n"
+        f"- {process_line}\n"
+        "- 在 [README.md](/tmp/work/README.md:8) 新增 `Documentation Map`，把 manual、protocol、smoke、specs 串起来。\n"
+        "- 新增执行方案文档：[plan.md](/tmp/work/docs/superpowers/plans/plan.md)。\n"
+        "风险：未明确风险。\n"
+        "下一步：可选：交给 DeepSeek 开发工程师或 GPT 开发工程师处理上述问题，也可继续补充或结束。",
+        digest_kind="implementation",
+    )
+
+    assert digest.startswith("执行摘要：")
+    assert "结果：文档-only小任务已完成，测试通过。" in digest
+    assert "改动：" in digest
+    assert "验证：" in digest
+    assert "关键摘要：" not in digest
+    assert "结论：" not in digest
+    assert process_line not in digest
+
+
 def test_auto_draft_digest_removes_rewrite_plan_from_visible_next_step() -> None:
     digest = render_auto_draft_digest(
         "结论：已经生成方案但需要用户决定。\n"

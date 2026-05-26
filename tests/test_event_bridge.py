@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2430,6 +2431,317 @@ async def test_auto_final_plan_prioritizes_human_readable_plan_over_diagnose_jso
 
 
 @pytest.mark.asyncio
+async def test_auto_final_plan_stage_uses_llm_digest_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate final plan",
+        codex_thread_id="thread-final-llm-digest",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "summarize with llm")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-final-llm-digest",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    seen_kinds: list[str] = []
+
+    async def fake_llm_digest(text: str, **kwargs: object) -> str:
+        seen_kinds.append(str(kwargs.get("digest_kind")))
+        return (
+            "方案摘要：\n"
+            "方案：用模型摘要器重写 Telegram 草稿。\n"
+            "依据：\n"
+            "- 原文来自 final plan。\n"
+            "风险：低。\n"
+            "下一步：可以交给开发工程师执行。"
+        )
+
+    monkeypatch.setattr(
+        "wlcodex.event_bridge.render_auto_draft_digest_with_llm",
+        fake_llm_digest,
+        raising=False,
+    )
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-final-llm-digest", "turnId": "turn-final-llm-digest"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-final-llm-digest",
+            "turnId": "turn-final-llm-digest",
+            "delta": "最终方案：我会先用 GitNexus 看结构，再给出方案。",
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-final-llm-digest", "status": "completed"},
+    ))
+
+    assert seen_kinds == ["design"]
+    assert "方案：用模型摘要器重写 Telegram 草稿。" in sent[-1][1]
+    assert "我会先用 GitNexus" not in sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_auto_final_plan_llm_receives_full_codex_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate final plan",
+        codex_thread_id="thread-final-full-llm",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "summarize full output")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-final-full-llm",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    seen_texts: list[str] = []
+
+    async def fake_llm_digest(text: str, **kwargs: object) -> str:
+        seen_texts.append(text)
+        return (
+            "方案摘要：\n"
+            "方案：最终方案已按完整输出提炼。\n"
+            "依据：\n"
+            "- 捕获到完整 final plan 文本。\n"
+            "风险：低。\n"
+            "下一步：可以交给开发工程师执行。"
+        )
+
+    monkeypatch.setattr(
+        "wlcodex.event_bridge.render_auto_draft_digest_with_llm",
+        fake_llm_digest,
+        raising=False,
+    )
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+    tail_marker = "FULL_CODEX_TAIL_AFTER_5000"
+    full_output = "最终方案：保留前置方案。\n" + ("背景细节。" * 700) + tail_marker
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-final-full-llm", "turnId": "turn-final-full-llm"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-final-full-llm",
+            "turnId": "turn-final-full-llm",
+            "delta": full_output,
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-final-full-llm", "status": "completed"},
+    ))
+
+    assert sent
+    assert seen_texts
+    assert tail_marker in seen_texts[-1]
+
+
+@pytest.mark.asyncio
+async def test_auto_digest_deepseek_token_usage_is_recorded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wlcodex.auto_digest_llm import (
+        DeepSeekDigestCompletion,
+        DeepSeekDigestUsage,
+    )
+    from wlcodex.auto_workflow import (
+        AUTO_COLLECTING_CONTEXT,
+        ROLE_AUTO_FINAL_PLAN,
+    )
+
+    monkeypatch.setenv("WLCODEX_DEEPSEEK_API_KEY", "sk-test")
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Generate final plan",
+        codex_thread_id="thread-final-token-usage",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "record digest tokens")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_COLLECTING_CONTEXT,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "codex",
+        ROLE_AUTO_FINAL_PLAN,
+        hidden_task_id=task.id,
+        external_session_id="thread-final-token-usage",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    tail_marker = "TOKEN_USAGE_TAIL_AFTER_5000"
+    full_output = "最终方案：记录 DeepSeek 摘要 token。\n" + ("背景细节。" * 700) + tail_marker
+
+    async def fake_deepseek_call(
+        *,
+        model: str,
+        prompt: str,
+        timeout_seconds: float,
+        config=None,
+    ) -> DeepSeekDigestCompletion:
+        assert tail_marker in prompt
+        return DeepSeekDigestCompletion(
+            content=(
+                '{"title":"方案摘要","primary_label":"方案","primary":"用 DeepSeek 摘要完整 final plan。",'
+                '"evidence_label":"依据","evidence_items":["原文尾部标记已进入模型 prompt。"],'
+                '"risk_label":"风险","risk":"低。",'
+                '"next_label":"下一步","next":"可以交给开发工程师执行。"}'
+            ),
+            usage=DeepSeekDigestUsage(
+                model=model,
+                input_tokens=2222,
+                output_tokens=111,
+                total_tokens=2333,
+                latency_ms=321,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "wlcodex.auto_digest_llm._call_deepseek",
+        fake_deepseek_call,
+        raising=False,
+    )
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-final-token-usage", "turnId": "turn-final-token-usage"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-final-token-usage",
+            "turnId": "turn-final-token-usage",
+            "delta": full_output,
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-final-token-usage", "status": "completed"},
+    ))
+
+    assert sent
+    usage_events = ledger.list_usage_events(
+        conversation_id=conversation.id,
+        agent="deepseek",
+    )
+    assert len(usage_events) == 1
+    usage = usage_events[0]
+    assert usage.request_kind == "telegram_digest"
+    assert usage.input_tokens == 2222
+    assert usage.output_tokens == 111
+    assert usage.total_tokens == 2333
+    assert usage.status == "accepted"
+    metadata = json.loads(usage.metadata_json)
+    assert metadata["source_chars"] == len(full_output)
+    assert metadata["digest_chars"] < metadata["source_chars"]
+
+
+@pytest.mark.asyncio
 async def test_auto_final_plan_completion_sends_chinese_digest_not_raw_long_plan(
     tmp_path: Path,
 ) -> None:
@@ -2515,10 +2827,12 @@ async def test_auto_final_plan_completion_sends_chinese_digest_not_raw_long_plan
 
     text = sent[-1][1]
     assert len(text) < 900
-    assert "结论：" in text
+    assert "方案摘要：" in text
+    assert "方案：" in text
     assert "依据：" in text
     assert "风险：" in text
     assert "下一步：" in text
+    assert "结论：" not in text
     assert "背景段落 10" not in text
     assert "mkdir -p" not in text
     assert "请选择下一步" in text
@@ -2605,10 +2919,13 @@ async def test_auto_claude_done_sends_chinese_digest_not_raw_long_summary(
 
     text = sent[-1][1]
     assert len(text) < 900
-    assert "结论：" in text
-    assert "依据：" in text
-    assert "风险：" in text
+    assert "执行摘要：" in text
+    assert "结果：" in text
+    assert "改动：" in text
+    assert "验证：" in text
     assert "下一步：" in text
+    assert "结论：" not in text
+    assert "关键摘要：" not in text
     assert "执行日志 20" not in text
     labels = [
         button["text"]
@@ -2616,6 +2933,104 @@ async def test_auto_claude_done_sends_chinese_digest_not_raw_long_summary(
         for button in row
     ]
     assert "审计工程师验收" in labels
+
+
+@pytest.mark.asyncio
+async def test_auto_implementation_llm_receives_full_agent_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wlcodex.auto_workflow import (
+        AUTO_DRAFT_READY,
+        ROLE_AUTO_IMPLEMENTATION,
+    )
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    task = service.start_task(
+        "demo",
+        "Run Claude implementation",
+        codex_thread_id="thread-impl-full-llm",
+        telegram_chat_id=123,
+    )
+    conversation = ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="auto",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    ledger.set_conversation_active_task(conversation.id, task.id)
+    orch_run = ledger.create_orchestration_run(conversation.id, "implement full digest")
+    ledger.update_orchestration_run(
+        orch_run.id,
+        status="running",
+        current_step=AUTO_DRAFT_READY,
+    )
+    agent_run = ledger.create_agent_run(
+        conversation.id,
+        "claude",
+        ROLE_AUTO_IMPLEMENTATION,
+        hidden_task_id=task.id,
+        external_session_id="thread-impl-full-llm",
+    )
+    ledger.update_agent_run_status(agent_run.id, "running")
+    seen_texts: list[str] = []
+
+    async def fake_llm_digest(text: str, **kwargs: object) -> str:
+        seen_texts.append(text)
+        return (
+            "执行摘要：\n"
+            "结果：实现完成，测试通过。\n"
+            "改动：\n"
+            "- 捕获到完整 implementation 文本。\n"
+            "验证：测试通过。\n"
+            "下一步：可以验收。"
+        )
+
+    monkeypatch.setattr(
+        "wlcodex.event_bridge.render_auto_draft_digest_with_llm",
+        fake_llm_digest,
+        raising=False,
+    )
+    sent: list[tuple[int, str, object]] = []
+
+    async def send_telegram(chat_id: int, text: str, buttons=None) -> int:
+        sent.append((chat_id, text, buttons))
+        return 1
+
+    bridge = _bridge(service, IdleBackend(), ledger, send_telegram=send_telegram)
+    tail_marker = "FULL_IMPLEMENTATION_TAIL_AFTER_5000"
+    full_output = (
+        "结果：文档-only小任务已完成，测试通过。\n"
+        + ("执行细节。" * 700)
+        + tail_marker
+    )
+
+    await bridge.process_event(BackendEvent(
+        "turn_started",
+        {"threadId": "thread-impl-full-llm", "turnId": "turn-impl-full-llm"},
+    ))
+    await bridge.process_event(BackendEvent(
+        "agent_message_delta",
+        {
+            "threadId": "thread-impl-full-llm",
+            "turnId": "turn-impl-full-llm",
+            "delta": full_output,
+        },
+    ))
+    await bridge.process_event(BackendEvent(
+        "turn_completed",
+        {"threadId": "thread-impl-full-llm", "status": "completed"},
+    ))
+
+    assert sent
+    assert seen_texts
+    assert tail_marker in seen_texts[-1]
 
 
 @pytest.mark.asyncio
@@ -2627,6 +3042,7 @@ async def test_auto_codex_implementation_done_advances_to_claude_done(
         AUTO_CLAUDE_RUNNING,
         ROLE_AUTO_IMPLEMENTATION,
     )
+    from wlcodex.conversation_callback import TEAM_VIEW_ARTIFACTS, TEAM_VIEW_STATUS
 
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
@@ -2702,6 +3118,12 @@ async def test_auto_codex_implementation_done_advances_to_claude_done(
     ]
     assert "开发完成，测试通过" in sent[-1][1]
     assert "Claude 执行完成" not in sent[-1][1]
+    assert "执行摘要：" in sent[-1][1]
+    assert "结果：" in sent[-1][1]
+    assert "关键摘要：" not in sent[-1][1]
+    assert "结论：" not in sent[-1][1]
+    assert TEAM_VIEW_STATUS not in _button_actions(sent[-1][2])
+    assert TEAM_VIEW_ARTIFACTS not in _button_actions(sent[-1][2])
 
 
 @pytest.mark.asyncio
