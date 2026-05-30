@@ -102,6 +102,124 @@ def test_terminal_surface_config_defaults() -> None:
     assert config.redaction_enabled is True
 
 
+def _write_live_stream_config(tmp_path: Path, *, live_stream_block: str = "") -> Path:
+    config_path = tmp_path / "wlcodex.toml"
+    config_path.write_text(
+        f"""
+[telegram]
+bot_token_env = "WLCODEX_TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [123]
+
+[codex]
+app_server_host = "127.0.0.1"
+app_server_port = 17431
+
+[storage]
+sqlite_path = "runtime/wlcodex.sqlite3"
+task_log_dir = "runtime/tasks"
+
+[display]
+status_update_min_interval_seconds = 2
+tail_lines = 40
+diff_max_chars = 3500
+
+[[workspaces]]
+alias = "wlcodex"
+path = "/tmp/wlcodex"
+
+{live_stream_block}
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_live_stream_config_defaults_disabled(tmp_path: Path) -> None:
+    config_path = _write_live_stream_config(tmp_path)
+    config = load_config(config_path)
+
+    assert config.live_stream.enabled is False
+    assert config.live_stream.host == "127.0.0.1"
+    assert config.live_stream.port == 18731
+    assert config.live_stream.access_token_env == "WLCODEX_LIVE_STREAM_TOKEN"
+    assert config.live_stream.allow_unauthenticated_loopback is True
+    assert config.codex_native.enabled is False
+    assert config.codex_native.transport == "app-server"
+    assert config.codex_native.sock_path is None
+    assert config.codex_native.listen_endpoint == "ws://127.0.0.1:18742"
+
+
+def test_live_stream_config_can_be_enabled(tmp_path: Path) -> None:
+    config_path = _write_live_stream_config(
+        tmp_path,
+        live_stream_block="""
+[live_stream]
+enabled = true
+host = "127.0.0.1"
+port = 18732
+access_token_env = "CUSTOM_LIVE_STREAM_TOKEN"
+allow_unauthenticated_loopback = false
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.live_stream.enabled is True
+    assert config.live_stream.host == "127.0.0.1"
+    assert config.live_stream.port == 18732
+    assert config.live_stream.access_token_env == "CUSTOM_LIVE_STREAM_TOKEN"
+    assert config.live_stream.allow_unauthenticated_loopback is False
+
+
+def test_codex_native_config_can_be_enabled(tmp_path: Path) -> None:
+    config_path = _write_live_stream_config(
+        tmp_path,
+        live_stream_block="""
+[codex_native]
+enabled = true
+transport = "proxy"
+sock_path = "~/wlcodex-native.sock"
+listen_endpoint = "ws://127.0.0.1:19999"
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.codex_native.enabled is True
+    assert config.codex_native.transport == "proxy"
+    assert config.codex_native.sock_path == Path.home() / "wlcodex-native.sock"
+    assert config.codex_native.listen_endpoint == "ws://127.0.0.1:19999"
+
+
+def test_codex_native_config_rejects_unknown_transport(tmp_path: Path) -> None:
+    config_path = _write_live_stream_config(
+        tmp_path,
+        live_stream_block="""
+[codex_native]
+enabled = true
+transport = "stdio"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="codex_native.transport"):
+        load_config(config_path)
+
+
+def test_live_stream_config_rejects_non_loopback_host(tmp_path: Path) -> None:
+    config_path = _write_live_stream_config(
+        tmp_path,
+        live_stream_block="""
+[live_stream]
+enabled = true
+host = "0.0.0.0"
+port = 18731
+""",
+    )
+
+    with pytest.raises(ConfigError, match="live_stream.host"):
+        load_config(config_path)
+
+
 def test_conversation_config_defaults(tmp_path: Path) -> None:
     config_path = tmp_path / "wlcodex.toml"
     config_path.write_text(

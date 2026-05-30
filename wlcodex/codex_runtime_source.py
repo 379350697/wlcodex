@@ -212,6 +212,20 @@ def _map_agent_message_delta(
     )]
 
 
+def _map_reasoning_delta(
+    src: CodexRuntimeSource, payload: dict
+) -> list[RuntimeEvent]:
+    item = payload.get("item")
+    item_id = ""
+    if isinstance(item, dict):
+        item_id = item.get("id", "")
+    return [src._make(
+        EventType.MODEL_REASONING_DELTA,
+        {"delta": payload.get("delta", ""), "itemId": item_id},
+        visibility=Visibility.USER,
+    )]
+
+
 def _map_token_usage(
     src: CodexRuntimeSource, payload: dict
 ) -> list[RuntimeEvent]:
@@ -247,6 +261,25 @@ def _map_command_output_delta(
     )]
 
 
+def _map_command_failed(
+    src: CodexRuntimeSource, payload: dict
+) -> list[RuntimeEvent]:
+    item = payload.get("item")
+    command = ""
+    exit_code = None
+    if isinstance(item, dict):
+        command = str(item.get("command", ""))
+        exit_code = item.get("exitCode")
+    return [src._make(
+        EventType.COMMAND_FAILED,
+        {
+            "itemId": payload.get("itemId", ""),
+            "command": command,
+            "exitCode": exit_code,
+        },
+    )]
+
+
 def _map_file_change_delta(
     src: CodexRuntimeSource, payload: dict
 ) -> list[RuntimeEvent]:
@@ -274,12 +307,55 @@ def _map_diff_updated(
     )]
 
 
+def _map_file_change_patch_updated(
+    src: CodexRuntimeSource, payload: dict
+) -> list[RuntimeEvent]:
+    patch = payload.get("patch", payload.get("diff", ""))
+    return [src._make(
+        EventType.DIFF_UPDATED,
+        {
+            "diff": patch,
+            "threadId": payload.get("threadId", ""),
+            "turnId": payload.get("turnId", ""),
+            "itemId": payload.get("itemId", ""),
+        },
+    )]
+
+
 def _map_plan_updated(
     src: CodexRuntimeSource, payload: dict
 ) -> list[RuntimeEvent]:
     return [src._make(
         EventType.AGENT_RUN_ACTIVITY,
         {"action": "plan_updated", "threadId": payload.get("threadId")},
+    )]
+
+
+def _map_user_message(
+    src: CodexRuntimeSource, payload: dict
+) -> list[RuntimeEvent]:
+    return [src._make(
+        EventType.USER_MESSAGE_RECEIVED,
+        {
+            "text": payload.get("text", ""),
+            "threadId": payload.get("threadId", ""),
+            "turnId": payload.get("turnId", ""),
+            "itemId": payload.get("itemId", ""),
+        },
+        visibility=Visibility.USER,
+    )]
+
+
+def _map_tool_request_user_input(
+    src: CodexRuntimeSource, payload: dict
+) -> list[RuntimeEvent]:
+    return [src._make(
+        EventType.AGENT_RUN_ACTIVITY,
+        {
+            **payload,
+            "action": "tool_request_user_input",
+        },
+        visibility=Visibility.USER,
     )]
 
 
@@ -365,11 +441,16 @@ _EVENT_MAP: dict[str, object] = {
     "item_started": _map_item_started,
     "item_completed": _map_item_completed,
     "agent_message_delta": _map_agent_message_delta,
+    "reasoning_delta": _map_reasoning_delta,
     "token_usage_updated": _map_token_usage,
     "command_output_delta": _map_command_output_delta,
+    "command_failed": _map_command_failed,
     "file_change_delta": _map_file_change_delta,
+    "file_change_patch_updated": _map_file_change_patch_updated,
     "diff_updated": _map_diff_updated,
     "plan_updated": _map_plan_updated,
+    "user_message": _map_user_message,
+    "tool_request_user_input": _map_tool_request_user_input,
     "approval_requested": _map_approval_requested,
     "approval_resolved": _map_approval_resolved,
 }

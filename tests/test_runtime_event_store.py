@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
-
-pytestmark = pytest.mark.slow
 
 from wlcodex.db import Ledger
 from wlcodex.runtime_events import (
@@ -23,6 +20,8 @@ from wlcodex.runtime_events import (
     safe_text_preview,
 )
 from wlcodex.runtime_event_store import RuntimeEventStore
+
+pytestmark = pytest.mark.slow
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +135,38 @@ def test_list_by_agent_run(tmp_path: Path) -> None:
     events = store.list_by_agent_run(42)
     assert len(events) == 2
     assert all(e.agent_run_id == 42 for e in events)
+
+
+def test_list_by_agent_run_after_returns_events_after_cursor(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = store.append(_make_event(agent_run_id=42, payload={"n": 1}))
+    second = store.append(_make_event(agent_run_id=42, payload={"n": 2}))
+    store.append(_make_event(agent_run_id=99, payload={"n": "other"}))
+    third = store.append(_make_event(agent_run_id=42, payload={"n": 3}))
+
+    events = store.list_by_agent_run_after(42, after_id=first.id, limit=20)
+
+    assert [event.id for event in events] == [second.id, third.id]
+    assert [event.payload["n"] for event in events] == [2, 3]
+
+
+def test_list_by_agent_run_after_respects_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    for index in range(5):
+        store.append(_make_event(agent_run_id=42, payload={"n": index}))
+
+    events = store.list_by_agent_run_after(42, after_id=0, limit=2)
+
+    assert len(events) == 2
+    assert [event.payload["n"] for event in events] == [0, 1]
+
+
+def test_list_by_agent_run_after_rejects_non_positive_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    events = store.list_by_agent_run_after(42, after_id=0, limit=0)
+
+    assert events == []
 
 
 # ---------------------------------------------------------------------------

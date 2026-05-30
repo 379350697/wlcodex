@@ -146,6 +146,100 @@ class RuntimeEventStore:
         ).fetchall()
         return [_row_to_event(r) for r in rows]
 
+    def list_by_agent_run_after(
+        self,
+        agent_run_id: int,
+        *,
+        after_id: int = 0,
+        limit: int = 500,
+    ) -> list[RuntimeEvent]:
+        """Events for a specific agent run after a runtime event id.
+
+        Ordered by id ascending so clients can use the last event id as a
+        reconnect cursor.
+        """
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT * FROM runtime_events
+            WHERE agent_run_id = ?
+              AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (agent_run_id, after_id, limit),
+        ).fetchall()
+        return [_row_to_event(r) for r in rows]
+
+    def list_by_agent_run_tail(
+        self,
+        agent_run_id: int,
+        *,
+        limit: int = 100,
+    ) -> list[RuntimeEvent]:
+        """Most recent events for an agent run, ordered oldest first."""
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT * FROM runtime_events
+            WHERE agent_run_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (agent_run_id, limit),
+        ).fetchall()
+        events = [_row_to_event(r) for r in rows]
+        events.reverse()
+        return events
+
+    def list_by_agent_run_before(
+        self,
+        agent_run_id: int,
+        *,
+        before_id: int,
+        limit: int = 100,
+    ) -> list[RuntimeEvent]:
+        """Events immediately before an event id, ordered oldest first."""
+        if before_id <= 0 or limit <= 0:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT * FROM runtime_events
+            WHERE agent_run_id = ?
+              AND id < ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (agent_run_id, before_id, limit),
+        ).fetchall()
+        events = [_row_to_event(r) for r in rows]
+        events.reverse()
+        return events
+
+    def count_by_agent_run_before(
+        self,
+        agent_run_id: int,
+        *,
+        before_id: int,
+    ) -> int:
+        """Count events for an agent run before an event id."""
+        if before_id <= 0:
+            return 0
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM runtime_events
+            WHERE agent_run_id = ?
+              AND id < ?
+            """,
+            (agent_run_id, before_id),
+        ).fetchone()
+        if row is None:
+            return 0
+        return int(row["count"])
+
     def list_by_conversation(
         self, conversation_id: int, *, limit: int = 200
     ) -> list[RuntimeEvent]:

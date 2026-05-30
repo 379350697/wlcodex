@@ -212,6 +212,29 @@ class Ledger:
             CREATE INDEX IF NOT EXISTS idx_agent_runs_conversation_id
                 ON agent_runs(conversation_id, id);
 
+            CREATE TABLE IF NOT EXISTS native_codex_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                native_thread_id TEXT NOT NULL,
+                agent_run_id INTEGER NOT NULL,
+                conversation_id INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                cwd TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT 'unknown',
+                status TEXT NOT NULL DEFAULT 'unknown',
+                last_turn_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(agent_run_id) REFERENCES agent_runs(id),
+                FOREIGN KEY(conversation_id) REFERENCES conversation_sessions(id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_native_codex_sessions_thread_id
+                ON native_codex_sessions(native_thread_id);
+            CREATE INDEX IF NOT EXISTS idx_native_codex_sessions_agent_run
+                ON native_codex_sessions(agent_run_id);
+            CREATE INDEX IF NOT EXISTS idx_native_codex_sessions_updated
+                ON native_codex_sessions(updated_at DESC);
+
             CREATE TABLE IF NOT EXISTS orchestration_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conversation_id INTEGER NOT NULL,

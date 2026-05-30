@@ -17,7 +17,7 @@ def test_turn_start_uses_input_not_items() -> None:
     params = build_turn_start_params("thread-1", "hello")
     assert params == {
         "threadId": "thread-1",
-        "input": [{"type": "text", "text": "hello"}],
+        "input": [{"type": "text", "text": "hello", "text_elements": []}],
     }
     assert "items" not in params
 
@@ -27,7 +27,7 @@ def test_turn_steer_uses_input_and_expected_turn_id() -> None:
     assert params == {
         "threadId": "thread-1",
         "expectedTurnId": "turn-1",
-        "input": [{"type": "text", "text": "stop"}],
+        "input": [{"type": "text", "text": "stop", "text_elements": []}],
     }
 
 
@@ -80,7 +80,7 @@ def test_turn_start_supports_planning_overrides() -> None:
     )
 
     assert params["threadId"] == "thread-1"
-    assert params["input"] == [{"type": "text", "text": "hello"}]
+    assert params["input"] == [{"type": "text", "text": "hello", "text_elements": []}]
     assert params["effort"] == "xhigh"
     assert params["approvalPolicy"] == "on-request"
     assert params["sandboxPolicy"] == {
@@ -92,6 +92,63 @@ def test_turn_start_supports_planning_overrides() -> None:
     assert params["model"] == "gpt-5.5"
     assert params["summary"] == "none"
     assert params["personality"] == "pragmatic"
+
+
+def test_turn_start_supports_native_model_and_images() -> None:
+    params = build_turn_start_params(
+        "thread-1",
+        "describe this",
+        model="gpt-5.5",
+        images=[
+            {
+                "url": "data:image/png;base64,abc",
+                "filename": "screen.png",
+            }
+        ],
+        collaboration_mode={
+            "mode": "default",
+            "settings": {
+                "model": "gpt-5.5",
+                "reasoning_effort": "medium",
+                "developer_instructions": None,
+            },
+        },
+    )
+
+    assert params == {
+        "threadId": "thread-1",
+        "input": [
+            {"type": "text", "text": "describe this", "text_elements": []},
+            {"type": "image", "url": "data:image/png;base64,abc"},
+        ],
+        "model": "gpt-5.5",
+        "collaborationMode": {
+            "mode": "default",
+            "settings": {
+                "model": "gpt-5.5",
+                "reasoning_effort": "medium",
+                "developer_instructions": None,
+            },
+        },
+    }
+
+
+def test_turn_steer_supports_image_input_blocks() -> None:
+    params = build_turn_steer_params(
+        "thread-1",
+        "turn-1",
+        "use this image",
+        images=[{"data_url": "data:image/jpeg;base64,abc"}],
+    )
+
+    assert params == {
+        "threadId": "thread-1",
+        "expectedTurnId": "turn-1",
+        "input": [
+            {"type": "text", "text": "use this image", "text_elements": []},
+            {"type": "image", "url": "data:image/jpeg;base64,abc"},
+        ],
+    }
 
 
 def test_parse_nested_thread_and_turn_responses() -> None:

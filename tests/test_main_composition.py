@@ -4,9 +4,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
-
 from wlcodex.approval import ApprovalService
 from wlcodex.codex_backend import FakeCodexBackend
 from wlcodex.config import load_config
@@ -18,6 +15,8 @@ from wlcodex.models import TaskStatus
 from wlcodex.task_service import TaskService
 from wlcodex.telegram_app import build_application
 from wlcodex.watchdog import TaskLivenessConfig, TaskWatchdog
+
+pytestmark = pytest.mark.integration
 
 
 def _write_test_config(path: Path) -> None:
@@ -432,7 +431,10 @@ allow_write = true
     )
 
 
-def _write_test_config_toml(terminal_enabled: bool = False) -> Path:
+def _write_test_config_toml(
+    terminal_enabled: bool = False,
+    live_stream_enabled: bool = False,
+) -> Path:
     """Write a minimal test config to a named temp dir and return the path."""
     import tempfile
     d = Path(tempfile.mkdtemp(prefix="wlcodex-test-config-"))
@@ -440,6 +442,14 @@ def _write_test_config_toml(terminal_enabled: bool = False) -> Path:
     terminal_block = ""
     if terminal_enabled:
         terminal_block = "\n[terminal]\nenabled = true\ndefault_agent = \"codex\"\n"
+    live_stream_block = ""
+    if live_stream_enabled:
+        live_stream_block = (
+            "\n[live_stream]\n"
+            "enabled = true\n"
+            "host = \"127.0.0.1\"\n"
+            "port = 18731\n"
+        )
     p.write_text(
         f"""
 [telegram]
@@ -462,6 +472,7 @@ task_log_dir = ""
 status_update_min_interval_seconds = 2
 tail_lines = 40
 diff_max_chars = 3500
+{live_stream_block}
 
 [[workspaces]]
 alias = "demo"
@@ -495,7 +506,6 @@ def test_create_terminal_manager_enabled_returns_manager_with_adapters() -> None
     TerminalSessionManager with adapters for both agents."""
     from wlcodex.main import _create_terminal_manager
     from wlcodex.surfaces.terminal.manager import TerminalSessionManager
-    from wlcodex.surfaces.terminal.claude_remote import ClaudeTerminalAdapter
     from wlcodex.surfaces.terminal.codex_terminal import CodexTerminalAdapter
 
     config_path = _write_test_config_toml(terminal_enabled=True)
@@ -534,6 +544,164 @@ def test_create_terminal_manager_with_claude_backend_registers_both_adapters() -
     assert "claude" in tm._adapters
     assert isinstance(tm._adapters["claude"], ClaudeTerminalAdapter)
     assert isinstance(tm._adapters["codex"], CodexTerminalAdapter)
+
+
+def test_create_live_stream_components_disabled_returns_none(tmp_path: Path) -> None:
+    from wlcodex.main import _create_live_stream_components
+    from wlcodex.runtime_event_store import RuntimeEventStore
+
+    config = load_config(_write_test_config_toml())
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    runtime_store = RuntimeEventStore(ledger._conn)
+
+    components = _create_live_stream_components(config, runtime_store)
+
+    assert components is None
+
+
+def test_create_live_stream_components_enabled_registers_projector(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.live_stream import WorkerLiveStreamHub, WorkerLiveStreamServer
+    from wlcodex.main import _create_live_stream_components
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import (
+        AggregateType,
+        EventSource,
+        EventType,
+        RuntimeEvent,
+        Visibility,
+        now_iso,
+    )
+
+    config = load_config(_write_test_config_toml(live_stream_enabled=True))
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    runtime_store = RuntimeEventStore(ledger._conn)
+
+    components = _create_live_stream_components(config, runtime_store)
+    assert components is not None
+    assert isinstance(components.hub, WorkerLiveStreamHub)
+    assert isinstance(components.server, WorkerLiveStreamServer)
+
+    queue = components.hub.subscribe(agent_run_id=42)
+    saved = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="42",
+            correlation_id="corr-42",
+            source=EventSource.CODEX,
+            actor="codex",
+            visibility=Visibility.USER,
+            payload={"delta": "hello"},
+            occurred_at=now_iso(),
+            agent_run_id=42,
+        )
+    )
+
+    streamed = queue.get_nowait()
+    assert streamed.id == saved.id
+    assert streamed.kind == "text_delta"
+
+
+def test_create_live_stream_components_wires_native_controller_when_enabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.config import (
+        AppConfig,
+        ApprovalConfig,
+        BackendConfig,
+        CodexConfig,
+        CodexNativeConfig,
+        DisplayConfig,
+        LiveStreamConfig,
+        StorageConfig,
+        TaskConfig,
+        TelegramConfig,
+        WorkspaceConfig,
+    )
+    from wlcodex.main import _create_live_stream_components
+    from wlcodex.runtime_event_store import RuntimeEventStore
+
+    monkeypatch.setenv("WLCODEX_LIVE_STREAM_TOKEN", "secret")
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    runtime_store = RuntimeEventStore(ledger._conn)
+    config = AppConfig(
+        telegram=TelegramConfig("BOT_TOKEN", frozenset({1})),
+        codex=CodexConfig("codex", "127.0.0.1", 17431, "on-request", "workspace-write"),
+        storage=StorageConfig(
+            tmp_path / "db.sqlite3",
+            tmp_path / "logs",
+            tmp_path / "worktrees",
+        ),
+        display=DisplayConfig(2, 40, 3500),
+        backend=BackendConfig(15, 60, 300, 3600, 3600, 20000),
+        approval=ApprovalConfig(3600, True),
+        task=TaskConfig(7200, 1800, 3600, 60, 120),
+        workspaces=(WorkspaceConfig("wlcodex", tmp_path, True),),
+        live_stream=LiveStreamConfig(
+            enabled=True,
+            host="127.0.0.1",
+            port=0,
+            allow_unauthenticated_loopback=False,
+        ),
+        codex_native=CodexNativeConfig(enabled=True, transport="proxy"),
+    )
+
+    components = _create_live_stream_components(config, runtime_store, ledger)
+
+    assert components is not None
+    assert components.server._native_controller is not None
+    assert components.server._access_token == "secret"
+
+
+def test_create_live_stream_components_rejects_native_without_token(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.config import (
+        AppConfig,
+        ApprovalConfig,
+        BackendConfig,
+        CodexConfig,
+        CodexNativeConfig,
+        DisplayConfig,
+        LiveStreamConfig,
+        StorageConfig,
+        TaskConfig,
+        TelegramConfig,
+        WorkspaceConfig,
+    )
+    from wlcodex.main import _create_live_stream_components
+    from wlcodex.runtime_event_store import RuntimeEventStore
+
+    monkeypatch.delenv("WLCODEX_LIVE_STREAM_TOKEN", raising=False)
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    config = AppConfig(
+        telegram=TelegramConfig("BOT_TOKEN", frozenset({1})),
+        codex=CodexConfig("codex", "127.0.0.1", 17431, "on-request", "workspace-write"),
+        storage=StorageConfig(
+            tmp_path / "db.sqlite3",
+            tmp_path / "logs",
+            tmp_path / "worktrees",
+        ),
+        display=DisplayConfig(2, 40, 3500),
+        backend=BackendConfig(15, 60, 300, 3600, 3600, 20000),
+        approval=ApprovalConfig(3600, True),
+        task=TaskConfig(7200, 1800, 3600, 60, 120),
+        workspaces=(WorkspaceConfig("wlcodex", tmp_path, True),),
+        live_stream=LiveStreamConfig(enabled=True, host="127.0.0.1", port=0),
+        codex_native=CodexNativeConfig(enabled=True, transport="proxy"),
+    )
+
+    with pytest.raises(RuntimeError, match="WLCODEX_LIVE_STREAM_TOKEN"):
+        _create_live_stream_components(config, RuntimeEventStore(ledger._conn), ledger)
 
 
 def test_main_passes_terminal_manager_to_build_application(tmp_path: Path) -> None:
@@ -752,7 +920,6 @@ def test_main_resolves_auto_claude_binary_before_backend_construction(
     tmp_path,
 ) -> None:
     import asyncio as _asyncio
-    import os as _os
     import sys as _sys
     from asyncio import base_events as _base_events
     from unittest.mock import MagicMock

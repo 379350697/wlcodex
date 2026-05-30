@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 import json
 import logging
+from typing import Any
 import uuid
 
 import websockets.exceptions
@@ -173,8 +174,27 @@ def _planning_turn_options(
 # ---------------------------------------------------------------------------
 
 
-def _text_input(prompt: str) -> list[dict[str, str]]:
-    return [{"type": "text", "text": prompt}]
+def _turn_input(
+    prompt: str,
+    images: list[dict[str, Any]] | None = None,
+) -> list[dict[str, object]]:
+    image_blocks = images or []
+    blocks: list[dict[str, object]] = []
+    if prompt or not image_blocks:
+        blocks.append({"type": "text", "text": prompt, "text_elements": []})
+    for image in image_blocks:
+        url = image.get("url") or image.get("data_url")
+        if isinstance(url, str) and url.strip():
+            blocks.append({"type": "image", "url": url.strip()})
+            continue
+        path = image.get("path") or image.get("localPath")
+        if isinstance(path, str) and path.strip():
+            blocks.append({"type": "localImage", "path": path.strip()})
+    return blocks
+
+
+def _text_input(prompt: str) -> list[dict[str, object]]:
+    return _turn_input(prompt)
 
 
 def build_thread_start_params(
@@ -221,8 +241,13 @@ def build_turn_start_params(
     summary: str | None = None,
     personality: str | None = None,
     service_tier: str | None = None,
+    images: list[dict[str, Any]] | None = None,
+    collaboration_mode: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    params: dict[str, object] = {"threadId": thread_id, "input": _text_input(prompt)}
+    params: dict[str, object] = {
+        "threadId": thread_id,
+        "input": _turn_input(prompt, images),
+    }
     if effort is not None:
         params["effort"] = effort
     if approval_policy is not None:
@@ -239,16 +264,22 @@ def build_turn_start_params(
         params["personality"] = personality
     if service_tier is not None:
         params["serviceTier"] = service_tier
+    if collaboration_mode is not None:
+        params["collaborationMode"] = collaboration_mode
     return params
 
 
 def build_turn_steer_params(
-    thread_id: str, expected_turn_id: str, prompt: str
+    thread_id: str,
+    expected_turn_id: str,
+    prompt: str,
+    *,
+    images: list[dict[str, Any]] | None = None,
 ) -> dict[str, object]:
     return {
         "threadId": thread_id,
         "expectedTurnId": expected_turn_id,
-        "input": _text_input(prompt),
+        "input": _turn_input(prompt, images),
     }
 
 

@@ -6,8 +6,12 @@ import logging
 import os
 from pathlib import Path
 import tomllib
+from typing import TYPE_CHECKING
 
 from wlcodex.claude_permissions import normalize_claude_permission_mode
+
+if TYPE_CHECKING:
+    from wlcodex.surfaces.core.models import SurfacePolicy
 
 
 class ConfigError(ValueError):
@@ -224,6 +228,23 @@ class TelegramOutputConfig:
 
 
 @dataclass(frozen=True)
+class LiveStreamConfig:
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 18731
+    access_token_env: str = "WLCODEX_LIVE_STREAM_TOKEN"
+    allow_unauthenticated_loopback: bool = True
+
+
+@dataclass(frozen=True)
+class CodexNativeConfig:
+    enabled: bool = False
+    transport: str = "app-server"
+    sock_path: Path | None = None
+    listen_endpoint: str = "ws://127.0.0.1:18742"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     telegram: TelegramConfig
     codex: CodexConfig
@@ -245,6 +266,8 @@ class AppConfig:
     product: ProductSurfaceConfig = ProductSurfaceConfig()
     telegram_output: TelegramOutputConfig = TelegramOutputConfig()
     workspace_discovery: WorkspaceDiscoveryConfig = WorkspaceDiscoveryConfig()
+    live_stream: LiveStreamConfig = LiveStreamConfig()
+    codex_native: CodexNativeConfig = CodexNativeConfig()
 
     def workspace_by_alias(self, alias: str) -> WorkspaceConfig:
         for workspace in self.workspaces:
@@ -313,6 +336,8 @@ def load_config(path: Path) -> AppConfig:
     terminal_raw = data.get("terminal", {})
     product_raw = data.get("product", {})
     telegram_output_raw = data.get("telegram_output", {})
+    live_stream_raw = data.get("live_stream", {})
+    codex_native_raw = data.get("codex_native", {})
     terminal_default_agent = str(terminal_raw.get("default_agent", "claude"))
     if terminal_default_agent not in ("claude", "codex"):
         raise ConfigError(
@@ -448,6 +473,8 @@ def load_config(path: Path) -> AppConfig:
         ),
         telegram_output=_telegram_output_config(telegram_output_raw),
         workspace_discovery=discovery,
+        live_stream=_live_stream_config(live_stream_raw),
+        codex_native=_codex_native_config(codex_native_raw),
     )
 
 
@@ -523,6 +550,45 @@ def _telegram_output_config(data: dict[str, object]) -> TelegramOutputConfig:
         final_chunk_chars=int(data.get("final_chunk_chars", 3900)),
         terminal_block_idle_seconds=float(
             data.get("terminal_block_idle_seconds", 2.0)
+        ),
+    )
+
+
+def _live_stream_config(data: dict[str, object]) -> LiveStreamConfig:
+    host = str(data.get("host", "127.0.0.1"))
+    if host not in ("127.0.0.1", "localhost"):
+        raise ConfigError(
+            f"live_stream.host must be loopback-only in this release, got: {host!r}"
+        )
+    port = int(data.get("port", 18731))
+    if port <= 0 or port > 65535:
+        raise ConfigError(f"live_stream.port must be 1-65535, got: {port}")
+    return LiveStreamConfig(
+        enabled=bool(data.get("enabled", False)),
+        host=host,
+        port=port,
+        access_token_env=str(
+            data.get("access_token_env", "WLCODEX_LIVE_STREAM_TOKEN")
+        ),
+        allow_unauthenticated_loopback=bool(
+            data.get("allow_unauthenticated_loopback", True)
+        ),
+    )
+
+
+def _codex_native_config(data: dict[str, object]) -> CodexNativeConfig:
+    transport = str(data.get("transport", "app-server"))
+    if transport not in {"app-server", "proxy"}:
+        raise ConfigError(
+            "codex_native.transport must be 'app-server' or 'proxy', "
+            f"got: {transport!r}"
+        )
+    return CodexNativeConfig(
+        enabled=bool(data.get("enabled", False)),
+        transport=transport,
+        sock_path=_optional_path(data.get("sock_path")),
+        listen_endpoint=str(
+            data.get("listen_endpoint", "ws://127.0.0.1:18742")
         ),
     )
 

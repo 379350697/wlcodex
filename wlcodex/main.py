@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 from wlcodex.app_server_process import AppServerProcess, AppServerProcessConfig
 from wlcodex.approval import ApprovalService
@@ -204,6 +205,98 @@ def _create_terminal_manager(
     return manager
 
 
+def _create_live_stream_components(
+    config: object,
+    runtime_store: RuntimeEventStore,
+    ledger: Ledger | None = None,
+) -> SimpleNamespace | None:
+    """Create local worker live stream components when enabled."""
+    if not config.live_stream.enabled:
+        logger.info(
+            "Worker live stream disabled (set live_stream.enabled = true to enable)"
+        )
+        return None
+
+    from wlcodex.live_stream import WorkerLiveStreamHub, WorkerLiveStreamServer
+
+    hub = WorkerLiveStreamHub(runtime_store)
+    runtime_store.add_projector(hub.publish)
+    native_client = None
+    native_controller = None
+    access_token = os.environ.get(config.live_stream.access_token_env, "")
+    if getattr(config.codex_native, "enabled", False):
+        if not access_token:
+            raise RuntimeError(
+                "codex_native.enabled requires "
+                f"{config.live_stream.access_token_env}"
+            )
+        if ledger is None:
+            logger.warning("Codex native control enabled but no ledger was provided")
+        else:
+            from wlcodex.codex_native.client import CodexNativeClient, LazyNativeClient
+            from wlcodex.codex_native.controller import CodexNativeController
+            from wlcodex.codex_native.session_store import NativeCodexSessionStore
+            from wlcodex.codex_native.transport import (
+                CodexAppServerWebSocketTransport,
+                CodexProxyTransport,
+            )
+
+            if config.codex_native.transport == "proxy":
+                transport = CodexProxyTransport(
+                    binary=config.codex.binary,
+                    sock_path=config.codex_native.sock_path,
+                )
+            else:
+                transport = CodexAppServerWebSocketTransport(
+                    binary=config.codex.binary,
+                    listen_endpoint=config.codex_native.listen_endpoint,
+                    startup_timeout_seconds=config.backend.startup_timeout_seconds,
+                )
+
+            async def _start_native_client() -> CodexNativeClient:
+                client = CodexNativeClient(
+                    send_json=transport.send_json,
+                    close=transport.close,
+                    request_timeout_seconds=config.backend.request_timeout_seconds,
+                )
+
+                async def _on_message(msg: dict) -> None:
+                    await client.rpc.receive_message(msg)
+
+                await transport.start(_on_message)
+                return client
+
+            native_client = LazyNativeClient(_start_native_client)
+            native_controller = CodexNativeController(
+                client=native_client,
+                session_store=NativeCodexSessionStore(ledger),
+                runtime_store=runtime_store,
+            )
+            logger.info("Codex native control bridge configured")
+
+    server = WorkerLiveStreamServer(
+        host=config.live_stream.host,
+        port=config.live_stream.port,
+        hub=hub,
+        native_controller=native_controller,
+        access_token=access_token,
+        allow_unauthenticated_loopback=(
+            config.live_stream.allow_unauthenticated_loopback
+        ),
+    )
+    logger.info(
+        "Worker live stream configured at http://%s:%s",
+        config.live_stream.host,
+        config.live_stream.port,
+    )
+    return SimpleNamespace(
+        hub=hub,
+        server=server,
+        native_client=native_client,
+        native_controller=native_controller,
+    )
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     # httpx logs full Telegram Bot API URLs at INFO, including the bot token.
@@ -235,6 +328,12 @@ def main() -> None:
     # Runtime projector — updates compatibility tables from runtime events
     runtime_projector = RuntimeProjector(ledger._conn, store=runtime_store)
     runtime_store.add_projector(runtime_projector.apply)
+
+    live_stream_components = _create_live_stream_components(
+        config,
+        runtime_store,
+        ledger,
+    )
 
     # Telegram delivery outbox — isolates network failures from orchestration
     from wlcodex.telegram_outbox import TelegramOutbox
@@ -570,8 +669,20 @@ def main() -> None:
         app_initialized = False
         app_started = False
         updater_started = False
+        live_stream_server = (
+            live_stream_components.server
+            if live_stream_components is not None
+            else None
+        )
         logger.info("WLCodex starting. Polling Telegram...")
         try:
+            if live_stream_server is not None:
+                await live_stream_server.start()
+                logger.info(
+                    "Worker live stream listening at http://%s:%s",
+                    live_stream_server.host,
+                    live_stream_server.port,
+                )
             # Initialize with infinite bootstrap retry for Telegram network errors.
             initialized = await _initialize_app_with_retry(
                 app, runtime_store=runtime_store,
@@ -630,6 +741,13 @@ def main() -> None:
                 await outbox_task
             except asyncio.CancelledError:
                 pass
+            # 2c. Stop worker live stream server
+            if live_stream_server is not None:
+                await live_stream_server.stop()
+            if live_stream_components is not None:
+                native_client = getattr(live_stream_components, "native_client", None)
+                if native_client is not None and hasattr(native_client, "close"):
+                    await native_client.close()
             # 3. Close WebSocket and cancel pending JSON-RPC requests
             if hasattr(backend, "close"):
                 await backend.close()

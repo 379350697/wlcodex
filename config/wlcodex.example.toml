@@ -155,6 +155,24 @@ semantic_max_chars = 3200
 final_chunk_chars = 3900
 terminal_block_idle_seconds = 2.0
 
+[live_stream]
+# Local Worker Live Stream web/SSE server. Disabled by default.
+# First release is loopback-only; put an authenticated tunnel in front for phone tests.
+enabled = false
+host = "127.0.0.1"
+port = 18731
+access_token_env = "WLCODEX_LIVE_STREAM_TOKEN"
+allow_unauthenticated_loopback = true
+
+[codex_native]
+# Official Codex IDE/mobile-style bridge for the "Codex干活的" station.
+enabled = false
+transport = "app-server"
+listen_endpoint = "ws://127.0.0.1:18742"
+# Legacy standalone daemon proxy, only when the official control socket exists:
+# transport = "proxy"
+# sock_path = "/Users/wl/.codex/app-server-control/app-server-control.sock"
+
 # Optional /auto digest rewriting:
 # - Default: rule-based local digest only, no network call.
 # - Set WLCODEX_DEEPSEEK_API_KEY to enable project-scoped DeepSeek rewriting.

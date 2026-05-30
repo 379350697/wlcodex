@@ -103,6 +103,42 @@ because it forwards deltas from the same Codex/Claude run.
 `cockpit` is reserved for richer Cockpit view rendering; currently behaves like
 `legacy`.
 
+## Worker Live Stream
+
+Worker Live Stream is the local HTTP/SSE surface for native-style per-worker
+real-time output. It is disabled by default and independent from Telegram.
+
+```toml
+[live_stream]
+enabled = false
+host = "127.0.0.1"
+port = 18731
+access_token_env = "WLCODEX_LIVE_STREAM_TOKEN"
+allow_unauthenticated_loopback = true
+
+[codex_native]
+enabled = false
+transport = "app-server"
+listen_endpoint = "ws://127.0.0.1:18742"
+```
+
+When enabled, WLCodex starts a loopback-only server and exposes:
+
+| URL | Purpose |
+|-----|---------|
+| `/health` | Local health check |
+| `/workers/<agent_run_id>/live` | Phone-friendly live page for one worker |
+| `/api/workers/<agent_run_id>/events?after=<event_id>` | Snapshot/reconnect cursor |
+| `/api/workers/<agent_run_id>/stream` | Server-Sent Events stream |
+| `/native/codex` | `Codex干活的` official Codex IDE session station |
+| `/api/native/codex/sessions` | Official Codex session list |
+
+The stream forwards the same persisted runtime events that power the workbench.
+It does not create another model run and does not add model tokens. Phone access
+must use `WLCODEX_LIVE_STREAM_TOKEN` when exposed through a tunnel. The first
+release rejects non-loopback bind hosts; use an authenticated tunnel to reach it
+from a phone.
+
 ## Safety rules
 
 - Private Telegram chat only
