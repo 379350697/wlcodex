@@ -57,6 +57,29 @@ class FakeNativeController:
         self.calls.append(("list_sessions",))
         return self.sessions
 
+    async def list_models(self) -> list[dict[str, Any]]:
+        self.calls.append(("list_models",))
+        return [
+            {
+                "id": "gpt-5.5",
+                "model": "gpt-5.5",
+                "displayName": "GPT-5.5",
+                "description": "Most capable",
+                "hidden": False,
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "medium", "description": "Balanced"},
+                    {"reasoningEffort": "high", "description": "Deep"},
+                ],
+                "defaultReasoningEffort": "medium",
+                "serviceTiers": [
+                    {"id": "auto", "name": "Auto", "description": "Default"},
+                    {"id": "fast", "name": "Fast", "description": "Lower latency"},
+                ],
+                "defaultServiceTier": "auto",
+                "isDefault": True,
+            }
+        ]
+
     async def read_session(self, native_thread_id: str) -> dict[str, Any]:
         self.calls.append(("read_session", native_thread_id))
         return {"thread": {"id": native_thread_id, "turns": []}, "agent_run_id": 42}
@@ -75,15 +98,50 @@ class FakeNativeController:
         prompt: str,
         *,
         model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> FakeControlResult:
-        if model is None and images is None:
+        if model is None and effort is None and service_tier is None and images is None:
             self.calls.append(("continue_session", native_thread_id, prompt))
         else:
             self.calls.append(
-                ("continue_session", native_thread_id, prompt, model, images)
+                (
+                    "continue_session",
+                    native_thread_id,
+                    prompt,
+                    model,
+                    effort,
+                    service_tier,
+                    images,
+                )
             )
         return FakeControlResult(native_thread_id, 42, "turn-2")
+
+    async def start_session(
+        self,
+        cwd: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+        images: list[dict[str, Any]] | None = None,
+    ) -> FakeControlResult:
+        self.calls.append(
+            ("start_session", cwd, prompt, model, effort, service_tier, images)
+        )
+        return FakeControlResult("thread-new", 43, "turn-new")
+
+    async def create_session(
+        self,
+        cwd: str,
+        *,
+        model: str | None = None,
+        service_tier: str | None = None,
+    ) -> FakeControlResult:
+        self.calls.append(("create_session", cwd, model, service_tier))
+        return FakeControlResult("thread-empty", 44, "", status="created")
 
     async def steer_session(
         self,
@@ -92,9 +150,11 @@ class FakeNativeController:
         prompt: str,
         *,
         model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> FakeControlResult:
-        if model is None and images is None:
+        if model is None and effort is None and service_tier is None and images is None:
             self.calls.append(("steer_session", native_thread_id, expected_turn_id, prompt))
         else:
             self.calls.append(
@@ -104,6 +164,8 @@ class FakeNativeController:
                     expected_turn_id,
                     prompt,
                     model,
+                    effort,
+                    service_tier,
                     images,
                 )
             )
@@ -212,7 +274,7 @@ async def test_native_sessions_requires_authorization_when_token_is_configured(
 
 
 @pytest.mark.asyncio
-async def test_native_routes_require_token_even_on_loopback_when_controller_exists(
+async def test_native_routes_allow_public_loopback_when_token_is_disabled(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -236,9 +298,54 @@ async def test_native_routes_require_token_even_on_loopback_when_controller_exis
     finally:
         await server.stop()
 
-    assert "HTTP/1.1 401 Unauthorized" in response
-    assert _json_body(response) == {"error": "unauthorized"}
-    assert controller.calls == []
+    assert "HTTP/1.1 200 OK" in response
+    assert _json_body(response) == {
+        "sessions": [
+            {
+                "native_thread_id": "thread-1",
+                "agent_run_id": 42,
+            }
+        ]
+    }
+    assert controller.calls == [("list_sessions",)]
+
+
+@pytest.mark.asyncio
+async def test_native_public_root_and_page_open_without_token(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token=None,
+        allow_unauthenticated_loopback=True,
+    )
+    await server.start()
+    try:
+        root_response = await _read_response(
+            server.host,
+            server.port,
+            "GET / HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        page_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 303 See Other" in root_response
+    assert "Location: /native/codex" in root_response
+    assert "访问令牌" not in root_response
+    assert "HTTP/1.1 200 OK" in page_response
+    assert "<title>Codex</title>" in page_response
 
 
 @pytest.mark.asyncio
@@ -278,6 +385,134 @@ async def test_native_sessions_returns_json_with_bearer_token(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_native_models_route_returns_official_catalog(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/models HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert body["models"][0]["model"] == "gpt-5.5"
+    assert body["models"][0]["supportedReasoningEfforts"][1] == {
+        "reasoningEffort": "high",
+        "description": "Deep",
+    }
+    assert body["models"][0]["serviceTiers"][1]["id"] == "fast"
+    assert controller.calls == [("list_models",)]
+
+
+@pytest.mark.asyncio
+async def test_native_start_route_creates_project_thread_with_model_settings(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    body = json.dumps(
+        {
+            "cwd": "/Users/wl/projects/wlcodex",
+            "prompt": "start in this project",
+            "model": "gpt-5.5",
+            "effort": "high",
+            "service_tier": "fast",
+            "images": [{"url": "data:image/png;base64,abc", "filename": "photo.png"}],
+        }
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/start HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert _json_body(response)["native_thread_id"] == "thread-new"
+    assert controller.calls == [
+        (
+            "start_session",
+            "/Users/wl/projects/wlcodex",
+            "start in this project",
+            "gpt-5.5",
+            "high",
+            "fast",
+            [{"url": "data:image/png;base64,abc", "filename": "photo.png"}],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_start_route_creates_empty_project_thread_without_prompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    body = json.dumps({"cwd": "/Users/wl/projects/wlcodex"})
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/start HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body_json = _json_body(response)
+    assert body_json["native_thread_id"] == "thread-empty"
+    assert body_json["status"] == "created"
+    assert controller.calls == [
+        ("create_session", "/Users/wl/projects/wlcodex", None, None)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_native_continue_posts_json_body_and_returns_control_result(
     tmp_path: Path,
 ) -> None:
@@ -314,6 +549,43 @@ async def test_native_continue_posts_json_body_and_returns_control_result(
         "turn_id": "turn-2",
         "status": "ok",
     }
+    assert controller.calls == [("continue_session", "thread-1", "keep going")]
+
+
+@pytest.mark.asyncio
+async def test_native_continue_accepts_chunked_json_body(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    first = '{"prompt":"keep '
+    second = 'going"}'
+    request = (
+        "POST /api/native/codex/sessions/thread-1/continue HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Authorization: Bearer secret\r\n"
+        "Content-Type: application/json\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Connection: close\r\n\r\n"
+        f"{len(first.encode('utf-8')):x}\r\n"
+        f"{first}\r\n"
+        f"{len(second.encode('utf-8')):x}\r\n"
+        f"{second}\r\n"
+        "0\r\n\r\n"
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(server.host, server.port, request)
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert _json_body(response)["turn_id"] == "turn-2"
     assert controller.calls == [("continue_session", "thread-1", "keep going")]
 
 
@@ -361,6 +633,8 @@ async def test_native_continue_accepts_model_and_image_attachments(
             "thread-1",
             "describe this",
             "gpt-5.5",
+            None,
+            None,
             [{"url": "data:image/png;base64,abc", "filename": "photo.png"}],
         )
     ]
@@ -584,6 +858,8 @@ async def test_native_steer_accepts_image_attachments(tmp_path: Path) -> None:
             "turn-2",
             "adjust",
             "gpt-5.5",
+            None,
+            None,
             [{"url": "data:image/jpeg;base64,abc"}],
         )
     ]
@@ -640,6 +916,8 @@ async def test_native_routes_return_rpc_error_message_instead_of_exception_class
             prompt: str,
             *,
             model: str | None = None,
+            effort: str | None = None,
+            service_tier: str | None = None,
             images: list[dict[str, Any]] | None = None,
         ) -> FakeControlResult:
             raise JsonRpcError(-32000, "turn is not accepting input")
@@ -737,9 +1015,181 @@ async def test_native_codex_page_contains_worker_and_session_selector(
     assert "HTTP/1.1 200 OK" in response
     assert "<title>Codex</title>" in response
     assert "Codex" in response
+    assert 'localStorage.setItem("wlcodexToken", token)' in response
     assert "/api/native/codex/sessions" in response
     assert "device-chip" in response
     assert "await api(`/api/native/codex/sessions/${encodeURIComponent(selected.native_thread_id)}`).catch" not in response
+
+
+@pytest.mark.asyncio
+async def test_native_root_and_unauthorized_page_show_token_entry(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        root_response = await _read_response(
+            server.host,
+            server.port,
+            "GET / HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        native_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in root_response
+    assert "<title>WLCodex</title>" in root_response
+    assert "localStorage.getItem(\"wlcodexToken\")" in root_response
+    assert 'location.replace("/native/codex")' in root_response
+    assert "HTTP/1.1 401 Unauthorized" in native_response
+    assert "Content-Type: text/html; charset=utf-8" in native_response
+    assert "访问令牌" in native_response
+    assert controller.calls == []
+
+
+@pytest.mark.asyncio
+async def test_native_one_time_login_ticket_sets_cookie_once(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        ticket_response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/login-ticket HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        ticket_body = _json_body(ticket_response)
+        login_path = ticket_body["path"]
+        first_open = await _read_response(
+            server.host,
+            server.port,
+            f"GET {login_path} HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        second_open = await _read_response(
+            server.host,
+            server.port,
+            f"GET {login_path} HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        first_login = await _read_response(
+            server.host,
+            server.port,
+            f"POST {login_path} HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        second_login = await _read_response(
+            server.host,
+            server.port,
+            f"POST {login_path} HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        cookie_login = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Cookie: wlcodex_token=secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in ticket_response
+    assert ticket_body["expires_in"] > 0
+    assert login_path.startswith("/native/codex/login?ticket=")
+    assert "secret" not in login_path
+    assert "HTTP/1.1 200 OK" in first_open
+    assert "进入 Codex" in first_open
+    assert "HTTP/1.1 200 OK" in second_open
+    assert "HTTP/1.1 303 See Other" in first_login
+    assert "Location: /native/codex" in first_login
+    assert "Set-Cookie: wlcodex_token=secret;" in first_login
+    assert "HTTP/1.1 401 Unauthorized" in second_login
+    assert "HTTP/1.1 200 OK" in cookie_login
+    assert "<title>Codex</title>" in cookie_login
+
+
+@pytest.mark.asyncio
+async def test_native_codex_page_uses_project_context_for_new_chat(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "let selectedProjectCwd = \"\";" in response
+    assert "function selectProject(cwd)" in response
+    assert "selectedProjectCwd === cwd ? \" active\" : \"\"" in response
+    assert "let selectedProjectRendered = false;" in response
+    assert "projectsEl.appendChild(projectNewChat);" in response
+    assert "selectedProjectRendered = true;" in response
+    assert "sessionProjectKey(session) === selectedProjectCwd" in response
+    assert 'id="projectNewChat"' in response
+    assert "function renderProjectAction()" in response
+    assert "async function openProjectNewChat()" in response
+    assert "async function startNewChat(prompt)" in response
+    assert "/api/native/codex/sessions/start" in response
+    assert "document.getElementById(\"chat\").onclick = () => selectProject(\"\");" in response
+    assert "document.querySelector(\".controls\")" in response
+    assert "const SESSION_PREVIEW_LIMIT = 10;" in response
+    assert "renderSessionList(filtered.slice(0, SESSION_PREVIEW_LIMIT)" in response
+    assert 'details.className = "more-sessions";' in response
+    assert "更多聊天" in response
+    assert ".label { display: block;" in response
+    assert ".recent-title { display: -webkit-box;" in response
+    assert "-webkit-line-clamp: 2;" in response
+    assert 'class="label recent-title"' in response
 
 
 @pytest.mark.asyncio
@@ -945,10 +1395,13 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "function renderStatusEvent" in response
     assert "function renderStatus(kind, text)" in response
     assert "function renderToolCall" in response
+    assert 'id="modelSettingsButton"' in response
+    assert 'id="modelPopover"' in response
     assert 'id="modelSelector"' in response
     assert 'id="imageInput"' in response
     assert 'id="attachmentButton"' in response
     assert 'id="attachmentStrip"' in response
+    assert 'class="interruption-choice" id="interruptionChoice" hidden' in response
     assert "function submitPrompt" in response
     assert "continueButton.onclick = () => submitPrompt();" in response
     assert 'throw new Error("官方 Codex 会话未连接");' in response
@@ -963,8 +1416,126 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert 'class="dock-actions" hidden' in response
     assert "function readImageAttachment" in response
     assert "function renderAttachments" in response
+    assert "function renderLocalUserEcho" in response
+    assert "renderTranscriptImages(node.body, payload.images || [])" in response
+    assert "node.append(document.createTextNode(String(text)))" in response
+    assert "openInterruptionChoice()" in response
+    assert 'submitPrompt("steer")' in response
+    assert 'submitPrompt("continue")' in response
     assert ".bubble" not in response
     assert "message assistant" not in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_uses_official_model_catalog_settings(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'id="reasoningSelector"' in response
+    assert 'id="serviceTierSelector"' in response
+    assert "模型" in response
+    assert "速度" in response
+    assert "推理" in response
+    assert "async function loadModelCatalog" in response
+    assert "/api/native/codex/models" in response
+    assert "function updateSettingSummary" in response
+    assert 'id="serviceTierOptions"' in response
+    assert 'id="reasoningOptions"' in response
+    assert "pointer-events: none" in response
+    assert "function renderSettingOptions" in response
+    assert "function fillServiceTierSelector" in response
+    assert "function serviceTierLabel" in response
+    assert "function reasoningEffortLabel" in response
+    assert 'if (key === "high") return "高";' in response
+    assert 'if (["xhigh", "extra_high"].includes(key)) return "极高";' in response
+    assert "function preferredServiceTierDefault" in response
+    assert 'normalOption.value = "";' in response
+    assert 'renderSettingOptions(serviceTierOptions, serviceTierSelector, updateSettingSummary, {includeEmpty: true});' in response
+    assert "const MODEL_SETTINGS_STORAGE_KEY" in response
+    assert "function saveModelSettingsIfChanged" in response
+    assert "if (willClose) saveModelSettingsIfChanged();" in response
+    assert "function markModelSettingsDirty" in response
+    assert "localStorage.setItem(MODEL_SETTINGS_STORAGE_KEY" in response
+    assert "button.dataset.value = option.value;" in response
+    assert "function syncSettingOptionsSelection" in response
+    assert "syncSettingOptionsSelection(container, select);" in response
+    assert "syncSettingOptionsSelection(reasoningOptions, reasoningSelector);" in response
+    assert "syncSettingOptionsSelection(serviceTierOptions, serviceTierSelector);" in response
+    assert "body.model = savedModelSettings.model;" in response
+    assert "body.effort = savedModelSettings.effort;" in response
+    assert "body.service_tier = savedModelSettings.service_tier;" in response
+    assert "modelSettingsButton.disabled = false;" in response
+    assert "function syncSettingOptionsDisabled" in response
+    assert "reasoningSelector.disabled = sendingPrompt || nativeTurnRunning" in response
+    assert "serviceTierSelector.disabled = sendingPrompt || nativeTurnRunning" in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_shows_approval_resolution_state(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'className = "approval-state"' in response
+    assert ".approval-action.approve" in response
+    assert ".approval-action.danger" in response
+    assert ".approval-action.selected" in response
+    assert ".approval-action.muted" in response
+    assert "button.dataset.action = action;" in response
+    assert "button.className = `approval-action ${tone}`;" in response
+    assert "card.dataset.selectedAction = action;" in response
+    assert "setApprovalButtons(card, action, state);" in response
+    assert "function setApprovalButtons" in response
+    assert "button.classList.toggle(\"selected\", selected);" in response
+    assert "button.classList.toggle(\"muted\", state !== \"idle\" && !selected);" in response
+    assert "function approvalResolvedAction" in response
+    assert "const action = approvalResolvedAction(event, card);" in response
+    assert 'setApprovalState(card, action, "resolved");' in response
+    assert 'setApprovalState(card, "approve_once", "resolved");' not in response
+    assert "function approvalStateText" in response
+    assert "if (action === \"approve_once\") return state === \"pending\" ? \"批准一次处理中\" : \"已批准一次\";" in response
+    assert "if (action === \"approve_session\") return state === \"pending\" ? \"本会话批准处理中\" : \"本会话已批准\";" in response
+    assert "setApprovalState(card, action, \"pending\")" in response
+    assert "setApprovalState(card, action, \"resolved\")" in response
+    assert "setApprovalState(card, action, \"failed\"" in response
+    assert "button.onclick = () => resolveApproval(payload.codexRequestId, action, card)" in response
 
 
 @pytest.mark.asyncio
@@ -1003,6 +1574,8 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert 'if (nativeThreadId) search.set("native_thread_id", nativeThreadId);' in response
     assert "eventsPath(`after=${latestEventId}&limit=100`)" in response
     assert 'source.onerror = () => { setConnectionState("reconnecting"); pollEvents(); };' in response
+    assert "function isInternalEvent(event)" in response
+    assert "if (isInternalEvent(event)) return;" in response
     assert 'historyFold.textContent = previousEventCount > 0 ? "加载更早的消息" : "更早的消息";' in response
     assert "`${previousEventCount} 条以前的消息`" not in response
     assert "以前的消息" in response
@@ -1079,7 +1652,7 @@ async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns
     assert "function latestFoldGroupTurnId(groups)" in response
     assert "turnFoldTitle(group)" in response
     assert "function foldMessageCount(group)" in response
-    assert 'if (event.type === "model.usage.updated") continue;' in response
+    assert "if (isInternalEvent(event)) continue;" in response
     assert "function dedupeDisplayEvents(sourceEvents)" in response
     assert "const groups = foldGroups(dedupeDisplayEvents(loadedEvents));" in response
     assert "title.textContent = turnFoldTitle(group);" in response
@@ -1116,6 +1689,40 @@ async def test_worker_live_page_only_keeps_pending_approvals_expanded(
     assert "const pendingApproval = hasPendingApproval(group);" in response
     assert "!pendingApproval" in response
     assert "const hasApproval = group.some(event => event.kind === \"approval_requested\");" not in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_fold_keeps_native_transcript_previews(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "function renderFoldPreview(head, group)" in response
+    assert "foldTranscriptPreviewText(group, \"user_message\")" in response
+    assert "foldTranscriptPreviewText(group, \"text_delta\")" in response
+    assert "appendFoldPreviewLine(preview, \"user\", userText);" in response
+    assert "appendFoldPreviewLine(preview, \"assistant\", assistantText);" in response
+    assert ".turn-fold[open] .turn-fold-preview { display: none; }" in response
+    assert "/turn-summary" not in response
+    assert "summarize" not in response
 
 
 @pytest.mark.asyncio

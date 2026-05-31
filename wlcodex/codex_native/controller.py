@@ -5,7 +5,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from wlcodex.codex_backend import build_approval_response, build_legacy_approval_response
+from wlcodex.codex_backend import (
+    build_approval_response,
+    build_legacy_approval_response,
+    parse_thread_start_response,
+)
 from wlcodex.codex_native.models import (
     NativeCodexControlResult,
     NativeCodexSession,
@@ -32,6 +36,16 @@ class _NativeClient(Protocol):
 
     async def list_sessions(self, limit: int) -> list[dict[str, Any]]: ...
 
+    async def list_models(self) -> list[dict[str, Any]]: ...
+
+    async def start_thread(
+        self,
+        cwd: str,
+        *,
+        model: str | None = None,
+        service_tier: str | None = None,
+    ) -> dict[str, Any]: ...
+
     async def read_session(
         self,
         native_thread_id: str,
@@ -47,6 +61,8 @@ class _NativeClient(Protocol):
         prompt: str,
         *,
         model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> str: ...
 
@@ -107,6 +123,58 @@ class CodexNativeController:
         raw_sessions = await self._client.list_sessions(limit)
         return [self._map_thread(raw) for raw in raw_sessions]
 
+    async def list_models(self) -> list[dict[str, Any]]:
+        return await self._client.list_models()
+
+    async def start_session(
+        self,
+        cwd: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+        images: list[dict[str, Any]] | None = None,
+    ) -> NativeCodexControlResult:
+        detail = await self._client.start_thread(
+            cwd.strip(),
+            model=model,
+            service_tier=service_tier,
+        )
+        native_thread_id = parse_thread_start_response(detail)
+        self._project_detail_header(native_thread_id, detail)
+        return await self._start_new_turn(
+            native_thread_id,
+            prompt,
+            model=model,
+            effort=effort,
+            service_tier=service_tier,
+            images=images,
+        )
+
+    async def create_session(
+        self,
+        cwd: str,
+        *,
+        model: str | None = None,
+        service_tier: str | None = None,
+    ) -> NativeCodexControlResult:
+        detail = await self._client.start_thread(
+            cwd.strip(),
+            model=model,
+            service_tier=service_tier,
+        )
+        native_thread_id = parse_thread_start_response(detail)
+        turn_state = self._project_detail_header(native_thread_id, detail)
+        return NativeCodexControlResult(
+            native_thread_id=native_thread_id,
+            agent_run_id=turn_state.session.agent_run_id,
+            turn_id=turn_state.turn_id,
+            active_turn_id=turn_state.active_turn_id,
+            turn_running=turn_state.turn_running,
+            status="created",
+        )
+
     async def read_session(self, native_thread_id: str) -> dict[str, Any]:
         detail = await self._client.read_session(native_thread_id)
         self._project_detail(native_thread_id, detail)
@@ -151,6 +219,8 @@ class CodexNativeController:
         prompt: str,
         *,
         model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> NativeCodexControlResult:
         native_thread_id = native_thread_id.strip()
@@ -173,6 +243,8 @@ class CodexNativeController:
                     native_thread_id,
                     prompt,
                     model=model,
+                    effort=effort,
+                    service_tier=service_tier,
                     images=images,
                 )
             session = self._session_store.update_session(
@@ -196,6 +268,8 @@ class CodexNativeController:
             native_thread_id,
             prompt,
             model=model,
+            effort=effort,
+            service_tier=service_tier,
             images=images,
         )
 
@@ -205,6 +279,8 @@ class CodexNativeController:
         prompt: str,
         *,
         model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> NativeCodexControlResult:
         session = self._ensure_session(native_thread_id)
@@ -212,6 +288,8 @@ class CodexNativeController:
             native_thread_id,
             prompt,
             model=model,
+            effort=effort,
+            service_tier=service_tier,
             images=images,
         )
         session = self._session_store.update_session(
@@ -239,6 +317,8 @@ class CodexNativeController:
         prompt: str,
         *,
         model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> NativeCodexControlResult:
         native_thread_id = native_thread_id.strip()
@@ -252,6 +332,8 @@ class CodexNativeController:
                 native_thread_id,
                 prompt,
                 model=model,
+                effort=effort,
+                service_tier=service_tier,
                 images=images,
             )
         try:
@@ -267,6 +349,8 @@ class CodexNativeController:
                 native_thread_id,
                 prompt,
                 model=model,
+                effort=effort,
+                service_tier=service_tier,
                 images=images,
             )
         session = self._session_store.update_session(

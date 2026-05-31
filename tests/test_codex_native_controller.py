@@ -82,18 +82,49 @@ class FakeNativeClient:
         prompt: str,
         *,
         model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> str:
-        if model is None and images is None:
+        if model is None and effort is None and service_tier is None and images is None:
             self.calls.append(("continue_session", thread, prompt))
         else:
-            self.calls.append(("continue_session", thread, prompt, model, images))
+            self.calls.append(
+                ("continue_session", thread, prompt, model, effort, service_tier, images)
+            )
         detail = self.details.setdefault(thread, {"thread": {"id": thread}})
         detail_thread = detail.setdefault("thread", {"id": thread})
         if isinstance(detail_thread, dict):
             detail_thread["status"] = "active"
             detail_thread["turns"] = [{"id": "turn-2", "status": "running", "items": []}]
         return "turn-2"
+
+    async def start_thread(
+        self,
+        cwd: str,
+        *,
+        model: str | None = None,
+        service_tier: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(("start_thread", cwd, model, service_tier))
+        thread = {
+            "id": "thread-new",
+            "title": "",
+            "cwd": cwd,
+            "sourceKind": "appServer",
+            "status": "idle",
+        }
+        self.details["thread-new"] = {"thread": thread, "turns": []}
+        return {
+            "thread": thread,
+            "model": model or "gpt-5.5",
+            "serviceTier": service_tier,
+            "cwd": cwd,
+        }
+
+    async def list_models(self) -> list[dict[str, Any]]:
+        self.calls.append(("list_models",))
+        return [{"model": "gpt-5.5", "displayName": "GPT-5.5"}]
 
     async def steer_turn(
         self,
@@ -709,7 +740,7 @@ async def test_controller_steer_starts_new_turn_when_thread_is_not_active(
 
 
 @pytest.mark.asyncio
-async def test_controller_passes_native_model_and_images(tmp_path: Path) -> None:
+async def test_controller_passes_native_model_settings_and_images(tmp_path: Path) -> None:
     controller, client, _session_store, _runtime_store = _controller(tmp_path)
     await controller.list_sessions()
 
@@ -717,6 +748,8 @@ async def test_controller_passes_native_model_and_images(tmp_path: Path) -> None
         "thread-1",
         "describe",
         model="gpt-5.5",
+        effort="high",
+        service_tier="fast",
         images=[{"url": "data:image/png;base64,abc"}],
     )
     steered = await controller.steer_session(
@@ -736,6 +769,8 @@ async def test_controller_passes_native_model_and_images(tmp_path: Path) -> None
             "thread-1",
             "describe",
             "gpt-5.5",
+            "high",
+            "fast",
             [{"url": "data:image/png;base64,abc"}],
         ),
         ("attach_session", "thread-1"),
@@ -747,6 +782,71 @@ async def test_controller_passes_native_model_and_images(tmp_path: Path) -> None
             [{"url": "data:image/jpeg;base64,abc"}],
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_controller_starts_new_project_session_with_model_settings(
+    tmp_path: Path,
+) -> None:
+    controller, client, session_store, _runtime_store = _controller(tmp_path)
+
+    result = await controller.start_session(
+        "/workspace/two",
+        "start work",
+        model="gpt-5.5",
+        effort="medium",
+        service_tier="fast",
+        images=[{"url": "data:image/png;base64,abc"}],
+    )
+
+    session = session_store.get_by_thread_id("thread-new")
+    assert result.native_thread_id == "thread-new"
+    assert result.turn_id == "turn-2"
+    assert result.turn_running is True
+    assert session is not None
+    assert session.cwd == "/workspace/two"
+    assert client.calls == [
+        ("start_thread", "/workspace/two", "gpt-5.5", "fast"),
+        (
+            "continue_session",
+            "thread-new",
+            "start work",
+            "gpt-5.5",
+            "medium",
+            "fast",
+            [{"url": "data:image/png;base64,abc"}],
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_controller_creates_empty_project_session(tmp_path: Path) -> None:
+    controller, client, session_store, _runtime_store = _controller(tmp_path)
+
+    result = await controller.create_session(
+        "/workspace/two",
+        model="gpt-5.5",
+        service_tier="fast",
+    )
+
+    session = session_store.get_by_thread_id("thread-new")
+    assert result.native_thread_id == "thread-new"
+    assert result.turn_id == ""
+    assert result.turn_running is False
+    assert result.status == "created"
+    assert session is not None
+    assert session.cwd == "/workspace/two"
+    assert client.calls == [("start_thread", "/workspace/two", "gpt-5.5", "fast")]
+
+
+@pytest.mark.asyncio
+async def test_controller_lists_native_models(tmp_path: Path) -> None:
+    controller, client, _session_store, _runtime_store = _controller(tmp_path)
+
+    models = await controller.list_models()
+
+    assert models == [{"model": "gpt-5.5", "displayName": "GPT-5.5"}]
+    assert client.calls == [("list_models",)]
 
 
 @pytest.mark.asyncio

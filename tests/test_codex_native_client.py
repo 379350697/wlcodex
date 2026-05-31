@@ -219,6 +219,111 @@ async def test_native_client_continue_sends_model_and_images_without_collaborati
 
 
 @pytest.mark.asyncio
+async def test_native_client_lists_official_model_catalog() -> None:
+    def response_for(msg: dict[str, Any]) -> dict[str, Any] | None:
+        match msg["method"]:
+            case "initialize":
+                return {}
+            case "model/list":
+                assert msg["params"] == {"limit": 100, "includeHidden": False}
+                return {
+                    "data": [
+                        {
+                            "id": "gpt-5.5",
+                            "model": "gpt-5.5",
+                            "displayName": "GPT-5.5",
+                            "hidden": False,
+                        }
+                    ],
+                    "nextCursor": None,
+                }
+        raise AssertionError(f"unexpected method: {msg['method']}")
+
+    transport = FakeTransport(response_for)
+    client = CodexNativeClient(
+        send_json=transport.send_json,
+        close=transport.close,
+    )
+    transport.client = client
+
+    models = await client.list_models()
+
+    assert models == [
+        {
+            "id": "gpt-5.5",
+            "model": "gpt-5.5",
+            "displayName": "GPT-5.5",
+            "hidden": False,
+        }
+    ]
+    assert _method_names(transport.sent) == ["initialize", "initialized", "model/list"]
+
+
+@pytest.mark.asyncio
+async def test_native_client_starts_thread_and_turn_with_real_model_settings() -> None:
+    def response_for(msg: dict[str, Any]) -> dict[str, Any] | None:
+        match msg["method"]:
+            case "initialize":
+                return {}
+            case "thread/start":
+                assert msg["params"] == {
+                    "cwd": "/workspace/two",
+                    "model": "gpt-5.5",
+                    "serviceTier": "fast",
+                }
+                return {
+                    "thread": {
+                        "id": "thread-new",
+                        "cwd": "/workspace/two",
+                        "status": "idle",
+                    }
+                }
+            case "turn/start":
+                assert msg["params"] == {
+                    "threadId": "thread-new",
+                    "input": [
+                        {"type": "text", "text": "start work", "text_elements": []},
+                        {"type": "image", "url": "data:image/png;base64,abc"},
+                    ],
+                    "effort": "high",
+                    "model": "gpt-5.5",
+                    "serviceTier": "fast",
+                }
+                return {"turn": {"id": "turn-new"}}
+        raise AssertionError(f"unexpected method: {msg['method']}")
+
+    transport = FakeTransport(response_for)
+    client = CodexNativeClient(
+        send_json=transport.send_json,
+        close=transport.close,
+    )
+    transport.client = client
+
+    detail = await client.start_thread(
+        "/workspace/two",
+        model="gpt-5.5",
+        service_tier="fast",
+    )
+    turn_id = await client.start_turn(
+        "thread-new",
+        "start work",
+        model="gpt-5.5",
+        effort="high",
+        service_tier="fast",
+        images=[{"url": "data:image/png;base64,abc"}],
+    )
+
+    assert detail["thread"]["id"] == "thread-new"
+    assert turn_id == "turn-new"
+    assert _method_names(transport.sent) == [
+        "initialize",
+        "initialized",
+        "thread/start",
+        "turn/start",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_native_client_attach_session_resumes_thread_without_starting_turn() -> None:
     def response_for(msg: dict[str, Any]) -> dict[str, Any] | None:
         match msg["method"]:

@@ -76,6 +76,48 @@ class CodexNativeClient:
             return []
         return [item for item in items if isinstance(item, dict)]
 
+    async def list_models(
+        self,
+        *,
+        limit: int = 100,
+        include_hidden: bool = False,
+    ) -> list[dict[str, Any]]:
+        await self.initialize()
+        models: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {
+                "limit": limit,
+                "includeHidden": include_hidden,
+            }
+            if cursor:
+                params["cursor"] = cursor
+            result = await self.rpc.request("model/list", params)
+            items = result.get("data")
+            if isinstance(items, list):
+                models.extend(item for item in items if isinstance(item, dict))
+            next_cursor = result.get("nextCursor")
+            cursor = next_cursor if isinstance(next_cursor, str) and next_cursor else None
+            if not cursor:
+                return models
+
+    async def start_thread(
+        self,
+        cwd: str,
+        *,
+        model: str | None = None,
+        service_tier: str | None = None,
+    ) -> dict[str, Any]:
+        await self.initialize()
+        params: dict[str, Any] = {}
+        if cwd.strip():
+            params["cwd"] = cwd.strip()
+        if model is not None:
+            params["model"] = model
+        if service_tier is not None:
+            params["serviceTier"] = service_tier
+        return await self.rpc.request("thread/start", params)
+
     async def read_session(
         self,
         native_thread_id: str,
@@ -101,16 +143,40 @@ class CodexNativeClient:
         prompt: str,
         *,
         model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> str:
         await self.initialize()
         await self.rpc.request("thread/resume", {"threadId": native_thread_id})
+        return await self.start_turn(
+            native_thread_id,
+            prompt,
+            model=model,
+            effort=effort,
+            service_tier=service_tier,
+            images=images,
+        )
+
+    async def start_turn(
+        self,
+        native_thread_id: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+        images: list[dict[str, Any]] | None = None,
+    ) -> str:
+        await self.initialize()
         result = await self.rpc.request(
             "turn/start",
             build_turn_start_params(
                 native_thread_id,
                 prompt,
                 model=model,
+                effort=effort,
+                service_tier=service_tier,
                 images=images,
             ),
         )
@@ -208,6 +274,30 @@ class LazyNativeClient:
     async def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
         return await (await self._get()).list_sessions(limit=limit)
 
+    async def list_models(
+        self,
+        *,
+        limit: int = 100,
+        include_hidden: bool = False,
+    ) -> list[dict[str, Any]]:
+        return await (await self._get()).list_models(
+            limit=limit,
+            include_hidden=include_hidden,
+        )
+
+    async def start_thread(
+        self,
+        cwd: str,
+        *,
+        model: str | None = None,
+        service_tier: str | None = None,
+    ) -> dict[str, Any]:
+        return await (await self._get()).start_thread(
+            cwd,
+            model=model,
+            service_tier=service_tier,
+        )
+
     async def read_session(
         self,
         native_thread_id: str,
@@ -228,12 +318,35 @@ class LazyNativeClient:
         prompt: str,
         *,
         model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> str:
         return await (await self._get()).continue_session(
             native_thread_id,
             prompt,
             model=model,
+            effort=effort,
+            service_tier=service_tier,
+            images=images,
+        )
+
+    async def start_turn(
+        self,
+        native_thread_id: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+        images: list[dict[str, Any]] | None = None,
+    ) -> str:
+        return await (await self._get()).start_turn(
+            native_thread_id,
+            prompt,
+            model=model,
+            effort=effort,
+            service_tier=service_tier,
             images=images,
         )
 

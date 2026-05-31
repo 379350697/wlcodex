@@ -68,10 +68,15 @@ async def _read_response(host: str, port: int, request: str) -> str:
     reader, writer = await asyncio.open_connection(host, port)
     writer.write(request.encode("utf-8"))
     await writer.drain()
-    data = await asyncio.wait_for(reader.read(65536), timeout=1.0)
+    chunks: list[bytes] = []
+    while True:
+        chunk = await asyncio.wait_for(reader.read(65536), timeout=1.0)
+        if not chunk:
+            break
+        chunks.append(chunk)
     writer.close()
     await writer.wait_closed()
-    return data.decode("utf-8", errors="replace")
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 @pytest.mark.asyncio

@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import secrets
+import time
 from html import escape
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from wlcodex.auto_digest_llm import DigestClient
 from wlcodex.live_stream.collapse import (
@@ -21,6 +23,8 @@ _REQUEST_TIMEOUT_SECONDS = 5.0
 _MAX_HEADER_BYTES = 16 * 1024
 _MAX_BODY_BYTES = 8 * 1024 * 1024
 _MAX_NATIVE_IMAGE_ATTACHMENTS = 8
+_LOGIN_TICKET_TTL_SECONDS = 5 * 60
+_LOGIN_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 
 
 class RequestBodyTooLarge(ValueError):
@@ -54,6 +58,7 @@ class WorkerLiveStreamServer:
         self._native_transcript_mirror = native_transcript_mirror
         self._server: asyncio.AbstractServer | None = None
         self._client_tasks: set[asyncio.Task[None]] = set()
+        self._login_tickets: dict[str, float] = {}
 
     async def start(self) -> None:
         if self._server is not None:
@@ -134,6 +139,40 @@ class WorkerLiveStreamServer:
                 )
                 return
 
+            if parsed.path in ("", "/") and self._native_controller is not None:
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                if not self._access_token:
+                    await self._send_redirect(writer, "/native/codex")
+                    return
+                await self._send_html(writer, 200, _native_token_entry_page())
+                return
+
+            if parsed.path == "/native/codex/login":
+                if not self._access_token:
+                    await self._send_redirect(writer, "/native/codex")
+                    return
+                if method == "GET":
+                    ticket = query.get("ticket", [""])[0]
+                    if not self._has_login_ticket(ticket):
+                        await self._send_html(writer, 401, _native_token_entry_page())
+                        return
+                    await self._send_html(writer, 200, _native_login_ticket_page(ticket))
+                    return
+                if method != "POST":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                if not self._consume_login_ticket(query.get("ticket", [""])[0]):
+                    await self._send_html(writer, 401, _native_token_entry_page())
+                    return
+                await self._send_redirect(
+                    writer,
+                    "/native/codex",
+                    headers={"Set-Cookie": _login_cookie_header(self._access_token or "")},
+                )
+                return
+
             if parsed.path == "/native/codex":
                 if method != "GET":
                     await self._send_json(writer, 405, {"error": "method not allowed"})
@@ -144,7 +183,7 @@ class WorkerLiveStreamServer:
                     query,
                     require_token=self._native_controller is not None,
                 ):
-                    await self._send_json(writer, 401, {"error": "unauthorized"})
+                    await self._send_html(writer, 401, _native_token_entry_page())
                     return
                 await self._send_html(writer, 200, _native_codex_page())
                 return
@@ -323,6 +362,14 @@ class WorkerLiveStreamServer:
         reader: asyncio.StreamReader,
         headers: dict[str, str],
     ) -> dict[str, Any]:
+        if _uses_chunked_transfer(headers):
+            raw = await _read_chunked_body(reader)
+            if not raw:
+                return {}
+            parsed = json.loads(raw.decode("utf-8"))
+            if not isinstance(parsed, dict):
+                raise ValueError("JSON body must be an object")
+            return parsed
         content_length = _safe_int(headers.get("content-length", "0"), default=0)
         if content_length == 0:
             return {}
@@ -359,6 +406,25 @@ class WorkerLiveStreamServer:
             return
 
         base = "/api/native/codex"
+        if path == f"{base}/login-ticket":
+            if not self._access_token:
+                await self._send_json(writer, 404, {"error": "not found"})
+                return
+            if method != "POST":
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
+            ticket = self._mint_login_ticket()
+            await self._send_json(
+                writer,
+                200,
+                {
+                    "ticket": ticket,
+                    "path": f"/native/codex/login?ticket={quote(ticket, safe='')}",
+                    "expires_in": _LOGIN_TICKET_TTL_SECONDS,
+                },
+            )
+            return
+
         if path == f"{base}/status":
             if method != "GET":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
@@ -377,6 +443,48 @@ class WorkerLiveStreamServer:
                 200,
                 {"sessions": [_json_object(session) for session in sessions]},
             )
+            return
+
+        if path == f"{base}/models":
+            if method != "GET":
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
+            models = await self._native_controller.list_models()
+            await self._send_json(
+                writer,
+                200,
+                {"models": [_json_object(model) for model in models]},
+            )
+            return
+
+        if path == f"{base}/sessions/start":
+            if method != "POST":
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
+            body = await self._read_request_json(writer, reader, headers)
+            if body is None:
+                return
+            prompt = str(body.get("prompt", ""))
+            model = _optional_nonempty_string(body.get("model"))
+            service_tier = _optional_nonempty_string(
+                body.get("service_tier") or body.get("serviceTier")
+            )
+            if prompt.strip():
+                result = await self._native_controller.start_session(
+                    str(body.get("cwd", "")),
+                    prompt,
+                    model=model,
+                    effort=_optional_nonempty_string(body.get("effort")),
+                    service_tier=service_tier,
+                    images=_safe_image_attachments(body.get("images")),
+                )
+            else:
+                result = await self._native_controller.create_session(
+                    str(body.get("cwd", "")),
+                    model=model,
+                    service_tier=service_tier,
+                )
+            await self._send_json(writer, 200, _json_object(result))
             return
 
         approval_prefix = f"{base}/approvals/"
@@ -435,6 +543,10 @@ class WorkerLiveStreamServer:
                 thread_id,
                 str(body.get("prompt", "")),
                 model=_optional_nonempty_string(body.get("model")),
+                effort=_optional_nonempty_string(body.get("effort")),
+                service_tier=_optional_nonempty_string(
+                    body.get("service_tier") or body.get("serviceTier")
+                ),
                 images=_safe_image_attachments(body.get("images")),
             )
             await self._send_json(writer, 200, _json_object(result))
@@ -451,6 +563,10 @@ class WorkerLiveStreamServer:
                 expected_turn_id,
                 str(body.get("prompt", "")),
                 model=_optional_nonempty_string(body.get("model")),
+                effort=_optional_nonempty_string(body.get("effort")),
+                service_tier=_optional_nonempty_string(
+                    body.get("service_tier") or body.get("serviceTier")
+                ),
                 images=_safe_image_attachments(body.get("images")),
             )
             await self._send_json(writer, 200, _json_object(result))
@@ -496,7 +612,7 @@ class WorkerLiveStreamServer:
         require_token: bool = False,
     ) -> bool:
         if require_token and not self._access_token:
-            return False
+            return self._allow_unauthenticated_loopback and _is_loopback_peer(writer)
         if self._access_token:
             prefix = "Bearer "
             authorization = headers.get("authorization", "")
@@ -504,9 +620,34 @@ class WorkerLiveStreamServer:
                 candidate = authorization[len(prefix) :]
                 if hmac.compare_digest(candidate, self._access_token):
                     return True
+            cookie_token = _cookie_value(headers.get("cookie", ""), "wlcodex_token")
+            if cookie_token and hmac.compare_digest(cookie_token, self._access_token):
+                return True
             query_token = query.get("token", [""])[0]
             return hmac.compare_digest(query_token, self._access_token)
         return self._allow_unauthenticated_loopback and _is_loopback_peer(writer)
+
+    def _mint_login_ticket(self) -> str:
+        self._purge_login_tickets()
+        ticket = secrets.token_urlsafe(32)
+        self._login_tickets[ticket] = time.monotonic() + _LOGIN_TICKET_TTL_SECONDS
+        return ticket
+
+    def _consume_login_ticket(self, ticket: str) -> bool:
+        self._purge_login_tickets()
+        expires_at = self._login_tickets.pop(ticket, None)
+        return expires_at is not None and expires_at >= time.monotonic()
+
+    def _has_login_ticket(self, ticket: str) -> bool:
+        self._purge_login_tickets()
+        expires_at = self._login_tickets.get(ticket)
+        return expires_at is not None and expires_at >= time.monotonic()
+
+    def _purge_login_tickets(self) -> None:
+        now = time.monotonic()
+        for ticket, expires_at in list(self._login_tickets.items()):
+            if expires_at < now:
+                self._login_tickets.pop(ticket, None)
 
     async def _send_json(
         self,
@@ -528,6 +669,21 @@ class WorkerLiveStreamServer:
             status,
             "text/html; charset=utf-8",
             body.encode("utf-8"),
+        )
+
+    async def _send_redirect(
+        self,
+        writer: asyncio.StreamWriter,
+        location: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        await _send_response(
+            writer,
+            303,
+            "text/plain; charset=utf-8",
+            b"",
+            extra_headers={"Location": location, **(headers or {})},
         )
 
     async def _send_sse(
@@ -572,9 +728,12 @@ async def _send_response(
     status: int,
     content_type: str,
     body: bytes,
+    *,
+    extra_headers: dict[str, str] | None = None,
 ) -> None:
     reason = {
         200: "OK",
+        303: "See Other",
         400: "Bad Request",
         401: "Unauthorized",
         404: "Not Found",
@@ -583,10 +742,14 @@ async def _send_response(
         431: "Request Header Fields Too Large",
         503: "Service Unavailable",
     }.get(status, "Error")
+    custom_headers = "".join(
+        f"{name}: {value}\r\n" for name, value in (extra_headers or {}).items()
+    )
     header = (
         f"HTTP/1.1 {status} {reason}\r\n"
         f"Content-Type: {content_type}\r\n"
         f"Content-Length: {len(body)}\r\n"
+        f"{custom_headers}"
         "Connection: close\r\n"
         "\r\n"
     )
@@ -599,6 +762,61 @@ async def _send_response(
 async def _write_sse(writer: asyncio.StreamWriter, event: WorkerStreamEvent) -> None:
     writer.write(format_sse_event(event))
     await writer.drain()
+
+
+def _uses_chunked_transfer(headers: dict[str, str]) -> bool:
+    transfer_encoding = headers.get("transfer-encoding", "")
+    return any(
+        part.strip().lower() == "chunked"
+        for part in transfer_encoding.split(",")
+    )
+
+
+async def _read_chunked_body(reader: asyncio.StreamReader) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        size_line = await asyncio.wait_for(
+            reader.readline(),
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
+        if not size_line:
+            raise asyncio.IncompleteReadError(size_line, None)
+        raw_size = size_line.split(b";", 1)[0].strip()
+        try:
+            chunk_size = int(raw_size, 16)
+        except ValueError as exc:
+            raise ValueError("invalid chunk size") from exc
+        if chunk_size < 0:
+            raise ValueError("invalid chunk size")
+        if chunk_size == 0:
+            await _discard_chunked_trailers(reader)
+            break
+        total += chunk_size
+        if total > _MAX_BODY_BYTES:
+            raise RequestBodyTooLarge("request body too large")
+        chunk = await asyncio.wait_for(
+            reader.readexactly(chunk_size),
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
+        line_end = await asyncio.wait_for(
+            reader.readexactly(2),
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
+        if line_end != b"\r\n":
+            raise ValueError("invalid chunk delimiter")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _discard_chunked_trailers(reader: asyncio.StreamReader) -> None:
+    while True:
+        line = await asyncio.wait_for(
+            reader.readline(),
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
+        if line in (b"\r\n", b"\n", b""):
+            return
 
 
 def format_sse_event(event: WorkerStreamEvent) -> bytes:
@@ -686,6 +904,22 @@ def _is_loopback_peer(writer: asyncio.StreamWriter) -> bool:
     return peer[0] in ("127.0.0.1", "::1", "localhost")
 
 
+def _cookie_value(raw: str, name: str) -> str:
+    for part in raw.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return unquote(value)
+    return ""
+
+
+def _login_cookie_header(token: str) -> str:
+    return (
+        "wlcodex_token="
+        + quote(token, safe="")
+        + f"; Path=/; Max-Age={_LOGIN_COOKIE_MAX_AGE_SECONDS}; SameSite=Lax"
+    )
+
+
 def _json_object(value: Any) -> dict[str, Any]:
     to_json_dict = getattr(value, "to_json_dict", None)
     if callable(to_json_dict):
@@ -698,6 +932,101 @@ def _json_object(value: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return dict(raw)
     return {"value": value}
+
+
+def _native_token_entry_page() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WLCodex</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 26px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #000; color: #f7f7f8; }
+    main { width: min(420px, 100%); display: grid; gap: 18px; }
+    h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
+    p { margin: 0; color: #aeb4bf; line-height: 1.5; }
+    form { display: grid; gap: 12px; }
+    input { width: 100%; height: 54px; border-radius: 14px; border: 1px solid #3a3a40; background: #14161d; color: #f7f7f8; padding: 0 14px; font-size: 16px; }
+    button { height: 52px; border: 0; border-radius: 14px; background: #f4f4f5; color: #101114; font-size: 16px; font-weight: 760; }
+    .status { min-height: 20px; color: #fca5a5; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Codex</h1>
+    <p>输入访问令牌后进入手机远程控制页。令牌只保存在此浏览器本地。</p>
+    <form id="tokenForm">
+      <input id="tokenInput" name="token" placeholder="访问令牌" autocomplete="current-password" autofocus>
+      <button type="submit">进入</button>
+      <div class="status" id="status"></div>
+    </form>
+  </main>
+  <script>
+    function rememberToken(value) {
+      try { localStorage.setItem("wlcodexToken", value); } catch (_error) {}
+      document.cookie = "wlcodex_token=" + encodeURIComponent(value) + "; Path=/; Max-Age=2592000; SameSite=Lax";
+    }
+    const params = new URLSearchParams(location.search);
+    const queryToken = params.get("token") || "";
+    let savedToken = "";
+    try { savedToken = localStorage.getItem("wlcodexToken") || ""; } catch (_error) {}
+    const token = queryToken || savedToken;
+    if (token) {
+      rememberToken(token);
+      location.replace("/native/codex");
+    }
+    const input = document.getElementById("tokenInput");
+    const status = document.getElementById("status");
+    document.getElementById("tokenForm").onsubmit = event => {
+      event.preventDefault();
+      const value = input.value.trim();
+      if (!value) {
+        status.textContent = "请输入访问令牌";
+        input.focus();
+        return;
+      }
+      rememberToken(value);
+      location.href = "/native/codex";
+    };
+  </script>
+</body>
+</html>"""
+
+
+def _native_login_ticket_page(ticket: str) -> str:
+    safe_ticket = escape(ticket, quote=True)
+    safe_action = f"/native/codex/login?ticket={quote(ticket, safe='')}"
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex</title>
+  <style>
+    :root {{ color-scheme: dark; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 26px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #000; color: #f7f7f8; }}
+    main {{ width: min(420px, 100%); display: grid; gap: 18px; }}
+    h1 {{ margin: 0; font-size: 28px; letter-spacing: 0; }}
+    p {{ margin: 0; color: #aeb4bf; line-height: 1.5; }}
+    form {{ display: grid; gap: 12px; }}
+    button {{ height: 52px; border: 0; border-radius: 14px; background: #f4f4f5; color: #101114; font-size: 16px; font-weight: 760; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Codex</h1>
+    <p>点击进入手机远程控制页。此链接只能使用一次。</p>
+    <form method="post" action="{safe_action}">
+      <input type="hidden" name="ticket" value="{safe_ticket}">
+      <button type="submit">进入 Codex</button>
+    </form>
+  </main>
+</body>
+</html>"""
 
 
 def _native_codex_page() -> str:
@@ -723,17 +1052,28 @@ def _native_codex_page() -> str:
     .off .dot { background: #8c8f98; }
     .laptop { width: 20px; height: 14px; border: 2px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
     .laptop:after { content: ""; position: absolute; left: -4px; right: -4px; bottom: -6px; height: 2px; background: currentColor; border-radius: 2px; }
-    main { padding: 8px 26px 124px; }
-    .nav-row, .project, .recent { display: grid; grid-template-columns: 38px 1fr auto; align-items: center; min-height: 62px; color: #f7f7f8; background: transparent; border: 0; width: 100%; padding: 0; text-align: left; }
+    main { overflow-x: hidden; padding: 8px 22px calc(124px + env(safe-area-inset-bottom)); }
+    .nav-row, .project, .recent { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 62px; color: #f7f7f8; background: transparent; border: 0; width: 100%; padding: 0; text-align: left; }
+    .nav-row[hidden], .project-new-chat[hidden] { display: none; }
+    .nav-row > span:nth-child(2), .project > span:nth-child(2) { min-width: 0; }
     .icon-folder, .icon-chat { width: 30px; height: 24px; border: 3px solid #f7f7f8; border-radius: 4px; position: relative; }
     .icon-folder:before { content: ""; position: absolute; left: 2px; top: -9px; width: 15px; height: 8px; border: 3px solid #f7f7f8; border-bottom: 0; border-radius: 4px 4px 0 0; background: #000; }
     .icon-chat { width: 28px; height: 28px; border-radius: 50%; }
     .icon-chat:after { content: ""; position: absolute; right: 2px; bottom: 1px; width: 7px; height: 7px; border-right: 3px solid #f7f7f8; border-bottom: 3px solid #f7f7f8; transform: rotate(28deg); background: #000; }
-    .label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; font-weight: 650; }
+    .nav-row.active .label, .project.active .label { color: #fff; }
+    .nav-row.active .icon-chat, .project.active .icon-folder { border-color: #fff; }
+    .project.active .icon-folder:before { border-color: #fff; }
+    .label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; font-weight: 650; }
     .section-title { margin: 26px 0 12px; color: #c8c8d0; font-size: 15px; }
-    .recent { grid-template-columns: 1fr auto; gap: 14px; min-height: 54px; }
+    .recent { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; min-height: 64px; padding: 6px 0; }
+    .recent-copy { min-width: 0; overflow: hidden; }
+    .recent-title { display: -webkit-box; max-height: 2.56em; white-space: normal; line-height: 1.28; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
     .recent.active .label { color: #fff; }
-    .time { color: #a9a9b2; font-size: 14px; white-space: nowrap; }
+    .more-sessions { border: 0; border-top: 1px solid #24262d; margin-top: 8px; padding-top: 8px; }
+    .more-sessions summary { min-height: 44px; list-style: none; cursor: pointer; color: #c8c8d0; font-size: 15px; }
+    .more-sessions summary::-webkit-details-marker { display: none; }
+    .more-sessions-body { display: grid; gap: 0; }
+    .time { max-width: 66px; overflow: hidden; color: #a9a9b2; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
     .meta { margin-top: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8d93a0; font-size: 12px; }
     .empty { color: #8d93a0; padding: 16px 0; }
     .controls { position: fixed; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 12px 26px 18px; background: linear-gradient(to top, #000 82%, rgba(0,0,0,0)); }
@@ -759,22 +1099,37 @@ def _native_codex_page() -> str:
       <span></span>
     </button>
     <div id="projects"></div>
+    <button class="nav-row project-new-chat" id="projectNewChat" hidden>
+      <span class="icon-chat"></span>
+      <span><span class="label">聊天</span><span class="meta" id="projectNewChatMeta"></span></span>
+      <span></span>
+    </button>
     <div class="section-title">最近</div>
     <div id="sessions"></div>
   </main>
   <section class="controls">
-    <input id="prompt" placeholder="搜索聊天或继续当前会话">
+    <input id="prompt" placeholder="搜索聊天或开始新聊天">
     <button class="chat" id="send">聊天</button>
   </section>
   <script>
     const token = new URLSearchParams(location.search).get("token") || "";
+    if (token) {
+      try { localStorage.setItem("wlcodexToken", token); } catch (_error) {}
+      document.cookie = "wlcodex_token=" + encodeURIComponent(token) + "; Path=/; Max-Age=2592000; SameSite=Lax";
+    }
     const headers = token ? {"Authorization": "Bearer " + token} : {};
     let selected = null;
+    let selectedProjectCwd = "";
     let sessions = [];
+    const SESSION_PREVIEW_LIMIT = 10;
     const devicesEl = document.getElementById("devices");
     const sessionsEl = document.getElementById("sessions");
     const projectsEl = document.getElementById("projects");
     const promptEl = document.getElementById("prompt");
+    const controlsEl = document.querySelector(".controls");
+    const chatRow = document.getElementById("chat");
+    const projectNewChat = document.getElementById("projectNewChat");
+    const projectNewChatMeta = document.getElementById("projectNewChatMeta");
 
     async function api(path, options = {}) {
       const res = await fetch(path, {
@@ -800,7 +1155,7 @@ def _native_codex_page() -> str:
       try {
         const data = await api("/api/native/codex/sessions");
         sessions = data.sessions || [];
-        if (!selected && sessions.length) selected = sessions[0];
+        if (selected && !sessions.some(session => session.native_thread_id === selected.native_thread_id)) selected = null;
         renderProjects();
         renderSessions();
       } catch (error) {
@@ -810,43 +1165,76 @@ def _native_codex_page() -> str:
 
     function renderProjects() {
       const seen = new Set();
+      let selectedProjectRendered = false;
       projectsEl.innerHTML = "";
+      chatRow.className = "nav-row" + (selectedProjectCwd ? "" : " active");
       for (const session of sessions) {
         const cwd = session.cwd || "";
         if (!cwd || seen.has(cwd)) continue;
         seen.add(cwd);
         const btn = document.createElement("button");
-        btn.className = "project";
+        btn.className = "project" + (selectedProjectCwd === cwd ? " active" : "");
         btn.innerHTML = `<span class="icon-folder"></span><span class="label">${escapeHtml(lastPath(cwd))}</span><span></span>`;
-        btn.onclick = () => {
-          selected = session;
-          renderSessions();
-        };
+        btn.onclick = () => selectProject(cwd);
         projectsEl.appendChild(btn);
+        if (selectedProjectCwd === cwd) {
+          projectsEl.appendChild(projectNewChat);
+          selectedProjectRendered = true;
+        }
         if (seen.size >= 4) break;
       }
+      if (selectedProjectCwd && !selectedProjectRendered) projectsEl.appendChild(projectNewChat);
+      updateContextHint();
+      renderProjectAction();
+    }
+
+    function selectProject(cwd) {
+      selectedProjectCwd = String(cwd || "");
+      selected = null;
+      renderProjects();
+      renderSessions();
+    }
+
+    function renderProjectAction() {
+      projectNewChat.hidden = !selectedProjectCwd;
+      projectNewChatMeta.textContent = selectedProjectCwd ? `在 ${lastPath(selectedProjectCwd)} 新建会话` : "";
     }
 
     function renderSessions() {
       const needle = promptEl.value.trim().toLowerCase();
-      const filtered = sessions.filter(session => {
+      const filtered = sortedSessions().filter(session => {
+        if (selectedProjectCwd && !(sessionProjectKey(session) === selectedProjectCwd)) return false;
         if (!needle) return true;
         return `${session.title || ""} ${session.cwd || ""}`.toLowerCase().includes(needle);
       });
       sessionsEl.innerHTML = "";
       if (!filtered.length) {
-        sessionsEl.innerHTML = `<div class="empty">没有匹配的聊天</div>`;
+        sessionsEl.innerHTML = `<div class="empty">没有最近聊天</div>`;
         return;
       }
-      for (const session of filtered.slice(0, 20)) {
+      renderSessionList(filtered.slice(0, SESSION_PREVIEW_LIMIT), sessionsEl);
+      if (filtered.length <= SESSION_PREVIEW_LIMIT) return;
+      const details = document.createElement("details");
+      details.className = "more-sessions";
+      const summary = document.createElement("summary");
+      summary.textContent = `更多聊天 ${filtered.length - SESSION_PREVIEW_LIMIT}`;
+      const body = document.createElement("div");
+      body.className = "more-sessions-body";
+      details.append(summary, body);
+      renderSessionList(filtered.slice(SESSION_PREVIEW_LIMIT), body);
+      sessionsEl.append(details);
+    }
+
+    function renderSessionList(source, target) {
+      for (const session of source) {
         const btn = document.createElement("button");
         btn.className = "recent" + (selected && selected.native_thread_id === session.native_thread_id ? " active" : "");
-        btn.innerHTML = `<span><span class="label">${escapeHtml(session.title || session.native_thread_id)}</span><span class="meta">${escapeHtml(lastPath(session.cwd || ""))} · ${escapeHtml(session.status || "")}</span></span><span class="time">${escapeHtml(relativeTime(session.updated_at))}</span>`;
+        btn.innerHTML = `<span class="recent-copy"><span class="label recent-title">${escapeHtml(session.title || session.native_thread_id)}</span><span class="meta">${escapeHtml(lastPath(session.cwd || ""))} · ${escapeHtml(session.status || "")}</span></span><span class="time">${escapeHtml(relativeTime(session.updated_at))}</span>`;
         btn.onclick = () => {
           selected = session;
-          openLive();
+          openLive(session);
         };
-        sessionsEl.appendChild(btn);
+        target.appendChild(btn);
       }
     }
 
@@ -859,21 +1247,56 @@ def _native_codex_page() -> str:
       await loadSessions();
     }
 
-    async function openLive() {
-      if (!selected) return;
+    async function startNewChat(prompt) {
+      const result = await api("/api/native/codex/sessions/start", {
+        method: "POST",
+        body: JSON.stringify({cwd: selectedProjectCwd, prompt})
+      });
+      openLive(result);
+    }
+
+    async function openProjectNewChat() {
+      if (!selectedProjectCwd) return;
+      projectNewChat.disabled = true;
+      try {
+        await startNewChat("");
+      } finally {
+        projectNewChat.disabled = false;
+      }
+    }
+
+    async function openLive(session = selected) {
+      if (!session) return;
       const params = new URLSearchParams();
       if (token) params.set("token", token);
-      params.set("native_thread_id", selected.native_thread_id);
-      location.href = `/workers/${selected.agent_run_id}/live?${params.toString()}`;
+      params.set("native_thread_id", session.native_thread_id);
+      location.href = `/workers/${session.agent_run_id}/live?${params.toString()}`;
     }
     document.getElementById("send").onclick = async () => {
-      if (!selected && sessions.length) selected = sessions[0];
-      if (promptEl.value.trim()) await control("continue", {prompt: promptEl.value});
-      await openLive();
+      const prompt = promptEl.value.trim();
+      if (!prompt) {
+        promptEl.focus();
+        return;
+      }
+      await startNewChat(prompt);
     };
-    document.getElementById("chat").onclick = openLive;
+    document.getElementById("chat").onclick = () => selectProject("");
+    projectNewChat.onclick = openProjectNewChat;
     document.getElementById("back").onclick = () => history.back();
     promptEl.addEventListener("input", renderSessions);
+    function sessionProjectKey(session) {
+      return String((session && session.cwd) || "");
+    }
+    function sortedSessions() {
+      return [...sessions].sort((left, right) => {
+        return Date.parse(right.updated_at || "") - Date.parse(left.updated_at || "");
+      });
+    }
+    function updateContextHint() {
+      const project = selectedProjectCwd ? lastPath(selectedProjectCwd) : "";
+      controlsEl.dataset.project = project;
+      promptEl.placeholder = project ? `在 ${project} 中开始新聊天或搜索` : "搜索聊天或开始新聊天";
+    }
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
@@ -934,7 +1357,10 @@ def _live_page(agent_run_id: int) -> str:
     .transcript-item.user { justify-self: end; justify-items: end; max-width: min(82%, 520px); }
     .transcript-item.user .transcript-meta { display: none; }
     .transcript-item.user .transcript-body { padding: 10px 13px; border: 1px solid #333842; border-radius: 18px 18px 4px 18px; background: #20242d; line-height: 1.5; }
+    .transcript-item.local-pending .transcript-body { opacity: .86; }
     .transcript-item.assistant { justify-self: start; max-width: 100%; padding-left: 22px; border-left: 2px solid #30333a; }
+    .transcript-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+    .transcript-image { width: min(180px, 52vw); max-height: 180px; border-radius: 12px; object-fit: cover; border: 1px solid #3f4550; background: #050506; }
     .status-event { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; color: #aeb4bf; font-size: 14px; line-height: 1.5; }
     .status-event:before { content: ""; width: 8px; height: 8px; margin-top: 7px; border-radius: 50%; background: #6b7280; }
     .status-event.busy:before { background: #f59e0b; }
@@ -948,11 +1374,17 @@ def _live_page(agent_run_id: int) -> str:
     .history-fold { width: 100%; min-height: 38px; margin: 2px 0 10px; border: 0; border-bottom: 1px solid #24262d; border-radius: 0; background: transparent; color: #b8bdc8; text-align: left; font-size: 15px; }
     .history-fold[hidden] { display: none; }
     .turn-fold { border: 0; border-bottom: 1px solid #24262d; border-radius: 0; background: transparent; overflow: visible; }
-    .turn-fold summary { display: flex; gap: 6px; align-items: center; min-height: 42px; padding: 0 0 8px; cursor: pointer; list-style: none; color: #d7dae1; }
+    .turn-fold summary { display: grid; gap: 8px; min-height: 42px; padding: 0 0 8px; cursor: pointer; list-style: none; color: #d7dae1; }
     .turn-fold summary::-webkit-details-marker { display: none; }
-    .turn-fold-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
-    .turn-fold-chevron { color: #aeb4bf; font-size: 18px; transition: transform .16s ease; }
+    .turn-fold-row { display: flex; gap: 6px; align-items: center; min-width: 0; }
+    .turn-fold-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+    .turn-fold-chevron { flex: 0 0 auto; color: #aeb4bf; font-size: 18px; transition: transform .16s ease; }
     .turn-fold[open] .turn-fold-chevron { transform: rotate(90deg); }
+    .turn-fold-preview { display: grid; gap: 8px; padding: 0 0 8px; }
+    .turn-fold[open] .turn-fold-preview { display: none; }
+    .turn-fold-preview-line { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.42; }
+    .turn-fold-preview-user { justify-self: end; max-width: min(82%, 520px); padding: 8px 11px; border: 1px solid #333842; border-radius: 15px 15px 4px 15px; background: #20242d; color: #f4f4f5; }
+    .turn-fold-preview-assistant { justify-self: start; padding-left: 18px; border-left: 2px solid #30333a; color: #cfd3dc; }
     .turn-fold-body { display: grid; gap: 18px; padding: 12px 0 18px; }
     .codex-tool-call, .file-change-card, .approval-card { border: 1px solid #30333a; background: #0f1014; border-radius: 10px; overflow: hidden; }
     .codex-tool-call.failed { border-color: #7f1d1d; }
@@ -961,11 +1393,35 @@ def _live_page(agent_run_id: int) -> str:
     .tool-state, .file-state { color: #9ca3af; font-size: 12px; }
     .tool-output, .file-body { margin: 0; max-height: 260px; overflow: auto; padding: 11px 12px; color: #d8dee9; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }
     .approval-card { border-color: #854d0e; background: #171107; }
+    .approval-card.resolving { border-color: #a16207; }
+    .approval-card.resolved { border-color: #166534; background: #07130b; }
+    .approval-card.failed { border-color: #7f1d1d; background: #17090a; }
     .approval-body { padding: 0 12px 12px; color: #fde68a; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.5; }
+    .approval-state { padding: 0 12px 10px; color: #d6d3d1; font-size: 13px; }
     .approval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0 12px 12px; }
+    .approval-action { min-height: 46px; border: 1px solid transparent; transition: opacity .16s ease, background .16s ease, border-color .16s ease; }
+    .approval-action.approve { background: #14532d; color: #ecfdf5; border-color: #22c55e; }
+    .approval-action.danger { background: #7f1d1d; color: #fff1f2; border-color: #ef4444; }
+    .approval-action.selected { opacity: 1; box-shadow: inset 0 0 0 2px rgba(255,255,255,.38); }
+    .approval-action.muted { background: #2a2a2d; color: #8e929b; border-color: #34363d; opacity: .62; box-shadow: none; }
     .codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 8px; padding: 10px 16px 16px; background: linear-gradient(to top, #000 86%, rgba(0,0,0,0)); border-top: 1px solid #272930; }
     .composer-tools { display: flex; gap: 8px; align-items: center; min-width: 0; }
-    .model-selector { flex: 1; min-width: 0; height: 38px; border-radius: 11px; border: 1px solid #3f4550; background: #11141b; color: #f4f4f5; padding: 0 12px; font-size: 14px; font-weight: 700; }
+    .composer-settings { position: relative; flex: 1; display: flex; gap: 8px; min-width: 0; }
+    .setting-pill { min-height: 38px; border-radius: 19px; padding: 0 14px; background: #2a2a2d; color: #f4f4f5; border: 0; font-size: 14px; font-weight: 760; white-space: nowrap; }
+    .setting-pill.permissions { flex: 0 0 auto; }
+    .model-popover { position: absolute; left: 0; bottom: 48px; width: min(330px, calc(100vw - 32px)); border: 1px solid #3a3a40; border-radius: 22px; background: #222225; box-shadow: 0 20px 54px rgba(0,0,0,.55); overflow: hidden; z-index: 6; }
+    .model-popover[hidden] { display: none; }
+    .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid #343439; color: #f4f4f5; }
+    .setting-row:last-child { border-bottom: 0; }
+    .setting-label { display: grid; gap: 5px; min-width: 0; font-size: 16px; font-weight: 760; }
+    .setting-value { color: #b8bdc8; font-size: 14px; font-weight: 500; }
+    .setting-chevron { color: #f4f4f5; font-size: 28px; line-height: 1; }
+    .model-selector, .setting-selector { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
+    .setting-options { display: grid; gap: 6px; padding: 0 12px 12px; border-bottom: 1px solid #343439; background: #1d1d20; }
+    .setting-options[hidden] { display: none; }
+    .setting-option { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-height: 38px; border-radius: 13px; padding: 7px 11px; background: transparent; color: #d4d4d8; font-size: 15px; text-align: left; }
+    .setting-option.selected { background: #34343a; color: #fff; }
+    .setting-option-check { color: #f4f4f5; font-weight: 800; }
     .attach-button { width: 40px; min-height: 38px; padding: 0; border-radius: 11px; background: #20242e; color: #f4f4f5; border: 1px solid #3f4550; font-size: 24px; line-height: 1; }
     .send-status { min-width: 66px; color: #9ca3af; font-size: 12px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .send-status.error { color: #fca5a5; }
@@ -976,6 +1432,10 @@ def _live_page(agent_run_id: int) -> str:
     .attachment-chip img { width: 46px; height: 42px; border-radius: 7px; object-fit: cover; background: #050506; }
     .attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d4d4d8; font-size: 12px; }
     .attachment-remove { width: 28px; min-height: 28px; padding: 0; border-radius: 50%; background: #272b35; color: #f4f4f5; font-size: 16px; }
+    .interruption-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 2px 0; }
+    .interruption-choice[hidden] { display: none; }
+    .choice-action { min-height: 42px; border-radius: 12px; background: #20242e; color: #f4f4f5; border: 1px solid #3f4550; }
+    .choice-action.primary { background: #f4f4f5; color: #101114; border: 0; }
     .dock-row { display: flex; gap: 10px; min-width: 0; align-items: center; }
     .dock-actions { display: flex; gap: 10px; min-width: 0; }
     .dock-actions[hidden] { display: none; }
@@ -1015,17 +1475,48 @@ def _live_page(agent_run_id: int) -> str:
     </main>
     <section class="codex-input-dock">
       <div class="composer-tools">
-        <select id="modelSelector" class="model-selector" aria-label="选择模型">
-          <option value="gpt-5.5" selected>GPT-5.5</option>
-          <option value="gpt-5.1">GPT-5.1</option>
-          <option value="gpt-5">GPT-5</option>
-          <option value="gpt-5-codex">GPT-5 Codex</option>
-        </select>
+        <div class="composer-settings">
+          <button class="setting-pill" id="modelSettingsButton" type="button">加载模型</button>
+          <button class="setting-pill permissions" type="button">默认权限</button>
+          <div class="model-popover" id="modelPopover" hidden>
+            <div class="setting-row" role="button" tabindex="0">
+              <span class="setting-label">模型<span class="setting-value" id="modelSettingValue">加载模型</span></span>
+              <span></span>
+              <span class="setting-chevron">›</span>
+              <select id="modelSelector" class="model-selector" aria-label="选择模型">
+                <option value="">加载模型</option>
+              </select>
+            </div>
+            <div class="setting-options" id="modelOptions" hidden></div>
+            <div class="setting-row" role="button" tabindex="0">
+              <span class="setting-label">速度<span class="setting-value" id="serviceTierSettingValue">正常</span></span>
+              <span></span>
+              <span class="setting-chevron">›</span>
+              <select id="serviceTierSelector" class="setting-selector" aria-label="选择速度">
+                <option value="">速度</option>
+              </select>
+            </div>
+            <div class="setting-options" id="serviceTierOptions" hidden></div>
+            <div class="setting-row" role="button" tabindex="0">
+              <span class="setting-label">推理<span class="setting-value" id="reasoningSettingValue">默认</span></span>
+              <span></span>
+              <span class="setting-chevron">›</span>
+              <select id="reasoningSelector" class="setting-selector" aria-label="选择推理程度">
+                <option value="">推理</option>
+              </select>
+            </div>
+            <div class="setting-options" id="reasoningOptions" hidden></div>
+          </div>
+        </div>
         <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
         <input id="imageInput" type="file" accept="image/*" multiple hidden>
         <span class="send-status" id="sendStatus"></span>
       </div>
       <div class="attachment-strip" id="attachmentStrip" hidden></div>
+      <div class="interruption-choice" id="interruptionChoice" hidden>
+        <button class="choice-action primary" id="steerChoice" type="button">引导</button>
+        <button class="choice-action" id="queueChoice" type="button">排队</button>
+      </div>
       <div class="dock-row">
         <input id="prompt" placeholder="继续官方 Codex 会话">
         <button class="primary-action" id="continue" aria-label="发送">↑</button>
@@ -1063,15 +1554,29 @@ def _live_page(agent_run_id: int) -> str:
     const continueButton = document.getElementById("continue");
     const steerButton = document.getElementById("steer");
     const interruptButton = document.getElementById("interrupt");
+    const modelSettingsButton = document.getElementById("modelSettingsButton");
+    const modelPopover = document.getElementById("modelPopover");
+    const modelSettingValue = document.getElementById("modelSettingValue");
+    const reasoningSettingValue = document.getElementById("reasoningSettingValue");
+    const serviceTierSettingValue = document.getElementById("serviceTierSettingValue");
     const modelSelector = document.getElementById("modelSelector");
+    const reasoningSelector = document.getElementById("reasoningSelector");
+    const serviceTierSelector = document.getElementById("serviceTierSelector");
+    const modelOptions = document.getElementById("modelOptions");
+    const reasoningOptions = document.getElementById("reasoningOptions");
+    const serviceTierOptions = document.getElementById("serviceTierOptions");
     const attachmentButton = document.getElementById("attachmentButton");
     const imageInput = document.getElementById("imageInput");
     const attachmentStrip = document.getElementById("attachmentStrip");
+    const interruptionChoice = document.getElementById("interruptionChoice");
+    const steerChoice = document.getElementById("steerChoice");
+    const queueChoice = document.getElementById("queueChoice");
     const sendStatus = document.getElementById("sendStatus");
     const streamPathBase = "__STREAM_PATH__";
     const agentRunId = __AGENT_RUN_ID__;
     const RECENT_EVENT_LIMIT = 80;
     const OLDER_EVENT_LIMIT = 80;
+    const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
     const transcriptNodes = new Map();
     const statusNodes = new Map();
     const commandNodes = new Map();
@@ -1079,6 +1584,9 @@ def _live_page(agent_run_id: int) -> str:
     let imageAttachments = [];
     let sendingPrompt = false;
     let nativeTurnRunning = false;
+    let modelCatalog = [];
+    let savedModelSettings = loadSavedModelSettings();
+    let modelSettingsDirty = false;
     historyFold.onclick = loadOlderEvents;
     async function api(path, options = {}) {
       const response = await fetch(path, {
@@ -1098,15 +1606,348 @@ def _live_page(agent_run_id: int) -> str:
         body: JSON.stringify(body)
       });
     }
-    async function resolveApproval(requestId, action) {
-      await api(`/api/native/codex/approvals/${encodeURIComponent(requestId)}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({action})
+    async function loadModelCatalog() {
+      try {
+        const result = await api("/api/native/codex/models");
+        modelCatalog = Array.isArray(result.models) ? result.models : [];
+        renderModelSettings();
+      } catch (error) {
+        modelCatalog = [];
+        modelSelector.innerHTML = `<option value="">${escapeHtml(error.message || "模型不可用")}</option>`;
+        reasoningSelector.innerHTML = `<option value="">推理</option>`;
+        serviceTierSelector.innerHTML = `<option value="">速度</option>`;
+        modelOptions.innerHTML = "";
+        reasoningOptions.innerHTML = "";
+        serviceTierOptions.innerHTML = "";
+        updateSettingSummary();
+      }
+      updateComposerDisabled();
+    }
+    function renderModelSettings() {
+      const visibleModels = modelCatalog.filter(model => !model.hidden);
+      const models = visibleModels.length ? visibleModels : modelCatalog;
+      modelSelector.innerHTML = "";
+      for (const model of models) {
+        const option = document.createElement("option");
+        option.value = model.model || model.id || "";
+        option.textContent = model.displayName || model.model || model.id || "Codex";
+        option.selected = Boolean(model.isDefault);
+        modelSelector.append(option);
+      }
+      if (savedModelSettings.model && optionValueExists(modelSelector, savedModelSettings.model)) {
+        modelSelector.value = savedModelSettings.model;
+      } else if (!modelSelector.value && modelSelector.options.length) {
+        modelSelector.selectedIndex = 0;
+      }
+      renderSettingOptions(modelOptions, modelSelector, () => {
+        renderReasoningAndSpeed();
+        updateSettingSummary();
+      });
+      renderReasoningAndSpeed(savedModelSettings);
+      savedModelSettings = readSelectedModelSettings();
+      modelSettingsDirty = false;
+    }
+    function renderReasoningAndSpeed(preferredSettings = {}) {
+      const model = selectedModelCatalogEntry();
+      const efforts = Array.isArray(model && model.supportedReasoningEfforts)
+        ? model.supportedReasoningEfforts
+        : [];
+      const tiers = Array.isArray(model && model.serviceTiers) ? model.serviceTiers : [];
+      fillSelector(
+        reasoningSelector,
+        efforts,
+        item => item.reasoningEffort || item.id || "",
+        item => reasoningEffortLabel(item.reasoningEffort || item.id || ""),
+        model && model.defaultReasoningEffort,
+        "推理"
+      );
+      fillServiceTierSelector(tiers, preferredServiceTierDefault(model, tiers));
+      if (preferredSettings.effort && optionValueExists(reasoningSelector, preferredSettings.effort)) {
+        reasoningSelector.value = preferredSettings.effort;
+      }
+      if (Object.prototype.hasOwnProperty.call(preferredSettings, "service_tier")
+        && optionValueExists(serviceTierSelector, preferredSettings.service_tier)) {
+        serviceTierSelector.value = preferredSettings.service_tier || "";
+      }
+      renderSettingOptions(reasoningOptions, reasoningSelector, updateSettingSummary);
+      renderSettingOptions(serviceTierOptions, serviceTierSelector, updateSettingSummary, {includeEmpty: true});
+      updateSettingSummary();
+    }
+    function selectedModelCatalogEntry() {
+      return modelCatalog.find(model => {
+        return (model.model || model.id || "") === modelSelector.value;
+      }) || modelCatalog.find(model => model.isDefault) || modelCatalog[0] || null;
+    }
+    function fillSelector(select, items, valueFor, labelFor, defaultValue, fallbackLabel) {
+      select.innerHTML = "";
+      if (!items.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = fallbackLabel;
+        select.append(option);
+        return;
+      }
+      for (const item of items) {
+        const option = document.createElement("option");
+        option.value = valueFor(item) || "";
+        option.textContent = labelFor(item) || option.value || fallbackLabel;
+        option.selected = option.value === defaultValue;
+        select.append(option);
+      }
+      if (!select.value && select.options.length) select.selectedIndex = 0;
+    }
+    function fillServiceTierSelector(tiers, defaultValue) {
+      serviceTierSelector.innerHTML = "";
+      const normalOption = document.createElement("option");
+      normalOption.value = "";
+      normalOption.textContent = "正常";
+      normalOption.selected = !defaultValue;
+      serviceTierSelector.append(normalOption);
+      for (const tier of tiers) {
+        const value = tier.id || tier.serviceTier || tier.name || "";
+        if (!value) continue;
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = serviceTierLabel(value);
+        option.selected = Boolean(defaultValue && value === defaultValue);
+        serviceTierSelector.append(option);
+      }
+    }
+    function renderSettingOptions(container, select, onChoose, options = {}) {
+      container.innerHTML = "";
+      Array.from(select.options || []).forEach(option => {
+        if (!option.value && !options.includeEmpty) return;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.value = option.value;
+        button.className = "setting-option" + (option.selected ? " selected" : "");
+        button.textContent = option.textContent || option.value;
+        button.disabled = select.disabled;
+        if (option.selected) {
+          const check = document.createElement("span");
+          check.className = "setting-option-check";
+          check.textContent = "✓";
+          button.append(check);
+        }
+        button.onclick = () => {
+          const previousValue = select.value;
+          select.value = option.value;
+          if (select.value !== previousValue) markModelSettingsDirty();
+          syncSettingOptionsSelection(container, select);
+          container.hidden = true;
+          if (onChoose) onChoose();
+          updateComposerDisabled();
+        };
+        container.append(button);
       });
     }
+    function syncSettingOptionsSelection(container, select) {
+      for (const button of Array.from(container.querySelectorAll(".setting-option"))) {
+        const selected = button.dataset.value === select.value;
+        button.classList.toggle("selected", selected);
+        const existingCheck = button.querySelector(".setting-option-check");
+        if (selected && !existingCheck) {
+          const check = document.createElement("span");
+          check.className = "setting-option-check";
+          check.textContent = "✓";
+          button.append(check);
+        } else if (!selected && existingCheck) {
+          existingCheck.remove();
+        }
+      }
+    }
+    function syncSettingOptionsDisabled() {
+      for (const [container, select] of [
+        [modelOptions, modelSelector],
+        [serviceTierOptions, serviceTierSelector],
+        [reasoningOptions, reasoningSelector],
+      ]) {
+        for (const button of Array.from(container.querySelectorAll(".setting-option"))) {
+          button.disabled = select.disabled;
+        }
+      }
+    }
+    function toggleSettingOptions(container) {
+      for (const node of [modelOptions, serviceTierOptions, reasoningOptions]) {
+        if (node !== container) node.hidden = true;
+      }
+      container.hidden = !container.hidden;
+    }
+    function preferredServiceTierDefault(model, tiers) {
+      const defaultValue = String((model && model.defaultServiceTier) || "").toLowerCase();
+      if (!defaultValue || ["fast", "priority"].includes(defaultValue)) return "";
+      const match = tiers.find(tier => {
+        return String(tier.id || tier.serviceTier || tier.name || "").toLowerCase() === defaultValue;
+      });
+      return match ? match.id || match.serviceTier || match.name || "" : "";
+    }
+    function serviceTierLabel(value) {
+      const key = String(value || "").trim().toLowerCase();
+      if (["", "auto", "default", "normal", "standard"].includes(key)) return "正常";
+      if (key === "fast" || key === "priority") return "快速";
+      if (key === "flex") return "弹性";
+      return String(value || "速度");
+    }
+    function reasoningEffortLabel(value) {
+      const key = String(value || "").trim().toLowerCase();
+      if (["minimal", "none"].includes(key)) return "最少";
+      if (key === "low") return "低";
+      if (["medium", "default", "normal", ""].includes(key)) return "正常";
+      if (key === "high") return "高";
+      if (["xhigh", "extra_high"].includes(key)) return "极高";
+      return String(value || "推理");
+    }
+    function loadSavedModelSettings() {
+      try {
+        return normalizeModelSettings(JSON.parse(localStorage.getItem(MODEL_SETTINGS_STORAGE_KEY) || "{}"));
+      } catch (_error) {
+        return normalizeModelSettings({});
+      }
+    }
+    function readSelectedModelSettings() {
+      return normalizeModelSettings({
+        model: modelSelector.value,
+        effort: reasoningSelector.value,
+        service_tier: serviceTierSelector.value
+      });
+    }
+    function normalizeModelSettings(settings = {}) {
+      return {
+        model: typeof settings.model === "string" ? settings.model : "",
+        effort: typeof settings.effort === "string" ? settings.effort : "",
+        service_tier: typeof settings.service_tier === "string" ? settings.service_tier : ""
+      };
+    }
+    function optionValueExists(select, value) {
+      const normalized = String(value || "");
+      return Array.from(select.options || []).some(option => option.value === normalized);
+    }
+    function modelSettingsEqual(left, right) {
+      return left.model === right.model
+        && left.effort === right.effort
+        && left.service_tier === right.service_tier;
+    }
+    function saveModelSettingsIfChanged() {
+      if (!modelSettingsDirty) return;
+      const nextSettings = readSelectedModelSettings();
+      const changed = !modelSettingsEqual(savedModelSettings, nextSettings);
+      savedModelSettings = nextSettings;
+      if (changed) {
+        try {
+          localStorage.setItem(MODEL_SETTINGS_STORAGE_KEY, JSON.stringify(savedModelSettings));
+        } catch (_error) {
+          // Some mobile browsers can block storage in private contexts; the current page state still applies.
+        }
+      }
+      modelSettingsDirty = false;
+    }
+    function markModelSettingsDirty() {
+      modelSettingsDirty = true;
+    }
+    async function resolveApproval(requestId, action, card) {
+      if (!requestId) return;
+      setApprovalState(card, action, "pending");
+      try {
+        await api(`/api/native/codex/approvals/${encodeURIComponent(requestId)}/resolve`, {
+          method: "POST",
+          body: JSON.stringify({action})
+        });
+        setApprovalState(card, action, "resolved");
+        await pollEvents();
+      } catch (error) {
+        setApprovalState(card, action, "failed", error.message || String(error));
+      }
+    }
+    function setApprovalState(card, action, state, message = "") {
+      if (!card) return;
+      const stateNode = card.querySelector(".approval-state");
+      if (action) card.dataset.selectedAction = action;
+      card.dataset.approvalState = state;
+      card.classList.toggle("resolving", state === "pending");
+      card.classList.toggle("resolved", state === "resolved");
+      card.classList.toggle("failed", state === "failed");
+      setApprovalButtons(card, action, state);
+      if (state === "pending" || state === "resolved") stateNode.textContent = approvalStateText(action, state);
+      else if (state === "failed") stateNode.textContent = message || "审批失败";
+      updateRunState(stateNode.textContent, state === "failed" ? "failed" : "busy");
+    }
+    function setApprovalButtons(card, action, state) {
+      const locked = state === "pending" || state === "resolved";
+      for (const button of Array.from(card.querySelectorAll(".approval-action"))) {
+        const selected = button.dataset.action === action;
+        button.classList.toggle("selected", selected);
+        button.classList.toggle("muted", state !== "idle" && !selected);
+        button.disabled = locked || (state !== "idle" && !selected);
+      }
+    }
+    function approvalStateText(action, state) {
+      if (action === "approve_once") return state === "pending" ? "批准一次处理中" : "已批准一次";
+      if (action === "approve_session") return state === "pending" ? "本会话批准处理中" : "本会话已批准";
+      if (action === "deny") return state === "pending" ? "拒绝处理中" : "已拒绝";
+      if (action === "cancel") return state === "pending" ? "取消处理中" : "已取消";
+      return state === "pending" ? "审批处理中" : "审批已处理";
+    }
+    function approvalResolvedAction(event, card) {
+      const payload = (event && event.payload) || {};
+      const response = payload.response || {};
+      if (card && card.dataset.selectedAction) return card.dataset.selectedAction;
+      if (payload.action) return String(payload.action);
+      if (response.action) return String(response.action);
+      if (response.scope === "session") return "approve_session";
+      if (response.decision === "acceptForSession" || response.decision === "approved_for_session") return "approve_session";
+      if (response.decision === "decline" || response.decision === "denied") return "deny";
+      if (response.decision === "cancel" || response.decision === "abort") return "cancel";
+      return "approve_once";
+    }
+    function approvalActionLabel(action) {
+      if (action === "approve_once") return "批准一次";
+      if (action === "approve_session") return "本会话批准";
+      if (action === "deny") return "拒绝";
+      if (action === "cancel") return "取消";
+      return "审批";
+    }
     continueButton.onclick = () => submitPrompt();
+    steerChoice.onclick = () => submitPrompt("steer");
+    queueChoice.onclick = () => submitPrompt("continue");
     steerButton.onclick = () => submitPrompt("steer");
     interruptButton.onclick = interruptNativeTurn;
+    modelSettingsButton.onclick = () => {
+      const willClose = !modelPopover.hidden;
+      if (willClose) saveModelSettingsIfChanged();
+      modelPopover.hidden = willClose;
+      if (willClose) {
+        modelOptions.hidden = true;
+        serviceTierOptions.hidden = true;
+        reasoningOptions.hidden = true;
+      }
+    };
+    modelSelector.onchange = () => {
+      renderReasoningAndSpeed();
+      updateSettingSummary();
+      markModelSettingsDirty();
+    };
+    reasoningSelector.onchange = () => {
+      renderSettingOptions(reasoningOptions, reasoningSelector, updateSettingSummary);
+      updateSettingSummary();
+      markModelSettingsDirty();
+    };
+    serviceTierSelector.onchange = () => {
+      renderSettingOptions(serviceTierOptions, serviceTierSelector, updateSettingSummary, {includeEmpty: true});
+      updateSettingSummary();
+      markModelSettingsDirty();
+    };
+    modelSettingValue.closest(".setting-row").onclick = event => {
+      if (event.target === modelSelector) return;
+      toggleSettingOptions(modelOptions);
+    };
+    serviceTierSettingValue.closest(".setting-row").onclick = event => {
+      if (event.target === serviceTierSelector) return;
+      toggleSettingOptions(serviceTierOptions);
+    };
+    reasoningSettingValue.closest(".setting-row").onclick = event => {
+      if (event.target === reasoningSelector) return;
+      toggleSettingOptions(reasoningOptions);
+    };
     attachmentButton.onclick = () => imageInput.click();
     imageInput.onchange = async () => {
       const files = Array.from(imageInput.files || []);
@@ -1137,15 +1978,20 @@ def _live_page(agent_run_id: int) -> str:
         await interruptNativeTurn();
         return;
       }
+      if (action === "choose") {
+        openInterruptionChoice();
+        return;
+      }
       const prompt = promptInput.value;
       if (!prompt.trim() && imageAttachments.length === 0) {
         setSendStatus("请输入内容或照片", "error");
         return;
       }
-      const body = {
-        prompt,
-        model: modelSelector.value || "gpt-5.5"
-      };
+      saveModelSettingsIfChanged();
+      const body = {prompt};
+      if (savedModelSettings.model) body.model = savedModelSettings.model;
+      if (savedModelSettings.effort) body.effort = savedModelSettings.effort;
+      if (savedModelSettings.service_tier) body.service_tier = savedModelSettings.service_tier;
       if (imageAttachments.length) {
         body.images = imageAttachments.map(image => ({
           url: image.url,
@@ -1154,7 +2000,10 @@ def _live_page(agent_run_id: int) -> str:
         }));
       }
       if (action === "steer") body.expected_turn_id = activeTurnId;
+      const echoAttachments = imageAttachments.map(image => ({...image}));
+      renderLocalUserEcho(prompt, echoAttachments);
       sendingPrompt = true;
+      closeInterruptionChoice();
       updateComposerDisabled();
       setSendStatus(action === "steer" ? "修正中" : "发送中", "");
       try {
@@ -1201,7 +2050,7 @@ def _live_page(agent_run_id: int) -> str:
     }
     function primaryComposerAction() {
       if (nativeTurnRunning && !composerHasDraft()) return "interrupt";
-      if (nativeTurnRunning) return "steer";
+      if (nativeTurnRunning) return "choose";
       return "continue";
     }
     function applyNativeTurnState(event, options = {}) {
@@ -1250,8 +2099,38 @@ def _live_page(agent_run_id: int) -> str:
       );
       steerButton.disabled = sendingPrompt || !nativeThreadId || !activeTurnId;
       attachmentButton.disabled = sendingPrompt;
+      modelSelector.disabled = sendingPrompt || nativeTurnRunning;
+      modelSettingsButton.disabled = false;
+      reasoningSelector.disabled = sendingPrompt || nativeTurnRunning || reasoningSelector.options.length <= 1;
+      serviceTierSelector.disabled = sendingPrompt || nativeTurnRunning || serviceTierSelector.options.length <= 1;
       interruptButton.disabled = sendingPrompt || !nativeThreadId || !activeTurnId;
+      syncSettingOptionsDisabled();
       setComposerActivity(nativeTurnRunning || sendingPrompt);
+    }
+    function updateSettingSummary() {
+      const modelText = selectedOptionText(modelSelector, "模型");
+      const effortText = selectedOptionText(reasoningSelector, "默认");
+      const tierText = selectedOptionText(serviceTierSelector, "正常");
+      modelSettingValue.textContent = modelText;
+      reasoningSettingValue.textContent = effortText;
+      serviceTierSettingValue.textContent = tierText;
+      modelSettingsButton.textContent = `${modelText} ${effortText}`.trim();
+      syncSettingOptionsSelection(modelOptions, modelSelector);
+      syncSettingOptionsSelection(reasoningOptions, reasoningSelector);
+      syncSettingOptionsSelection(serviceTierOptions, serviceTierSelector);
+    }
+    function selectedOptionText(select, fallback) {
+      const option = select && select.options ? select.options[select.selectedIndex] : null;
+      return (option && option.textContent ? option.textContent : fallback) || fallback;
+    }
+    function openInterruptionChoice() {
+      if (!nativeTurnRunning || !composerHasDraft()) return;
+      interruptionChoice.hidden = false;
+      steerChoice.disabled = sendingPrompt || !activeTurnId;
+      queueChoice.disabled = sendingPrompt || !nativeThreadId;
+    }
+    function closeInterruptionChoice() {
+      interruptionChoice.hidden = true;
     }
     function setSendStatus(text, tone) {
       sendStatus.textContent = text || "";
@@ -1339,6 +2218,18 @@ def _live_page(agent_run_id: int) -> str:
         attachmentStrip.append(chip);
       });
     }
+    function renderLocalUserEcho(text, images) {
+      const event = {
+        kind: "user_message",
+        payload: {
+          text: text || "",
+          images: images || [],
+          itemId: "local-user-" + Date.now()
+        }
+      };
+      renderTranscript(event, "user local-pending", "你");
+      window.scrollTo(0, document.body.scrollHeight);
+    }
     async function attachNative() {
       if (!nativeThreadId || attached) return;
       attached = true;
@@ -1356,6 +2247,7 @@ def _live_page(agent_run_id: int) -> str:
       }
     }
     updateComposerDisabled();
+    loadModelCatalog();
     attachNative().then(() => {
       return loadRecentEvents();
     }).catch(() => {
@@ -1383,9 +2275,12 @@ def _live_page(agent_run_id: int) -> str:
     function hasLiveDisplayEvents(sourceEvents) {
       return sourceEvents.some(event => {
         if (!event) return false;
-        if (event.type === "model.usage.updated") return false;
+        if (isInternalEvent(event)) return false;
         return event.kind !== "event";
       });
+    }
+    function isInternalEvent(event) {
+      return Boolean(event && event.type === "model.usage.updated");
     }
     async function loadOlderEvents() {
       if (!oldestEventId || !previousEventCount) return;
@@ -1476,6 +2371,7 @@ def _live_page(agent_run_id: int) -> str:
       const incomingTurnId = eventFoldTurnId(event);
       const duplicateDisplayEvent = isDuplicateDisplayEvent(event, loadedEvents);
       loadedEvents.push(event);
+      if (isInternalEvent(event)) return;
       if (duplicateDisplayEvent) {
         applyNativeTurnState(event);
         updateComposerDisabled();
@@ -1513,6 +2409,7 @@ def _live_page(agent_run_id: int) -> str:
       const seen = new Set();
       const result = [];
       for (const event of sourceEvents) {
+        if (isInternalEvent(event)) continue;
         const key = mirroredDisplayKey(event);
         if (key) {
           if (seen.has(key)) continue;
@@ -1553,13 +2450,17 @@ def _live_page(agent_run_id: int) -> str:
       const details = document.createElement("details");
       details.className = "turn-fold";
       const head = document.createElement("summary");
+      const labelRow = document.createElement("div");
+      labelRow.className = "turn-fold-row";
       const title = document.createElement("span");
       title.className = "turn-fold-title";
       title.textContent = turnFoldTitle(group);
       const chevron = document.createElement("span");
       chevron.className = "turn-fold-chevron";
       chevron.textContent = "›";
-      head.append(title, chevron);
+      labelRow.append(title, chevron);
+      head.append(labelRow);
+      renderFoldPreview(head, group);
       const body = document.createElement("div");
       body.className = "turn-fold-body";
       details.append(head, body);
@@ -1571,6 +2472,39 @@ def _live_page(agent_run_id: int) -> str:
       } finally {
         renderTarget = previousTarget;
       }
+    }
+    function renderFoldPreview(head, group) {
+      const userText = foldTranscriptPreviewText(group, "user_message");
+      const assistantText = foldTranscriptPreviewText(group, "text_delta");
+      if (!userText && !assistantText) return;
+      const preview = document.createElement("div");
+      preview.className = "turn-fold-preview";
+      if (userText) appendFoldPreviewLine(preview, "user", userText);
+      if (assistantText) appendFoldPreviewLine(preview, "assistant", assistantText);
+      head.append(preview);
+    }
+    function appendFoldPreviewLine(preview, role, text) {
+      const line = document.createElement("div");
+      line.className = "turn-fold-preview-line turn-fold-preview-" + role;
+      line.textContent = text;
+      preview.append(line);
+    }
+    function foldTranscriptPreviewText(group, kind) {
+      const parts = [];
+      for (const event of group) {
+        if (event.kind !== kind) continue;
+        const payload = event.payload || {};
+        const text = String(payload.text || payload.delta || "").trim();
+        if (!text) continue;
+        parts.push(text);
+        if (parts.join(" ").length >= 280) break;
+      }
+      return trimFoldPreview(parts.join(" "));
+    }
+    function trimFoldPreview(text) {
+      const compact = String(text || "").replace(/\\s+/g, " ").trim();
+      if (compact.length <= 220) return compact;
+      return compact.slice(0, 217).trimEnd() + "...";
     }
     function buildFoldSummary(group, latestTurnId) {
       const nativeTurnId = String((group[0].payload || {}).native_turn_id || "");
@@ -1591,7 +2525,7 @@ def _live_page(agent_run_id: int) -> str:
       };
     }
     function groupHasVisibleContent(group) {
-      return group.some(event => event.type !== "model.usage.updated");
+      return group.some(event => !isInternalEvent(event));
     }
     function hasPendingApproval(group) {
       const requested = new Set();
@@ -1627,7 +2561,7 @@ def _live_page(agent_run_id: int) -> str:
     function foldMessageCount(group) {
       const keys = new Set();
       for (const event of group) {
-        if (event.type === "model.usage.updated") continue;
+        if (isInternalEvent(event)) continue;
         const key = foldMessageKey(event);
         if (key) keys.add(key);
       }
@@ -1666,6 +2600,7 @@ def _live_page(agent_run_id: int) -> str:
       header.classList.add(value);
     }
     function render(event, options = {}) {
+      if (isInternalEvent(event)) return;
       const payload = event.payload || {};
       if (payload.native_thread_id) nativeThreadId = payload.native_thread_id;
       applyNativeTurnState(event, options);
@@ -1681,7 +2616,10 @@ def _live_page(agent_run_id: int) -> str:
       else if (event.kind === "command_started" || event.kind === "command_output" || event.kind === "command_completed" || event.kind === "command_failed") renderToolCall(event);
       else if (event.kind === "diff_updated" || event.kind === "file_changed") renderFileChange(event);
       else if (event.kind === "approval_requested") renderApproval(event);
-      else if (event.kind === "approval_resolved") renderStatusEvent(event, "审批已处理", "done");
+      else if (event.kind === "approval_resolved") {
+        markApprovalResolved(event);
+        renderStatusEvent(event, "审批已处理", "done");
+      }
       else renderStatusEvent(event, statusText(event, payload), statusTone(event));
       } finally {
         renderTarget = previousTarget;
@@ -1711,7 +2649,21 @@ def _live_page(agent_run_id: int) -> str:
         node = {row, body};
         transcriptNodes.set(key, node);
       }
+      renderTranscriptImages(node.body, payload.images || []);
       appendText(node.body, payload.text || payload.delta || payload.summary || "");
+    }
+    function renderTranscriptImages(target, images) {
+      if (!Array.isArray(images) || !images.length || target.querySelector(".transcript-images")) return;
+      const wrap = document.createElement("div");
+      wrap.className = "transcript-images";
+      for (const image of images) {
+        const preview = document.createElement("img");
+        preview.className = "transcript-image";
+        preview.src = image.url || image.data_url || "";
+        preview.alt = image.filename || "image";
+        wrap.append(preview);
+      }
+      target.prepend(wrap);
     }
     function renderStatusEvent(event, fallback, tone) {
       const payload = event.payload || {};
@@ -1795,6 +2747,7 @@ def _live_page(agent_run_id: int) -> str:
       row.className = "approval-item";
       const card = document.createElement("section");
       card.className = "approval-card";
+      card.dataset.requestId = payload.codexRequestId || "";
       const head = document.createElement("div");
       head.className = "approval-head";
       const title = document.createElement("span");
@@ -1804,24 +2757,38 @@ def _live_page(agent_run_id: int) -> str:
       const body = document.createElement("div");
       body.className = "approval-body";
       body.textContent = payload.summary || payload.command || payload.kind || "Approval required";
+      const resolution = document.createElement("div");
+      resolution.className = "approval-state";
+      resolution.textContent = "等待你的确认";
       const actions = document.createElement("div");
       actions.className = "approval-actions";
-      for (const [label, action, cls] of [
-        ["批准一次", "approve_once", ""],
-        ["本会话批准", "approve_session", ""],
-        ["拒绝", "deny", "secondary"],
-        ["取消", "cancel", "secondary"]
+      for (const [label, action, tone] of [
+        ["批准一次", "approve_once", "approve"],
+        ["本会话批准", "approve_session", "approve"],
+        ["拒绝", "deny", "danger"],
+        ["取消", "cancel", "danger"]
       ]) {
         const button = document.createElement("button");
         button.textContent = label;
-        if (cls) button.className = cls;
-        button.onclick = () => resolveApproval(payload.codexRequestId, action);
+        button.dataset.action = action;
+        button.className = `approval-action ${tone}`;
+        button.onclick = () => resolveApproval(payload.codexRequestId, action, card);
         actions.append(button);
       }
-      card.append(head, body, actions);
+      card.append(head, body, resolution, actions);
       row.append(card);
       renderTarget.append(row);
       updateRunState("等待审批", "busy");
+    }
+    function markApprovalResolved(event) {
+      const key = approvalRequestKey(event);
+      if (!key) return;
+      for (const card of document.querySelectorAll(".approval-card")) {
+        if (card.dataset.requestId === key) {
+          const action = approvalResolvedAction(event, card);
+          setApprovalState(card, action, "resolved");
+        }
+      }
     }
     function renderStatus(kind, text) {
       renderStatusEvent(
@@ -1845,7 +2812,7 @@ def _live_page(agent_run_id: int) -> str:
     }
     function appendText(node, text) {
       if (!text) return;
-      node.textContent += String(text);
+      node.append(document.createTextNode(String(text)));
     }
     function commandTitle(payload) {
       if (payload.command) return String(payload.command);
