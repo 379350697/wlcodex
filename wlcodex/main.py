@@ -223,6 +223,7 @@ def _create_live_stream_components(
     runtime_store.add_projector(hub.publish)
     native_client = None
     native_controller = None
+    native_transcript_mirror = None
     access_token = os.environ.get(config.live_stream.access_token_env, "")
     if getattr(config.codex_native, "enabled", False):
         if not access_token:
@@ -236,6 +237,9 @@ def _create_live_stream_components(
             from wlcodex.codex_native.client import CodexNativeClient, LazyNativeClient
             from wlcodex.codex_native.controller import CodexNativeController
             from wlcodex.codex_native.session_store import NativeCodexSessionStore
+            from wlcodex.codex_native.transcript_mirror import (
+                CodexSessionTranscriptMirror,
+            )
             from wlcodex.codex_native.transport import (
                 CodexAppServerWebSocketTransport,
                 CodexProxyTransport,
@@ -267,13 +271,17 @@ def _create_live_stream_components(
                 return client
 
             native_client = LazyNativeClient(_start_native_client)
+            native_session_store = NativeCodexSessionStore(ledger)
             native_controller = CodexNativeController(
                 client=native_client,
-                session_store=NativeCodexSessionStore(ledger),
+                session_store=native_session_store,
+                runtime_store=runtime_store,
+            )
+            native_transcript_mirror = CodexSessionTranscriptMirror(
+                session_store=native_session_store,
                 runtime_store=runtime_store,
             )
             logger.info("Codex native control bridge configured")
-
     server = WorkerLiveStreamServer(
         host=config.live_stream.host,
         port=config.live_stream.port,
@@ -283,6 +291,7 @@ def _create_live_stream_components(
         allow_unauthenticated_loopback=(
             config.live_stream.allow_unauthenticated_loopback
         ),
+        native_transcript_mirror=native_transcript_mirror,
     )
     logger.info(
         "Worker live stream configured at http://%s:%s",

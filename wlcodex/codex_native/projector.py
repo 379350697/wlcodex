@@ -318,6 +318,7 @@ class NativeCodexEventProjector:
         native_thread_id: str,
         native_turn_id: str,
         text: str,
+        item_id: str | None = None,
     ) -> list[RuntimeEvent]:
         session = self._session_store.get_or_create_session(
             native_thread_id=native_thread_id,
@@ -330,7 +331,7 @@ class NativeCodexEventProjector:
                 "threadId": native_thread_id,
                 "turnId": native_turn_id,
                 "text": text,
-                "itemId": f"local-user-{uuid4()}",
+                "itemId": item_id or f"local-user-{uuid4()}",
             },
             session_agent_run_id=session.agent_run_id,
             session_conversation_id=session.conversation_id,

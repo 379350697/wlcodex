@@ -993,7 +993,8 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "HTTP/1.1 200 OK" in response
     assert "RECENT_EVENT_LIMIT" in response
     assert 'eventsPath("tail=" + RECENT_EVENT_LIMIT, {currentTurn: true})' in response
-    assert 'if (!loadedEvents.length && nativeTurnId)' in response
+    assert "hasLiveDisplayEvents" in response
+    assert "model.usage.updated" in response
     assert "function loadRecentEvents" in response
     assert "function loadOlderEvents" in response
     assert "function pollEvents" in response
@@ -1002,6 +1003,8 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert 'if (nativeThreadId) search.set("native_thread_id", nativeThreadId);' in response
     assert "eventsPath(`after=${latestEventId}&limit=100`)" in response
     assert 'source.onerror = () => { setConnectionState("reconnecting"); pollEvents(); };' in response
+    assert 'historyFold.textContent = previousEventCount > 0 ? "加载更早的消息" : "更早的消息";' in response
+    assert "`${previousEventCount} 条以前的消息`" not in response
     assert "以前的消息" in response
     assert "previous_event_count" in response
     assert "new EventSource(streamPath)" not in response
@@ -1037,9 +1040,75 @@ async def test_worker_live_page_does_not_bind_historical_turns_as_current_contro
     assert "function applyNativeTurnState(event, options = {})" in response
     assert "let activeTurnId = \"\";" in response
     assert (
-        "if (!options.historical && payload.native_turn_id) "
+        "if (!options.historical && !mirroredTranscript && payload.native_turn_id) "
         "nativeTurnId = payload.native_turn_id;" in response
     )
-    assert "if (options.historical) return;" in response
+    assert "const mirroredTranscript = isMirroredTranscriptEvent(event);" in response
+    assert "if (options.historical || mirroredTranscript) return;" in response
     assert "body.expected_turn_id = activeTurnId;" in response
     assert "activeTurnId = result.active_turn_id || \"\";" in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "options.latest)" not in response
+    assert "const latestTurnId = latestFoldGroupTurnId(groups);" in response
+    assert "renderFoldGroup(group, {latestTurnId});" in response
+    assert "function latestFoldGroupTurnId(groups)" in response
+    assert "turnFoldTitle(group)" in response
+    assert "function foldMessageCount(group)" in response
+    assert 'if (event.type === "model.usage.updated") continue;' in response
+    assert "title.textContent = turnFoldTitle(group);" in response
+    assert "nativeTurnId !== latestTurnId" in response
+    assert "completed || nativeTurnId !== latestTurnId" not in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_groups_turn_events_before_collapsing(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "const groupByKey = new Map();" in response
+    assert "groupByKey.get(key).push(event);" in response
+    assert "return Array.from(groupByKey.values()).sort" in response

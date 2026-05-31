@@ -43,6 +43,27 @@ def _event(agent_run_id: int, payload: dict) -> RuntimeEvent:
     )
 
 
+def _runtime_event(
+    agent_run_id: int,
+    event_type: str,
+    payload: dict,
+) -> RuntimeEvent:
+    return RuntimeEvent(
+        schema_version=1,
+        event_type=event_type,
+        aggregate_type=AggregateType.AGENT_RUN,
+        aggregate_id=str(agent_run_id),
+        correlation_id=f"corr-{agent_run_id}",
+        source=EventSource.CODEX,
+        actor="codex",
+        visibility=Visibility.USER,
+        payload=payload,
+        occurred_at=now_iso(),
+        conversation_id=7,
+        agent_run_id=agent_run_id,
+    )
+
+
 async def _read_response(host: str, port: int, request: str) -> str:
     reader, writer = await asyncio.open_connection(host, port)
     writer.write(request.encode("utf-8"))
@@ -134,6 +155,55 @@ async def test_snapshot_endpoint_can_return_tail_with_previous_count(
 
 
 @pytest.mark.asyncio
+async def test_snapshot_endpoint_syncs_native_transcript_before_tail(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+
+    class FakeTranscriptMirror:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def sync_thread(self, native_thread_id: str) -> int:
+            self.calls.append(native_thread_id)
+            store.append(
+                _runtime_event(
+                    42,
+                    EventType.USER_MESSAGE_RECEIVED,
+                    {
+                        "native_thread_id": native_thread_id,
+                        "native_turn_id": "jsonl-turn",
+                        "text": "jsonl latest",
+                    },
+                )
+            )
+            return 1
+
+    mirror = FakeTranscriptMirror()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_transcript_mirror=mirror,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/workers/42/events?tail=10&native_thread_id=thread-jsonl HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    body = response.split("\r\n\r\n", 1)[1]
+    payload = json.loads(body)
+    assert mirror.calls == ["thread-jsonl"]
+    assert payload["events"][0]["payload"]["text"] == "jsonl latest"
+
+
+@pytest.mark.asyncio
 async def test_snapshot_endpoint_can_page_before_an_event(tmp_path: Path) -> None:
     store = _store(tmp_path)
     saved = [store.append(_event(42, {"delta": str(index)})) for index in range(5)]
@@ -163,6 +233,46 @@ async def test_snapshot_endpoint_can_page_before_an_event(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_turn_summary_endpoint_returns_rule_summary(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.append(
+        _runtime_event(
+            42,
+            EventType.USER_MESSAGE_RECEIVED,
+            {"native_turn_id": "turn-fold", "text": "修复实时发送"},
+        )
+    )
+    store.append(
+        _runtime_event(
+            42,
+            EventType.AGENT_RUN_COMPLETED,
+            {"native_turn_id": "turn-fold", "status": "completed"},
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/workers/42/turn-summary?native_turn_id=turn-fold HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    body = response.split("\r\n\r\n", 1)[1]
+    payload = json.loads(body)
+    assert payload["summary"]["native_turn_id"] == "turn-fold"
+    assert payload["summary"]["title"] == "2 条消息：修复实时发送"
+    assert payload["summary"]["source"] == "rules"
+
+
+@pytest.mark.asyncio
 async def test_live_page_endpoint(tmp_path: Path) -> None:
     store = _store(tmp_path)
     server = WorkerLiveStreamServer(
@@ -183,6 +293,17 @@ async def test_live_page_endpoint(tmp_path: Path) -> None:
     assert "HTTP/1.1 200 OK" in response
     assert "Codex" in response
     assert "/api/workers/42/stream" in response
+    assert "turn-fold" in response
+    assert "turn-fold-chevron" in response
+    assert "turnFoldTitle(group)" in response
+    assert "turn-fold-source" not in response
+    assert "sourceLabel" not in response
+    assert "hasLiveDisplayEvents" in response
+    assert ".transcript-item.user { justify-self: end;" in response
+    assert ".transcript-item.user .transcript-body" in response
+    assert "function isMirroredTranscriptEvent(event)" in response
+    assert "const mirroredTranscript = isMirroredTranscriptEvent(event);" in response
+    assert "if (options.historical || mirroredTranscript) return;" in response
 
 
 def test_server_rejects_non_loopback_host(tmp_path: Path) -> None:

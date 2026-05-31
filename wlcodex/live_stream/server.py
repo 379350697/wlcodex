@@ -7,6 +7,11 @@ from html import escape
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from wlcodex.auto_digest_llm import DigestClient
+from wlcodex.live_stream.collapse import (
+    LiveTurnSummaryConfig,
+    summarize_turn_with_sidecar,
+)
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.jsonrpc import JsonRpcError
@@ -32,6 +37,9 @@ class WorkerLiveStreamServer:
         native_controller: Any = None,
         access_token: str | None = None,
         allow_unauthenticated_loopback: bool = True,
+        turn_summary_config: LiveTurnSummaryConfig | None = None,
+        turn_summary_client: DigestClient | None = None,
+        native_transcript_mirror: Any = None,
     ) -> None:
         if host not in ("127.0.0.1", "localhost"):
             raise ValueError(f"Worker live stream server is loopback-only, got {host!r}")
@@ -41,6 +49,9 @@ class WorkerLiveStreamServer:
         self._native_controller = native_controller
         self._access_token = access_token
         self._allow_unauthenticated_loopback = allow_unauthenticated_loopback
+        self._turn_summary_config = turn_summary_config or LiveTurnSummaryConfig.from_env()
+        self._turn_summary_client = turn_summary_client
+        self._native_transcript_mirror = native_transcript_mirror
         self._server: asyncio.AbstractServer | None = None
         self._client_tasks: set[asyncio.Task[None]] = set()
 
@@ -168,10 +179,13 @@ class WorkerLiveStreamServer:
             if agent_id is not None:
                 after = _safe_int(query.get("after", ["0"])[0], default=0)
                 limit = _safe_int(query.get("limit", ["500"])[0], default=500)
+                native_thread_id = _optional_nonempty_string(
+                    query.get("native_thread_id", [""])[0]
+                ) or ""
                 native_turn_id = _optional_nonempty_string(
                     query.get("native_turn_id", [""])[0]
                 ) or ""
-                native_sync_error = ""
+                native_sync_error = self._sync_native_transcript(native_thread_id)
                 previous_event_count = 0
                 if "tail" in query:
                     tail_limit = _safe_int(query.get("tail", ["80"])[0], default=80)
@@ -221,6 +235,42 @@ class WorkerLiveStreamServer:
 
             agent_id = _agent_id_from_path(
                 parsed.path,
+                prefix="/api/workers/",
+                suffix="/turn-summary",
+            )
+            if agent_id is not None:
+                native_turn_id = _optional_nonempty_string(
+                    query.get("native_turn_id", [""])[0]
+                )
+                if not native_turn_id:
+                    await self._send_json(
+                        writer,
+                        400,
+                        {"error": "native_turn_id is required"},
+                    )
+                    return
+                events = _filter_events_for_native_turn(
+                    self._hub.snapshot_tail(agent_run_id=agent_id, limit=2000).events,
+                    native_turn_id=native_turn_id,
+                )
+                summary = await summarize_turn_with_sidecar(
+                    events,
+                    current_turn_id=_optional_nonempty_string(
+                        query.get("current_turn_id", [""])[0]
+                    )
+                    or "",
+                    config=self._turn_summary_config,
+                    client=self._turn_summary_client,
+                )
+                await self._send_json(
+                    writer,
+                    200,
+                    {"agent_run_id": agent_id, "summary": summary.to_json_dict()},
+                )
+                return
+
+            agent_id = _agent_id_from_path(
+                parsed.path,
                 prefix="/workers/",
                 suffix="/live",
             )
@@ -258,6 +308,15 @@ class WorkerLiveStreamServer:
         finally:
             if task is not None:
                 self._client_tasks.discard(task)
+
+    def _sync_native_transcript(self, native_thread_id: str) -> str:
+        if not native_thread_id or self._native_transcript_mirror is None:
+            return ""
+        try:
+            self._native_transcript_mirror.sync_thread(native_thread_id)
+        except Exception as exc:
+            return str(exc) or type(exc).__name__
+        return ""
 
     async def _read_json_body(
         self,
@@ -869,12 +928,13 @@ def _live_page(agent_run_id: int) -> str:
     .run-state.failed .run-pulse { background: #ef4444; box-shadow: 0 0 16px rgba(239,68,68,.7); }
     .event-cursor { color: #777b86; font-size: 12px; }
     .codex-transcript { display: grid; gap: 18px; padding-top: 8px; }
-    .transcript-item { display: grid; gap: 7px; padding: 0 0 2px; }
+    .transcript-item { display: grid; gap: 7px; min-width: 0; padding: 0; }
     .transcript-meta { color: #9aa0aa; font-size: 13px; }
     .transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #f4f4f5; font-size: 17px; line-height: 1.62; }
-    .transcript-item.user { padding-left: 22px; border-left: 2px solid #f4f4f5; }
-    .transcript-item.user .transcript-meta { color: #f4f4f5; font-weight: 700; }
-    .transcript-item.assistant { padding-left: 22px; border-left: 2px solid #30333a; }
+    .transcript-item.user { justify-self: end; justify-items: end; max-width: min(82%, 520px); }
+    .transcript-item.user .transcript-meta { display: none; }
+    .transcript-item.user .transcript-body { padding: 10px 13px; border: 1px solid #333842; border-radius: 18px 18px 4px 18px; background: #20242d; line-height: 1.5; }
+    .transcript-item.assistant { justify-self: start; max-width: 100%; padding-left: 22px; border-left: 2px solid #30333a; }
     .status-event { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; color: #aeb4bf; font-size: 14px; line-height: 1.5; }
     .status-event:before { content: ""; width: 8px; height: 8px; margin-top: 7px; border-radius: 50%; background: #6b7280; }
     .status-event.busy:before { background: #f59e0b; }
@@ -885,8 +945,15 @@ def _live_page(agent_run_id: int) -> str:
     .composer-activity-dot { width: 7px; height: 7px; margin: 8px 0 14px 2px; border-radius: 50%; background: #f4f4f5; opacity: .72; transition: width .18s ease, height .18s ease, opacity .18s ease, transform .18s ease; }
     .composer-activity-dot.active { width: 13px; height: 13px; opacity: 1; animation: composerPulse 1.15s ease-in-out infinite; }
     @keyframes composerPulse { 0%, 100% { transform: scale(.82); } 50% { transform: scale(1.18); } }
-    .history-fold { width: 100%; min-height: 42px; margin: 4px 0 14px; border: 1px solid #30333a; border-radius: 12px; background: #111216; color: #d5d8df; font-size: 14px; }
+    .history-fold { width: 100%; min-height: 38px; margin: 2px 0 10px; border: 0; border-bottom: 1px solid #24262d; border-radius: 0; background: transparent; color: #b8bdc8; text-align: left; font-size: 15px; }
     .history-fold[hidden] { display: none; }
+    .turn-fold { border: 0; border-bottom: 1px solid #24262d; border-radius: 0; background: transparent; overflow: visible; }
+    .turn-fold summary { display: flex; gap: 6px; align-items: center; min-height: 42px; padding: 0 0 8px; cursor: pointer; list-style: none; color: #d7dae1; }
+    .turn-fold summary::-webkit-details-marker { display: none; }
+    .turn-fold-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+    .turn-fold-chevron { color: #aeb4bf; font-size: 18px; transition: transform .16s ease; }
+    .turn-fold[open] .turn-fold-chevron { transform: rotate(90deg); }
+    .turn-fold-body { display: grid; gap: 18px; padding: 12px 0 18px; }
     .codex-tool-call, .file-change-card, .approval-card { border: 1px solid #30333a; background: #0f1014; border-radius: 10px; overflow: hidden; }
     .codex-tool-call.failed { border-color: #7f1d1d; }
     .tool-head, .file-head, .approval-head { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 11px 12px; border-bottom: 1px solid #26282f; }
@@ -942,7 +1009,7 @@ def _live_page(agent_run_id: int) -> str:
         <span id="runStateLabel">连接官方 Codex 会话</span>
         <span class="event-cursor" id="cursor"></span>
       </section>
-      <button class="history-fold" id="historyFold" hidden>以前的消息</button>
+      <button class="history-fold" id="historyFold" hidden>更早的消息</button>
       <section class="codex-transcript" id="events"><div class="empty" id="empty">等待官方 Codex 转录</div></section>
       <div class="composer-activity-dot" id="composerActivityDot" aria-hidden="true"></div>
     </main>
@@ -1002,11 +1069,13 @@ def _live_page(agent_run_id: int) -> str:
     const attachmentStrip = document.getElementById("attachmentStrip");
     const sendStatus = document.getElementById("sendStatus");
     const streamPathBase = "__STREAM_PATH__";
+    const agentRunId = __AGENT_RUN_ID__;
     const RECENT_EVENT_LIMIT = 80;
     const OLDER_EVENT_LIMIT = 80;
     const transcriptNodes = new Map();
     const statusNodes = new Map();
     const commandNodes = new Map();
+    let renderTarget = events;
     let imageAttachments = [];
     let sendingPrompt = false;
     let nativeTurnRunning = false;
@@ -1137,8 +1206,9 @@ def _live_page(agent_run_id: int) -> str:
     }
     function applyNativeTurnState(event, options = {}) {
       const payload = event.payload || {};
-      if (!options.historical && payload.native_turn_id) nativeTurnId = payload.native_turn_id;
-      if (options.historical) return;
+      const mirroredTranscript = isMirroredTranscriptEvent(event);
+      if (!options.historical && !mirroredTranscript && payload.native_turn_id) nativeTurnId = payload.native_turn_id;
+      if (options.historical || mirroredTranscript) return;
       if (event.kind === "completed" || event.kind === "failed") {
         if (!payload.native_turn_id || payload.native_turn_id === activeTurnId) activeTurnId = "";
         nativeTurnRunning = false;
@@ -1153,6 +1223,12 @@ def _live_page(agent_run_id: int) -> str:
         nativeTurnRunning = true;
       }
       setComposerActivity(nativeTurnRunning || sendingPrompt);
+    }
+    function isMirroredTranscriptEvent(event) {
+      const payload = (event && event.payload) || {};
+      const itemId = String(payload.itemId || "");
+      const turnId = String(payload.native_turn_id || payload.turnId || "");
+      return itemId.startsWith("jsonl-") || turnId.startsWith("jsonl-turn:");
     }
     function setComposerActivity(active) {
       composerActivityDot.classList.toggle("active", Boolean(active));
@@ -1291,7 +1367,7 @@ def _live_page(agent_run_id: int) -> str:
       let snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT, {currentTurn: true}));
       if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
       loadedEvents = snapshot.events || [];
-      if (!loadedEvents.length && nativeTurnId) {
+      if ((!loadedEvents.length || !hasLiveDisplayEvents(loadedEvents)) && nativeTurnId) {
         snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));
         if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
         loadedEvents = snapshot.events || [];
@@ -1303,6 +1379,13 @@ def _live_page(agent_run_id: int) -> str:
       updateHistoryFold();
       openStream(latestEventId);
       pollEvents();
+    }
+    function hasLiveDisplayEvents(sourceEvents) {
+      return sourceEvents.some(event => {
+        if (!event) return false;
+        if (event.type === "model.usage.updated") return false;
+        return event.kind !== "event";
+      });
     }
     async function loadOlderEvents() {
       if (!oldestEventId || !previousEventCount) return;
@@ -1380,19 +1463,144 @@ def _live_page(agent_run_id: int) -> str:
       statusNodes.clear();
       commandNodes.clear();
       events.innerHTML = "";
-      for (const event of loadedEvents) render(event, {scroll: false, historical: true});
+      const groups = foldGroups(loadedEvents);
+      const latestTurnId = latestFoldGroupTurnId(groups);
+      groups.forEach(group => {
+        renderFoldGroup(group, {latestTurnId});
+      });
     }
     function renderLiveEvent(event) {
       if (event.id && event.id <= latestEventId) return;
+      const previousLatestTurnId = latestFoldGroupTurnId(foldGroups(loadedEvents));
       if (event.id) latestEventId = event.id;
+      const incomingTurnId = eventFoldTurnId(event);
       loadedEvents.push(event);
+      if (previousLatestTurnId && incomingTurnId && incomingTurnId !== previousLatestTurnId) {
+        rebuildStream();
+        applyNativeTurnState(event);
+        updateComposerDisabled();
+        if (event.id) cursor.textContent = "#" + event.id;
+        window.scrollTo(0, document.body.scrollHeight);
+        return;
+      }
       render(event);
     }
     function updateHistoryFold() {
       historyFold.hidden = previousEventCount <= 0;
-      historyFold.textContent = previousEventCount > 0
-        ? `${previousEventCount} 条以前的消息`
-        : "以前的消息";
+      historyFold.textContent = previousEventCount > 0 ? "加载更早的消息" : "更早的消息";
+    }
+    function foldGroups(sourceEvents) {
+      const groupByKey = new Map();
+      let syntheticIndex = 0;
+      for (const event of sourceEvents) {
+        const payload = event.payload || {};
+        const key = payload.native_turn_id || payload.turnId || `event:${event.id || syntheticIndex++}`;
+        if (!groupByKey.has(key)) groupByKey.set(key, []);
+        groupByKey.get(key).push(event);
+      }
+      return Array.from(groupByKey.values()).sort((left, right) => {
+        return eventGroupLastId(left) - eventGroupLastId(right);
+      });
+    }
+    function eventGroupLastId(group) {
+      return group.reduce((latest, event) => Math.max(latest, Number(event.id || 0)), 0);
+    }
+    function latestFoldGroupTurnId(groups) {
+      for (let index = groups.length - 1; index >= 0; index--) {
+        const payload = (groups[index][0] || {}).payload || {};
+        const nativeTurnId = String(payload.native_turn_id || payload.turnId || "");
+        if (nativeTurnId) return nativeTurnId;
+      }
+      return "";
+    }
+    function renderFoldGroup(group, options = {}) {
+      const summary = buildFoldSummary(group, options.latestTurnId || "");
+      if (!summary.shouldCollapse) {
+        for (const event of group) render(event, {scroll: false, historical: true});
+        return;
+      }
+      const details = document.createElement("details");
+      details.className = "turn-fold";
+      const head = document.createElement("summary");
+      const title = document.createElement("span");
+      title.className = "turn-fold-title";
+      title.textContent = turnFoldTitle(group);
+      const chevron = document.createElement("span");
+      chevron.className = "turn-fold-chevron";
+      chevron.textContent = "›";
+      head.append(title, chevron);
+      const body = document.createElement("div");
+      body.className = "turn-fold-body";
+      details.append(head, body);
+      events.append(details);
+      const previousTarget = renderTarget;
+      renderTarget = body;
+      try {
+        for (const event of group) render(event, {scroll: false, historical: true});
+      } finally {
+        renderTarget = previousTarget;
+      }
+    }
+    function buildFoldSummary(group, latestTurnId) {
+      const nativeTurnId = String((group[0].payload || {}).native_turn_id || "");
+      const failed = group.some(event => isFailedEvent(event));
+      const hasApproval = group.some(event => event.kind === "approval_requested");
+      const currentTurnId = activeTurnId || (nativeTurnRunning ? nativeTurnId : "");
+      const shouldCollapse = (
+        group.length > 1 &&
+        nativeTurnId &&
+        !failed &&
+        !hasApproval &&
+        nativeTurnId !== currentTurnId &&
+        nativeTurnId !== latestTurnId
+      );
+      return {
+        nativeTurnId,
+        shouldCollapse
+      };
+    }
+    function eventFoldTurnId(event) {
+      const payload = (event && event.payload) || {};
+      return String(payload.native_turn_id || payload.turnId || "");
+    }
+    function turnFoldTitle(group) {
+      return `${foldMessageCount(group)} 条以前的消息`;
+    }
+    function foldMessageCount(group) {
+      const keys = new Set();
+      for (const event of group) {
+        if (event.type === "model.usage.updated") continue;
+        const key = foldMessageKey(event);
+        if (key) keys.add(key);
+      }
+      return Math.max(keys.size, group.length ? 1 : 0);
+    }
+    function foldMessageKey(event) {
+      const payload = (event && event.payload) || {};
+      const turnId = payload.native_turn_id || payload.turnId || "";
+      const itemId = payload.itemId || payload.item_id || payload.codexRequestId || "";
+      if (itemId) return `${event.kind}:${itemId}`;
+      if (event.kind === "user_message") return `user:${turnId}:user`;
+      if (event.kind === "text_delta") return `assistant:${turnId}:assistant`;
+      if (event.kind === "reasoning_delta") return `reasoning:${turnId}:reasoning`;
+      if (
+        event.kind === "command_started" ||
+        event.kind === "command_output" ||
+        event.kind === "command_completed" ||
+        event.kind === "command_failed"
+      ) {
+        return `command:${turnId}:${payload.command || event.id || ""}`;
+      }
+      return `${event.kind}:${event.id || ""}`;
+    }
+    function isFailedEvent(event) {
+      const payload = event.payload || {};
+      return event.kind === "failed" || isFailedStatus(payload.status);
+    }
+    function isFailedStatus(status) {
+      return ["failed", "error", "cancelled", "canceled"].includes(
+        String(status || "").trim().toLowerCase()
+      );
     }
     function setConnectionState(value) {
       state.textContent = value;
@@ -1406,6 +1614,9 @@ def _live_page(agent_run_id: int) -> str:
       updateComposerDisabled();
       cursor.textContent = event.id ? "#" + event.id : "";
       if (empty && empty.isConnected) empty.remove();
+      const previousTarget = renderTarget;
+      renderTarget = options.target || renderTarget || events;
+      try {
       if (event.kind === "user_message") renderTranscript(event, "user", "你");
       else if (event.kind === "text_delta") renderAssistant(event);
       else if (event.kind === "reasoning_delta") renderStatusEvent(event, "思考中", "busy");
@@ -1414,6 +1625,9 @@ def _live_page(agent_run_id: int) -> str:
       else if (event.kind === "approval_requested") renderApproval(event);
       else if (event.kind === "approval_resolved") renderStatusEvent(event, "审批已处理", "done");
       else renderStatusEvent(event, statusText(event, payload), statusTone(event));
+      } finally {
+        renderTarget = previousTarget;
+      }
       if (options.scroll !== false) window.scrollTo(0, document.body.scrollHeight);
     }
     function renderAssistant(event) {
@@ -1435,7 +1649,7 @@ def _live_page(agent_run_id: int) -> str:
         const body = document.createElement("div");
         body.className = "transcript-body";
         row.append(meta, body);
-        events.append(row);
+        renderTarget.append(row);
         node = {row, body};
         transcriptNodes.set(key, node);
       }
@@ -1457,7 +1671,7 @@ def _live_page(agent_run_id: int) -> str:
         detail.className = "status-detail";
         body.append(title, detail);
         row.append(body);
-        events.append(row);
+        renderTarget.append(row);
         node = {row, title, detail};
         statusNodes.set(key, node);
       }
@@ -1485,7 +1699,7 @@ def _live_page(agent_run_id: int) -> str:
         head.append(title, status);
         card.append(head, output);
         wrap.append(card);
-        events.append(wrap);
+        renderTarget.append(wrap);
         node = {card, title, status, output};
         commandNodes.set(key, node);
       }
@@ -1515,7 +1729,7 @@ def _live_page(agent_run_id: int) -> str:
       head.append(title, state);
       card.append(head, body);
       row.append(card);
-      events.append(row);
+      renderTarget.append(row);
     }
     function renderApproval(event) {
       const payload = event.payload || {};
@@ -1548,7 +1762,7 @@ def _live_page(agent_run_id: int) -> str:
       }
       card.append(head, body, actions);
       row.append(card);
-      events.append(row);
+      renderTarget.append(row);
       updateRunState("等待审批", "busy");
     }
     function renderStatus(kind, text) {
