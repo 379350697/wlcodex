@@ -1463,7 +1463,7 @@ def _live_page(agent_run_id: int) -> str:
       statusNodes.clear();
       commandNodes.clear();
       events.innerHTML = "";
-      const groups = foldGroups(loadedEvents);
+      const groups = foldGroups(dedupeDisplayEvents(loadedEvents));
       const latestTurnId = latestFoldGroupTurnId(groups);
       groups.forEach(group => {
         renderFoldGroup(group, {latestTurnId});
@@ -1471,10 +1471,17 @@ def _live_page(agent_run_id: int) -> str:
     }
     function renderLiveEvent(event) {
       if (event.id && event.id <= latestEventId) return;
-      const previousLatestTurnId = latestFoldGroupTurnId(foldGroups(loadedEvents));
+      const previousLatestTurnId = latestFoldGroupTurnId(foldGroups(dedupeDisplayEvents(loadedEvents)));
       if (event.id) latestEventId = event.id;
       const incomingTurnId = eventFoldTurnId(event);
+      const duplicateDisplayEvent = isDuplicateDisplayEvent(event, loadedEvents);
       loadedEvents.push(event);
+      if (duplicateDisplayEvent) {
+        applyNativeTurnState(event);
+        updateComposerDisabled();
+        if (event.id) cursor.textContent = "#" + event.id;
+        return;
+      }
       if (previousLatestTurnId && incomingTurnId && incomingTurnId !== previousLatestTurnId) {
         rebuildStream();
         applyNativeTurnState(event);
@@ -1501,6 +1508,30 @@ def _live_page(agent_run_id: int) -> str:
       return Array.from(groupByKey.values()).sort((left, right) => {
         return eventGroupLastId(left) - eventGroupLastId(right);
       });
+    }
+    function dedupeDisplayEvents(sourceEvents) {
+      const seen = new Set();
+      const result = [];
+      for (const event of sourceEvents) {
+        const key = mirroredDisplayKey(event);
+        if (key) {
+          if (seen.has(key)) continue;
+          seen.add(key);
+        }
+        result.push(event);
+      }
+      return result;
+    }
+    function isDuplicateDisplayEvent(event, previousEvents) {
+      const key = mirroredDisplayKey(event);
+      if (!key) return false;
+      return previousEvents.some(previous => mirroredDisplayKey(previous) === key);
+    }
+    function mirroredDisplayKey(event) {
+      const payload = (event && event.payload) || {};
+      const itemId = String(payload.itemId || payload.item_id || "");
+      if (!itemId.startsWith("jsonl-")) return "";
+      return itemId;
     }
     function eventGroupLastId(group) {
       return group.reduce((latest, event) => Math.max(latest, Number(event.id || 0)), 0);
@@ -1544,13 +1575,13 @@ def _live_page(agent_run_id: int) -> str:
     function buildFoldSummary(group, latestTurnId) {
       const nativeTurnId = String((group[0].payload || {}).native_turn_id || "");
       const failed = group.some(event => isFailedEvent(event));
-      const hasApproval = group.some(event => event.kind === "approval_requested");
+      const pendingApproval = hasPendingApproval(group);
       const currentTurnId = activeTurnId || (nativeTurnRunning ? nativeTurnId : "");
       const shouldCollapse = (
-        group.length > 1 &&
+        groupHasVisibleContent(group) &&
         nativeTurnId &&
         !failed &&
-        !hasApproval &&
+        !pendingApproval &&
         nativeTurnId !== currentTurnId &&
         nativeTurnId !== latestTurnId
       );
@@ -1558,6 +1589,33 @@ def _live_page(agent_run_id: int) -> str:
         nativeTurnId,
         shouldCollapse
       };
+    }
+    function groupHasVisibleContent(group) {
+      return group.some(event => event.type !== "model.usage.updated");
+    }
+    function hasPendingApproval(group) {
+      const requested = new Set();
+      for (const event of group) {
+        if (event.kind !== "approval_requested") continue;
+        const key = approvalRequestKey(event);
+        if (!key) return true;
+        requested.add(key);
+      }
+      if (!requested.size) return false;
+      const resolved = new Set();
+      for (const event of loadedEvents) {
+        if (event.kind !== "approval_resolved") continue;
+        const key = approvalRequestKey(event);
+        if (key) resolved.add(key);
+      }
+      for (const key of requested) {
+        if (!resolved.has(key)) return true;
+      }
+      return false;
+    }
+    function approvalRequestKey(event) {
+      const payload = (event && event.payload) || {};
+      return String(payload.codexRequestId || payload.requestId || payload.itemId || payload.item_id || "");
     }
     function eventFoldTurnId(event) {
       const payload = (event && event.payload) || {};

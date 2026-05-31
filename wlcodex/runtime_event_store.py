@@ -1,4 +1,4 @@
-"""Append-only runtime event store.
+"""Runtime event store.
 
 Provides append/query APIs so that no other lane writes raw SQL for
 runtime events.  Redaction and payload length caps are applied at append
@@ -23,10 +23,13 @@ logger = logging.getLogger(__name__)
 
 
 class RuntimeEventStore:
-    """Append-only store for ``runtime_events``.
+    """Store for ``runtime_events``.
 
     The table is created by ``Ledger.migrate()`` in ``wlcodex.db``.
-    This store only inserts and queries.
+    This store owns all raw SQL for runtime events.  Runtime events are
+    appended by default; ``correct_payload_item_turn_id`` is a narrow
+    compatibility repair for Codex JSONL transcript items that were mirrored
+    before their official turn id was known.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -239,6 +242,74 @@ class RuntimeEventStore:
         if row is None:
             return 0
         return int(row["count"])
+
+    def has_payload_item_id(self, agent_run_id: int, item_id: str) -> bool:
+        """Return whether an agent run already has an event for a payload item."""
+        if not item_id:
+            return False
+        row = self._conn.execute(
+            """
+            SELECT 1
+            FROM runtime_events
+            WHERE agent_run_id = ?
+              AND (
+                json_extract(payload_json, '$.itemId') = ?
+                OR json_extract(payload_json, '$.item_id') = ?
+              )
+            LIMIT 1
+            """,
+            (agent_run_id, item_id, item_id),
+        ).fetchone()
+        return row is not None
+
+    def correct_payload_item_turn_id(
+        self,
+        agent_run_id: int,
+        item_id: str,
+        *,
+        native_turn_id: str,
+        native_thread_id: str = "",
+    ) -> int:
+        """Correct mirrored Codex transcript turn metadata for an existing item."""
+        if not item_id or not native_turn_id:
+            return 0
+        rows = self._conn.execute(
+            """
+            SELECT id, payload_json
+            FROM runtime_events
+            WHERE agent_run_id = ?
+              AND (
+                json_extract(payload_json, '$.itemId') = ?
+                OR json_extract(payload_json, '$.item_id') = ?
+              )
+            """,
+            (agent_run_id, item_id, item_id),
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            payload = json.loads(str(row["payload_json"]))
+            if not isinstance(payload, dict):
+                continue
+            next_payload = dict(payload)
+            next_payload["native_turn_id"] = native_turn_id
+            next_payload["turnId"] = native_turn_id
+            if native_thread_id:
+                next_payload["native_thread_id"] = native_thread_id
+                next_payload["threadId"] = native_thread_id
+            if next_payload == payload:
+                continue
+            self._conn.execute(
+                """
+                UPDATE runtime_events
+                SET payload_json = ?
+                WHERE id = ?
+                """,
+                (json.dumps(next_payload, ensure_ascii=False), int(row["id"])),
+            )
+            updated += 1
+        if updated:
+            self._conn.commit()
+        return updated
 
     def list_by_conversation(
         self, conversation_id: int, *, limit: int = 200

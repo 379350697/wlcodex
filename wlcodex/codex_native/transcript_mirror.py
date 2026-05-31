@@ -11,8 +11,8 @@ from wlcodex.codex_native.session_store import NativeCodexSessionStore
 from wlcodex.runtime_event_store import RuntimeEventStore
 
 
-_DEFAULT_TAIL_LINES = 500
-_DEFAULT_MAX_BYTES = 2_000_000
+_DEFAULT_TAIL_LINES = 2_000
+_DEFAULT_MAX_BYTES = 8_000_000
 _SOURCE_KIND = "codex_jsonl"
 
 
@@ -45,6 +45,7 @@ class CodexSessionTranscriptMirror:
     ) -> None:
         self._root = root or Path.home() / ".codex" / "sessions"
         self._session_store = session_store
+        self._runtime_store = runtime_store
         self._projector = NativeCodexEventProjector(session_store, runtime_store)
         self._tail_lines = max(1, tail_lines)
         self._max_bytes = max(1024, max_bytes)
@@ -63,14 +64,31 @@ class CodexSessionTranscriptMirror:
             native_thread_id=native_thread_id,
             source_kind=_SOURCE_KIND,
         )
-        fallback_turn_id = session.last_turn_id or f"jsonl-tail:{native_thread_id}"
+        fallback_turn_id = f"jsonl-tail:{native_thread_id}"
         projected_count = 0
         for item in _parse_transcript_items(
             _read_tail_lines(path, limit=self._tail_lines, max_bytes=self._max_bytes),
             native_thread_id=native_thread_id,
             fallback_turn_id=fallback_turn_id,
         ):
-            if item.item_id in self._seen_item_ids:
+            if item.item_id in self._seen_item_ids or (
+                self._runtime_store.has_payload_item_id(
+                    session.agent_run_id,
+                    item.item_id,
+                )
+            ):
+                self._seen_item_ids.add(item.item_id)
+                if _is_official_turn_id(item.turn_id):
+                    self._runtime_store.correct_payload_item_turn_id(
+                        session.agent_run_id,
+                        item.item_id,
+                        native_turn_id=item.turn_id,
+                        native_thread_id=native_thread_id,
+                    )
+                    self._session_store.update_session(
+                        native_thread_id=native_thread_id,
+                        last_turn_id=item.turn_id,
+                    )
                 continue
             if item.role == "user":
                 projected = self._projector.project_user_message(
@@ -137,18 +155,31 @@ def _parse_transcript_items(
     current_turn_id = fallback_turn_id
     for line in lines:
         row = _json_object(line)
-        if not row or row.get("type") != "event_msg":
+        if not row:
             continue
+        row_type = str(row.get("type") or "")
         payload = row.get("payload")
         if not isinstance(payload, dict):
             continue
+        row_turn_id = _turn_id(payload)
+        if row_type == "turn_context":
+            if row_turn_id:
+                current_turn_id = row_turn_id
+            continue
+        if row_type != "event_msg":
+            continue
         payload_type = str(payload.get("type") or "")
         timestamp = str(row.get("timestamp") or "")
+        if row_turn_id:
+            current_turn_id = row_turn_id
+        if payload_type in {"task_started", "task_complete", "turn_aborted"}:
+            continue
         if payload_type == "user_message":
             text = _text(payload.get("message"))
             if not text:
                 continue
-            current_turn_id = _stable_id("jsonl-turn", timestamp, text)
+            if current_turn_id == fallback_turn_id:
+                current_turn_id = _stable_id("jsonl-turn", timestamp, text)
             items.append(
                 _TranscriptItem(
                     role="user",
@@ -189,6 +220,18 @@ def _json_object(line: str) -> dict[str, Any] | None:
 
 def _text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _turn_id(payload: dict[str, Any]) -> str:
+    for key in ("turn_id", "turnId"):
+        turn_id = _text(payload.get(key))
+        if turn_id:
+            return turn_id
+    return ""
+
+
+def _is_official_turn_id(turn_id: str) -> bool:
+    return bool(turn_id and not turn_id.startswith("jsonl-"))
 
 
 def _stable_id(prefix: str, *parts: str) -> str:

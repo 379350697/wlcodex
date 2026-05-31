@@ -1080,9 +1080,42 @@ async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns
     assert "turnFoldTitle(group)" in response
     assert "function foldMessageCount(group)" in response
     assert 'if (event.type === "model.usage.updated") continue;' in response
+    assert "function dedupeDisplayEvents(sourceEvents)" in response
+    assert "const groups = foldGroups(dedupeDisplayEvents(loadedEvents));" in response
     assert "title.textContent = turnFoldTitle(group);" in response
     assert "nativeTurnId !== latestTurnId" in response
     assert "completed || nativeTurnId !== latestTurnId" not in response
+    assert "group.length > 1" not in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_only_keeps_pending_approvals_expanded(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "function hasPendingApproval(group)" in response
+    assert "const pendingApproval = hasPendingApproval(group);" in response
+    assert "!pendingApproval" in response
+    assert "const hasApproval = group.some(event => event.kind === \"approval_requested\");" not in response
 
 
 @pytest.mark.asyncio
