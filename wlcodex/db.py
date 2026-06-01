@@ -235,6 +235,33 @@ class Ledger:
             CREATE INDEX IF NOT EXISTS idx_native_codex_sessions_updated
                 ON native_codex_sessions(updated_at DESC);
 
+            CREATE TABLE IF NOT EXISTS native_agent_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                provider_engine TEXT NOT NULL,
+                native_session_id TEXT NOT NULL,
+                agent_run_id INTEGER NOT NULL,
+                conversation_id INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                cwd TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT 'unknown',
+                status TEXT NOT NULL DEFAULT 'unknown',
+                last_turn_id TEXT NOT NULL DEFAULT '',
+                activity_at TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(agent_run_id) REFERENCES agent_runs(id),
+                FOREIGN KEY(conversation_id) REFERENCES conversation_sessions(id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_native_agent_sessions_identity
+                ON native_agent_sessions(provider, provider_engine, native_session_id);
+            CREATE INDEX IF NOT EXISTS idx_native_agent_sessions_provider_updated
+                ON native_agent_sessions(provider, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_native_agent_sessions_agent_run
+                ON native_agent_sessions(agent_run_id);
+
             CREATE TABLE IF NOT EXISTS orchestration_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conversation_id INTEGER NOT NULL,

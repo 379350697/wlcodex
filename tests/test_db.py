@@ -1228,3 +1228,14 @@ def test_team_instinct_upsert_normalizes_naive_datetimes_to_utc(
 
     assert stored.created_at.tzinfo is timezone.utc
     assert stored.last_validated_at.tzinfo is timezone.utc
+
+
+def test_migrate_creates_native_agent_sessions(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+
+    row = ledger._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_agent_sessions'"
+    ).fetchone()
+
+    assert row is not None
