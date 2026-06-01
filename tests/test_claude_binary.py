@@ -50,6 +50,19 @@ def test_auto_uses_path_binary(tmp_path: Path) -> None:
     assert result.source == "path"
 
 
+def test_resolve_claude_binary_checks_local_bin_in_auto_mode(
+    tmp_path: Path,
+) -> None:
+    local_binary = tmp_path / ".local" / "bin" / "claude"
+    _make_executable(local_binary)
+
+    result = resolve_claude_binary("auto", env={"PATH": ""}, home=tmp_path)
+
+    assert result.binary == str(local_binary)
+    assert result.source == "local-bin"
+    assert "~/.local/bin/claude" in result.attempted
+
+
 def test_stale_vscode_extension_path_repairs_to_latest_installed_binary(
     tmp_path: Path,
 ) -> None:

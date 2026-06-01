@@ -112,6 +112,15 @@ def resolve_claude_binary(
     if path_resolved:
         return ClaudeBinaryResolution(path_resolved, "path", attempted=tuple(attempted))
 
+    attempted.append("~/.local/bin/claude")
+    local_bin = home_path / ".local" / "bin" / "claude"
+    if local_bin.is_file() and os.access(local_bin, os.X_OK):
+        return ClaudeBinaryResolution(
+            str(local_bin),
+            "local-bin",
+            attempted=tuple(attempted),
+        )
+
     attempted.append("VS Code extension scan")
     vscode_resolved = _find_latest_vscode_claude(home_path)
     if vscode_resolved:

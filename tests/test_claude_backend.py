@@ -1274,6 +1274,29 @@ def test_prompt_args_include_supported_optional_flags() -> None:
     assert "--include-hook-events" in args
 
 
+def test_prompt_args_omits_model_when_model_is_empty() -> None:
+    from wlcodex.claude_binary import ClaudeCliCapabilities
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    backend = ClaudeBackend(ClaudeConfig(enabled=True, binary="/bin/echo", model=""))
+    backend._cli_capabilities = ClaudeCliCapabilities(
+        print_prompt=True,
+        output_format=True,
+        stream_json_output=True,
+        include_partial_messages=True,
+        include_hook_events=True,
+        input_stream_json=True,
+        permission_mode=True,
+        model=True,
+        effort=True,
+        resume=True,
+    )
+
+    args = backend._prompt_args("hello", stream_json=True)
+
+    assert "--model" not in args
+
+
 @pytest.mark.asyncio
 async def test_send_terminal_input_fails_clearly_when_resume_unsupported(
     tmp_path: Path,

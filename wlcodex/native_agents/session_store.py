@@ -186,12 +186,19 @@ class NativeAgentSessionStore:
         self,
         *,
         provider: str,
+        provider_engine: str = "",
         limit: int = 50,
     ) -> list[NativeAgentSession]:
+        where = "provider = ?"
+        params: list[Any] = [provider]
+        if provider_engine:
+            where += " AND provider_engine = ?"
+            params.append(provider_engine)
+        params.append(limit)
         rows = self._conn.execute(
-            """
+            f"""
             SELECT * FROM native_agent_sessions
-            WHERE provider = ?
+            WHERE {where}
             ORDER BY
                 CASE
                     WHEN activity_at IS NOT NULL AND activity_at != '' THEN activity_at
@@ -200,7 +207,7 @@ class NativeAgentSessionStore:
                 id DESC
             LIMIT ?
             """,
-            (provider, limit),
+            params,
         ).fetchall()
         return [_session(row) for row in rows]
 

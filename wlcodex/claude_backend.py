@@ -921,7 +921,6 @@ def record_claude_usage_event(
             input_tokens = int(usage.get("input_tokens", 0))
             output_tokens = int(usage.get("output_tokens", 0))
             cached_input_tokens = int(usage.get("cached_input_tokens", 0))
-            total_tokens = int(usage.get("total_tokens", input_tokens + output_tokens))
             reasoning_output_tokens = 0
             if not model:
                 model = str(usage.get("model", ""))
@@ -931,7 +930,6 @@ def record_claude_usage_event(
             output_tokens = approx_tokens(output_text)
             cached_input_tokens = 0
             reasoning_output_tokens = 0
-            total_tokens = input_tokens + output_tokens
 
         if input_tokens == 0 and output_tokens == 0:
             return

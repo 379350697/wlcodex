@@ -123,3 +123,20 @@ def test_list_recent_filters_by_provider(tmp_path: Path) -> None:
     assert [session.id for session in store.list_recent(provider="codex")] == [
         codex.id
     ]
+
+
+def test_list_recent_can_filter_by_provider_engine(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    cli = store.get_or_create_session(
+        provider="claude",
+        provider_engine="cli-local",
+        native_session_id="cli-1",
+    )
+    for index in range(5):
+        store.get_or_create_session(
+            provider="claude",
+            provider_engine="sdk-deepseek",
+            native_session_id=f"sdk-{index}",
+        )
+
+    assert store.list_recent(provider="claude", provider_engine="cli-local") == [cli]
