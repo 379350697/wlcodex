@@ -78,6 +78,7 @@ class EventSource(StrEnum):
     ORCHESTRATOR = "orchestrator"
     CODEX = "codex"
     CLAUDE = "claude"
+    ANTIGRAVITY = "antigravity"
     PROJECTOR = "projector"
     WATCHDOG = "watchdog"
     SYSTEM = "system"
