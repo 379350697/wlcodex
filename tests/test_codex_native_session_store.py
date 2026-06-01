@@ -62,4 +62,5 @@ def test_list_recent_returns_newest_first(tmp_path: Path) -> None:
     store.update_session(first.id, status="running")
     recent = store.list_recent(limit=10)
 
-    assert [session.id for session in recent] == [first.id, third.id, second.id]
+    assert [session.id for session in recent] == [third.id, second.id, first.id]
+    assert recent[-1].status == "running"

@@ -60,6 +60,7 @@ class NativeCodexSessionStore:
         source_kind: str = "unknown",
         status: str = "unknown",
         last_turn_id: str = "",
+        activity_at: str = "",
     ) -> NativeCodexSession:
         existing = self.get_by_thread_id(native_thread_id)
         if existing is not None:
@@ -70,6 +71,7 @@ class NativeCodexSessionStore:
                 source_kind=source_kind or existing.source_kind,
                 status=status or existing.status,
                 last_turn_id=last_turn_id or existing.last_turn_id,
+                activity_at=activity_at or existing.activity_at,
             )
 
         conversation_id = self.get_or_create_native_conversation()
@@ -90,9 +92,9 @@ class NativeCodexSessionStore:
             """
             INSERT INTO native_codex_sessions (
                 native_thread_id, agent_run_id, conversation_id, title, cwd,
-                source_kind, status, last_turn_id, created_at, updated_at
+                source_kind, status, last_turn_id, activity_at, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 native_thread_id,
@@ -103,6 +105,7 @@ class NativeCodexSessionStore:
                 source_kind,
                 status,
                 last_turn_id,
+                activity_at or now,
                 now,
                 now,
             ),
@@ -123,6 +126,7 @@ class NativeCodexSessionStore:
         source_kind: str | None = None,
         status: str | None = None,
         last_turn_id: str | None = None,
+        activity_at: str | None = None,
     ) -> NativeCodexSession:
         existing = self._lookup_session(session_id, native_thread_id)
         if status is not None:
@@ -135,7 +139,7 @@ class NativeCodexSessionStore:
             """
             UPDATE native_codex_sessions
             SET title = ?, cwd = ?, source_kind = ?, status = ?,
-                last_turn_id = ?, updated_at = ?
+                last_turn_id = ?, activity_at = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -144,6 +148,7 @@ class NativeCodexSessionStore:
                 source_kind if source_kind is not None else existing.source_kind,
                 status if status is not None else existing.status,
                 last_turn_id if last_turn_id is not None else existing.last_turn_id,
+                activity_at if activity_at is not None else existing.activity_at,
                 _now(),
                 existing.id,
             ),
@@ -160,7 +165,12 @@ class NativeCodexSessionStore:
         rows = self._conn.execute(
             """
             SELECT * FROM native_codex_sessions
-            ORDER BY updated_at DESC, id DESC
+            ORDER BY
+                CASE
+                    WHEN activity_at IS NOT NULL AND activity_at != '' THEN activity_at
+                    ELSE updated_at
+                END DESC,
+                id DESC
             LIMIT ?
             """,
             (limit,),
@@ -209,6 +219,7 @@ def _session(row: sqlite3.Row) -> NativeCodexSession:
         source_kind=str(row["source_kind"]),
         status=str(row["status"]),
         last_turn_id=str(row["last_turn_id"]),
+        activity_at=str(row["activity_at"]),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
     )

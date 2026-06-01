@@ -26,6 +26,7 @@ class NativeCodexSession:
     source_kind: str
     status: str
     last_turn_id: str
+    activity_at: str
     created_at: str
     updated_at: str
 
@@ -40,6 +41,7 @@ class NativeCodexSession:
             "source_kind": self.source_kind,
             "status": self.status,
             "last_turn_id": self.last_turn_id,
+            "activity_at": self.activity_at,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

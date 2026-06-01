@@ -1462,7 +1462,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       for (const session of source) {
         const btn = document.createElement("button");
         btn.className = "recent" + (selected && selected.native_thread_id === session.native_thread_id ? " active" : "");
-        btn.innerHTML = `<span class="recent-copy"><span class="label recent-title">${escapeHtml(session.title || session.native_thread_id)}</span><span class="meta">${escapeHtml(lastPath(session.cwd || ""))} · ${escapeHtml(session.status || "")}</span></span><span class="time">${escapeHtml(relativeTime(session.updated_at))}</span>`;
+        btn.innerHTML = `<span class="recent-copy"><span class="label recent-title">${escapeHtml(session.title || session.native_thread_id)}</span><span class="meta">${escapeHtml(lastPath(session.cwd || ""))} · ${escapeHtml(session.status || "")}</span></span><span class="time">${escapeHtml(relativeTime(sessionActivityAt(session)))}</span>`;
         btn.onclick = () => {
           selected = session;
           openLive(session);
@@ -1523,8 +1523,11 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     }
     function sortedSessions() {
       return [...sessions].sort((left, right) => {
-        return Date.parse(right.updated_at || "") - Date.parse(left.updated_at || "");
+        return Date.parse(sessionActivityAt(right)) - Date.parse(sessionActivityAt(left));
       });
+    }
+    function sessionActivityAt(session) {
+      return session.activity_at || session.updated_at || "";
     }
     function updateContextHint() {
       const project = selectedProjectCwd ? lastPath(selectedProjectCwd) : "";

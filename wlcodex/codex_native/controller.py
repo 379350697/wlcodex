@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from wlcodex.codex_backend import (
@@ -502,6 +503,7 @@ class CodexNativeController:
                 session.id,
                 last_turn_id=turn_id,
                 status="running" if active_turn_id else session.status,
+                activity_at=_detail_activity_at(detail) or None,
             )
         return _TurnState(
             session=session,
@@ -527,6 +529,7 @@ class CodexNativeController:
                 or "unknown"
             ),
             status=_string_value(raw, "status") or "unknown",
+            activity_at=_thread_activity_at(raw),
         )
 
     def _register_handlers(self) -> None:
@@ -567,6 +570,65 @@ def _string_value(raw: dict[str, Any], key: str) -> str:
     if isinstance(value, dict) and value.get("type"):
         return str(value["type"])
     return str(value) if value else ""
+
+
+def _thread_activity_at(raw: dict[str, Any]) -> str:
+    for key in (
+        "updatedAt",
+        "updated_at",
+        "lastActivityAt",
+        "last_activity_at",
+        "lastRunAt",
+        "last_run_at",
+        "completedAt",
+        "createdAt",
+    ):
+        value = _activity_value(raw, key)
+        if value:
+            return value
+    turns = raw.get("turns")
+    if isinstance(turns, list):
+        return _turn_activity_at(_latest_turn(turns))
+    return ""
+
+
+def _detail_activity_at(detail: dict[str, Any]) -> str:
+    thread = detail.get("thread")
+    if isinstance(thread, dict):
+        value = _thread_activity_at(thread)
+        if value:
+            return value
+    return _turn_activity_at(_latest_turn(_turns(detail)))
+
+
+def _turn_activity_at(turn: dict[str, Any] | None) -> str:
+    if turn is None:
+        return ""
+    for key in ("completedAt", "updatedAt", "startedAt", "createdAt"):
+        value = _activity_value(turn, key)
+        if value:
+            return value
+    return ""
+
+
+def _activity_value(raw: dict[str, Any], key: str) -> str:
+    value = raw.get(key)
+    if isinstance(value, int | float):
+        return _epoch_to_iso(float(value))
+    if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", text):
+            return _epoch_to_iso(float(text))
+        return text
+    return ""
+
+
+def _epoch_to_iso(value: float) -> str:
+    if value > 10_000_000_000:
+        value = value / 1000
+    if value <= 0:
+        return ""
+    return datetime.fromtimestamp(value, timezone.utc).isoformat()
 
 
 def _active_turn_id(detail: dict[str, Any]) -> str:

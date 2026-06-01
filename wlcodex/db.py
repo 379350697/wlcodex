@@ -222,6 +222,7 @@ class Ledger:
                 source_kind TEXT NOT NULL DEFAULT 'unknown',
                 status TEXT NOT NULL DEFAULT 'unknown',
                 last_turn_id TEXT NOT NULL DEFAULT '',
+                activity_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(agent_run_id) REFERENCES agent_runs(id),
@@ -579,6 +580,16 @@ class Ledger:
         self._add_column_if_missing(
             "conversation_sessions", "claude_session_id",
             "claude_session_id TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "native_codex_sessions", "activity_at",
+            "activity_at TEXT NOT NULL DEFAULT ''",
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_native_codex_sessions_activity
+                ON native_codex_sessions(activity_at DESC, id DESC)
+            """
         )
         # orchestration_runs.diagnose_json — added for structured LightFeeV2
         # diagnose artifact storage (old DBs created before this column must

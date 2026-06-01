@@ -174,6 +174,7 @@ def _controller(
 @pytest.mark.asyncio
 async def test_controller_lists_and_maps_sessions(tmp_path: Path) -> None:
     controller, client, session_store, _runtime_store = _controller(tmp_path)
+    client.sessions[0]["updatedAt"] = "1780291245"
 
     sessions = await controller.list_sessions(limit=5)
 
@@ -187,7 +188,45 @@ async def test_controller_lists_and_maps_sessions(tmp_path: Path) -> None:
     assert session.source_kind == "ide"
     assert session.status == "idle"
     assert session.agent_run_id > 0
+    assert session.activity_at == "2026-06-01T05:20:45+00:00"
     assert session_store.get_by_thread_id("thread-1") == session
+
+
+@pytest.mark.asyncio
+async def test_native_recent_sessions_sort_by_official_activity_time(
+    tmp_path: Path,
+) -> None:
+    controller, _client, session_store, _runtime_store = _controller(tmp_path)
+    _client.sessions = [
+        {
+            "id": "thread-old",
+            "title": "Old task",
+            "cwd": "/workspace/old",
+            "sourceKind": "ide",
+            "status": "idle",
+            "updatedAt": "1780290683",
+        },
+        {
+            "id": "thread-new",
+            "title": "New task",
+            "cwd": "/workspace/new",
+            "sourceKind": "ide",
+            "status": "idle",
+            "updatedAt": "1780291245",
+        },
+    ]
+
+    await controller.list_sessions()
+    session_store.update_session(native_thread_id="thread-old", status="running")
+
+    recent = session_store.list_recent(limit=10)
+
+    assert [session.native_thread_id for session in recent[:2]] == [
+        "thread-new",
+        "thread-old",
+    ]
+    assert recent[0].activity_at == "2026-06-01T05:20:45+00:00"
+    assert recent[1].activity_at == "2026-06-01T05:11:23+00:00"
 
 
 @pytest.mark.asyncio

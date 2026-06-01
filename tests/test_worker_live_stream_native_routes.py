@@ -20,11 +20,15 @@ from wlcodex.runtime_events import RuntimeEvent
 class FakeNativeSession:
     native_thread_id: str
     agent_run_id: int
+    activity_at: str = "2026-05-31T12:39:00+00:00"
+    updated_at: str = "2026-05-31T13:00:00+00:00"
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
             "native_thread_id": self.native_thread_id,
             "agent_run_id": self.agent_run_id,
+            "activity_at": self.activity_at,
+            "updated_at": self.updated_at,
         }
 
 
@@ -301,12 +305,14 @@ async def test_native_routes_allow_public_loopback_when_token_is_disabled(
     assert "HTTP/1.1 200 OK" in response
     assert _json_body(response) == {
         "sessions": [
-            {
-                "native_thread_id": "thread-1",
-                "agent_run_id": 42,
-            }
-        ]
-    }
+                {
+                    "native_thread_id": "thread-1",
+                    "agent_run_id": 42,
+                    "activity_at": "2026-05-31T12:39:00+00:00",
+                    "updated_at": "2026-05-31T13:00:00+00:00",
+                }
+            ]
+        }
     assert controller.calls == [("list_sessions",)]
 
 
@@ -375,12 +381,14 @@ async def test_native_sessions_returns_json_with_bearer_token(tmp_path: Path) ->
     assert "HTTP/1.1 200 OK" in response
     assert _json_body(response) == {
         "sessions": [
-            {
-                "native_thread_id": "thread-1",
-                "agent_run_id": 42,
-            }
-        ]
-    }
+                {
+                    "native_thread_id": "thread-1",
+                    "agent_run_id": 42,
+                    "activity_at": "2026-05-31T12:39:00+00:00",
+                    "updated_at": "2026-05-31T13:00:00+00:00",
+                }
+            ]
+        }
     assert controller.calls == [("list_sessions",)]
 
 
@@ -1193,6 +1201,9 @@ async def test_native_codex_page_uses_project_context_for_new_chat(
     assert ".recent-title { display: -webkit-box;" in response
     assert "-webkit-line-clamp: 2;" in response
     assert 'class="label recent-title"' in response
+    assert "relativeTime(sessionActivityAt(session))" in response
+    assert "Date.parse(sessionActivityAt(right))" in response
+    assert "return session.activity_at || session.updated_at || \"\";" in response
 
 
 @pytest.mark.asyncio
