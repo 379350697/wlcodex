@@ -223,6 +223,8 @@ def _create_live_stream_components(
     runtime_store.add_projector(hub.publish)
     native_client = None
     native_controller = None
+    native_registry = None
+    native_providers = []
     native_transcript_mirror = None
     access_token = os.environ.get(config.live_stream.access_token_env, "")
     if getattr(config.codex_native, "enabled", False):
@@ -277,11 +279,18 @@ def _create_live_stream_components(
                 session_store=native_session_store,
                 runtime_store=runtime_store,
             )
+            from wlcodex.native_agents.codex_provider import CodexAppServerProvider
+
+            native_providers.append(CodexAppServerProvider(native_controller))
             native_transcript_mirror = CodexSessionTranscriptMirror(
                 session_store=native_session_store,
                 runtime_store=runtime_store,
             )
             logger.info("Codex native control bridge configured")
+    if native_providers:
+        from wlcodex.native_agents.provider import NativeAgentRegistry
+
+        native_registry = NativeAgentRegistry(native_providers)
     server = WorkerLiveStreamServer(
         host=config.live_stream.host,
         port=config.live_stream.port,
@@ -303,6 +312,7 @@ def _create_live_stream_components(
         server=server,
         native_client=native_client,
         native_controller=native_controller,
+        native_registry=native_registry,
     )
 
 
