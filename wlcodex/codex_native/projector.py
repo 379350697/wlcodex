@@ -361,6 +361,8 @@ class NativeCodexEventProjector:
                 "native_thread_id": native_thread_id,
                 "native_turn_id": native_turn_id,
                 "source_kind": _SOURCE_KIND,
+                "provider": "codex",
+                "provider_engine": "app-server",
             }
             dedupe_key = _dedupe_key(
                 event.event_type,

@@ -4,7 +4,7 @@ from wlcodex.codex_native.projector import NativeCodexEventProjector
 from wlcodex.codex_native.session_store import NativeCodexSessionStore
 from wlcodex.db import Ledger
 from wlcodex.runtime_event_store import RuntimeEventStore
-from wlcodex.runtime_events import EventType
+from wlcodex.runtime_events import EventSource, EventType
 
 
 def _stores(
@@ -37,9 +37,12 @@ def test_projector_creates_session_and_text_delta(tmp_path: Path) -> None:
     assert [event.event_type for event in events] == [EventType.MODEL_TEXT_DELTA]
     event = events[0]
     assert event.actor == "codex_native"
+    assert event.source == EventSource.CODEX
     assert event.payload["native_thread_id"] == "thread_123"
     assert event.payload["native_turn_id"] == "turn_456"
     assert event.payload["source_kind"] == "codex_native"
+    assert event.payload["provider"] == "codex"
+    assert event.payload["provider_engine"] == "app-server"
     assert event.payload["delta"] == "hello"
     assert event.payload["itemId"] == "item_789"
 
