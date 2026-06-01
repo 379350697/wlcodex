@@ -6,8 +6,6 @@ Covers: /mode, /product, /terminal, /terminal <agent>, /terminal <subcommand>.
 import pytest
 
 from wlcodex.router import (
-    ModeSwitchCommand,
-    TerminalSubCommand,
     parse_command,
     ParseError,
 )
@@ -129,7 +127,6 @@ async def test_product_handler_sends_confirmation():
 
     from wlcodex.telegram_app import WlCodexHandlers
 
-    captured_events = []
     sent_messages = []
 
     class FakeRuntimeStore:
@@ -892,7 +889,7 @@ async def test_terminal_input_with_active_session_prompts_busy_choices_not_raw_s
     _, text, buttons = sent_messages[0]
     assert "当前工作区正在执行" in text
     labels = {button["text"] for row in buttons for button in row}
-    assert "发给当前 Codex" in labels
+    assert "发给当前 GPT 开发工程师" in labels
     assert "打断并执行这句" in labels
     assert "排队稍后" in labels
     assert "新开隔离现场" in labels

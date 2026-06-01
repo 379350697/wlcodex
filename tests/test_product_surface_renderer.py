@@ -1,8 +1,5 @@
 """Tests for wlcodex.surfaces.product.renderer — cockpit status, approval, completion/failure."""
 
-import pytest
-from dataclasses import dataclass
-
 from wlcodex.surfaces.product.renderer import (
     render_cockpit_status,
     render_cockpit_completion,
@@ -25,7 +22,7 @@ def test_cockpit_status_shows_phase_and_agent():
         agent_status="running",
     )
     text = render_cockpit_status(state)
-    assert "Codex" in text
+    assert "GPT 开发工程师" in text
     assert "分析" in text
 
 
@@ -38,7 +35,7 @@ def test_cockpit_status_shows_current_command():
         elapsed_seconds=200,
     )
     text = render_cockpit_status(state)
-    assert "Claude" in text
+    assert "DeepSeek 开发工程师" in text
     assert "pytest" in text
     assert "已运行" in text
 
@@ -168,14 +165,14 @@ def test_cockpit_approval_command():
     text = render_cockpit_approval("command", "rm -rf /tmp/test", agent="codex")
     assert "审批" in text
     assert "命令" in text
-    assert "Codex" in text
+    assert "GPT 开发工程师" in text
     assert "rm" in text
 
 
 def test_cockpit_approval_file_change():
     text = render_cockpit_approval("file_change", "修改 src/foo.py", agent="claude")
     assert "文件修改" in text
-    assert "Claude" in text
+    assert "DeepSeek 开发工程师" in text
 
 
 def test_cockpit_approval_truncates_long_summary():
@@ -186,8 +183,8 @@ def test_cockpit_approval_truncates_long_summary():
 
 def test_cockpit_approval_no_raw_agent_id():
     text = render_cockpit_approval("command", "test", agent="codex")
-    # Should use display name "Codex" not raw "codex"
-    assert "Codex" in text
+    # Should use display name instead of raw "codex".
+    assert "GPT 开发工程师" in text
 
 
 # ── Cockpit queued ─────────────────────────────────────────────────────────
@@ -200,7 +197,7 @@ def test_cockpit_queued_no_agent():
 
 def test_cockpit_queued_with_agent():
     text = render_cockpit_queued(agent="codex")
-    assert "Codex" in text
+    assert "GPT 开发工程师" in text
     assert "启动" in text
 
 
