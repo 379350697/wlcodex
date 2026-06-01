@@ -245,6 +245,50 @@ class CodexNativeConfig:
 
 
 @dataclass(frozen=True)
+class NativeAgentsCodexConfig:
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class NativeAgentsClaudeCliLocalConfig:
+    binary: str = "auto"
+    model: str = ""
+    permission_mode: str = "acceptEdits"
+
+
+@dataclass(frozen=True)
+class NativeAgentsClaudeSdkDeepSeekConfig:
+    api_key_env: str = "DEEPSEEK_API_KEY"
+    base_url: str = "https://api.deepseek.com/anthropic"
+    model: str = "deepseek-v4-pro"
+
+
+@dataclass(frozen=True)
+class NativeAgentsClaudeConfig:
+    enabled: bool = False
+    engine: str = "cli-local"
+    cli_local: NativeAgentsClaudeCliLocalConfig = NativeAgentsClaudeCliLocalConfig()
+    sdk_deepseek: NativeAgentsClaudeSdkDeepSeekConfig = (
+        NativeAgentsClaudeSdkDeepSeekConfig()
+    )
+
+
+@dataclass(frozen=True)
+class NativeAgentsAntigravityConfig:
+    enabled: bool = False
+    engine: str = "sdk"
+
+
+@dataclass(frozen=True)
+class NativeAgentsConfig:
+    enabled: bool = False
+    default_provider: str = "codex"
+    codex: NativeAgentsCodexConfig = NativeAgentsCodexConfig()
+    claude: NativeAgentsClaudeConfig = NativeAgentsClaudeConfig()
+    antigravity: NativeAgentsAntigravityConfig = NativeAgentsAntigravityConfig()
+
+
+@dataclass(frozen=True)
 class AppConfig:
     telegram: TelegramConfig
     codex: CodexConfig
@@ -268,6 +312,7 @@ class AppConfig:
     workspace_discovery: WorkspaceDiscoveryConfig = WorkspaceDiscoveryConfig()
     live_stream: LiveStreamConfig = LiveStreamConfig()
     codex_native: CodexNativeConfig = CodexNativeConfig()
+    native_agents: NativeAgentsConfig = NativeAgentsConfig()
 
     def workspace_by_alias(self, alias: str) -> WorkspaceConfig:
         for workspace in self.workspaces:
@@ -338,6 +383,17 @@ def load_config(path: Path) -> AppConfig:
     telegram_output_raw = data.get("telegram_output", {})
     live_stream_raw = data.get("live_stream", {})
     codex_native_raw = data.get("codex_native", {})
+    native_agents_raw = data.get("native_agents", {})
+    native_agents_config = _native_agents_config(native_agents_raw)
+    codex_native_config = _codex_native_config(codex_native_raw)
+    if codex_native_config.enabled and not native_agents_config.enabled:
+        native_agents_config = NativeAgentsConfig(
+            enabled=True,
+            default_provider="codex",
+            codex=NativeAgentsCodexConfig(enabled=True),
+            claude=native_agents_config.claude,
+            antigravity=native_agents_config.antigravity,
+        )
     terminal_default_agent = str(terminal_raw.get("default_agent", "claude"))
     if terminal_default_agent not in ("claude", "codex"):
         raise ConfigError(
@@ -474,7 +530,8 @@ def load_config(path: Path) -> AppConfig:
         telegram_output=_telegram_output_config(telegram_output_raw),
         workspace_discovery=discovery,
         live_stream=_live_stream_config(live_stream_raw),
-        codex_native=_codex_native_config(codex_native_raw),
+        codex_native=codex_native_config,
+        native_agents=native_agents_config,
     )
 
 
@@ -589,6 +646,71 @@ def _codex_native_config(data: dict[str, object]) -> CodexNativeConfig:
         sock_path=_optional_path(data.get("sock_path")),
         listen_endpoint=str(
             data.get("listen_endpoint", "ws://127.0.0.1:18742")
+        ),
+    )
+
+
+def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
+    default_provider = str(data.get("default_provider", "codex"))
+    if default_provider not in {"codex", "claude", "antigravity"}:
+        raise ConfigError(
+            "native_agents.default_provider must be codex, claude, or antigravity"
+        )
+
+    codex_raw = dict(data.get("codex", {}) or {})
+    claude_raw = dict(data.get("claude", {}) or {})
+    antigravity_raw = dict(data.get("antigravity", {}) or {})
+    cli_raw = dict(claude_raw.get("cli_local", {}) or {})
+    sdk_raw = dict(claude_raw.get("sdk_deepseek", {}) or {})
+
+    if "enabled" in cli_raw or "enabled" in sdk_raw:
+        raise ConfigError(
+            "claude engine must be selected by native_agents.claude.engine, "
+            "not by per-engine enabled flags"
+        )
+
+    engine = str(claude_raw.get("engine", "cli-local"))
+    if engine not in {"cli-local", "sdk-deepseek"}:
+        raise ConfigError(
+            "native_agents.claude.engine must be cli-local or sdk-deepseek"
+        )
+
+    antigravity_engine = str(antigravity_raw.get("engine", "sdk"))
+    if antigravity_engine != "sdk":
+        raise ConfigError("native_agents.antigravity.engine must be sdk")
+
+    try:
+        cli_permission_mode = normalize_claude_permission_mode(
+            str(cli_raw.get("permission_mode", "acceptEdits"))
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+    return NativeAgentsConfig(
+        enabled=bool(data.get("enabled", False)),
+        default_provider=default_provider,
+        codex=NativeAgentsCodexConfig(
+            enabled=bool(codex_raw.get("enabled", False)),
+        ),
+        claude=NativeAgentsClaudeConfig(
+            enabled=bool(claude_raw.get("enabled", False)),
+            engine=engine,
+            cli_local=NativeAgentsClaudeCliLocalConfig(
+                binary=str(cli_raw.get("binary", "auto")),
+                model=str(cli_raw.get("model", "")),
+                permission_mode=cli_permission_mode,
+            ),
+            sdk_deepseek=NativeAgentsClaudeSdkDeepSeekConfig(
+                api_key_env=str(sdk_raw.get("api_key_env", "DEEPSEEK_API_KEY")),
+                base_url=str(
+                    sdk_raw.get("base_url", "https://api.deepseek.com/anthropic")
+                ),
+                model=str(sdk_raw.get("model", "deepseek-v4-pro")),
+            ),
+        ),
+        antigravity=NativeAgentsAntigravityConfig(
+            enabled=bool(antigravity_raw.get("enabled", False)),
+            engine=antigravity_engine,
         ),
     )
 

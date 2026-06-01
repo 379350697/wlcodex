@@ -173,6 +173,31 @@ listen_endpoint = "ws://127.0.0.1:18742"
 # transport = "proxy"
 # sock_path = "/Users/wl/.codex/app-server-control/app-server-control.sock"
 
+[native_agents]
+enabled = false
+default_provider = "codex"
+
+[native_agents.codex]
+enabled = false
+
+[native_agents.claude]
+enabled = false
+engine = "cli-local"
+
+[native_agents.claude.cli_local]
+binary = "auto"
+model = ""
+permission_mode = "acceptEdits"
+
+[native_agents.claude.sdk_deepseek]
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com/anthropic"
+model = "deepseek-v4-pro"
+
+[native_agents.antigravity]
+enabled = false
+engine = "sdk"
+
 # Optional /auto digest rewriting:
 # - Default: rule-based local digest only, no network call.
 # - Set WLCODEX_DEEPSEEK_API_KEY to enable project-scoped DeepSeek rewriting.
