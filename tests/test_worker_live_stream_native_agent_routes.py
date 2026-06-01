@@ -231,6 +231,111 @@ async def test_native_agent_login_ticket_path_uses_provider_name(
 
 
 @pytest.mark.asyncio
+async def test_native_agent_login_ticket_path_quotes_provider_name(
+    tmp_path: Path,
+) -> None:
+    custom_provider = FakeProvider()
+    custom_provider.provider = "claude/dev"
+    response, provider = await _request_native_agent(
+        tmp_path,
+        "POST /api/native/claude%2Fdev/login-ticket HTTP/1.1\r\n"
+        "Host: test\r\nAuthorization: Bearer secret\r\n"
+        "Connection: close\r\n\r\n",
+        provider=custom_provider,
+        access_token="secret",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["path"].startswith("/native/claude%2Fdev/login?ticket=")
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_native_agent_login_page_returns_404(tmp_path: Path) -> None:
+    response, provider = await _request_native_agent(
+        tmp_path,
+        "GET /native/missing/login?ticket=ticket-1 HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        access_token="secret",
+    )
+
+    assert "HTTP/1.1 404 Not Found" in response
+    assert _json_body(response)["error"] == "unknown native provider"
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_native_claude_page_uses_claude_api_base(tmp_path: Path) -> None:
+    response, _provider = await _request_native_agent(
+        tmp_path,
+        "GET /native/claude HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'const PROVIDER = "claude";' in response
+    assert 'const API_BASE = "/api/native/claude";' in response
+    assert "/api/native/codex/sessions" not in response
+
+
+@pytest.mark.asyncio
+async def test_native_root_lists_providers(tmp_path: Path) -> None:
+    response, _provider = await _request_native_agent(
+        tmp_path,
+        "GET /native HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "/native/claude" in response
+    assert "Claude" in response
+    assert "sdk-deepseek" in response
+
+
+@pytest.mark.asyncio
+async def test_unknown_native_agent_page_returns_404(tmp_path: Path) -> None:
+    response, provider = await _request_native_agent(
+        tmp_path,
+        "GET /native/missing HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 404 Not Found" in response
+    assert _json_body(response)["error"] == "unknown native provider"
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_uses_native_provider_query(tmp_path: Path) -> None:
+    response, _provider = await _request_native_agent(
+        tmp_path,
+        "GET /workers/4/live?native_provider=claude&native_thread_id=session-2 HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'const PROVIDER = "claude";' in response
+    assert 'const API_BASE = "/api/native/claude";' in response
+    assert "/api/native/codex/sessions/" not in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_falls_back_to_codex_for_unknown_provider(
+    tmp_path: Path,
+) -> None:
+    response, _provider = await _request_native_agent(
+        tmp_path,
+        "GET /workers/4/live?native_provider=missing&native_thread_id=session-2 HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'const PROVIDER = "codex";' in response
+    assert 'const API_BASE = "/api/native/codex";' in response
+
+
+@pytest.mark.asyncio
 async def test_unknown_native_agent_provider_returns_404(tmp_path: Path) -> None:
     response, provider = await _request_native_agent(
         tmp_path,

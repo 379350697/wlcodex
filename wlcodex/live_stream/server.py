@@ -151,16 +151,36 @@ class WorkerLiveStreamServer:
                 await self._send_html(writer, 200, _native_token_entry_page())
                 return
 
-            if parsed.path == "/native/codex/login":
+            if parsed.path == "/native":
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                await self._send_native_provider_index(writer, headers, query)
+                return
+
+            login_provider = _native_login_provider_from_path(parsed.path)
+            if login_provider:
+                if self._native_provider(login_provider) is None:
+                    await self._send_json(
+                        writer,
+                        404,
+                        {"error": "unknown native provider"},
+                    )
+                    return
+                safe_login_provider = quote(login_provider, safe="")
                 if not self._access_token:
-                    await self._send_redirect(writer, "/native/codex")
+                    await self._send_redirect(writer, f"/native/{safe_login_provider}")
                     return
                 if method == "GET":
                     ticket = query.get("ticket", [""])[0]
                     if not self._has_login_ticket(ticket):
                         await self._send_html(writer, 401, _native_token_entry_page())
                         return
-                    await self._send_html(writer, 200, _native_login_ticket_page(ticket))
+                    await self._send_html(
+                        writer,
+                        200,
+                        _native_login_ticket_page(ticket, login_provider),
+                    )
                     return
                 if method != "POST":
                     await self._send_json(writer, 405, {"error": "method not allowed"})
@@ -170,7 +190,7 @@ class WorkerLiveStreamServer:
                     return
                 await self._send_redirect(
                     writer,
-                    "/native/codex",
+                    f"/native/{safe_login_provider}",
                     headers={"Set-Cookie": _login_cookie_header(self._access_token or "")},
                 )
                 return
@@ -187,7 +207,15 @@ class WorkerLiveStreamServer:
                 ):
                     await self._send_html(writer, 401, _native_token_entry_page())
                     return
-                await self._send_html(writer, 200, _native_codex_page())
+                await self._send_native_page(writer, "codex", headers, query)
+                return
+
+            native_provider = _native_page_provider_from_path(parsed.path)
+            if native_provider:
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                await self._send_native_page(writer, native_provider, headers, query)
                 return
 
             if parsed.path.startswith("/api/native/"):
@@ -316,7 +344,19 @@ class WorkerLiveStreamServer:
                 suffix="/live",
             )
             if agent_id is not None:
-                await self._send_html(writer, 200, _live_page(agent_id))
+                native_provider = (
+                    _optional_nonempty_string(
+                        query.get("native_provider", query.get("provider", ["codex"]))[0]
+                    )
+                    or "codex"
+                )
+                if self._native_provider(native_provider) is None:
+                    native_provider = "codex"
+                await self._send_html(
+                    writer,
+                    200,
+                    _live_page(agent_id, native_provider=native_provider),
+                )
                 return
 
             agent_id = _agent_id_from_path(
@@ -440,7 +480,7 @@ class WorkerLiveStreamServer:
                 {
                     "ticket": ticket,
                     "path": (
-                        f"/native/{provider_name}/login?"
+                        f"/native/{quote(provider_name, safe='')}/login?"
                         f"ticket={quote(ticket, safe='')}"
                     ),
                     "expires_in": _LOGIN_TICKET_TTL_SECONDS,
@@ -650,6 +690,52 @@ class WorkerLiveStreamServer:
 
             return CodexAppServerProvider(self._native_controller)
         return None
+
+    async def _send_native_provider_index(
+        self,
+        writer: asyncio.StreamWriter,
+        headers: dict[str, str],
+        query: dict[str, list[str]],
+    ) -> None:
+        if not self._is_authorized(
+            writer,
+            headers,
+            query,
+            require_token=(
+                self._native_registry is not None
+                or self._native_controller is not None
+            ),
+        ):
+            await self._send_html(writer, 401, _native_token_entry_page())
+            return
+        if self._native_registry is not None:
+            providers = self._native_registry.list_provider_summaries()
+        elif self._native_controller is not None:
+            providers = [{"provider": "codex", "provider_engine": "app-server"}]
+        else:
+            providers = []
+        await self._send_html(writer, 200, _native_provider_index_html(providers))
+
+    async def _send_native_page(
+        self,
+        writer: asyncio.StreamWriter,
+        provider_name: str,
+        headers: dict[str, str],
+        query: dict[str, list[str]],
+    ) -> None:
+        provider = self._native_provider(provider_name)
+        if provider is None:
+            await self._send_json(writer, 404, {"error": "unknown native provider"})
+            return
+        if not self._is_authorized(
+            writer,
+            headers,
+            query,
+            require_token=True,
+        ):
+            await self._send_html(writer, 401, _native_token_entry_page())
+            return
+        await self._send_html(writer, 200, _native_codex_page(provider_name))
 
     async def _read_request_json(
         self,
@@ -911,6 +997,20 @@ def _native_provider_route_parts(path: str) -> tuple[str, str]:
     return unquote(provider), suffix
 
 
+def _native_login_provider_from_path(path: str) -> str:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "native" and parts[2] == "login":
+        return unquote(parts[1])
+    return ""
+
+
+def _native_page_provider_from_path(path: str) -> str:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "native":
+        return unquote(parts[1])
+    return ""
+
+
 def _safe_int(raw: str, *, default: int) -> int:
     try:
         value = int(raw)
@@ -1010,6 +1110,55 @@ def _json_object(value: Any) -> dict[str, Any]:
     return {"value": value}
 
 
+def _native_provider_display_name(provider: str) -> str:
+    names = {
+        "codex": "Codex",
+        "claude": "Claude",
+        "antigravity": "Antigravity",
+    }
+    provider_name = str(provider or "").strip()
+    return names.get(provider_name, provider_name.replace("-", " ").title() or "Native")
+
+
+def _native_provider_index_html(providers: list[dict[str, str]]) -> str:
+    if providers:
+        links = "\n".join(
+            (
+                f'<a class="provider" href="/native/{quote(str(provider["provider"]), safe="")}">'
+                f'<span>{escape(_native_provider_display_name(str(provider["provider"])))}</span>'
+                f'<small>{escape(str(provider.get("provider_engine", "")))}</small>'
+                "</a>"
+            )
+            for provider in providers
+        )
+    else:
+        links = '<div class="empty">No native providers configured.</div>'
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Native Agents</title>
+  <style>
+    :root {{ color-scheme: dark; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; padding: 28px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #000; color: #f7f7f8; }}
+    main {{ display: grid; gap: 14px; max-width: 560px; margin: 0 auto; }}
+    h1 {{ margin: 0 0 8px; font-size: 28px; letter-spacing: 0; }}
+    .provider {{ display: grid; gap: 4px; min-height: 64px; align-content: center; padding: 12px 0; border-bottom: 1px solid #24262d; color: inherit; text-decoration: none; }}
+    .provider span {{ font-size: 20px; font-weight: 760; }}
+    .provider small, .empty {{ color: #9ca3af; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Native Agents</h1>
+    {links}
+  </main>
+</body>
+</html>"""
+
+
 def _native_token_entry_page() -> str:
     return """<!doctype html>
 <html lang="zh-CN">
@@ -1072,9 +1221,11 @@ def _native_token_entry_page() -> str:
 </html>"""
 
 
-def _native_login_ticket_page(ticket: str) -> str:
+def _native_login_ticket_page(ticket: str, provider_name: str = "codex") -> str:
     safe_ticket = escape(ticket, quote=True)
-    safe_action = f"/native/codex/login?ticket={quote(ticket, safe='')}"
+    display_name = escape(_native_provider_display_name(provider_name))
+    safe_provider = quote(provider_name, safe="")
+    safe_action = f"/native/{safe_provider}/login?ticket={quote(ticket, safe='')}"
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1094,24 +1245,27 @@ def _native_login_ticket_page(ticket: str) -> str:
 </head>
 <body>
   <main>
-    <h1>Codex</h1>
+    <h1>{display_name}</h1>
     <p>点击进入手机远程控制页。此链接只能使用一次。</p>
     <form method="post" action="{safe_action}">
       <input type="hidden" name="ticket" value="{safe_ticket}">
-      <button type="submit">进入 Codex</button>
+      <button type="submit">进入 {display_name}</button>
     </form>
   </main>
 </body>
 </html>"""
 
 
-def _native_codex_page() -> str:
-    return """<!doctype html>
+def _native_codex_page(provider_name: str = "codex") -> str:
+    provider_name = provider_name.strip() or "codex"
+    provider_label = _native_provider_display_name(provider_name)
+    api_base = f"/api/native/{quote(provider_name, safe='')}"
+    template = """<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Codex</title>
+  <title>__PROVIDER_LABEL__</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -1161,7 +1315,7 @@ def _native_codex_page() -> str:
   <header>
     <div class="topbar">
       <button class="circle" id="back" aria-label="back">‹</button>
-      <h1>Codex</h1>
+      <h1>__PROVIDER_LABEL__</h1>
       <button class="circle menu" aria-label="menu">⋮</button>
     </div>
     <div class="devices" id="devices">
@@ -1188,6 +1342,9 @@ def _native_codex_page() -> str:
     <button class="chat" id="send">聊天</button>
   </section>
   <script>
+    const PROVIDER = __PROVIDER_JSON__;
+    const PROVIDER_LABEL = __PROVIDER_LABEL_JSON__;
+    const API_BASE = __API_BASE_JSON__;
     const token = new URLSearchParams(location.search).get("token") || "";
     if (token) {
       try { localStorage.setItem("wlcodexToken", token); } catch (_error) {}
@@ -1219,8 +1376,8 @@ def _native_codex_page() -> str:
 
     async function loadStatus() {
       try {
-        const status = await api("/api/native/codex/status");
-        const name = status.server_name || "wanglindeMac-mini.local";
+        const status = await api(`${API_BASE}/status`);
+        const name = status.server_name || PROVIDER_LABEL;
         devicesEl.innerHTML = `<button class="device-chip${status.connected ? "" : " off"}"><span class="dot"></span><span class="laptop"></span><span>${escapeHtml(name)}</span></button>`;
       } catch (error) {
         devicesEl.innerHTML = `<button class="device-chip off"><span class="dot"></span><span class="laptop"></span><span>${escapeHtml(error.message)}</span></button>`;
@@ -1229,7 +1386,7 @@ def _native_codex_page() -> str:
 
     async function loadSessions() {
       try {
-        const data = await api("/api/native/codex/sessions");
+        const data = await api(`${API_BASE}/sessions`);
         sessions = data.sessions || [];
         if (selected && !sessions.some(session => session.native_thread_id === selected.native_thread_id)) selected = null;
         renderProjects();
@@ -1316,7 +1473,7 @@ def _native_codex_page() -> str:
 
     async function control(action, body) {
       if (!selected) return;
-      await api(`/api/native/codex/sessions/${encodeURIComponent(selected.native_thread_id)}/${action}`, {
+      await api(`${API_BASE}/sessions/${encodeURIComponent(selected.native_thread_id)}/${action}`, {
         method: "POST",
         body: JSON.stringify(body)
       });
@@ -1324,7 +1481,7 @@ def _native_codex_page() -> str:
     }
 
     async function startNewChat(prompt) {
-      const result = await api("/api/native/codex/sessions/start", {
+      const result = await api(`${API_BASE}/sessions/start`, {
         method: "POST",
         body: JSON.stringify({cwd: selectedProjectCwd, prompt})
       });
@@ -1345,6 +1502,7 @@ def _native_codex_page() -> str:
       if (!session) return;
       const params = new URLSearchParams();
       if (token) params.set("token", token);
+      params.set("native_provider", PROVIDER);
       params.set("native_thread_id", session.native_thread_id);
       location.href = `/workers/${session.agent_run_id}/live?${params.toString()}`;
     }
@@ -1378,7 +1536,7 @@ def _native_codex_page() -> str:
     }
     function lastPath(path) {
       const parts = String(path).split("/").filter(Boolean);
-      return parts[parts.length - 1] || path || "Codex";
+      return parts[parts.length - 1] || path || PROVIDER_LABEL;
     }
     function relativeTime(value) {
       const stamp = Date.parse(value);
@@ -1396,11 +1554,20 @@ def _native_codex_page() -> str:
   </script>
 </body>
 </html>"""
+    return (
+        template.replace("__PROVIDER_LABEL__", escape(provider_label))
+        .replace("__PROVIDER_JSON__", json.dumps(provider_name, ensure_ascii=False))
+        .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
+        .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
+    )
 
 
-def _live_page(agent_run_id: int) -> str:
+def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     stream_path = f"/api/workers/{agent_run_id}/stream"
-    safe_title = escape("Codex")
+    native_provider = native_provider.strip() or "codex"
+    provider_label = _native_provider_display_name(native_provider)
+    api_base = f"/api/native/{quote(native_provider, safe='')}"
+    safe_title = escape(provider_label)
     template = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1615,6 +1782,9 @@ def _live_page(agent_run_id: int) -> str:
     const composerActivityDot = document.getElementById("composerActivityDot");
     const params = new URLSearchParams(location.search);
     const token = params.get("token") || "";
+    const PROVIDER = __PROVIDER_JSON__;
+    const PROVIDER_LABEL = __PROVIDER_LABEL_JSON__;
+    const API_BASE = __API_BASE_JSON__;
     let nativeThreadId = params.get("native_thread_id") || "";
     let nativeTurnId = "";
     let activeTurnId = "";
@@ -1676,15 +1846,15 @@ def _live_page(agent_run_id: int) -> str:
       return response.json().catch(() => ({}));
     }
     async function nativeControl(action, body) {
-      if (!nativeThreadId) throw new Error("官方 Codex 会话未连接");
-      return api(`/api/native/codex/sessions/${encodeURIComponent(nativeThreadId)}/${action}`, {
+      if (!nativeThreadId) throw new Error(`${PROVIDER_LABEL} 会话未连接`);
+      return api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/${action}`, {
         method: "POST",
         body: JSON.stringify(body)
       });
     }
     async function loadModelCatalog() {
       try {
-        const result = await api("/api/native/codex/models");
+        const result = await api(`${API_BASE}/models`);
         modelCatalog = Array.isArray(result.models) ? result.models : [];
         renderModelSettings();
       } catch (error) {
@@ -1924,7 +2094,7 @@ def _live_page(agent_run_id: int) -> str:
       if (!requestId) return;
       setApprovalState(card, action, "pending");
       try {
-        await api(`/api/native/codex/approvals/${encodeURIComponent(requestId)}/resolve`, {
+        await api(`${API_BASE}/approvals/${encodeURIComponent(requestId)}/resolve`, {
           method: "POST",
           body: JSON.stringify({action})
         });
@@ -2047,7 +2217,7 @@ def _live_page(agent_run_id: int) -> str:
     promptInput.addEventListener("input", updateComposerDisabled);
     document.getElementById("back").onclick = () => {
       const query = token ? "?token=" + encodeURIComponent(token) : "";
-      location.href = "/native/codex" + query;
+      location.href = `/native/${encodeURIComponent(PROVIDER)}` + query;
     };
     async function submitPrompt(action = primaryComposerAction()) {
       if (action === "interrupt") {
@@ -2310,7 +2480,7 @@ def _live_page(agent_run_id: int) -> str:
       if (!nativeThreadId || attached) return;
       attached = true;
       try {
-        const result = await api(`/api/native/codex/sessions/${encodeURIComponent(nativeThreadId)}/attach`, {
+        const result = await api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/attach`, {
           method: "POST",
           body: "{}"
         });
@@ -2703,7 +2873,7 @@ def _live_page(agent_run_id: int) -> str:
       if (options.scroll !== false) window.scrollTo(0, document.body.scrollHeight);
     }
     function renderAssistant(event) {
-      renderTranscript(event, "assistant", "Codex");
+      renderTranscript(event, "assistant", PROVIDER_LABEL);
     }
     function renderCommand(event) {
       renderToolCall(event);
@@ -2928,6 +3098,9 @@ def _live_page(agent_run_id: int) -> str:
         .replace("__SAFE_TITLE__", safe_title)
         .replace("__STREAM_PATH__", stream_path)
         .replace("__AGENT_RUN_ID__", str(agent_run_id))
+        .replace("__PROVIDER_JSON__", json.dumps(native_provider, ensure_ascii=False))
+        .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
+        .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
     )
 
 

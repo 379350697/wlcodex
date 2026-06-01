@@ -1016,7 +1016,9 @@ async def test_native_codex_page_contains_worker_and_session_selector(
     assert "<title>Codex</title>" in response
     assert "Codex" in response
     assert 'localStorage.setItem("wlcodexToken", token)' in response
-    assert "/api/native/codex/sessions" in response
+    assert 'const PROVIDER = "codex";' in response
+    assert 'const API_BASE = "/api/native/codex";' in response
+    assert "api(`${API_BASE}/sessions`)" in response
     assert "device-chip" in response
     assert "await api(`/api/native/codex/sessions/${encodeURIComponent(selected.native_thread_id)}`).catch" not in response
 
@@ -1179,7 +1181,8 @@ async def test_native_codex_page_uses_project_context_for_new_chat(
     assert "function renderProjectAction()" in response
     assert "async function openProjectNewChat()" in response
     assert "async function startNewChat(prompt)" in response
-    assert "/api/native/codex/sessions/start" in response
+    assert 'const API_BASE = "/api/native/codex";' in response
+    assert "api(`${API_BASE}/sessions/start`" in response
     assert "document.getElementById(\"chat\").onclick = () => selectProject(\"\");" in response
     assert "document.querySelector(\".controls\")" in response
     assert "const SESSION_PREVIEW_LIMIT = 10;" in response
@@ -1354,8 +1357,10 @@ async def test_worker_live_page_accepts_query_token_and_contains_native_controls
 
     assert "HTTP/1.1 200 OK" in response
     assert 'const streamPathBase = "/api/workers/42/stream";' in response
-    assert "/api/native/codex/sessions/" in response
-    assert "/api/native/codex/approvals/" in response
+    assert 'const PROVIDER = "codex";' in response
+    assert 'const API_BASE = "/api/native/codex";' in response
+    assert "`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/${action}`" in response
+    assert "`${API_BASE}/approvals/${encodeURIComponent(requestId)}/resolve`" in response
     assert "attachNative" in response
     assert "syncNative" not in response
     assert "native-mobile-shell" in response
@@ -1404,7 +1409,7 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert 'class="interruption-choice" id="interruptionChoice" hidden' in response
     assert "function submitPrompt" in response
     assert "continueButton.onclick = () => submitPrompt();" in response
-    assert 'throw new Error("官方 Codex 会话未连接");' in response
+    assert 'throw new Error(`${PROVIDER_LABEL} 会话未连接`);' in response
     assert "await pollEvents();" in response
     assert "function primaryComposerAction" in response
     assert "function applyNativeTurnState" in response
@@ -1456,7 +1461,8 @@ async def test_worker_live_page_uses_official_model_catalog_settings(
     assert "速度" in response
     assert "推理" in response
     assert "async function loadModelCatalog" in response
-    assert "/api/native/codex/models" in response
+    assert 'const API_BASE = "/api/native/codex";' in response
+    assert "api(`${API_BASE}/models`)" in response
     assert "function updateSettingSummary" in response
     assert 'id="serviceTierOptions"' in response
     assert 'id="reasoningOptions"' in response
