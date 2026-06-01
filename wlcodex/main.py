@@ -226,13 +226,18 @@ def _create_live_stream_components(
     native_registry = None
     native_providers = []
     native_transcript_mirror = None
+    native_agents_enabled = bool(getattr(config.native_agents, "enabled", False))
+    native_codex_requested = bool(getattr(config.codex_native, "enabled", False)) or (
+        native_agents_enabled and bool(getattr(config.native_agents.codex, "enabled", False))
+    )
     access_token = os.environ.get(config.live_stream.access_token_env, "")
-    if getattr(config.codex_native, "enabled", False):
+    if native_codex_requested or native_agents_enabled:
         if not access_token:
             raise RuntimeError(
-                "codex_native.enabled requires "
+                "native agent control requires "
                 f"{config.live_stream.access_token_env}"
             )
+    if native_codex_requested:
         if ledger is None:
             logger.warning("Codex native control enabled but no ledger was provided")
         else:
@@ -287,6 +292,73 @@ def _create_live_stream_components(
                 runtime_store=runtime_store,
             )
             logger.info("Codex native control bridge configured")
+    if native_agents_enabled:
+        if ledger is None:
+            logger.warning("Native agents enabled but no ledger was provided")
+        else:
+            from wlcodex.native_agents.session_store import NativeAgentSessionStore
+
+            native_agent_session_store = NativeAgentSessionStore(ledger)
+            if config.native_agents.claude.enabled:
+                if config.native_agents.claude.engine == "cli-local":
+                    from wlcodex.native_agents.claude_cli_provider import (
+                        ClaudeCliLocalProvider,
+                    )
+
+                    cli_config = config.native_agents.claude.cli_local
+                    resolution = resolve_claude_binary(cli_config.binary)
+                    binary_resolution_error = resolution.warning
+                    if not resolution.binary:
+                        binary_resolution_error = (
+                            resolution.warning
+                            or "Claude binary not found. Tried: "
+                            + ", ".join(resolution.attempted)
+                        )
+                    native_providers.append(
+                        ClaudeCliLocalProvider(
+                            engine=ClaudeBackend(
+                                ClaudeConfig(
+                                    enabled=bool(resolution.binary),
+                                    binary=resolution.binary or cli_config.binary,
+                                    permission_mode=cli_config.permission_mode,
+                                    model=cli_config.model,
+                                    binary_resolution_error=binary_resolution_error,
+                                )
+                            ),
+                            session_store=native_agent_session_store,
+                            default_cwd=str(
+                                config.workspace_by_alias(
+                                    config.conversation.default_workspace
+                                ).path
+                            ),
+                        )
+                    )
+                elif config.native_agents.claude.engine == "sdk-deepseek":
+                    from wlcodex.native_agents.claude_sdk_deepseek_provider import (
+                        ClaudeSdkDeepSeekConfig,
+                        ClaudeSdkDeepSeekProvider,
+                    )
+
+                    sdk_config = config.native_agents.claude.sdk_deepseek
+                    native_providers.append(
+                        ClaudeSdkDeepSeekProvider(
+                            config=ClaudeSdkDeepSeekConfig(
+                                api_key_env=sdk_config.api_key_env,
+                                base_url=sdk_config.base_url,
+                                model=sdk_config.model,
+                            ),
+                            session_store=native_agent_session_store,
+                        )
+                    )
+
+            if config.native_agents.antigravity.enabled:
+                from wlcodex.native_agents.antigravity_provider import (
+                    AntigravitySdkProvider,
+                )
+
+                native_providers.append(
+                    AntigravitySdkProvider(session_store=native_agent_session_store)
+                )
     if native_providers:
         from wlcodex.native_agents.provider import NativeAgentRegistry
 

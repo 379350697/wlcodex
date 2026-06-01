@@ -662,6 +662,86 @@ def test_create_live_stream_components_wires_native_controller_when_enabled(
     assert components.server._access_token == "secret"
 
 
+def test_create_live_stream_components_wires_single_claude_sdk_engine(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.config import (
+        AppConfig,
+        ApprovalConfig,
+        BackendConfig,
+        CodexConfig,
+        CodexNativeConfig,
+        DisplayConfig,
+        LiveStreamConfig,
+        NativeAgentsClaudeCliLocalConfig,
+        NativeAgentsClaudeConfig,
+        NativeAgentsClaudeSdkDeepSeekConfig,
+        NativeAgentsCodexConfig,
+        NativeAgentsConfig,
+        StorageConfig,
+        TaskConfig,
+        TelegramConfig,
+        WorkspaceConfig,
+    )
+    from wlcodex.main import _create_live_stream_components
+    from wlcodex.runtime_event_store import RuntimeEventStore
+
+    monkeypatch.setenv("WLCODEX_LIVE_STREAM_TOKEN", "secret")
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    config = AppConfig(
+        telegram=TelegramConfig("BOT_TOKEN", frozenset({1})),
+        codex=CodexConfig("codex", "127.0.0.1", 17431, "on-request", "workspace-write"),
+        storage=StorageConfig(
+            tmp_path / "db.sqlite3",
+            tmp_path / "logs",
+            tmp_path / "worktrees",
+        ),
+        display=DisplayConfig(2, 40, 3500),
+        backend=BackendConfig(15, 60, 300, 3600, 3600, 20000),
+        approval=ApprovalConfig(3600, True),
+        task=TaskConfig(7200, 1800, 3600, 60, 120),
+        workspaces=(WorkspaceConfig("wlcodex", tmp_path, True),),
+        live_stream=LiveStreamConfig(
+            enabled=True,
+            host="127.0.0.1",
+            port=0,
+            allow_unauthenticated_loopback=False,
+        ),
+        codex_native=CodexNativeConfig(enabled=False),
+        native_agents=NativeAgentsConfig(
+            enabled=True,
+            codex=NativeAgentsCodexConfig(enabled=False),
+            claude=NativeAgentsClaudeConfig(
+                enabled=True,
+                engine="sdk-deepseek",
+                cli_local=NativeAgentsClaudeCliLocalConfig(
+                    binary="auto",
+                    model="",
+                    permission_mode="acceptEdits",
+                ),
+                sdk_deepseek=NativeAgentsClaudeSdkDeepSeekConfig(
+                    api_key_env="DEEPSEEK_API_KEY",
+                    base_url="https://api.deepseek.com/anthropic",
+                    model="deepseek-v4-pro",
+                ),
+            ),
+        ),
+    )
+
+    components = _create_live_stream_components(
+        config,
+        RuntimeEventStore(ledger._conn),
+        ledger,
+    )
+
+    assert components is not None
+    assert components.native_registry.get("claude").provider_engine == "sdk-deepseek"
+    assert components.native_registry.maybe_get("codex") is None
+    assert components.server._native_registry is components.native_registry
+
+
 def test_create_live_stream_components_rejects_native_without_token(
     monkeypatch,
     tmp_path: Path,
