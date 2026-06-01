@@ -39,6 +39,7 @@ class WorkerLiveStreamServer:
         port: int,
         hub: WorkerLiveStreamHub,
         native_controller: Any = None,
+        native_registry: Any = None,
         access_token: str | None = None,
         allow_unauthenticated_loopback: bool = True,
         turn_summary_config: LiveTurnSummaryConfig | None = None,
@@ -51,6 +52,7 @@ class WorkerLiveStreamServer:
         self.port = port
         self._hub = hub
         self._native_controller = native_controller
+        self._native_registry = native_registry
         self._access_token = access_token
         self._allow_unauthenticated_loopback = allow_unauthenticated_loopback
         self._turn_summary_config = turn_summary_config or LiveTurnSummaryConfig.from_env()
@@ -188,8 +190,8 @@ class WorkerLiveStreamServer:
                 await self._send_html(writer, 200, _native_codex_page())
                 return
 
-            if parsed.path.startswith("/api/native/codex"):
-                await self._handle_native_route(
+            if parsed.path.startswith("/api/native/"):
+                await self._handle_native_agent_route(
                     reader,
                     writer,
                     method,
@@ -384,7 +386,7 @@ class WorkerLiveStreamServer:
             raise ValueError("JSON body must be an object")
         return parsed
 
-    async def _handle_native_route(
+    async def _handle_native_agent_route(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
@@ -393,20 +395,38 @@ class WorkerLiveStreamServer:
         headers: dict[str, str],
         query: dict[str, list[str]],
     ) -> None:
+        provider_name, provider_suffix = _native_provider_route_parts(path)
+        provider = self._native_provider(provider_name)
+        if provider is None:
+            if provider_name == "codex" and self._native_registry is None:
+                if not self._is_authorized(writer, headers, query, require_token=False):
+                    await self._send_json(writer, 401, {"error": "unauthorized"})
+                    return
+                await self._send_json(
+                    writer,
+                    503,
+                    {"error": "native controller unavailable"},
+                )
+                return
+            await self._send_json(writer, 404, {"error": "unknown native provider"})
+            return
+        legacy_codex_controller = (
+            provider_name == "codex"
+            and self._native_registry is None
+            and self._native_controller is not None
+        )
         if not self._is_authorized(
             writer,
             headers,
             query,
-            require_token=self._native_controller is not None,
+            require_token=provider is not None,
         ):
             await self._send_json(writer, 401, {"error": "unauthorized"})
             return
-        if self._native_controller is None:
-            await self._send_json(writer, 503, {"error": "native controller unavailable"})
-            return
 
-        base = "/api/native/codex"
-        if path == f"{base}/login-ticket":
+        target = self._native_controller if legacy_codex_controller else provider
+        route = f"/{provider_suffix}" if provider_suffix else ""
+        if route == "/login-ticket":
             if not self._access_token:
                 await self._send_json(writer, 404, {"error": "not found"})
                 return
@@ -419,25 +439,38 @@ class WorkerLiveStreamServer:
                 200,
                 {
                     "ticket": ticket,
-                    "path": f"/native/codex/login?ticket={quote(ticket, safe='')}",
+                    "path": (
+                        f"/native/{provider_name}/login?"
+                        f"ticket={quote(ticket, safe='')}"
+                    ),
                     "expires_in": _LOGIN_TICKET_TTL_SECONDS,
                 },
             )
             return
 
-        if path == f"{base}/status":
+        if route == "/status":
             if method != "GET":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
-            status = await self._native_controller.status()
+            status = await target.status()
             await self._send_json(writer, 200, _json_object(status))
             return
 
-        if path == f"{base}/sessions":
+        if route == "/capabilities":
             if method != "GET":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
-            sessions = await self._native_controller.list_sessions()
+            await self._send_json(writer, 200, provider.capabilities().to_json_dict())
+            return
+
+        if route == "/sessions":
+            if method != "GET":
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
+            if legacy_codex_controller:
+                sessions = await target.list_sessions()
+            else:
+                sessions = await target.list_sessions(50)
             await self._send_json(
                 writer,
                 200,
@@ -445,11 +478,11 @@ class WorkerLiveStreamServer:
             )
             return
 
-        if path == f"{base}/models":
+        if route == "/models":
             if method != "GET":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
-            models = await self._native_controller.list_models()
+            models = await target.list_models()
             await self._send_json(
                 writer,
                 200,
@@ -457,7 +490,7 @@ class WorkerLiveStreamServer:
             )
             return
 
-        if path == f"{base}/sessions/start":
+        if route == "/sessions/start":
             if method != "POST":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
@@ -470,7 +503,7 @@ class WorkerLiveStreamServer:
                 body.get("service_tier") or body.get("serviceTier")
             )
             if prompt.strip():
-                result = await self._native_controller.start_session(
+                result = await target.start_session(
                     str(body.get("cwd", "")),
                     prompt,
                     model=model,
@@ -479,7 +512,7 @@ class WorkerLiveStreamServer:
                     images=_safe_image_attachments(body.get("images")),
                 )
             else:
-                result = await self._native_controller.create_session(
+                result = await target.create_session(
                     str(body.get("cwd", "")),
                     model=model,
                     service_tier=service_tier,
@@ -487,15 +520,19 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 200, _json_object(result))
             return
 
-        approval_prefix = f"{base}/approvals/"
-        if path.startswith(approval_prefix):
-            parts = [unquote(part) for part in path[len(approval_prefix) :].split("/") if part]
+        approval_prefix = "/approvals/"
+        if route.startswith(approval_prefix):
+            parts = [
+                unquote(part)
+                for part in route[len(approval_prefix) :].split("/")
+                if part
+            ]
             if len(parts) == 2 and parts[1] == "resolve" and method == "POST":
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
                     return
                 try:
-                    result = await self._native_controller.resolve_approval(parts[0], body)
+                    result = await target.resolve_approval(parts[0], body)
                 except KeyError:
                     await self._send_json(
                         writer,
@@ -511,11 +548,11 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 404, {"error": "not found"})
             return
 
-        session_prefix = f"{base}/sessions/"
-        if not path.startswith(session_prefix):
+        session_prefix = "/sessions/"
+        if not route.startswith(session_prefix):
             await self._send_json(writer, 404, {"error": "not found"})
             return
-        remainder = path[len(session_prefix) :]
+        remainder = route[len(session_prefix) :]
         parts = [unquote(part) for part in remainder.split("/") if part]
         if not parts:
             await self._send_json(writer, 404, {"error": "not found"})
@@ -524,22 +561,22 @@ class WorkerLiveStreamServer:
         action = parts[1] if len(parts) > 1 else ""
 
         if method == "GET" and action == "" and len(parts) == 1:
-            session = await self._native_controller.read_session(thread_id)
+            session = await target.read_session(thread_id)
             await self._send_json(writer, 200, _json_object(session))
             return
         if method == "POST" and action == "attach" and len(parts) == 2:
-            session = await self._native_controller.attach_session(thread_id)
+            session = await target.attach_session(thread_id)
             await self._send_json(writer, 200, _json_object(session))
             return
         if method == "POST" and action == "sync" and len(parts) == 2:
-            session = await self._native_controller.sync_session(thread_id)
+            session = await target.sync_session(thread_id)
             await self._send_json(writer, 200, _json_object(session))
             return
         if method == "POST" and action == "continue" and len(parts) == 2:
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
                 return
-            result = await self._native_controller.continue_session(
+            result = await target.continue_session(
                 thread_id,
                 str(body.get("prompt", "")),
                 model=_optional_nonempty_string(body.get("model")),
@@ -558,7 +595,7 @@ class WorkerLiveStreamServer:
             expected_turn_id = str(
                 body.get("expected_turn_id") or body.get("turn_id") or ""
             )
-            result = await self._native_controller.steer_session(
+            result = await target.steer_session(
                 thread_id,
                 expected_turn_id,
                 str(body.get("prompt", "")),
@@ -575,13 +612,44 @@ class WorkerLiveStreamServer:
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
                 return
-            result = await self._native_controller.interrupt_session(
+            result = await target.interrupt_session(
                 thread_id,
                 str(body.get("turn_id", "")),
             )
             await self._send_json(writer, 200, _json_object(result))
             return
         await self._send_json(writer, 404, {"error": "not found"})
+
+    async def _handle_native_route(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        query: dict[str, list[str]],
+    ) -> None:
+        await self._handle_native_agent_route(
+            reader,
+            writer,
+            method,
+            path,
+            headers,
+            query,
+        )
+
+    def _native_provider(self, provider_name: str) -> Any | None:
+        if not provider_name:
+            return None
+        if self._native_registry is not None:
+            provider = self._native_registry.maybe_get(provider_name)
+            if provider is not None:
+                return provider
+        if provider_name == "codex" and self._native_controller is not None:
+            from wlcodex.native_agents.codex_provider import CodexAppServerProvider
+
+            return CodexAppServerProvider(self._native_controller)
+        return None
 
     async def _read_request_json(
         self,
@@ -833,6 +901,14 @@ def _agent_id_from_path(path: str, *, prefix: str, suffix: str) -> int | None:
     if not raw.isdigit():
         return None
     return int(raw)
+
+
+def _native_provider_route_parts(path: str) -> tuple[str, str]:
+    prefix = "/api/native/"
+    if not path.startswith(prefix):
+        return "", ""
+    provider, _, suffix = path[len(prefix) :].partition("/")
+    return unquote(provider), suffix
 
 
 def _safe_int(raw: str, *, default: int) -> int:

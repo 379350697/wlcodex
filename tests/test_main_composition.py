@@ -658,6 +658,7 @@ def test_create_live_stream_components_wires_native_controller_when_enabled(
     assert components is not None
     assert components.server._native_controller is not None
     assert components.native_registry.get("codex").provider_engine == "app-server"
+    assert components.server._native_registry is components.native_registry
     assert components.server._access_token == "secret"
 
 

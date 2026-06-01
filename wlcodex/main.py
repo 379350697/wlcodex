@@ -296,6 +296,7 @@ def _create_live_stream_components(
         port=config.live_stream.port,
         hub=hub,
         native_controller=native_controller,
+        native_registry=native_registry,
         access_token=access_token,
         allow_unauthenticated_loopback=(
             config.live_stream.allow_unauthenticated_loopback
