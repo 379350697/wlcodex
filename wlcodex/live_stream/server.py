@@ -10,6 +10,16 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from wlcodex.auto_digest_llm import DigestClient
+from wlcodex.council import (
+    CouncilConfig,
+    CouncilReviewPacket,
+    CouncilReviewService,
+    CouncilSeatAssignment,
+    NativeProviderCouncilReviewer,
+    council_assignment_diversity,
+    default_council_config,
+    default_council_seat_definitions,
+)
 from wlcodex.live_stream.collapse import (
     LiveTurnSummaryConfig,
     summarize_turn_with_sidecar,
@@ -220,6 +230,40 @@ class WorkerLiveStreamServer:
 
             if parsed.path.startswith("/api/native/"):
                 await self._handle_native_agent_route(
+                    reader,
+                    writer,
+                    method,
+                    parsed.path,
+                    headers,
+                    query,
+                )
+                return
+
+            if parsed.path in ("/council", "/council/seats"):
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                if not self._is_authorized(
+                    writer,
+                    headers,
+                    query,
+                    require_token=(
+                        self._native_registry is not None
+                        or self._native_controller is not None
+                    ),
+                ):
+                    await self._send_html(writer, 401, _native_token_entry_page())
+                    return
+                page = (
+                    _council_seats_page()
+                    if parsed.path == "/council/seats"
+                    else _council_review_page()
+                )
+                await self._send_html(writer, 200, page)
+                return
+
+            if parsed.path.startswith("/api/council/"):
+                await self._handle_council_route(
                     reader,
                     writer,
                     method,
@@ -659,6 +703,125 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 200, _json_object(result))
             return
         await self._send_json(writer, 404, {"error": "not found"})
+
+    async def _handle_council_route(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        query: dict[str, list[str]],
+    ) -> None:
+        if not self._is_authorized(
+            writer,
+            headers,
+            query,
+            require_token=(
+                self._native_registry is not None
+                or self._native_controller is not None
+            ),
+        ):
+            await self._send_json(writer, 401, {"error": "unauthorized"})
+            return
+
+        if path == "/api/council/config/default":
+            if method != "GET":
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
+            await self._send_json(
+                writer,
+                200,
+                await self._default_council_config_payload(),
+            )
+            return
+
+        if path == "/api/council/runs":
+            if method != "POST":
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
+            body = await self._read_request_json(writer, reader, headers)
+            if body is None:
+                return
+            try:
+                packet = _council_packet_from_body(body)
+                config = await self._council_config_from_body(body)
+                reviewer = NativeProviderCouncilReviewer(
+                    provider_resolver=_ServerNativeProviderResolver(self),
+                    default_cwd=str(body.get("cwd") or ""),
+                )
+                board = await CouncilReviewService(reviewer=reviewer).review_packet(
+                    packet=packet,
+                    config=config,
+                )
+            except ValueError as exc:
+                await self._send_json(writer, 400, {"error": str(exc)})
+                return
+            await self._send_json(writer, 200, board.to_json_dict())
+            return
+
+        await self._send_json(writer, 404, {"error": "not found"})
+
+    async def _default_council_config_payload(self) -> dict[str, Any]:
+        providers = self._council_provider_summaries()
+        models = await self._council_provider_models(providers)
+        provider_name = str(providers[0]["provider"]) if providers else "codex"
+        model_name = _first_model_id(models.get(provider_name, ())) or "default"
+        config = default_council_config(provider=provider_name, model=model_name)
+        payload = config.to_json_dict()
+        payload["providers"] = providers
+        payload["models"] = models
+        payload["diversity"] = council_assignment_diversity(
+            config.assignments
+        ).to_json_dict()
+        return payload
+
+    async def _council_config_from_body(self, body: dict[str, Any]) -> CouncilConfig:
+        raw_config = body.get("config")
+        if not isinstance(raw_config, dict):
+            default_payload = await self._default_council_config_payload()
+            raw_config = default_payload
+        assignments = _council_assignments_from_json(raw_config.get("assignments"))
+        return CouncilConfig(
+            seat_definitions=default_council_seat_definitions(),
+            assignments=assignments,
+            required_seat_ids=_tuple_from_json(raw_config.get("required_seat_ids")),
+            mode=str(raw_config.get("mode") or "council"),
+            enabled=bool(raw_config.get("enabled", True)),
+        )
+
+    def _council_provider_summaries(self) -> list[dict[str, str]]:
+        if self._native_registry is not None:
+            return [
+                {
+                    "provider": str(summary.get("provider") or ""),
+                    "provider_engine": str(summary.get("provider_engine") or ""),
+                }
+                for summary in self._native_registry.list_provider_summaries()
+            ]
+        if self._native_controller is not None:
+            return [{"provider": "codex", "provider_engine": "app-server"}]
+        return []
+
+    async def _council_provider_models(
+        self,
+        providers: list[dict[str, str]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        models: dict[str, list[dict[str, Any]]] = {}
+        for summary in providers:
+            provider_name = str(summary.get("provider") or "")
+            provider = self._native_provider(provider_name)
+            list_models = getattr(provider, "list_models", None)
+            if not callable(list_models):
+                models[provider_name] = []
+                continue
+            try:
+                raw_models = await list_models()
+            except Exception:
+                models[provider_name] = []
+                continue
+            models[provider_name] = [_json_object(model) for model in raw_models]
+        return models
 
     async def _handle_native_route(
         self,
@@ -1110,6 +1273,67 @@ def _json_object(value: Any) -> dict[str, Any]:
     return {"value": value}
 
 
+class _ServerNativeProviderResolver:
+    def __init__(self, server: WorkerLiveStreamServer) -> None:
+        self._server = server
+
+    def get(self, provider: str) -> Any:
+        target = self._server._native_provider(provider)
+        if target is None:
+            raise KeyError(f"unknown native provider: {provider}")
+        return target
+
+
+def _council_packet_from_body(body: dict[str, Any]) -> CouncilReviewPacket:
+    return CouncilReviewPacket(
+        title=str(body.get("title") or ""),
+        proposal=str(body.get("proposal") or ""),
+        context=str(body.get("context") or ""),
+        success_criteria=_tuple_from_json(body.get("success_criteria")),
+        constraints=_tuple_from_json(body.get("constraints")),
+        metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+    )
+
+
+def _council_assignments_from_json(value: Any) -> tuple[CouncilSeatAssignment, ...]:
+    if not isinstance(value, list):
+        return ()
+    assignments: list[CouncilSeatAssignment] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        assignments.append(
+            CouncilSeatAssignment(
+                seat_id=str(raw.get("seat_id") or ""),
+                provider=str(raw.get("provider") or ""),
+                model=str(raw.get("model") or ""),
+                profile=str(raw.get("profile") or ""),
+                enabled=bool(raw.get("enabled", True)),
+                metadata=raw.get("metadata")
+                if isinstance(raw.get("metadata"), dict)
+                else {},
+            )
+        )
+    return tuple(assignments)
+
+
+def _tuple_from_json(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple):
+        return tuple(str(item) for item in value if str(item).strip())
+    return ()
+
+
+def _first_model_id(models: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> str:
+    for model in models:
+        for key in ("id", "name", "model"):
+            value = str(model.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
 def _native_provider_display_name(provider: str) -> str:
     names = {
         "codex": "Codex",
@@ -1121,6 +1345,16 @@ def _native_provider_display_name(provider: str) -> str:
 
 
 def _native_provider_index_html(providers: list[dict[str, str]]) -> str:
+    council_links = """
+      <a class="provider council" href="/council">
+        <span>议会审核</span>
+        <small>提交方案并运行五席审核</small>
+      </a>
+      <a class="provider council" href="/council/seats">
+        <span>席位配置</span>
+        <small>配置唱反调、第一性原理、扩展思路、局外人、执行者</small>
+      </a>
+    """
     if providers:
         links = "\n".join(
             (
@@ -1146,6 +1380,7 @@ def _native_provider_index_html(providers: list[dict[str, str]]) -> str:
     main {{ display: grid; gap: 14px; max-width: 560px; margin: 0 auto; }}
     h1 {{ margin: 0 0 8px; font-size: 28px; letter-spacing: 0; }}
     .provider {{ display: grid; gap: 4px; min-height: 64px; align-content: center; padding: 12px 0; border-bottom: 1px solid #24262d; color: inherit; text-decoration: none; }}
+    .provider.council {{ border-bottom-color: #334155; }}
     .provider span {{ font-size: 20px; font-weight: 760; }}
     .provider small, .empty {{ color: #9ca3af; }}
   </style>
@@ -1153,8 +1388,318 @@ def _native_provider_index_html(providers: list[dict[str, str]]) -> str:
 <body>
   <main>
     <h1>Native Agents</h1>
+    {council_links}
     {links}
   </main>
+</body>
+</html>"""
+
+
+def _council_review_page() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>议会审核</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #050506; color: #f7f7f8; }
+    header { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: center; min-height: 72px; padding: 10px 18px; background: rgba(5,5,6,.96); border-bottom: 1px solid #26282f; }
+    .circle { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 50%; border: 1px solid #34363d; background: #202126; color: #fff; text-decoration: none; font-size: 28px; line-height: 1; }
+    h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
+    .config-link { min-height: 42px; padding: 0 14px; border-radius: 21px; border: 1px solid #34363d; color: #f7f7f8; display: inline-grid; place-items: center; text-decoration: none; font-weight: 720; }
+    main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 18px; width: min(1180px, 100%); margin: 0 auto; padding: 18px; }
+    section { min-width: 0; }
+    .panel { border: 1px solid #2f3138; background: #111217; border-radius: 8px; padding: 14px; }
+    .stack { display: grid; gap: 12px; }
+    label { display: grid; gap: 6px; color: #d4d7de; font-size: 14px; font-weight: 680; }
+    input, textarea, select { width: 100%; min-width: 0; border: 1px solid #383b43; border-radius: 8px; background: #1b1d24; color: #f7f7f8; font: inherit; padding: 11px 12px; }
+    textarea { min-height: 124px; resize: vertical; line-height: 1.48; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .run { min-height: 48px; border: 0; border-radius: 8px; background: #f7f7f8; color: #050506; font-weight: 800; font-size: 16px; }
+    .muted { color: #9ca3af; font-size: 13px; line-height: 1.45; }
+    .seat-list, .results { display: grid; gap: 10px; }
+    .seat, .result { border: 1px solid #2b2d34; border-radius: 8px; padding: 12px; background: #0d0e12; }
+    .seat-head, .result-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .seat-title, .result-title { font-weight: 800; }
+    .badge { border-radius: 999px; padding: 4px 8px; background: #22252e; color: #cfd3dc; font-size: 12px; white-space: nowrap; }
+    .summary { margin-top: 8px; color: #d9dde6; line-height: 1.5; white-space: pre-wrap; }
+    .error { color: #fecaca; }
+    @media (max-width: 820px) {
+      main { grid-template-columns: 1fr; padding-bottom: 96px; }
+      header { grid-template-columns: 46px 1fr; }
+      .config-link { grid-column: 1 / -1; }
+      .row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="circle" href="/native" aria-label="back">‹</a>
+    <h1>议会审核</h1>
+    <a class="config-link" href="/council/seats">席位配置</a>
+  </header>
+  <main>
+    <section class="panel stack">
+      <div>
+        <strong>Review Packet</strong>
+        <div class="muted">把同一份方案锁定后交给五个席位审核。</div>
+      </div>
+      <label>标题<input id="title" value="方案审核"></label>
+      <label>方案<textarea id="proposal" placeholder="粘贴要审核的方案、需求或实现摘要"></textarea></label>
+      <label>上下文<textarea id="context" placeholder="可选：相关背景、约束、当前分支、风险"></textarea></label>
+      <div class="row">
+        <label>成功标准<textarea id="success" placeholder="每行一条"></textarea></label>
+        <label>约束<textarea id="constraints" placeholder="每行一条"></textarea></label>
+      </div>
+      <label>工作目录<input id="cwd" placeholder="/Users/wl/projects/wlcodex"></label>
+      <button class="run" id="run">启动议会审核</button>
+      <div class="muted" id="status">正在读取席位配置...</div>
+    </section>
+    <aside class="stack">
+      <section class="panel stack">
+        <div>
+          <strong>当前席位</strong>
+          <div class="muted" id="diversity">模型多样性等待计算</div>
+        </div>
+        <div class="seat-list" id="seats"></div>
+      </section>
+      <section class="panel stack">
+        <div>
+          <strong>审核结果</strong>
+          <div class="muted">Chair synthesis 会先显示，五席输出随后展开。</div>
+        </div>
+        <div class="results" id="results"></div>
+      </section>
+    </aside>
+  </main>
+  <script>
+    const DEFAULT_CONFIG_URL = "/api/council/config/default";
+    const RUN_URL = "/api/council/runs";
+    const STORAGE_KEY = "wlcodexCouncilConfig";
+    let config = null;
+
+    const $ = (id) => document.getElementById(id);
+    const lines = (text) => text.split("\\n").map((item) => item.trim()).filter(Boolean);
+    const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}[ch]));
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {"Content-Type": "application/json", ...(options.headers || {})},
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      return data;
+    }
+
+    function savedConfig(defaultConfig) {
+      try {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+        if (saved && Array.isArray(saved.assignments)) return {...defaultConfig, ...saved};
+      } catch (_error) {}
+      return defaultConfig;
+    }
+
+    function renderSeats() {
+      const assignments = (config.assignments || []).filter((seat) => seat.enabled !== false);
+      const definitions = Object.fromEntries((config.seat_definitions || []).map((seat) => [seat.seat_id, seat]));
+      $("seats").innerHTML = assignments.map((assignment) => {
+        const definition = definitions[assignment.seat_id] || {};
+        return `<div class="seat"><div class="seat-head"><span class="seat-title">${esc(definition.role || assignment.seat_id)}</span><span class="badge">${esc(assignment.provider)} · ${esc(assignment.model)}</span></div><div class="summary">${esc(definition.mission || "")}</div></div>`;
+      }).join("");
+      const unique = new Set(assignments.map((item) => `${item.provider}:${item.model}`)).size;
+      $("diversity").textContent = `模型多样性 ${unique}/${assignments.length || 0}`;
+    }
+
+    function renderBoard(board) {
+      const synthesis = board.synthesis || {};
+      const results = board.results || [];
+      $("results").innerHTML = [
+        `<div class="result"><div class="result-head"><span class="result-title">Chair Synthesis</span><span class="badge">${esc(synthesis.consensus || board.status || "")}</span></div><div class="summary">${esc((synthesis.required_changes || []).join("\\n") || "等待席位输出同步。")}</div></div>`,
+        ...results.map((result) => `<div class="result"><div class="result-head"><span class="result-title">${esc(result.seat_id)}</span><span class="badge">${esc(result.status)} · ${esc(result.verdict)}</span></div><div class="summary">${esc(result.summary || result.error || "")}</div></div>`)
+      ].join("");
+    }
+
+    async function loadConfig() {
+      const defaults = await api(DEFAULT_CONFIG_URL);
+      config = savedConfig(defaults);
+      renderSeats();
+      $("status").textContent = "席位配置已就绪。";
+    }
+
+    $("run").onclick = async () => {
+      $("status").textContent = "议会审核启动中...";
+      $("results").innerHTML = "";
+      try {
+        const board = await api(RUN_URL, {
+          method: "POST",
+          body: JSON.stringify({
+            title: $("title").value,
+            proposal: $("proposal").value,
+            context: $("context").value,
+            success_criteria: lines($("success").value),
+            constraints: lines($("constraints").value),
+            cwd: $("cwd").value,
+            config,
+          }),
+        });
+        renderBoard(board);
+        $("status").textContent = `运行状态：${board.status}`;
+      } catch (error) {
+        $("status").innerHTML = `<span class="error">${esc(error.message)}</span>`;
+      }
+    };
+    loadConfig().catch((error) => {$("status").innerHTML = `<span class="error">${esc(error.message)}</span>`;});
+  </script>
+</body>
+</html>"""
+
+
+def _council_seats_page() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>议会席位配置</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #050506; color: #f7f7f8; }
+    header { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: center; min-height: 72px; padding: 10px 18px; background: rgba(5,5,6,.96); border-bottom: 1px solid #26282f; }
+    .circle { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 50%; border: 1px solid #34363d; background: #202126; color: #fff; text-decoration: none; font-size: 28px; line-height: 1; }
+    h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
+    .review-link, button.save { min-height: 42px; padding: 0 14px; border-radius: 21px; border: 1px solid #34363d; color: #f7f7f8; background: #202126; display: inline-grid; place-items: center; text-decoration: none; font-weight: 720; }
+    main { display: grid; gap: 14px; width: min(980px, 100%); margin: 0 auto; padding: 18px; }
+    .toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid #2f3138; background: #111217; border-radius: 8px; padding: 14px; }
+    .muted { color: #9ca3af; font-size: 13px; line-height: 1.45; }
+    .seat-grid { display: grid; gap: 12px; }
+    .seat { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(140px, .7fr) minmax(160px, .8fr) auto; gap: 10px; align-items: center; border: 1px solid #2b2d34; border-radius: 8px; padding: 12px; background: #0d0e12; }
+    .seat-title { display: grid; gap: 5px; min-width: 0; }
+    .role { font-weight: 820; font-size: 17px; }
+    .mission { color: #aeb4bf; font-size: 13px; line-height: 1.45; }
+    label { display: grid; gap: 5px; color: #d4d7de; font-size: 12px; font-weight: 680; }
+    input, select { width: 100%; min-width: 0; border: 1px solid #383b43; border-radius: 8px; background: #1b1d24; color: #f7f7f8; font: inherit; padding: 10px 11px; }
+    .switch { width: 54px; height: 32px; }
+    @media (max-width: 760px) {
+      header { grid-template-columns: 46px 1fr; }
+      .review-link { grid-column: 1 / -1; }
+      .toolbar { display: grid; }
+      .seat { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="circle" href="/native" aria-label="back">‹</a>
+    <h1>议会席位配置</h1>
+    <a class="review-link" href="/council">议会审核</a>
+  </header>
+  <main>
+    <section class="toolbar">
+      <div>
+        <strong>默认议会</strong>
+        <div class="muted">固定五席：唱反调、第一性原理、扩展思路、局外人、执行者</div>
+        <div class="muted" id="diversity">读取席位中...</div>
+      </div>
+      <button class="save" id="save">保存配置</button>
+    </section>
+    <section class="seat-grid" id="seats"></section>
+  </main>
+  <script>
+    const DEFAULT_CONFIG_URL = "/api/council/config/default";
+    const STORAGE_KEY = "wlcodexCouncilConfig";
+    let config = null;
+    let models = {};
+    const $ = (id) => document.getElementById(id);
+    const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}[ch]));
+
+    async function api(path) {
+      const response = await fetch(path);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      return data;
+    }
+
+    function savedConfig(defaultConfig) {
+      try {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+        if (saved && Array.isArray(saved.assignments)) return {...defaultConfig, ...saved};
+      } catch (_error) {}
+      return defaultConfig;
+    }
+
+    function modelOptions(provider, current) {
+      const available = models[provider] || [];
+      const ids = available.map((item) => item.id || item.name || item.model).filter(Boolean);
+      if (current && !ids.includes(current)) ids.unshift(current);
+      return ids.map((id) => `<option value="${esc(id)}"${id === current ? " selected" : ""}>${esc(id)}</option>`).join("");
+    }
+
+    function render() {
+      const providers = config.providers || [];
+      const definitions = Object.fromEntries((config.seat_definitions || []).map((seat) => [seat.seat_id, seat]));
+      $("seats").innerHTML = (config.assignments || []).map((assignment, index) => {
+        const definition = definitions[assignment.seat_id] || {};
+        const providerOptions = providers.map((provider) => {
+          const id = provider.provider;
+          return `<option value="${esc(id)}"${id === assignment.provider ? " selected" : ""}>${esc(id)}</option>`;
+        }).join("");
+        return `<div class="seat" data-index="${index}">
+          <div class="seat-title"><span class="role">${esc(definition.role || assignment.seat_id)}</span><span class="mission">${esc(definition.mission || "")}</span></div>
+          <label>Provider<select data-field="provider">${providerOptions}</select></label>
+          <label>Model<select data-field="model">${modelOptions(assignment.provider, assignment.model)}</select></label>
+          <label>启用<input class="switch" type="checkbox" data-field="enabled"${assignment.enabled !== false ? " checked" : ""}></label>
+        </div>`;
+      }).join("");
+      updateDiversity();
+    }
+
+    function updateDiversity() {
+      const enabled = (config.assignments || []).filter((seat) => seat.enabled !== false);
+      const unique = new Set(enabled.map((seat) => `${seat.provider}:${seat.model}`)).size;
+      $("diversity").textContent = `模型多样性 ${unique}/${enabled.length || 0}，允许同一模型担任多个席位。`;
+    }
+
+    $("seats").onchange = (event) => {
+      const row = event.target.closest(".seat");
+      if (!row) return;
+      const assignment = config.assignments[Number(row.dataset.index)];
+      const field = event.target.dataset.field;
+      if (field === "enabled") assignment.enabled = event.target.checked;
+      if (field === "provider") {
+        assignment.provider = event.target.value;
+        const first = (models[assignment.provider] || [])[0];
+        assignment.model = first ? (first.id || first.name || first.model || assignment.model) : assignment.model;
+        render();
+        return;
+      }
+      if (field === "model") assignment.model = event.target.value;
+      updateDiversity();
+    };
+
+    $("save").onclick = () => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        mode: config.mode,
+        enabled: config.enabled,
+        assignments: config.assignments,
+        required_seat_ids: config.required_seat_ids,
+      }));
+      $("diversity").textContent = "配置已保存。";
+      setTimeout(updateDiversity, 900);
+    };
+
+    api(DEFAULT_CONFIG_URL).then((defaults) => {
+      models = defaults.models || {};
+      config = savedConfig(defaults);
+      render();
+    }).catch((error) => {
+      $("diversity").textContent = error.message;
+    });
+  </script>
 </body>
 </html>"""
 
