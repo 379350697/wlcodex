@@ -314,7 +314,7 @@ async def test_cli_provider_hides_local_duplicate_after_created_session_claims_p
         title="Latest Local",
         cwd=str(workspace),
         created_at="2026-06-03T00:00:00+00:00",
-        updated_at="2026-06-03T00:00:01+00:00",
+        updated_at="2999-06-03T00:00:01+00:00",
         source_path=str(tmp_path / "latest-conv.pb"),
     )
 

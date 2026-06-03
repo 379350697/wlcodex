@@ -504,14 +504,18 @@ class AntigravityCliLocalProvider:
         self,
         conversation_id: str,
     ) -> NativeAgentSession | None:
+        matches: list[NativeAgentSession] = []
         for session in self._session_store.list_recent(
             provider=self.provider,
             provider_engine=self.provider_engine,
             limit=500,
         ):
             if _antigravity_conversation_id(session) == conversation_id:
+                matches.append(session)
+        for session in matches:
+            if session.native_session_id != conversation_id:
                 return session
-        return None
+        return matches[0] if matches else None
 
     def _runtime_turns(self, session: NativeAgentSession) -> list[dict[str, str]]:
         if self._runtime_store is None:
