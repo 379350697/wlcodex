@@ -31,6 +31,7 @@ class ClaudeSdkDeepSeekConfig:
     api_key_env: str = "DEEPSEEK_API_KEY"
     base_url: str = "https://api.deepseek.com/anthropic"
     model: str = "deepseek-v4-pro"
+    effort: str = "medium"
     ccswitch_fallback_enabled: bool = True
     ccswitch_db_path: str = str(DEFAULT_CCSWITCH_DB_PATH)
 
@@ -39,6 +40,17 @@ class ClaudeSdkDeepSeekConfig:
 class _RunOutcome:
     status: str
     error: str = ""
+
+
+_DEEPSEEK_REASONING_EFFORTS = [
+    {"reasoningEffort": "low", "description": "轻量"},
+    {"reasoningEffort": "medium", "description": "正常"},
+    {"reasoningEffort": "high", "description": "深度"},
+    {"reasoningEffort": "xhigh", "description": "极深"},
+]
+_DEEPSEEK_REASONING_EFFORT_IDS = {
+    str(item["reasoningEffort"]) for item in _DEEPSEEK_REASONING_EFFORTS
+}
 
 
 class ClaudeAgentSdkRunner:
@@ -63,7 +75,11 @@ class ClaudeAgentSdkRunner:
         os.environ["ANTHROPIC_AUTH_TOKEN"] = api_key
         os.environ["ANTHROPIC_BASE_URL"] = config.base_url
         try:
-            options = ClaudeAgentOptions(cwd=cwd, model=config.model)
+            options = ClaudeAgentOptions(
+                cwd=cwd,
+                model=config.model,
+                effort=config.effort or None,
+            )
             async for message in query(prompt=prompt, options=options):
                 yield message
         finally:
@@ -149,7 +165,16 @@ class ClaudeSdkDeepSeekProvider:
         )
 
     async def list_models(self) -> list[dict[str, Any]]:
-        return [{"id": self._config.model}]
+        return [
+            {
+                "id": self._config.model,
+                "model": self._config.model,
+                "displayName": self._config.model,
+                "defaultReasoningEffort": self._config.effort,
+                "supportedReasoningEfforts": list(_DEEPSEEK_REASONING_EFFORTS),
+                "serviceTiers": [],
+            }
+        ]
 
     async def wait_for_background_tasks(self) -> None:
         if not self._background_tasks:
@@ -396,7 +421,13 @@ class ClaudeSdkDeepSeekProvider:
 
     def _config_for_kwargs(self, kwargs: dict[str, Any]) -> ClaudeSdkDeepSeekConfig:
         model = str(kwargs.get("model") or "").strip()
-        return replace(self._config, model=model) if model else self._config
+        effort = str(kwargs.get("effort") or "").strip()
+        changes: dict[str, str] = {}
+        if model:
+            changes["model"] = model
+        if effort in _DEEPSEEK_REASONING_EFFORT_IDS:
+            changes["effort"] = effort
+        return replace(self._config, **changes) if changes else self._config
 
     def _config_for_credentials(
         self,
@@ -412,7 +443,11 @@ class ClaudeSdkDeepSeekProvider:
         config: ClaudeSdkDeepSeekConfig,
         credentials: DeepSeekCredentials | None = None,
     ) -> dict[str, Any]:
-        metadata = {"base_url": config.base_url, "model": config.model}
+        metadata = {
+            "base_url": config.base_url,
+            "model": config.model,
+            "effort": config.effort,
+        }
         if credentials is not None:
             metadata.update(credentials.safe_metadata())
         return metadata

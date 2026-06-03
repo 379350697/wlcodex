@@ -31,7 +31,9 @@ class FakeSdkRunner:
         config: ClaudeSdkDeepSeekConfig,
         api_key: str = "",
     ):
-        self.calls.append((prompt, cwd, session_id, config.base_url, config.model, api_key))
+        self.calls.append(
+            (prompt, cwd, session_id, config.base_url, config.model, api_key, config.effort)
+        )
         if self.fail:
             raise RuntimeError("sdk failed")
         yield {"type": "assistant", "text": "done"}
@@ -114,12 +116,14 @@ async def test_continue_session_uses_existing_sdk_session_id(
         created.native_session_id,
         "continue",
         model="deepseek-v4-flash",
+        effort="high",
     )
     await provider.wait_for_background_tasks()
 
     assert result.status == "continued"
     assert runner.calls[0][2] == created.native_session_id
     assert runner.calls[0][4] == "deepseek-v4-flash"
+    assert runner.calls[0][6] == "high"
 
 
 @pytest.mark.asyncio
@@ -148,6 +152,29 @@ def test_capabilities_do_not_expose_second_claude_provider(tmp_path: Path) -> No
     assert provider.provider_engine == "sdk-deepseek"
     assert provider.capabilities().can_start_session is True
     assert provider.capabilities().can_steer_active_turn is False
+
+
+@pytest.mark.asyncio
+async def test_list_models_exposes_deepseek_reasoning_levels(tmp_path: Path) -> None:
+    provider, _runner, _store, _runtime_store = _provider(tmp_path)
+
+    models = await provider.list_models()
+
+    assert models == [
+        {
+            "id": "deepseek-v4-pro",
+            "model": "deepseek-v4-pro",
+            "displayName": "deepseek-v4-pro",
+            "defaultReasoningEffort": "medium",
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": "low", "description": "轻量"},
+                {"reasoningEffort": "medium", "description": "正常"},
+                {"reasoningEffort": "high", "description": "深度"},
+                {"reasoningEffort": "xhigh", "description": "极深"},
+            ],
+            "serviceTiers": [],
+        }
+    ]
 
 
 def _ccswitch_db(path: Path) -> None:

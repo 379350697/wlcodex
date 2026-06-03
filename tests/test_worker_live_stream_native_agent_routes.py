@@ -275,7 +275,10 @@ async def test_native_claude_page_uses_claude_api_base(tmp_path: Path) -> None:
 
     assert "HTTP/1.1 200 OK" in response
     assert 'const PROVIDER = "claude";' in response
+    assert 'const PROVIDER_LABEL = "Claude";' in response
     assert 'const API_BASE = "/api/native/claude";' in response
+    assert "<title>Claude</title>" in response
+    assert "<h1>Claude</h1>" in response
     assert "/api/native/codex/sessions" not in response
 
 
@@ -316,8 +319,16 @@ async def test_worker_live_page_uses_native_provider_query(tmp_path: Path) -> No
 
     assert "HTTP/1.1 200 OK" in response
     assert 'const PROVIDER = "claude";' in response
+    assert 'const PROVIDER_LABEL = "Claude";' in response
     assert 'const API_BASE = "/api/native/claude";' in response
+    assert "<h1>Claude</h1>" in response
+    assert "连接 Claude 会话" in response
+    assert "等待 Claude 转录" in response
+    assert 'placeholder="继续 Claude 会话"' in response
     assert "/api/native/codex/sessions/" not in response
+    assert "连接官方 Codex 会话" not in response
+    assert "等待官方 Codex 转录" not in response
+    assert "继续官方 Codex 会话" not in response
 
 
 @pytest.mark.asyncio

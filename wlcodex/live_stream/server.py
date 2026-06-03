@@ -2604,7 +2604,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     <header id="header">
       <button class="circle" id="back" aria-label="返回">‹</button>
       <div class="screen-title">
-        <h1>Codex</h1>
+        <h1>__PROVIDER_LABEL_TEXT__</h1>
         <div class="subtitle"><span class="status-dot"></span><span id="state">connecting</span></div>
       </div>
       <button class="circle" aria-label="菜单">⋮</button>
@@ -2612,11 +2612,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     <main>
       <section class="codex-status-flow run-state" id="runStatus">
         <span class="run-pulse"></span>
-        <span id="runStateLabel">连接官方 Codex 会话</span>
+        <span id="runStateLabel">连接 __PROVIDER_LABEL_TEXT__ 会话</span>
         <span class="event-cursor" id="cursor"></span>
       </section>
       <button class="history-fold" id="historyFold" hidden>更早的消息</button>
-      <section class="codex-transcript" id="events"><div class="empty" id="empty">等待官方 Codex 转录</div></section>
+      <section class="codex-transcript" id="events"><div class="empty" id="empty">等待 __PROVIDER_LABEL_TEXT__ 转录</div></section>
       <div class="composer-activity-dot" id="composerActivityDot" aria-hidden="true"></div>
     </main>
     <section class="codex-input-dock">
@@ -2664,7 +2664,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         <button class="choice-action" id="queueChoice" type="button">排队</button>
       </div>
       <div class="dock-row">
-        <input id="prompt" placeholder="继续官方 Codex 会话">
+        <input id="prompt" placeholder="继续 __PROVIDER_LABEL_TEXT__ 会话">
         <button class="primary-action" id="continue" aria-label="发送">↑</button>
       </div>
       <div class="dock-actions" hidden>
@@ -2779,7 +2779,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       for (const model of models) {
         const option = document.createElement("option");
         option.value = model.model || model.id || "";
-        option.textContent = model.displayName || model.model || model.id || "Codex";
+        option.textContent = model.displayName || model.model || model.id || PROVIDER_LABEL;
         option.selected = Boolean(model.isDefault);
         modelSelector.append(option);
       }
@@ -3999,6 +3999,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     return (
         template
         .replace("__SAFE_TITLE__", safe_title)
+        .replace("__PROVIDER_LABEL_TEXT__", safe_title)
         .replace("__STREAM_PATH__", stream_path)
         .replace("__AGENT_RUN_ID__", str(agent_run_id))
         .replace("__PROVIDER_JSON__", json.dumps(native_provider, ensure_ascii=False))
