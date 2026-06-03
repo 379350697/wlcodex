@@ -253,6 +253,7 @@ class NativeAgentsCodexConfig:
 class NativeAgentsClaudeCliLocalConfig:
     binary: str = "auto"
     model: str = ""
+    effort: str = "max"
     permission_mode: str = "acceptEdits"
 
 
@@ -700,6 +701,7 @@ def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
             cli_local=NativeAgentsClaudeCliLocalConfig(
                 binary=str(cli_raw.get("binary", "auto")),
                 model=str(cli_raw.get("model", "")),
+                effort=str(cli_raw.get("effort", "max")),
                 permission_mode=cli_permission_mode,
             ),
             sdk_deepseek=NativeAgentsClaudeSdkDeepSeekConfig(

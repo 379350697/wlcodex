@@ -2944,6 +2944,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       if (["medium", "default", "normal", ""].includes(key)) return "正常";
       if (key === "high") return "高";
       if (["xhigh", "extra_high"].includes(key)) return "极高";
+      if (["max", "maximum"].includes(key)) return "最大";
       return String(value || "推理");
     }
     function loadSavedModelSettings() {

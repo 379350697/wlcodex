@@ -89,6 +89,33 @@ ccswitch_db_path = "/tmp/cc-switch.db"
     assert config.native_agents.claude.sdk_deepseek.ccswitch_db_path == "/tmp/cc-switch.db"
 
 
+def test_native_agents_parse_claude_cli_local_effort(tmp_path: Path) -> None:
+    config = load_config(
+        _write_config(
+            tmp_path,
+            """
+[native_agents]
+enabled = true
+default_provider = "claude"
+
+[native_agents.claude]
+enabled = true
+engine = "cli-local"
+
+[native_agents.claude.cli_local]
+binary = "/Users/wl/.local/bin/claude"
+model = "deepseek-v4-pro"
+effort = "xhigh"
+permission_mode = "acceptEdits"
+""",
+        )
+    )
+
+    assert config.native_agents.claude.cli_local.model == "deepseek-v4-pro"
+    assert config.native_agents.claude.cli_local.effort == "xhigh"
+    assert config.native_agents.claude.cli_local.permission_mode == "acceptEdits"
+
+
 def test_native_agents_reject_claude_engine_as_provider(tmp_path: Path) -> None:
     with pytest.raises(
         ConfigError,

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from wlcodex.agent_backend import AgentStreamEvent
 from wlcodex.db import Ledger
+from wlcodex.native_agents.claude_local_sessions import ClaudeLocalSessionIndex
 from wlcodex.native_agents.claude_cli_provider import ClaudeCliLocalProvider
 from wlcodex.native_agents.session_store import NativeAgentSessionStore
 from wlcodex.runtime_event_store import RuntimeEventStore
@@ -60,6 +63,7 @@ def _provider(
     tmp_path: Path,
     *,
     engine=None,
+    session_index: ClaudeLocalSessionIndex | None = None,
 ) -> tuple[
     ClaudeCliLocalProvider,
     NativeAgentSessionStore,
@@ -77,6 +81,7 @@ def _provider(
             session_store=store,
             runtime_store=runtime_store,
             default_cwd=str(tmp_path),
+            session_index=session_index or ClaudeLocalSessionIndex(tmp_path / ".claude"),
         ),
         store,
         fake_engine,
@@ -224,6 +229,35 @@ def test_claude_cli_provider_capabilities_disable_active_turn_steering(
 
 
 @pytest.mark.asyncio
+async def test_claude_cli_provider_lists_configured_model_and_reasoning(
+    tmp_path: Path,
+) -> None:
+    engine = FakeClaudeEngine()
+    engine._config = SimpleNamespace(model="deepseek-v4-pro", effort="max")
+    provider, _store, _engine, _runtime_store = _provider(tmp_path, engine=engine)
+
+    models = await provider.list_models()
+
+    assert models == [
+        {
+            "id": "deepseek-v4-pro",
+            "model": "deepseek-v4-pro",
+            "displayName": "deepseek-v4-pro",
+            "isDefault": True,
+            "defaultReasoningEffort": "max",
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": "low", "description": "轻量"},
+                {"reasoningEffort": "medium", "description": "正常"},
+                {"reasoningEffort": "high", "description": "深度"},
+                {"reasoningEffort": "xhigh", "description": "极深"},
+                {"reasoningEffort": "max", "description": "最大"},
+            ],
+            "serviceTiers": [],
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_claude_cli_provider_lists_only_cli_local_sessions(
     tmp_path: Path,
 ) -> None:
@@ -245,6 +279,121 @@ async def test_claude_cli_provider_lists_only_cli_local_sessions(
     sessions = await provider.list_sessions(1)
 
     assert [session.id for session in sessions] == [cli.id]
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_provider_imports_local_claude_sessions_on_list(
+    tmp_path: Path,
+) -> None:
+    _write_claude_session(
+        tmp_path,
+        "33333333-3333-4333-8333-333333333333",
+        [
+            {
+                "type": "user",
+                "sessionId": "33333333-3333-4333-8333-333333333333",
+                "timestamp": "2026-06-03T08:36:15.853Z",
+                "cwd": "/repo",
+                "entrypoint": "claude-code",
+                "version": "2.1.161",
+                "message": {"role": "user", "content": "private prompt"},
+            }
+        ],
+    )
+    provider, store, _engine, _runtime_store = _provider(tmp_path)
+
+    sessions = await provider.list_sessions(50)
+
+    assert [session.native_session_id for session in sessions] == [
+        "33333333-3333-4333-8333-333333333333"
+    ]
+    imported = store.get_by_native_session_id(
+        provider="claude",
+        provider_engine="cli-local",
+        native_session_id="33333333-3333-4333-8333-333333333333",
+    )
+    assert imported is not None
+    assert imported.cwd == "/repo"
+    assert imported.title == "Claude 33333333"
+    assert imported.metadata["claude_session_id"] == (
+        "33333333-3333-4333-8333-333333333333"
+    )
+    assert imported.metadata["entrypoint"] == "claude-code"
+    assert "private" not in imported.title
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_provider_continues_imported_local_session_with_resume(
+    tmp_path: Path,
+) -> None:
+    _write_claude_session(
+        tmp_path,
+        "44444444-4444-4444-8444-444444444444",
+        [
+            {
+                "type": "user",
+                "sessionId": "44444444-4444-4444-8444-444444444444",
+                "timestamp": "2026-06-03T08:36:15.853Z",
+                "cwd": "/repo",
+                "message": {"role": "user", "content": "first"},
+            }
+        ],
+    )
+    provider, _store, engine, _runtime_store = _provider(tmp_path)
+
+    result = await provider.continue_session(
+        "44444444-4444-4444-8444-444444444444",
+        "continue from phone",
+    )
+    await provider.wait_for_background_tasks()
+
+    assert result.status == "continued"
+    assert engine.requests[0].extra == {
+        "resume_session_id": "44444444-4444-4444-8444-444444444444"
+    }
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_provider_syncs_selected_local_transcript_once(
+    tmp_path: Path,
+) -> None:
+    _write_claude_session(
+        tmp_path,
+        "55555555-5555-4555-8555-555555555555",
+        [
+            {
+                "type": "user",
+                "uuid": "user-1",
+                "sessionId": "55555555-5555-4555-8555-555555555555",
+                "timestamp": "2026-06-03T08:36:15.853Z",
+                "cwd": "/repo",
+                "message": {"role": "user", "content": "hello"},
+            },
+            {
+                "type": "assistant",
+                "uuid": "assistant-1",
+                "sessionId": "55555555-5555-4555-8555-555555555555",
+                "timestamp": "2026-06-03T08:36:19.298Z",
+                "cwd": "/repo",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "world"}],
+                },
+            },
+        ],
+    )
+    provider, _store, _engine, runtime_store = _provider(tmp_path)
+
+    attached = await provider.attach_session(
+        "55555555-5555-4555-8555-555555555555"
+    )
+    await provider.sync_session("55555555-5555-4555-8555-555555555555")
+
+    events = runtime_store.list_by_agent_run(attached.agent_run_id)
+    assert [(event.event_type, event.payload.get("text") or event.payload.get("delta")) for event in events] == [
+        (EventType.USER_MESSAGE_RECEIVED, "hello"),
+        (EventType.MODEL_TEXT_DELTA, "world"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -285,3 +434,16 @@ async def test_claude_cli_provider_clears_stale_error_after_success(
     assert session.status == "done"
     assert "error" not in session.metadata
     assert session.metadata["claude_session_id"] == "claude-real-2"
+
+
+def _write_claude_session(
+    root: Path,
+    session_id: str,
+    rows: list[dict],
+) -> None:
+    path = root / ".claude" / "projects" / "-repo" / f"{session_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )

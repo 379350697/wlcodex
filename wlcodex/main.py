@@ -322,6 +322,7 @@ def _create_live_stream_components(
                                     binary=resolution.binary or cli_config.binary,
                                     permission_mode=cli_config.permission_mode,
                                     model=cli_config.model,
+                                    effort=cli_config.effort,
                                     binary_resolution_error=binary_resolution_error,
                                 )
                             ),
