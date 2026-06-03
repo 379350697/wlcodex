@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
 from wlcodex.agent_backend import AgentRequest
+from wlcodex.native_agents.runtime_events import (
+    NativeAgentRuntimeEmitter,
+    extract_native_agent_text,
+)
 from wlcodex.native_agents.models import (
     NativeAgentCapabilities,
     NativeAgentControlResult,
@@ -12,6 +17,7 @@ from wlcodex.native_agents.models import (
     NativeAgentStatus,
 )
 from wlcodex.native_agents.session_store import NativeAgentSessionStore
+from wlcodex.runtime_event_store import RuntimeEventStore
 
 
 @dataclass(frozen=True)
@@ -30,11 +36,18 @@ class ClaudeCliLocalProvider:
         *,
         engine: Any,
         session_store: NativeAgentSessionStore,
+        runtime_store: RuntimeEventStore | None = None,
         default_cwd: str = "",
     ) -> None:
         self._engine = engine
         self._session_store = session_store
+        self._runtime_store = runtime_store
         self._default_cwd = default_cwd
+        self._background_tasks: set[asyncio.Task[None]] = set()
+
+    async def wait_for_background_tasks(self) -> None:
+        while self._background_tasks:
+            await asyncio.gather(*tuple(self._background_tasks))
 
     async def status(self) -> NativeAgentStatus:
         enabled = bool(getattr(self._engine, "enabled", False))
@@ -98,6 +111,7 @@ class ClaudeCliLocalProvider:
     ) -> NativeAgentControlResult:
         self._ensure_enabled()
         native_session_id = f"claude-cli-{uuid4()}"
+        native_turn_id = _new_turn_id()
         session = self._session_store.get_or_create_session(
             provider=self.provider,
             provider_engine=self.provider_engine,
@@ -106,17 +120,20 @@ class ClaudeCliLocalProvider:
             cwd=cwd or self._default_cwd,
             source_kind="claude_cli_local",
             status="running",
+            last_turn_id=native_turn_id,
             metadata={},
         )
-        outcome = await self._run_prompt(
+        self._start_background_prompt(
+            session=session,
+            native_turn_id=native_turn_id,
             prompt=prompt,
-            cwd=session.cwd,
             resume_session_id="",
         )
-        session = self._update_after_run(session, outcome)
         return _control_result(
             session,
-            status="started" if outcome.status == "done" else outcome.status,
+            status="started",
+            turn_id=native_turn_id,
+            turn_running=True,
         )
 
     async def create_session(self, cwd: str, **kwargs: Any) -> NativeAgentControlResult:
@@ -152,15 +169,23 @@ class ClaudeCliLocalProvider:
     ) -> NativeAgentControlResult:
         self._ensure_enabled()
         session = self._lookup_session(native_session_id)
-        outcome = await self._run_prompt(
+        native_turn_id = _new_turn_id()
+        session = self._session_store.update_session(
+            session.id,
+            status="running",
+            last_turn_id=native_turn_id,
+        )
+        self._start_background_prompt(
+            session=session,
+            native_turn_id=native_turn_id,
             prompt=prompt,
-            cwd=session.cwd,
             resume_session_id=_claude_session_id(session),
         )
-        session = self._update_after_run(session, outcome)
         return _control_result(
             session,
-            status="continued" if outcome.status == "done" else outcome.status,
+            status="continued",
+            turn_id=native_turn_id,
+            turn_running=True,
         )
 
     async def steer_session(
@@ -194,17 +219,28 @@ class ClaudeCliLocalProvider:
         prompt: str,
         cwd: str,
         resume_session_id: str,
+        session: NativeAgentSession | None = None,
+        native_turn_id: str = "",
     ) -> _RunOutcome:
         latest_session_id = resume_session_id
         error = ""
         extra = {"resume_session_id": resume_session_id} if resume_session_id else {}
         request = AgentRequest(prompt=prompt, workspace_path=cwd, extra=extra)
         async for event in self._engine.send_streaming(request):
+            event_type = str(getattr(event, "event_type", "") or "")
             event_session_id = str(getattr(event, "session_id", "") or "")
             if event_session_id:
                 latest_session_id = event_session_id
-            if getattr(event, "event_type", "") == "error":
+            if event_type == "error":
                 error = str(getattr(event, "delta", "") or "")
+                continue
+            text = extract_native_agent_text(event)
+            if text:
+                self._emit_text_delta(
+                    session=session,
+                    native_turn_id=native_turn_id,
+                    delta=text,
+                )
         if error:
             return _RunOutcome(
                 status="failed",
@@ -245,17 +281,103 @@ class ClaudeCliLocalProvider:
         if not bool(getattr(self._engine, "enabled", False)):
             raise RuntimeError("Claude CLI provider is disabled")
 
+    def _start_background_prompt(
+        self,
+        *,
+        session: NativeAgentSession,
+        native_turn_id: str,
+        prompt: str,
+        resume_session_id: str,
+    ) -> None:
+        emitter = self._emitter()
+        if emitter is not None:
+            emitter.started(session, native_turn_id=native_turn_id)
+            emitter.user_message(session, native_turn_id=native_turn_id, text=prompt)
+        task = asyncio.create_task(
+            self._run_prompt_to_terminal_state(
+                session=session,
+                native_turn_id=native_turn_id,
+                prompt=prompt,
+                resume_session_id=resume_session_id,
+            )
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_prompt_to_terminal_state(
+        self,
+        *,
+        session: NativeAgentSession,
+        native_turn_id: str,
+        prompt: str,
+        resume_session_id: str,
+    ) -> None:
+        try:
+            outcome = await self._run_prompt(
+                prompt=prompt,
+                cwd=session.cwd,
+                resume_session_id=resume_session_id,
+                session=session,
+                native_turn_id=native_turn_id,
+            )
+        except Exception as exc:  # pragma: no cover - defensive task boundary
+            outcome = _RunOutcome(
+                status="failed",
+                claude_session_id=resume_session_id,
+                error=str(exc),
+            )
+        updated = self._update_after_run(session, outcome)
+        emitter = self._emitter()
+        if emitter is None:
+            return
+        if outcome.status == "done":
+            emitter.completed(updated, native_turn_id=native_turn_id)
+        else:
+            emitter.failed(
+                updated,
+                native_turn_id=native_turn_id,
+                error=outcome.error or "Claude CLI run failed",
+            )
+
+    def _emitter(self) -> NativeAgentRuntimeEmitter | None:
+        if self._runtime_store is None:
+            return None
+        return NativeAgentRuntimeEmitter(
+            runtime_store=self._runtime_store,
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            source_kind="claude_cli_local",
+        )
+
+    def _emit_text_delta(
+        self,
+        *,
+        session: NativeAgentSession | None,
+        native_turn_id: str,
+        delta: str,
+    ) -> None:
+        if session is None or not native_turn_id:
+            return
+        emitter = self._emitter()
+        if emitter is not None:
+            emitter.text_delta(session, native_turn_id=native_turn_id, delta=delta)
+
 
 def _control_result(
     session: NativeAgentSession,
     *,
     status: str,
+    turn_id: str = "",
+    turn_running: bool = False,
 ) -> NativeAgentControlResult:
     return NativeAgentControlResult(
         provider=session.provider,
         provider_engine=session.provider_engine,
         native_session_id=session.native_session_id,
         agent_run_id=session.agent_run_id,
+        turn_id=turn_id,
+        active_turn_id=turn_id if turn_running else "",
+        turn_running=turn_running,
         status=status,
     )
 
@@ -266,6 +388,10 @@ def _title_from_prompt(prompt: str) -> str:
 
 def _claude_session_id(session: NativeAgentSession) -> str:
     return str(session.metadata.get("claude_session_id", "") or "")
+
+
+def _new_turn_id() -> str:
+    return f"cli-local-turn-{uuid4()}"
 
 
 def _engine_config_value(engine: Any, field: str) -> str:

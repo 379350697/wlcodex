@@ -725,19 +725,22 @@ def test_create_live_stream_components_wires_single_claude_sdk_engine(
                     api_key_env="DEEPSEEK_API_KEY",
                     base_url="https://api.deepseek.com/anthropic",
                     model="deepseek-v4-pro",
+                    ccswitch_fallback_enabled=True,
+                    ccswitch_db_path=str(tmp_path / "cc-switch.db"),
                 ),
             ),
         ),
     )
 
-    components = _create_live_stream_components(
-        config,
-        RuntimeEventStore(ledger._conn),
-        ledger,
-    )
+    runtime_store = RuntimeEventStore(ledger._conn)
+    components = _create_live_stream_components(config, runtime_store, ledger)
 
     assert components is not None
-    assert components.native_registry.get("claude").provider_engine == "sdk-deepseek"
+    provider = components.native_registry.get("claude")
+    assert provider.provider_engine == "sdk-deepseek"
+    assert provider._runtime_store is runtime_store
+    assert provider._config.ccswitch_fallback_enabled is True
+    assert provider._config.ccswitch_db_path == str(tmp_path / "cc-switch.db")
     assert components.native_registry.maybe_get("codex") is None
     assert components.server._native_registry is components.native_registry
 

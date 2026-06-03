@@ -185,7 +185,8 @@ enabled = false
 [native_agents.claude]
 # Exactly one Claude engine is active at a time:
 # - cli-local reuses the local Claude Code login state, including ccswitch routing.
-# - sdk-deepseek ignores local ccswitch and uses DEEPSEEK_API_KEY directly.
+# - sdk-deepseek uses DEEPSEEK_API_KEY first, then the current ccswitch DeepSeek
+#   provider credentials.
 enabled = false
 engine = "cli-local"
 
@@ -198,6 +199,8 @@ permission_mode = "acceptEdits"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com/anthropic"
 model = "deepseek-v4-pro"
+ccswitch_fallback_enabled = true
+ccswitch_db_path = "~/.cc-switch/cc-switch.db"
 
 [native_agents.antigravity]
 # SDK provider path. This does not depend on the system-level agy CLI.

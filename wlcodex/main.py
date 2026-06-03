@@ -346,8 +346,13 @@ def _create_live_stream_components(
                                 api_key_env=sdk_config.api_key_env,
                                 base_url=sdk_config.base_url,
                                 model=sdk_config.model,
+                                ccswitch_fallback_enabled=(
+                                    sdk_config.ccswitch_fallback_enabled
+                                ),
+                                ccswitch_db_path=sdk_config.ccswitch_db_path,
                             ),
                             session_store=native_agent_session_store,
+                            runtime_store=runtime_store,
                         )
                     )
 

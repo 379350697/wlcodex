@@ -261,6 +261,8 @@ class NativeAgentsClaudeSdkDeepSeekConfig:
     api_key_env: str = "DEEPSEEK_API_KEY"
     base_url: str = "https://api.deepseek.com/anthropic"
     model: str = "deepseek-v4-pro"
+    ccswitch_fallback_enabled: bool = True
+    ccswitch_db_path: str = "~/.cc-switch/cc-switch.db"
 
 
 @dataclass(frozen=True)
@@ -706,6 +708,12 @@ def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
                     sdk_raw.get("base_url", "https://api.deepseek.com/anthropic")
                 ),
                 model=str(sdk_raw.get("model", "deepseek-v4-pro")),
+                ccswitch_fallback_enabled=bool(
+                    sdk_raw.get("ccswitch_fallback_enabled", True)
+                ),
+                ccswitch_db_path=str(
+                    sdk_raw.get("ccswitch_db_path", "~/.cc-switch/cc-switch.db")
+                ),
             ),
         ),
         antigravity=NativeAgentsAntigravityConfig(

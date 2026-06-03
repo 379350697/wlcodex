@@ -74,6 +74,8 @@ engine = "sdk-deepseek"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com/anthropic"
 model = "deepseek-v4-pro"
+ccswitch_fallback_enabled = false
+ccswitch_db_path = "/tmp/cc-switch.db"
 """,
         )
     )
@@ -83,6 +85,8 @@ model = "deepseek-v4-pro"
     assert config.native_agents.claude.enabled is True
     assert config.native_agents.claude.engine == "sdk-deepseek"
     assert config.native_agents.claude.sdk_deepseek.model == "deepseek-v4-pro"
+    assert config.native_agents.claude.sdk_deepseek.ccswitch_fallback_enabled is False
+    assert config.native_agents.claude.sdk_deepseek.ccswitch_db_path == "/tmp/cc-switch.db"
 
 
 def test_native_agents_reject_claude_engine_as_provider(tmp_path: Path) -> None:

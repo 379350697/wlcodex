@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -10,7 +11,12 @@ from wlcodex.native_agents.models import (
     NativeAgentSession,
     NativeAgentStatus,
 )
+from wlcodex.native_agents.runtime_events import (
+    NativeAgentRuntimeEmitter,
+    extract_native_agent_text,
+)
 from wlcodex.native_agents.session_store import NativeAgentSessionStore
+from wlcodex.runtime_event_store import RuntimeEventStore
 
 
 @dataclass(frozen=True)
@@ -59,10 +65,18 @@ class AntigravitySdkProvider:
         self,
         *,
         session_store: NativeAgentSessionStore,
+        runtime_store: RuntimeEventStore | None = None,
         runner: Any | None = None,
     ) -> None:
         self._session_store = session_store
+        self._runtime_store = runtime_store
         self._runner = runner or AntigravitySdkRunner()
+        self._background_tasks: set[asyncio.Task[None]] = set()
+
+    async def wait_for_background_tasks(self) -> None:
+        if not self._background_tasks:
+            return
+        await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
 
     async def status(self) -> NativeAgentStatus:
         if not bool(getattr(self._runner, "available", False)):
@@ -122,6 +136,7 @@ class AntigravitySdkProvider:
         **kwargs: Any,
     ) -> NativeAgentControlResult:
         native_session_id = f"antigravity-sdk-{uuid4()}"
+        native_turn_id = _new_turn_id()
         session = self._session_store.get_or_create_session(
             provider=self.provider,
             provider_engine=self.provider_engine,
@@ -130,16 +145,18 @@ class AntigravitySdkProvider:
             cwd=cwd,
             source_kind="antigravity_sdk",
             status="running",
+            last_turn_id=native_turn_id,
         )
-        outcome = await self._run_prompt(
+        self._start_background_prompt(
+            session=session,
             prompt=prompt,
-            cwd=session.cwd,
-            session_id=session.native_session_id,
+            native_turn_id=native_turn_id,
         )
-        session = self._update_after_run(session, outcome)
         return _control_result(
             session,
-            status="started" if outcome.status == "done" else outcome.status,
+            status="started",
+            turn_id=native_turn_id,
+            turn_running=True,
         )
 
     async def create_session(self, cwd: str, **kwargs: Any) -> NativeAgentControlResult:
@@ -172,15 +189,22 @@ class AntigravitySdkProvider:
         **kwargs: Any,
     ) -> NativeAgentControlResult:
         session = self._lookup_session(native_session_id)
-        outcome = await self._run_prompt(
-            prompt=prompt,
-            cwd=session.cwd,
-            session_id=session.native_session_id,
+        native_turn_id = _new_turn_id()
+        session = self._session_store.update_session(
+            session.id,
+            status="running",
+            last_turn_id=native_turn_id,
         )
-        session = self._update_after_run(session, outcome)
+        self._start_background_prompt(
+            session=session,
+            prompt=prompt,
+            native_turn_id=native_turn_id,
+        )
         return _control_result(
             session,
-            status="continued" if outcome.status == "done" else outcome.status,
+            status="continued",
+            turn_id=native_turn_id,
+            turn_running=True,
         )
 
     async def steer_session(
@@ -209,20 +233,65 @@ class AntigravitySdkProvider:
     async def _run_prompt(
         self,
         *,
+        session: NativeAgentSession,
         prompt: str,
-        cwd: str,
-        session_id: str,
+        native_turn_id: str,
     ) -> _RunOutcome:
+        emitter = self._emitter()
         try:
-            async for _event in self._runner.run(
+            async for event in self._runner.run(
                 prompt=prompt,
-                cwd=cwd,
-                session_id=session_id,
+                cwd=session.cwd,
+                session_id=session.native_session_id,
             ):
-                pass
+                text = extract_native_agent_text(event)
+                if text and emitter is not None:
+                    emitter.text_delta(session, native_turn_id=native_turn_id, delta=text)
         except Exception as exc:
             return _RunOutcome(status="failed", error=str(exc))
         return _RunOutcome(status="done")
+
+    def _start_background_prompt(
+        self,
+        *,
+        session: NativeAgentSession,
+        prompt: str,
+        native_turn_id: str,
+    ) -> None:
+        emitter = self._emitter()
+        if emitter is not None:
+            emitter.started(session, native_turn_id=native_turn_id)
+            emitter.user_message(session, native_turn_id=native_turn_id, text=prompt)
+        task = asyncio.create_task(
+            self._run_prompt_to_terminal_state(
+                session=session,
+                prompt=prompt,
+                native_turn_id=native_turn_id,
+            )
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_prompt_to_terminal_state(
+        self,
+        *,
+        session: NativeAgentSession,
+        prompt: str,
+        native_turn_id: str,
+    ) -> None:
+        outcome = await self._run_prompt(
+            session=session,
+            prompt=prompt,
+            native_turn_id=native_turn_id,
+        )
+        updated = self._update_after_run(session, outcome)
+        emitter = self._emitter()
+        if emitter is None:
+            return
+        if outcome.status == "done":
+            emitter.completed(updated, native_turn_id=native_turn_id)
+        else:
+            emitter.failed(updated, native_turn_id=native_turn_id, error=outcome.error)
 
     def _update_after_run(
         self,
@@ -250,16 +319,35 @@ class AntigravitySdkProvider:
             raise KeyError(native_session_id)
         return session
 
+    def _emitter(self) -> NativeAgentRuntimeEmitter | None:
+        if self._runtime_store is None:
+            return None
+        return NativeAgentRuntimeEmitter(
+            runtime_store=self._runtime_store,
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            source_kind="antigravity_sdk",
+        )
+
 
 def _control_result(
     session: NativeAgentSession,
     *,
     status: str,
+    turn_id: str = "",
+    turn_running: bool = False,
 ) -> NativeAgentControlResult:
     return NativeAgentControlResult(
         provider=session.provider,
         provider_engine=session.provider_engine,
         native_session_id=session.native_session_id,
         agent_run_id=session.agent_run_id,
+        turn_id=turn_id,
+        active_turn_id=turn_id if turn_running else "",
+        turn_running=turn_running,
         status=status,
     )
+
+
+def _new_turn_id() -> str:
+    return f"antigravity-sdk-turn-{uuid4()}"
