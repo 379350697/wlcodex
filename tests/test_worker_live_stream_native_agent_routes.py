@@ -297,6 +297,38 @@ async def test_native_root_lists_providers(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_root_provider_links_preserve_query_token(
+    tmp_path: Path,
+) -> None:
+    response, _provider = await _request_native_agent(
+        tmp_path,
+        "GET /native?token=secret HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        access_token="secret",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'href="/native/claude?token=secret"' in response
+    assert 'href="/council?token=secret"' in response
+
+
+@pytest.mark.asyncio
+async def test_native_claude_token_entry_returns_to_claude(
+    tmp_path: Path,
+) -> None:
+    response, _provider = await _request_native_agent(
+        tmp_path,
+        "GET /native/claude HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        access_token="secret",
+    )
+
+    assert "HTTP/1.1 401 Unauthorized" in response
+    assert 'location.replace("/native/claude")' in response
+    assert 'location.href = "/native/claude";' in response
+
+
+@pytest.mark.asyncio
 async def test_unknown_native_agent_page_returns_404(tmp_path: Path) -> None:
     response, provider = await _request_native_agent(
         tmp_path,

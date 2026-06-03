@@ -1014,7 +1014,7 @@ class WorkerLiveStreamServer:
                 or self._native_controller is not None
             ),
         ):
-            await self._send_html(writer, 401, _native_token_entry_page())
+            await self._send_html(writer, 401, _native_token_entry_page("/native"))
             return
         if self._native_registry is not None:
             providers = self._native_registry.list_provider_summaries()
@@ -1022,7 +1022,12 @@ class WorkerLiveStreamServer:
             providers = [{"provider": "codex", "provider_engine": "app-server"}]
         else:
             providers = []
-        await self._send_html(writer, 200, _native_provider_index_html(providers))
+        query_token = str((query.get("token") or [""])[0] or "")
+        await self._send_html(
+            writer,
+            200,
+            _native_provider_index_html(providers, access_token=query_token),
+        )
 
     async def _send_native_page(
         self,
@@ -1041,7 +1046,12 @@ class WorkerLiveStreamServer:
             query,
             require_token=True,
         ):
-            await self._send_html(writer, 401, _native_token_entry_page())
+            safe_provider = quote(provider_name, safe="")
+            await self._send_html(
+                writer,
+                401,
+                _native_token_entry_page(f"/native/{safe_provider}"),
+            )
             return
         await self._send_html(writer, 200, _native_codex_page(provider_name))
 
@@ -1592,17 +1602,25 @@ def _native_provider_display_name(provider: str) -> str:
     return names.get(provider_name, provider_name.replace("-", " ").title() or "Native")
 
 
-def _native_provider_index_html(providers: list[dict[str, str]]) -> str:
+def _native_provider_index_html(
+    providers: list[dict[str, str]],
+    *,
+    access_token: str = "",
+) -> str:
+    token_suffix = (
+        f"?token={quote(str(access_token), safe='')}" if str(access_token or "") else ""
+    )
     council_links = """
-      <a class="provider council" href="/council">
+      <a class="provider council" href="/council__TOKEN_SUFFIX__">
         <span>议会审核</span>
         <small>提交方案并运行五席审核</small>
       </a>
-    """
+    """.replace("__TOKEN_SUFFIX__", token_suffix)
     if providers:
         links = "\n".join(
             (
-                f'<a class="provider" href="/native/{quote(str(provider["provider"]), safe="")}">'
+                f'<a class="provider" href="/native/'
+                f'{quote(str(provider["provider"]), safe="")}{token_suffix}">'
                 f'<span>{escape(_native_provider_display_name(str(provider["provider"])))}</span>'
                 f'<small>{escape(str(provider.get("provider_engine", "")))}</small>'
                 "</a>"
@@ -2059,7 +2077,8 @@ def _council_seats_page() -> str:
 </html>"""
 
 
-def _native_token_entry_page() -> str:
+def _native_token_entry_page(return_to: str = "/native/codex") -> str:
+    return_to_json = json.dumps(_safe_native_return_path(return_to))
     return """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -2101,7 +2120,7 @@ def _native_token_entry_page() -> str:
     const token = queryToken || savedToken;
     if (token) {
       rememberToken(token);
-      location.replace("/native/codex");
+      location.replace(__RETURN_TO__);
     }
     const input = document.getElementById("tokenInput");
     const status = document.getElementById("status");
@@ -2114,11 +2133,20 @@ def _native_token_entry_page() -> str:
         return;
       }
       rememberToken(value);
-      location.href = "/native/codex";
+      location.href = __RETURN_TO__;
     };
   </script>
 </body>
-</html>"""
+</html>""".replace("__RETURN_TO__", return_to_json)
+
+
+def _safe_native_return_path(path: str) -> str:
+    value = str(path or "").strip()
+    if not value or not value.startswith("/") or value.startswith("//"):
+        return "/native/codex"
+    if "\r" in value or "\n" in value:
+        return "/native/codex"
+    return value
 
 
 def _native_login_ticket_page(ticket: str, provider_name: str = "codex") -> str:
