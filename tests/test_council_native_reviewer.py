@@ -129,6 +129,10 @@ async def test_native_reviewer_starts_provider_and_parses_structured_review() ->
     assert result.verdict == "reject"
     assert result.confidence == 0.61
     assert result.summary == "Adapter needs a stricter boundary."
+    assert result.native_session_id == "native-review-1"
+    assert result.provider_engine == "app-server"
+    assert result.to_json_dict()["native_session_id"] == "native-review-1"
+    assert result.to_json_dict()["provider_engine"] == "app-server"
     assert result.risks == ("provider can edit files",)
     assert result.required_changes == ("force read-only instruction",)
     assert provider.start_calls[0]["cwd"] == "/repo"
@@ -158,6 +162,8 @@ async def test_native_reviewer_returns_started_when_history_has_no_review_text()
     assert result.verdict == "need_more_info"
     assert result.confidence == 0.0
     assert result.summary == "Native review session started: native-review-1"
+    assert result.native_session_id == "native-review-1"
+    assert result.provider_engine == "app-server"
 
 
 @pytest.mark.asyncio

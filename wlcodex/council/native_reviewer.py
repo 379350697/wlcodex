@@ -56,6 +56,8 @@ class NativeProviderCouncilReviewer:
             request.seat,
             payload=parsed,
             raw_output=review_text,
+            native_session_id=native_session_id,
+            provider_engine=provider_engine,
         )
 
 
@@ -179,6 +181,8 @@ def _result_from_payload(
     *,
     payload: dict[str, Any],
     raw_output: str,
+    native_session_id: str = "",
+    provider_engine: str = "",
 ) -> CouncilReviewResult:
     return CouncilReviewResult(
         seat_id=seat.seat_id,
@@ -191,6 +195,8 @@ def _result_from_payload(
         required_changes=_strings(payload.get("required_changes")),
         open_questions=_strings(payload.get("open_questions")),
         raw_output=raw_output,
+        native_session_id=native_session_id,
+        provider_engine=provider_engine,
     )
 
 

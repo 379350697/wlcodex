@@ -154,6 +154,8 @@ class CouncilReviewResult:
     raw_output: str = ""
     status: CouncilResultStatus = "completed"
     error: str = ""
+    native_session_id: str = ""
+    provider_engine: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "seat_id", self.seat_id.strip())
@@ -174,6 +176,8 @@ class CouncilReviewResult:
         )
         object.__setattr__(self, "raw_output", self.raw_output.strip())
         object.__setattr__(self, "error", self.error.strip())
+        object.__setattr__(self, "native_session_id", self.native_session_id.strip())
+        object.__setattr__(self, "provider_engine", self.provider_engine.strip())
         if self.status not in {"completed", "started", "failed"}:
             raise ValueError(
                 "council review result status must be completed, started, or failed"
@@ -215,6 +219,8 @@ class CouncilReviewResult:
             summary=f"Native review session started: {native_session_id}",
             status="started",
             raw_output=native_session_id,
+            native_session_id=native_session_id,
+            provider_engine=provider_engine,
             open_questions=(f"Sync {seat.provider}/{provider_engine} review output.",),
         )
 
@@ -232,6 +238,8 @@ class CouncilReviewResult:
             "raw_output": self.raw_output,
             "status": self.status,
             "error": self.error,
+            "native_session_id": self.native_session_id,
+            "provider_engine": self.provider_engine,
         }
 
 

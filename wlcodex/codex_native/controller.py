@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -32,6 +33,11 @@ class _StaleActiveTurnMismatch(Exception):
         self.stale_turn_id = stale_turn_id
 
 
+# The app-server can expose a new thread before its rollout accepts turn/start.
+# Keep this race inside the controller so callers do not need a manual prompt path.
+_ROLLOUT_NOT_READY_RETRY_DELAYS = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
+
+
 class _NativeClient(Protocol):
     async def status(self) -> Any: ...
 
@@ -57,6 +63,17 @@ class _NativeClient(Protocol):
     async def attach_session(self, native_thread_id: str) -> dict[str, Any]: ...
 
     async def continue_session(
+        self,
+        native_thread_id: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+        images: list[dict[str, Any]] | None = None,
+    ) -> str: ...
+
+    async def start_turn(
         self,
         native_thread_id: str,
         prompt: str,
@@ -151,6 +168,7 @@ class CodexNativeController:
             effort=effort,
             service_tier=service_tier,
             images=images,
+            resume_first=False,
         )
 
     async def create_session(
@@ -283,15 +301,17 @@ class CodexNativeController:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        resume_first: bool = True,
     ) -> NativeCodexControlResult:
         session = self._ensure_session(native_thread_id)
-        turn_id = await self._client.continue_session(
+        turn_id = await self._send_turn_when_rollout_is_ready(
             native_thread_id,
             prompt,
             model=model,
             effort=effort,
             service_tier=service_tier,
             images=images,
+            resume_first=resume_first,
         )
         session = self._session_store.update_session(
             session.id,
@@ -310,6 +330,55 @@ class CodexNativeController:
             active_turn_id=turn_id,
             turn_running=True,
         )
+
+    async def _send_turn_when_rollout_is_ready(
+        self,
+        native_thread_id: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+        images: list[dict[str, Any]] | None = None,
+        resume_first: bool = True,
+    ) -> str:
+        for attempt in range(len(_ROLLOUT_NOT_READY_RETRY_DELAYS) + 1):
+            try:
+                if resume_first:
+                    return await self._client.continue_session(
+                        native_thread_id,
+                        prompt,
+                        model=model,
+                        effort=effort,
+                        service_tier=service_tier,
+                        images=images,
+                    )
+                return await self._client.start_turn(
+                    native_thread_id,
+                    prompt,
+                    model=model,
+                    effort=effort,
+                    service_tier=service_tier,
+                    images=images,
+                )
+            except JsonRpcError as exc:
+                if (
+                    not _is_rollout_not_ready_error(exc)
+                    or attempt == len(_ROLLOUT_NOT_READY_RETRY_DELAYS)
+                ):
+                    raise
+                await self._refresh_rollout_state(native_thread_id)
+                delay = _ROLLOUT_NOT_READY_RETRY_DELAYS[attempt]
+                if delay:
+                    await asyncio.sleep(delay)
+        raise RuntimeError("unreachable rollout retry state")
+
+    async def _refresh_rollout_state(self, native_thread_id: str) -> None:
+        try:
+            await self._refresh_turn_state(native_thread_id)
+        except JsonRpcError as exc:
+            if not _is_rollout_not_ready_error(exc):
+                raise
 
     async def steer_session(
         self,
@@ -725,6 +794,11 @@ def _is_active_status(status: str) -> bool:
 def _active_turn_id_from_mismatch(message: str) -> str:
     match = re.search(r"found `([^`]+)`", message)
     return match.group(1).strip() if match else ""
+
+
+def _is_rollout_not_ready_error(exc: JsonRpcError) -> bool:
+    message = str(exc.rpc_message or exc)
+    return exc.code == -32600 and "no rollout found for thread id" in message
 
 
 def _is_older_ordered_turn_id(candidate: str, reference: str) -> bool:

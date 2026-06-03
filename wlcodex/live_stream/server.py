@@ -6,16 +6,23 @@ import json
 import secrets
 import time
 from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from uuid import uuid4
 
 from wlcodex.auto_digest_llm import DigestClient
 from wlcodex.council import (
     CouncilConfig,
     CouncilReviewPacket,
+    CouncilReviewRequest,
+    CouncilReviewResult,
     CouncilReviewService,
+    CouncilSeat,
     CouncilSeatAssignment,
+    CouncilSynthesis,
     NativeProviderCouncilReviewer,
+    build_council_seats,
     council_assignment_diversity,
     default_council_config,
     default_council_seat_definitions,
@@ -35,6 +42,7 @@ _MAX_BODY_BYTES = 8 * 1024 * 1024
 _MAX_NATIVE_IMAGE_ATTACHMENTS = 8
 _LOGIN_TICKET_TTL_SECONDS = 5 * 60
 _LOGIN_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+_COUNCIL_PROJECTS_ROOT = Path.home() / "projects"
 
 
 class RequestBodyTooLarge(ValueError):
@@ -70,6 +78,8 @@ class WorkerLiveStreamServer:
         self._native_transcript_mirror = native_transcript_mirror
         self._server: asyncio.AbstractServer | None = None
         self._client_tasks: set[asyncio.Task[None]] = set()
+        self._council_runs: dict[str, dict[str, Any]] = {}
+        self._council_run_tasks: set[asyncio.Task[None]] = set()
         self._login_tickets: dict[str, float] = {}
 
     async def start(self) -> None:
@@ -90,6 +100,11 @@ class WorkerLiveStreamServer:
         await self._server.wait_closed()
         self._server = None
         tasks = [task for task in self._client_tasks if task is not asyncio.current_task()]
+        tasks.extend(
+            task
+            for task in self._council_run_tasks
+            if task is not asyncio.current_task()
+        )
         for task in tasks:
             task.cancel()
         if tasks:
@@ -736,6 +751,13 @@ class WorkerLiveStreamServer:
             )
             return
 
+        if path == "/api/council/projects":
+            if method != "GET":
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
+            await self._send_json(writer, 200, _council_projects_payload())
+            return
+
         if path == "/api/council/runs":
             if method != "POST":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
@@ -746,6 +768,17 @@ class WorkerLiveStreamServer:
             try:
                 packet = _council_packet_from_body(body)
                 config = await self._council_config_from_body(body)
+                if bool(body.get("async")):
+                    await self._send_json(
+                        writer,
+                        200,
+                        self._start_async_council_run(
+                            packet=packet,
+                            config=config,
+                            cwd=str(body.get("cwd") or ""),
+                        ),
+                    )
+                    return
                 reviewer = NativeProviderCouncilReviewer(
                     provider_resolver=_ServerNativeProviderResolver(self),
                     default_cwd=str(body.get("cwd") or ""),
@@ -760,7 +793,119 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 200, board.to_json_dict())
             return
 
+        run_id = _council_run_id_from_path(path)
+        if run_id:
+            if method != "GET":
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
+            run = self._council_runs.get(run_id)
+            if run is None:
+                await self._send_json(writer, 404, {"error": "council run not found"})
+                return
+            await self._send_json(writer, 200, _council_run_public_payload(run))
+            return
+
         await self._send_json(writer, 404, {"error": "not found"})
+
+    def _start_async_council_run(
+        self,
+        *,
+        packet: CouncilReviewPacket,
+        config: CouncilConfig,
+        cwd: str,
+    ) -> dict[str, Any]:
+        seats = build_council_seats(config)
+        run_id = uuid4().hex
+        now = time.time()
+        run = {
+            "run_id": run_id,
+            "mode": "async",
+            "status": "queued",
+            "packet_fingerprint": packet.fingerprint,
+            "round_index": 1,
+            "cwd": cwd,
+            "created_at": now,
+            "updated_at": now,
+            "seats": [seat.to_json_dict() for seat in seats],
+            "results": [_council_pending_result_payload(seat) for seat in seats],
+            "synthesis": CouncilSynthesis.from_results(()).to_json_dict(),
+        }
+        self._council_runs[run_id] = run
+        task = asyncio.create_task(
+            self._run_async_council_review(
+                run_id=run_id,
+                packet=packet,
+                seats=seats,
+                cwd=cwd,
+            )
+        )
+        self._council_run_tasks.add(task)
+        task.add_done_callback(self._council_run_tasks.discard)
+        return _council_run_public_payload(run)
+
+    async def _run_async_council_review(
+        self,
+        *,
+        run_id: str,
+        packet: CouncilReviewPacket,
+        seats: tuple[CouncilSeat, ...],
+        cwd: str,
+    ) -> None:
+        run = self._council_runs.get(run_id)
+        if run is None:
+            return
+        run["status"] = "running"
+        _touch_council_run(run)
+        reviewer = NativeProviderCouncilReviewer(
+            provider_resolver=_ServerNativeProviderResolver(self),
+            default_cwd=cwd,
+        )
+        tasks = [
+            self._run_async_council_seat(
+                run_id=run_id,
+                index=index,
+                packet=packet,
+                seat=seat,
+                reviewer=reviewer,
+            )
+            for index, seat in enumerate(seats)
+        ]
+        results = tuple(await asyncio.gather(*tasks))
+        run = self._council_runs.get(run_id)
+        if run is None:
+            return
+        run["synthesis"] = CouncilSynthesis.from_results(results).to_json_dict()
+        run["status"] = _council_run_status(results)
+        _touch_council_run(run)
+
+    async def _run_async_council_seat(
+        self,
+        *,
+        run_id: str,
+        index: int,
+        packet: CouncilReviewPacket,
+        seat: CouncilSeat,
+        reviewer: NativeProviderCouncilReviewer,
+    ) -> CouncilReviewResult:
+        run = self._council_runs.get(run_id)
+        if run is not None:
+            run["results"][index] = _council_pending_result_payload(
+                seat,
+                status="running",
+                summary="席位审核会话启动中...",
+            )
+            _touch_council_run(run)
+        try:
+            result = await reviewer.review(
+                CouncilReviewRequest(packet=packet, seat=seat, round_index=1)
+            )
+        except Exception as exc:
+            result = CouncilReviewResult.failed(seat, str(exc))
+        run = self._council_runs.get(run_id)
+        if run is not None:
+            run["results"][index] = _council_result_payload(result)
+            _touch_council_run(run)
+        return result
 
     async def _default_council_config_payload(self) -> dict[str, Any]:
         providers = self._council_provider_summaries()
@@ -1317,6 +1462,90 @@ def _council_assignments_from_json(value: Any) -> tuple[CouncilSeatAssignment, .
     return tuple(assignments)
 
 
+def _council_run_id_from_path(path: str) -> str:
+    prefix = "/api/council/runs/"
+    if not path.startswith(prefix):
+        return ""
+    remainder = path[len(prefix) :].strip("/")
+    if not remainder or "/" in remainder:
+        return ""
+    return unquote(remainder)
+
+
+def _council_pending_result_payload(
+    seat: CouncilSeat,
+    *,
+    status: str = "queued",
+    summary: str = "等待席位审核启动。",
+) -> dict[str, Any]:
+    return {
+        "seat_id": seat.seat_id,
+        "provider": seat.provider,
+        "model": seat.model,
+        "role": seat.role,
+        "verdict": "",
+        "confidence": 0.0,
+        "summary": summary,
+        "risks": [],
+        "required_changes": [],
+        "open_questions": [],
+        "raw_output": "",
+        "status": status,
+        "error": "",
+        "native_session_id": "",
+        "provider_engine": "",
+        "native_session_path": "",
+    }
+
+
+def _council_result_payload(result: CouncilReviewResult) -> dict[str, Any]:
+    payload = result.to_json_dict()
+    payload["native_session_path"] = _native_session_path(
+        result.provider,
+        result.native_session_id,
+    )
+    return payload
+
+
+def _native_session_path(provider: str, native_session_id: str) -> str:
+    if not provider or not native_session_id:
+        return ""
+    return (
+        f"/native/{quote(provider, safe='')}"
+        f"?native_thread_id={quote(native_session_id, safe='')}"
+    )
+
+
+def _council_run_status(results: tuple[CouncilReviewResult, ...]) -> str:
+    completed = sum(1 for result in results if result.status == "completed")
+    failed = sum(1 for result in results if result.status == "failed")
+    if completed == len(results):
+        return "completed"
+    if failed == len(results):
+        return "failed"
+    return "partial"
+
+
+def _touch_council_run(run: dict[str, Any]) -> None:
+    run["updated_at"] = time.time()
+
+
+def _council_run_public_payload(run: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": run.get("run_id", ""),
+        "mode": run.get("mode", "async"),
+        "status": run.get("status", "queued"),
+        "packet_fingerprint": run.get("packet_fingerprint", ""),
+        "round_index": run.get("round_index", 1),
+        "cwd": run.get("cwd", ""),
+        "created_at": run.get("created_at", 0.0),
+        "updated_at": run.get("updated_at", 0.0),
+        "seats": [dict(seat) for seat in run.get("seats", [])],
+        "results": [dict(result) for result in run.get("results", [])],
+        "synthesis": dict(run.get("synthesis", {})),
+    }
+
+
 def _tuple_from_json(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,)
@@ -1334,6 +1563,25 @@ def _first_model_id(models: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -
     return ""
 
 
+def _council_projects_payload(
+    projects_root: Path | None = None,
+) -> dict[str, Any]:
+    projects_root = projects_root or _COUNCIL_PROJECTS_ROOT
+    projects: list[dict[str, str]] = []
+    try:
+        entries = sorted(
+            projects_root.iterdir(),
+            key=lambda path: path.name.casefold(),
+        )
+    except OSError:
+        entries = []
+    for entry in entries:
+        if entry.name.startswith(".") or not entry.is_dir():
+            continue
+        projects.append({"name": entry.name, "cwd": str(entry)})
+    return {"root": str(projects_root), "projects": projects}
+
+
 def _native_provider_display_name(provider: str) -> str:
     names = {
         "codex": "Codex",
@@ -1349,10 +1597,6 @@ def _native_provider_index_html(providers: list[dict[str, str]]) -> str:
       <a class="provider council" href="/council">
         <span>议会审核</span>
         <small>提交方案并运行五席审核</small>
-      </a>
-      <a class="provider council" href="/council/seats">
-        <span>席位配置</span>
-        <small>配置唱反调、第一性原理、扩展思路、局外人、执行者</small>
       </a>
     """
     if providers:
@@ -1419,6 +1663,7 @@ def _council_review_page() -> str:
     textarea { min-height: 124px; resize: vertical; line-height: 1.48; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .run { min-height: 48px; border: 0; border-radius: 8px; background: #f7f7f8; color: #050506; font-weight: 800; font-size: 16px; }
+    .run:disabled { opacity: .55; cursor: progress; }
     .muted { color: #9ca3af; font-size: 13px; line-height: 1.45; }
     .seat-list, .results { display: grid; gap: 10px; }
     .seat, .result { border: 1px solid #2b2d34; border-radius: 8px; padding: 12px; background: #0d0e12; }
@@ -1426,6 +1671,7 @@ def _council_review_page() -> str:
     .seat-title, .result-title { font-weight: 800; }
     .badge { border-radius: 999px; padding: 4px 8px; background: #22252e; color: #cfd3dc; font-size: 12px; white-space: nowrap; }
     .summary { margin-top: 8px; color: #d9dde6; line-height: 1.5; white-space: pre-wrap; }
+    .session-link { display: inline-grid; place-items: center; min-height: 32px; margin-top: 10px; padding: 0 10px; border: 1px solid #3b3f49; border-radius: 8px; color: #f7f7f8; text-decoration: none; font-size: 13px; font-weight: 720; }
     .error { color: #fecaca; }
     @media (max-width: 820px) {
       main { grid-template-columns: 1fr; padding-bottom: 96px; }
@@ -1454,8 +1700,8 @@ def _council_review_page() -> str:
         <label>成功标准<textarea id="success" placeholder="每行一条"></textarea></label>
         <label>约束<textarea id="constraints" placeholder="每行一条"></textarea></label>
       </div>
-      <label>工作目录<input id="cwd" placeholder="/Users/wl/projects/wlcodex"></label>
-      <button class="run" id="run">启动议会审核</button>
+      <label>工作目录<select id="cwd"><option value="">正在读取项目...</option></select></label>
+      <button class="run" id="run" disabled>启动议会审核</button>
       <div class="muted" id="status">正在读取席位配置...</div>
     </section>
     <aside class="stack">
@@ -1469,7 +1715,7 @@ def _council_review_page() -> str:
       <section class="panel stack">
         <div>
           <strong>审核结果</strong>
-          <div class="muted">Chair synthesis 会先显示，五席输出随后展开。</div>
+          <div class="muted">每个席位会独立显示状态，启动后可打开原生会话。</div>
         </div>
         <div class="results" id="results"></div>
       </section>
@@ -1477,9 +1723,14 @@ def _council_review_page() -> str:
   </main>
   <script>
     const DEFAULT_CONFIG_URL = "/api/council/config/default";
+    const PROJECTS_URL = "/api/council/projects";
     const RUN_URL = "/api/council/runs";
+    const POLL_INTERVAL_MS = 1200;
     const STORAGE_KEY = "wlcodexCouncilConfig";
     let config = null;
+    let projects = [];
+    let pollTimer = null;
+    let activeRunId = "";
 
     const $ = (id) => document.getElementById(id);
     const lines = (text) => text.split("\\n").map((item) => item.trim()).filter(Boolean);
@@ -1514,29 +1765,127 @@ def _council_review_page() -> str:
       $("diversity").textContent = `模型多样性 ${unique}/${assignments.length || 0}`;
     }
 
+    function renderProjects(payload) {
+      projects = Array.isArray(payload.projects) ? payload.projects : [];
+      if (!projects.length) {
+        $("cwd").innerHTML = `<option value="">未找到 ${esc(payload.root || "/Users/wl/projects")} 下的项目</option>`;
+        return;
+      }
+      const preferred = projects.find((project) => project.name === "wlcodex") || projects[0];
+      $("cwd").innerHTML = projects.map((project) => `<option value="${esc(project.cwd)}">${esc(project.name)}</option>`).join("");
+      $("cwd").value = preferred.cwd;
+    }
+
+    function boardStatusLabel(status) {
+      return ({
+        queued: "等待席位启动",
+        running: "席位审核中",
+        partial: "部分席位已启动，等待输出",
+        completed: "审核完成",
+        failed: "审核失败",
+      })[String(status || "")] || "等待席位输出";
+    }
+
+    function seatStatusLabel(status) {
+      return ({
+        queued: "等待启动",
+        running: "启动中",
+        started: "已启动，等待输出",
+        completed: "已完成",
+        failed: "失败",
+      })[String(status || "")] || "等待";
+    }
+
+    function consensusLabel(consensus) {
+      return ({
+        no_completed_reviews: "等待席位输出",
+        approved: "通过",
+        approved_with_changes: "带修改通过",
+        rejected: "未通过",
+        mixed: "意见不一致",
+      })[String(consensus || "")] || "等待汇总";
+    }
+
+    function isBoardActive(board) {
+      return ["queued", "running"].includes(String((board && board.status) || ""));
+    }
+
+    function setRunBusy(isBusy) {
+      $("run").disabled = isBusy;
+      $("run").textContent = isBusy ? "议会审核中..." : "启动议会审核";
+    }
+
+    function setBoardStatus(board) {
+      $("status").textContent = board ? boardStatusLabel(board.status) : "席位配置已就绪。";
+    }
+
     function renderBoard(board) {
       const synthesis = board.synthesis || {};
       const results = board.results || [];
+      const chairLabel = synthesis.consensus ? consensusLabel(synthesis.consensus) : boardStatusLabel(board.status);
       $("results").innerHTML = [
-        `<div class="result"><div class="result-head"><span class="result-title">Chair Synthesis</span><span class="badge">${esc(synthesis.consensus || board.status || "")}</span></div><div class="summary">${esc((synthesis.required_changes || []).join("\\n") || "等待席位输出同步。")}</div></div>`,
-        ...results.map((result) => `<div class="result"><div class="result-head"><span class="result-title">${esc(result.seat_id)}</span><span class="badge">${esc(result.status)} · ${esc(result.verdict)}</span></div><div class="summary">${esc(result.summary || result.error || "")}</div></div>`)
+        `<div class="result"><div class="result-head"><span class="result-title">Chair Synthesis</span><span class="badge">${esc(chairLabel)}</span></div><div class="summary">${esc((synthesis.required_changes || []).join("\\n") || "等待席位输出同步。")}</div></div>`,
+        ...results.map((result) => {
+          const sessionLink = result.native_session_path ? `<a class="session-link" href="${esc(result.native_session_path)}">打开原生会话</a>` : "";
+          const verdict = result.verdict ? ` · ${esc(result.verdict)}` : "";
+          return `<div class="result"><div class="result-head"><span class="result-title">${esc(result.seat_id)}</span><span class="badge">${esc(seatStatusLabel(result.status))}${verdict}</span></div><div class="summary">${esc(result.summary || result.error || "")}</div>${sessionLink}</div>`;
+        })
       ].join("");
     }
 
+    function stopPolling(resetRun = false) {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = null;
+      if (resetRun) {
+        activeRunId = "";
+        setRunBusy(false);
+      }
+    }
+
+    function startPolling(runId) {
+      stopPolling();
+      if (!runId) return;
+      activeRunId = runId;
+      setRunBusy(true);
+      pollTimer = setInterval(async () => {
+        try {
+          const board = await api(`${RUN_URL}/${encodeURIComponent(runId)}`);
+          renderBoard(board);
+          setBoardStatus(board);
+          if (!isBoardActive(board)) stopPolling(true);
+        } catch (error) {
+          stopPolling(true);
+          $("status").innerHTML = `<span class="error">${esc(error.message)}</span>`;
+        }
+      }, POLL_INTERVAL_MS);
+    }
+
     async function loadConfig() {
-      const defaults = await api(DEFAULT_CONFIG_URL);
+      const [defaults, projectPayload] = await Promise.all([
+        api(DEFAULT_CONFIG_URL),
+        api(PROJECTS_URL),
+      ]);
       config = savedConfig(defaults);
+      renderProjects(projectPayload);
       renderSeats();
-      $("status").textContent = "席位配置已就绪。";
+      setBoardStatus(null);
+      setRunBusy(false);
     }
 
     $("run").onclick = async () => {
-      $("status").textContent = "议会审核启动中...";
+      if (activeRunId) {
+        $("status").textContent = "当前议会还在审核中";
+        return;
+      }
+      activeRunId = "starting";
+      setRunBusy(true);
+      $("status").textContent = "正在启动席位...";
       $("results").innerHTML = "";
       try {
         const board = await api(RUN_URL, {
           method: "POST",
           body: JSON.stringify({
+            async: true,
             title: $("title").value,
             proposal: $("proposal").value,
             context: $("context").value,
@@ -1547,8 +1896,14 @@ def _council_review_page() -> str:
           }),
         });
         renderBoard(board);
-        $("status").textContent = `运行状态：${board.status}`;
+        setBoardStatus(board);
+        if (isBoardActive(board)) {
+          startPolling(board.run_id);
+        } else {
+          stopPolling(true);
+        }
       } catch (error) {
+        stopPolling(true);
         $("status").innerHTML = `<span class="error">${esc(error.message)}</span>`;
       }
     };

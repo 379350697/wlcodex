@@ -99,6 +99,29 @@ class FakeNativeClient:
             detail_thread["turns"] = [{"id": "turn-2", "status": "running", "items": []}]
         return "turn-2"
 
+    async def start_turn(
+        self,
+        thread: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+        images: list[dict[str, Any]] | None = None,
+    ) -> str:
+        if model is None and effort is None and service_tier is None and images is None:
+            self.calls.append(("start_turn", thread, prompt))
+        else:
+            self.calls.append(
+                ("start_turn", thread, prompt, model, effort, service_tier, images)
+            )
+        detail = self.details.setdefault(thread, {"thread": {"id": thread}})
+        detail_thread = detail.setdefault("thread", {"id": thread})
+        if isinstance(detail_thread, dict):
+            detail_thread["status"] = "active"
+            detail_thread["turns"] = [{"id": "turn-2", "status": "running", "items": []}]
+        return "turn-2"
+
     async def start_thread(
         self,
         cwd: str,
@@ -847,13 +870,218 @@ async def test_controller_starts_new_project_session_with_model_settings(
     assert client.calls == [
         ("start_thread", "/workspace/two", "gpt-5.5", "fast"),
         (
-            "continue_session",
+            "start_turn",
             "thread-new",
             "start work",
             "gpt-5.5",
             "medium",
             "fast",
             [{"url": "data:image/png;base64,abc"}],
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_controller_start_session_retries_when_rollout_stays_briefly_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SlowRolloutClient(FakeNativeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.continue_failures = 0
+
+        async def attach_session(self, thread: str) -> dict[str, Any]:
+            self.calls.append(("attach_session", thread))
+            raise JsonRpcError(-32600, f"no rollout found for thread id {thread}")
+
+        async def start_turn(
+            self,
+            thread: str,
+            prompt: str,
+            *,
+            model: str | None = None,
+            effort: str | None = None,
+            service_tier: str | None = None,
+            images: list[dict[str, Any]] | None = None,
+        ) -> str:
+            self.calls.append(
+                ("start_turn", thread, prompt, model, effort, service_tier, images)
+            )
+            if self.continue_failures < 6:
+                self.continue_failures += 1
+                raise JsonRpcError(
+                    -32600,
+                    f"no rollout found for thread id {thread}",
+                )
+            return "turn-after-slow-rollout"
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("wlcodex.codex_native.controller.asyncio.sleep", no_sleep)
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    client = SlowRolloutClient()
+    controller = CodexNativeController(
+        client,
+        NativeCodexSessionStore(ledger),
+        RuntimeEventStore(ledger._conn),
+    )
+
+    result = await controller.start_session(
+        "/workspace/two",
+        "start after slow rollout",
+        model="gpt-5.5",
+        effort="medium",
+        service_tier="fast",
+    )
+
+    assert result.turn_id == "turn-after-slow-rollout"
+    assert client.calls[0] == ("start_thread", "/workspace/two", "gpt-5.5", "fast")
+    assert client.calls.count(("attach_session", "thread-new")) == 6
+    start_turn_calls = [call for call in client.calls if call[0] == "start_turn"]
+    assert len(start_turn_calls) == 7
+    assert set(start_turn_calls) == {
+        (
+            "start_turn",
+            "thread-new",
+            "start after slow rollout",
+            "gpt-5.5",
+            "medium",
+            "fast",
+            None,
+        )
+    }
+
+
+@pytest.mark.asyncio
+async def test_controller_start_session_raises_when_rollout_never_becomes_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingRolloutClient(FakeNativeClient):
+        async def attach_session(self, thread: str) -> dict[str, Any]:
+            self.calls.append(("attach_session", thread))
+            raise JsonRpcError(-32600, f"no rollout found for thread id {thread}")
+
+        async def start_turn(
+            self,
+            thread: str,
+            prompt: str,
+            *,
+            model: str | None = None,
+            effort: str | None = None,
+            service_tier: str | None = None,
+            images: list[dict[str, Any]] | None = None,
+        ) -> str:
+            self.calls.append(
+                ("start_turn", thread, prompt, model, effort, service_tier, images)
+            )
+            raise JsonRpcError(-32600, f"no rollout found for thread id {thread}")
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("wlcodex.codex_native.controller.asyncio.sleep", no_sleep)
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    client = MissingRolloutClient()
+    controller = CodexNativeController(
+        client,
+        NativeCodexSessionStore(ledger),
+        RuntimeEventStore(ledger._conn),
+    )
+
+    with pytest.raises(JsonRpcError, match="no rollout found"):
+        await controller.start_session(
+            "/workspace/two",
+            "start later",
+            model="gpt-5.5",
+            effort="medium",
+            service_tier="fast",
+        )
+
+    session = NativeCodexSessionStore(ledger).get_by_thread_id("thread-new")
+    assert session is not None
+    assert session.cwd == "/workspace/two"
+    assert client.calls[0] == ("start_thread", "/workspace/two", "gpt-5.5", "fast")
+    assert client.calls.count(("attach_session", "thread-new")) >= 1
+
+
+@pytest.mark.asyncio
+async def test_controller_start_session_retries_when_rollout_is_not_ready(
+    tmp_path: Path,
+) -> None:
+    class RolloutRaceClient(FakeNativeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_once = False
+
+        async def start_turn(
+            self,
+            thread: str,
+            prompt: str,
+            *,
+            model: str | None = None,
+            effort: str | None = None,
+            service_tier: str | None = None,
+            images: list[dict[str, Any]] | None = None,
+        ) -> str:
+            self.calls.append(
+                ("start_turn", thread, prompt, model, effort, service_tier, images)
+            )
+            if not self.failed_once:
+                self.failed_once = True
+                raise JsonRpcError(
+                    -32600,
+                    f"no rollout found for thread id {thread}",
+                )
+            return "turn-after-rollout"
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    client = RolloutRaceClient()
+    controller = CodexNativeController(
+        client,
+        NativeCodexSessionStore(ledger),
+        RuntimeEventStore(ledger._conn),
+    )
+
+    result = await controller.start_session(
+        "/workspace/two",
+        "start after rollout",
+        model="gpt-5.5",
+        effort="medium",
+        service_tier="fast",
+    )
+
+    session = NativeCodexSessionStore(ledger).get_by_thread_id("thread-new")
+    assert result.native_thread_id == "thread-new"
+    assert result.turn_id == "turn-after-rollout"
+    assert result.turn_running is True
+    assert session is not None
+    assert session.last_turn_id == "turn-after-rollout"
+    assert client.calls == [
+        ("start_thread", "/workspace/two", "gpt-5.5", "fast"),
+        (
+            "start_turn",
+            "thread-new",
+            "start after rollout",
+            "gpt-5.5",
+            "medium",
+            "fast",
+            None,
+        ),
+        ("attach_session", "thread-new"),
+        (
+            "start_turn",
+            "thread-new",
+            "start after rollout",
+            "gpt-5.5",
+            "medium",
+            "fast",
+            None,
         ),
     ]
 

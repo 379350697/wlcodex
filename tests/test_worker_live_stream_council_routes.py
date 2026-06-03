@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from wlcodex.db import Ledger
+from wlcodex.live_stream import server as live_server
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.server import WorkerLiveStreamServer
 from wlcodex.native_agents.models import (
@@ -131,7 +132,20 @@ async def test_council_review_page_is_available_from_web(tmp_path: Path) -> None
     assert "<title>议会审核</title>" in response
     assert 'href="/council/seats"' in response
     assert 'const DEFAULT_CONFIG_URL = "/api/council/config/default";' in response
+    assert 'const PROJECTS_URL = "/api/council/projects";' in response
+    assert 'const POLL_INTERVAL_MS = 1200;' in response
     assert "Review Packet" in response
+    assert '<select id="cwd">' in response
+    assert '<input id="cwd"' not in response
+    assert "打开原生会话" in response
+    assert "function setRunBusy" in response
+    assert "function boardStatusLabel" in response
+    assert "function seatStatusLabel" in response
+    assert "当前议会还在审核中" in response
+    assert "议会审核中..." in response
+    assert "部分席位已启动，等待输出" in response
+    assert "已启动，等待输出" in response
+    assert "运行状态：" not in response
     assert provider.calls == []
 
 
@@ -164,9 +178,45 @@ async def test_native_root_links_to_council_pages(tmp_path: Path) -> None:
 
     assert "HTTP/1.1 200 OK" in response
     assert "/council" in response
-    assert "/council/seats" in response
     assert "议会审核" in response
-    assert "席位配置" in response
+    assert "/council/seats" not in response
+    assert "席位配置" not in response
+
+
+@pytest.mark.asyncio
+async def test_council_projects_api_lists_projects_root_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    (projects_root / "wlcodex").mkdir()
+    (projects_root / "LightFeeV2").mkdir()
+    (projects_root / ".hidden").mkdir()
+    (projects_root / "README.md").write_text("not a project")
+    monkeypatch.setattr(
+        live_server,
+        "_COUNCIL_PROJECTS_ROOT",
+        projects_root,
+        raising=False,
+    )
+
+    response, provider = await _request_council(
+        tmp_path,
+        "GET /api/council/projects HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload == {
+        "root": str(projects_root),
+        "projects": [
+            {"name": "LightFeeV2", "cwd": str(projects_root / "LightFeeV2")},
+            {"name": "wlcodex", "cwd": str(projects_root / "wlcodex")},
+        ],
+    }
+    assert provider.calls == []
 
 
 @pytest.mark.asyncio
@@ -242,3 +292,78 @@ async def test_council_run_api_starts_native_review_session(tmp_path: Path) -> N
     assert "Review a web-submitted proposal." in provider.calls[1][2]
     assert provider.calls[1][3]["model"] == "deepseek-v4"
     assert provider.calls[2][0] == "read_session"
+
+
+@pytest.mark.asyncio
+async def test_async_council_run_api_can_poll_each_seat_state(tmp_path: Path) -> None:
+    fake_provider = FakeCouncilProvider()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(_store(tmp_path)),
+        native_registry=NativeAgentRegistry([fake_provider]),
+    )
+    body = json.dumps(
+        {
+            "async": True,
+            "title": "Web Council",
+            "proposal": "Review a web-submitted proposal.",
+            "cwd": "/repo",
+            "config": {
+                "mode": "council",
+                "assignments": [
+                    {
+                        "seat_id": "contrarian",
+                        "provider": "claude",
+                        "model": "deepseek-v4",
+                        "enabled": True,
+                    }
+                ],
+                "required_seat_ids": ["contrarian"],
+            },
+        }
+    )
+    await server.start()
+    try:
+        start_response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/council/runs HTTP/1.1\r\n"
+            "Host: test\r\nContent-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+        assert "HTTP/1.1 200 OK" in start_response
+        started_payload = _json_body(start_response)
+        assert started_payload["run_id"]
+        assert started_payload["mode"] == "async"
+        assert started_payload["results"][0]["seat_id"] == "contrarian"
+        assert started_payload["results"][0]["status"] in {"queued", "running", "started"}
+
+        polled_payload: dict[str, Any] | None = None
+        for _attempt in range(20):
+            poll_response = await _read_response(
+                server.host,
+                server.port,
+                f"GET /api/council/runs/{started_payload['run_id']} HTTP/1.1\r\n"
+                "Host: test\r\nConnection: close\r\n\r\n",
+            )
+            assert "HTTP/1.1 200 OK" in poll_response
+            polled_payload = _json_body(poll_response)
+            if polled_payload["results"][0]["native_session_id"]:
+                break
+            await asyncio.sleep(0.01)
+        assert polled_payload is not None
+        result = polled_payload["results"][0]
+        assert polled_payload["run_id"] == started_payload["run_id"]
+        assert polled_payload["status"] == "partial"
+        assert result["status"] == "started"
+        assert result["native_session_id"].startswith("council-")
+        assert result["provider_engine"] == "sdk-deepseek"
+        assert result["native_session_path"] == (
+            f"/native/claude?native_thread_id={result['native_session_id']}"
+        )
+        assert result["summary"].startswith("Native review session started:")
+    finally:
+        await server.stop()
