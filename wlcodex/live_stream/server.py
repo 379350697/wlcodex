@@ -175,7 +175,9 @@ class WorkerLiveStreamServer:
                 native_landing_path = (
                     "/native" if self._native_registry is not None else "/native/codex"
                 )
-                if not self._access_token:
+                if not self._access_token or (
+                    self._allow_unauthenticated_loopback and _is_loopback_peer(writer)
+                ):
                     await self._send_redirect(writer, native_landing_path)
                     return
                 await self._send_html(
@@ -1092,8 +1094,10 @@ class WorkerLiveStreamServer:
         *,
         require_token: bool = False,
     ) -> bool:
+        if self._allow_unauthenticated_loopback and _is_loopback_peer(writer):
+            return True
         if require_token and not self._access_token:
-            return self._allow_unauthenticated_loopback and _is_loopback_peer(writer)
+            return False
         if self._access_token:
             prefix = "Bearer "
             authorization = headers.get("authorization", "")
@@ -1106,7 +1110,7 @@ class WorkerLiveStreamServer:
                 return True
             query_token = query.get("token", [""])[0]
             return hmac.compare_digest(query_token, self._access_token)
-        return self._allow_unauthenticated_loopback and _is_loopback_peer(writer)
+        return False
 
     def _mint_login_ticket(self) -> str:
         self._purge_login_tickets()
@@ -2282,6 +2286,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     const PROVIDER = __PROVIDER_JSON__;
     const PROVIDER_LABEL = __PROVIDER_LABEL_JSON__;
     const API_BASE = __API_BASE_JSON__;
+    const PROJECTS_URL = "/api/council/projects";
     const token = new URLSearchParams(location.search).get("token") || "";
     if (token) {
       try { localStorage.setItem("wlcodexToken", token); } catch (_error) {}
@@ -2291,6 +2296,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     let selected = null;
     let selectedProjectCwd = "";
     let sessions = [];
+    let projectCatalog = [];
     const SESSION_PREVIEW_LIMIT = 10;
     const devicesEl = document.getElementById("devices");
     const sessionsEl = document.getElementById("sessions");
@@ -2333,25 +2339,44 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       }
     }
 
+    async function loadProjects() {
+      try {
+        const data = await api(PROJECTS_URL);
+        projectCatalog = Array.isArray(data.projects) ? data.projects : [];
+      } catch (_error) {
+        projectCatalog = [];
+      }
+    }
+
+    async function loadHomeData() {
+      await loadProjects();
+      await loadSessions();
+    }
+
     function renderProjects() {
       const seen = new Set();
       let selectedProjectRendered = false;
       projectsEl.innerHTML = "";
       chatRow.className = "nav-row" + (selectedProjectCwd ? "" : " active");
-      for (const session of sessions) {
-        const cwd = session.cwd || "";
-        if (!cwd || seen.has(cwd)) continue;
+      function addProjectOption(cwd, label) {
+        cwd = String(cwd || "");
+        if (!cwd || seen.has(cwd)) return;
         seen.add(cwd);
         const btn = document.createElement("button");
         btn.className = "project" + (selectedProjectCwd === cwd ? " active" : "");
-        btn.innerHTML = `<span class="icon-folder"></span><span class="label">${escapeHtml(lastPath(cwd))}</span><span></span>`;
+        btn.innerHTML = `<span class="icon-folder"></span><span class="label">${escapeHtml(label || lastPath(cwd))}</span><span></span>`;
         btn.onclick = () => selectProject(cwd);
         projectsEl.appendChild(btn);
         if (selectedProjectCwd === cwd) {
           projectsEl.appendChild(projectNewChat);
           selectedProjectRendered = true;
         }
-        if (seen.size >= 4) break;
+      }
+      for (const project of projectCatalog) {
+        addProjectOption(project.cwd, project.name);
+      }
+      for (const session of sessions) {
+        addProjectOption(session.cwd || "", lastPath(session.cwd || ""));
       }
       if (selectedProjectCwd && !selectedProjectRendered) projectsEl.appendChild(projectNewChat);
       updateContextHint();
@@ -2489,8 +2514,8 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       return `${Math.round(hours / 24)}天`;
     }
     loadStatus();
-    loadSessions();
-    setInterval(loadSessions, 3000);
+    loadHomeData();
+    setInterval(loadHomeData, 3000);
   </script>
 </body>
 </html>"""
@@ -3807,7 +3832,8 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         markApprovalResolved(event);
         renderStatusEvent(event, "审批已处理", "done");
       }
-      else renderStatusEvent(event, statusText(event, payload), statusTone(event));
+      else if (shouldRenderStatusEvent(event)) renderStatusEvent(event, statusText(event, payload), statusTone(event));
+      else updateRunState(statusTitle(event, statusText(event, payload)), statusTone(event));
       } finally {
         renderTarget = previousTarget;
       }
@@ -4013,16 +4039,17 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       if (kind === "command_failed") return "失败";
       return "输出";
     }
-    function statusTitle(event, fallback) {
-      if (event.kind === "reasoning_delta") return "Thinking";
-      if (event.kind === "completed") return "完成";
-      if (event.kind === "failed") return "失败";
-      return fallback || event.kind || "状态";
-    }
     function statusTone(event) {
       if (event.kind === "completed") return "done";
       if (event.kind === "failed") return "failed";
+      if (event.kind === "lifecycle") return "busy";
       return "neutral";
+    }
+    function shouldRenderStatusEvent(event) {
+      const payload = event.payload || {};
+      if (event.kind === "completed") return false;
+      if (event.kind === "lifecycle" && !isFailedStatus(payload.status)) return false;
+      return true;
     }
     function statusText(event, payload) {
       if (payload.status) return payload.status;
@@ -4030,6 +4057,15 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       if (payload.delta) return payload.delta;
       if (event.type) return event.type;
       return "";
+    }
+    function statusTitle(event, fallback) {
+      const payload = event.payload || {};
+      const status = String(payload.status || "").trim().toLowerCase();
+      if (event.kind === "lifecycle" && status === "running") return `${PROVIDER_LABEL} 正在回复`;
+      if (event.kind === "reasoning_delta") return "Thinking";
+      if (event.kind === "completed") return "完成";
+      if (event.kind === "failed") return "失败";
+      return fallback || event.kind || "状态";
     }
   </script>
 </body>

@@ -231,7 +231,10 @@ def _create_live_stream_components(
         native_agents_enabled and bool(getattr(config.native_agents.codex, "enabled", False))
     )
     access_token = os.environ.get(config.live_stream.access_token_env, "")
-    if native_codex_requested or native_agents_enabled:
+    strict_live_stream_auth = not bool(
+        getattr(config.live_stream, "allow_unauthenticated_loopback", True)
+    )
+    if (native_codex_requested or native_agents_enabled) and strict_live_stream_auth:
         if not access_token:
             raise RuntimeError(
                 "native agent control requires "

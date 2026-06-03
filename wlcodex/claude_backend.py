@@ -105,6 +105,7 @@ class ClaudeBackend:
                 exit_code=1,
             )
         resume_session_id = str(request.extra.get("resume_session_id", "") or "")
+        session_id = str(request.extra.get("session_id", "") or "")
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -112,6 +113,7 @@ class ClaudeBackend:
                 *self._prompt_args(
                     request.prompt,
                     resume_session_id=resume_session_id,
+                    session_id=session_id,
                 ),
                 cwd=request.workspace_path or None,
                 env=_sanitized_env(),
@@ -192,6 +194,7 @@ class ClaudeBackend:
             )
             return
         resume_session_id = str(request.extra.get("resume_session_id", "") or "")
+        session_id = str(request.extra.get("session_id", "") or "")
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -200,6 +203,7 @@ class ClaudeBackend:
                     request.prompt,
                     stream_json=True,
                     resume_session_id=resume_session_id,
+                    session_id=session_id,
                 ),
                 cwd=request.workspace_path or None,
                 env=_sanitized_env(),
@@ -281,8 +285,8 @@ class ClaudeBackend:
                         )
                         if not done:
                             if process_exited or _process_has_exited(proc):
-                                await _kill_process_group(proc)
-                                break
+                                process_exited = True
+                                continue
                             continue
 
                     if wait_task is not None and wait_task in done:
@@ -548,13 +552,15 @@ class ClaudeBackend:
         *,
         stream_json: bool = False,
         resume_session_id: str = "",
+        session_id: str = "",
     ) -> list[str]:
         capabilities = self._capabilities_for_args()
-        args = (
-            ["--resume", resume_session_id, "-p", prompt]
-            if resume_session_id
-            else ["-p", prompt]
-        )
+        if resume_session_id:
+            args = ["--resume", resume_session_id, "-p", prompt]
+        elif session_id and capabilities.session_id:
+            args = ["--session-id", session_id, "-p", prompt]
+        else:
+            args = ["-p", prompt]
         if capabilities.permission_mode:
             args.extend([
                 "--permission-mode",
@@ -598,6 +604,7 @@ class ClaudeBackend:
             model=True,
             effort=True,
             resume=True,
+            session_id=True,
         )
 
     async def _probe_hook_events(self) -> bool:

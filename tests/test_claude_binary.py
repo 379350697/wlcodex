@@ -132,6 +132,7 @@ Usage: claude [options] [command] [prompt]
   --model <model>
   --effort <level>
   -r, --resume [value]
+  --session-id <uuid>
 """
 
     caps = parse_claude_help(help_text)
@@ -147,6 +148,7 @@ Usage: claude [options] [command] [prompt]
         model=True,
         effort=True,
         resume=True,
+        session_id=True,
     )
 
 
@@ -163,6 +165,7 @@ def test_parse_minimal_help_disables_optional_flags() -> None:
     assert caps.model is False
     assert caps.effort is False
     assert caps.resume is False
+    assert caps.session_id is False
 
 
 @pytest.mark.asyncio

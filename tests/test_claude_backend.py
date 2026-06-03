@@ -602,6 +602,18 @@ def test_prompt_args_resume_existing_session() -> None:
     assert args[3] == "continue"
 
 
+def test_prompt_args_sets_explicit_session_id_for_new_session() -> None:
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    session_id = "11111111-1111-4111-8111-111111111111"
+    backend = ClaudeBackend(ClaudeConfig(enabled=True))
+
+    args = backend._prompt_args("start", session_id=session_id)
+
+    assert args[:4] == ["--session-id", session_id, "-p", "start"]
+    assert "--resume" not in args
+
+
 def test_to_agent_stream_event_text() -> None:
     from wlcodex.claude_backend import _to_agent_stream_event
     from wlcodex.claude_stream_parser import ClaudeStreamEvent
@@ -1093,6 +1105,46 @@ async def test_streaming_emits_agent_run_failed_on_non_zero_exit(tmp_path: Path)
     stored_types = [e.event_type for e in stored]
     assert EventType.AGENT_RUN_STARTED in stored_types
     assert EventType.AGENT_RUN_FAILED in stored_types
+
+
+@pytest.mark.asyncio
+async def test_streaming_drains_stdout_after_process_exits(tmp_path: Path) -> None:
+    from wlcodex.agent_backend import AgentRequest
+    from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig
+
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/bin/sh\n"
+        "(\n"
+        "  sleep 0.05\n"
+        "  printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"sess-delayed\",\"result\":\"delayed hello\"}'\n"
+        ") &\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+
+    backend = ClaudeBackend(
+        ClaudeConfig(
+            enabled=True,
+            binary=str(fake_claude),
+            request_timeout_seconds=1.0,
+            stream_idle_timeout_seconds=1.0,
+            stream_drain_grace_seconds=0.01,
+        )
+    )
+    backend._hook_events_supported = False
+
+    events = [
+        event
+        async for event in backend.send_streaming(
+            AgentRequest(prompt="test", workspace_path=str(tmp_path))
+        )
+    ]
+
+    assert [(event.event_type, event.delta, event.session_id) for event in events] == [
+        ("text", "delayed hello", "sess-delayed")
+    ]
 
 
 @pytest.mark.asyncio

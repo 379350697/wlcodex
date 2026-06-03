@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from wlcodex.agent_backend import AgentRequest
 from wlcodex.native_agents.claude_local_sessions import (
@@ -29,6 +30,7 @@ class _RunOutcome:
     status: str
     claude_session_id: str = ""
     error: str = ""
+    emitted_text: bool = False
 
 
 _CLAUDE_REASONING_EFFORTS = [
@@ -140,7 +142,7 @@ class ClaudeCliLocalProvider:
         **kwargs: Any,
     ) -> NativeAgentControlResult:
         self._ensure_enabled()
-        native_session_id = f"claude-cli-{uuid4()}"
+        native_session_id = str(uuid4())
         native_turn_id = _new_turn_id()
         session = self._session_store.get_or_create_session(
             provider=self.provider,
@@ -158,6 +160,7 @@ class ClaudeCliLocalProvider:
             native_turn_id=native_turn_id,
             prompt=prompt,
             resume_session_id="",
+            session_id=native_session_id,
         )
         return _control_result(
             session,
@@ -168,10 +171,11 @@ class ClaudeCliLocalProvider:
 
     async def create_session(self, cwd: str, **kwargs: Any) -> NativeAgentControlResult:
         self._ensure_enabled()
+        native_session_id = str(uuid4())
         session = self._session_store.get_or_create_session(
             provider=self.provider,
             provider_engine=self.provider_engine,
-            native_session_id=f"claude-cli-{uuid4()}",
+            native_session_id=native_session_id,
             title="Claude CLI session",
             cwd=cwd or self._default_cwd,
             source_kind="claude_cli_local",
@@ -214,6 +218,7 @@ class ClaudeCliLocalProvider:
             native_turn_id=native_turn_id,
             prompt=prompt,
             resume_session_id=_claude_session_id(session),
+            session_id=_session_id_for_new_cli_run(session),
         )
         return _control_result(
             session,
@@ -253,12 +258,18 @@ class ClaudeCliLocalProvider:
         prompt: str,
         cwd: str,
         resume_session_id: str,
+        session_id: str = "",
         session: NativeAgentSession | None = None,
         native_turn_id: str = "",
     ) -> _RunOutcome:
         latest_session_id = resume_session_id
         error = ""
-        extra = {"resume_session_id": resume_session_id} if resume_session_id else {}
+        emitted_text = False
+        extra = {}
+        if resume_session_id:
+            extra["resume_session_id"] = resume_session_id
+        elif session_id:
+            extra["session_id"] = session_id
         request = AgentRequest(prompt=prompt, workspace_path=cwd, extra=extra)
         async for event in self._engine.send_streaming(request):
             event_type = str(getattr(event, "event_type", "") or "")
@@ -270,6 +281,7 @@ class ClaudeCliLocalProvider:
                 continue
             text = extract_native_agent_text(event)
             if text:
+                emitted_text = True
                 self._emit_text_delta(
                     session=session,
                     native_turn_id=native_turn_id,
@@ -280,8 +292,18 @@ class ClaudeCliLocalProvider:
                 status="failed",
                 claude_session_id=latest_session_id,
                 error=error,
+                emitted_text=emitted_text,
             )
-        return _RunOutcome(status="done", claude_session_id=latest_session_id)
+        if not latest_session_id and not emitted_text:
+            return _RunOutcome(
+                status="failed",
+                error="Claude CLI completed without output or session id.",
+            )
+        return _RunOutcome(
+            status="done",
+            claude_session_id=latest_session_id,
+            emitted_text=emitted_text,
+        )
 
     def _update_after_run(
         self,
@@ -341,7 +363,7 @@ class ClaudeCliLocalProvider:
             merged_metadata.update(metadata)
             return self._session_store.update_session(
                 existing.id,
-                title=existing.title or local_session.title,
+                title=_merged_import_title(existing, local_session),
                 cwd=existing.cwd or local_session.cwd or self._default_cwd,
                 source_kind=existing.source_kind or "claude_cli_local",
                 status=existing.status or "done",
@@ -377,6 +399,9 @@ class ClaudeCliLocalProvider:
     def _sync_local_transcript(
         self,
         session: NativeAgentSession,
+        *,
+        native_turn_id: str = "",
+        skip_user_text: str = "",
     ) -> NativeAgentSession:
         if self._runtime_store is None:
             return session
@@ -388,16 +413,63 @@ class ClaudeCliLocalProvider:
         emitter = self._emitter()
         if emitter is None:
             return session
-        native_turn_id = session.last_turn_id or f"cli-local-history-{claude_session_id}"
+        base_turn_id = session.last_turn_id or f"cli-local-history-{claude_session_id}"
+        existing_counts = self._existing_transcript_event_counts(session)
+        skipped_user = False
         for index, entry in enumerate(entries[synced_count:], start=synced_count):
-            entry_turn_id = f"{native_turn_id}-{index}"
+            entry_turn_id = native_turn_id or f"{base_turn_id}-{index}"
+            entry_key = (entry.role, entry.text.strip())
+            if entry_key[1] and existing_counts[entry_key] > 0:
+                existing_counts[entry_key] -= 1
+                continue
             if entry.role == "user":
+                if (
+                    skip_user_text
+                    and not skipped_user
+                    and entry.text.strip() == skip_user_text.strip()
+                ):
+                    skipped_user = True
+                    continue
                 emitter.user_message(session, native_turn_id=entry_turn_id, text=entry.text)
             elif entry.role == "assistant":
                 emitter.text_delta(session, native_turn_id=entry_turn_id, delta=entry.text)
         metadata = dict(session.metadata)
         metadata["claude_synced_message_count"] = len(entries)
         return self._session_store.update_session(session.id, metadata=metadata)
+
+    def _existing_transcript_event_counts(
+        self,
+        session: NativeAgentSession,
+    ) -> Counter[tuple[str, str]]:
+        if self._runtime_store is None or session.agent_run_id <= 0:
+            return Counter()
+        counts: Counter[tuple[str, str]] = Counter()
+        assistant_parts: dict[str, list[str]] = defaultdict(list)
+        for event in self._runtime_store.list_by_agent_run(
+            session.agent_run_id,
+            limit=1000,
+        ):
+            payload = event.payload
+            if str(payload.get("native_thread_id") or "") != session.native_session_id:
+                continue
+            if event.event_type == "user.message.received":
+                text = str(payload.get("text") or "").strip()
+                if text:
+                    counts[("user", text)] += 1
+            elif event.event_type == "model.text.delta":
+                key = str(
+                    payload.get("itemId")
+                    or payload.get("native_turn_id")
+                    or f"assistant:{event.id}"
+                )
+                assistant_parts[key].append(
+                    str(payload.get("delta") or payload.get("text") or "")
+                )
+        for parts in assistant_parts.values():
+            text = "".join(parts).strip()
+            if text:
+                counts[("assistant", text)] += 1
+        return counts
 
     def _ensure_enabled(self) -> None:
         if not bool(getattr(self._engine, "enabled", False)):
@@ -410,6 +482,7 @@ class ClaudeCliLocalProvider:
         native_turn_id: str,
         prompt: str,
         resume_session_id: str,
+        session_id: str = "",
     ) -> None:
         emitter = self._emitter()
         if emitter is not None:
@@ -421,6 +494,7 @@ class ClaudeCliLocalProvider:
                 native_turn_id=native_turn_id,
                 prompt=prompt,
                 resume_session_id=resume_session_id,
+                session_id=session_id,
             )
         )
         self._background_tasks.add(task)
@@ -433,12 +507,14 @@ class ClaudeCliLocalProvider:
         native_turn_id: str,
         prompt: str,
         resume_session_id: str,
+        session_id: str = "",
     ) -> None:
         try:
             outcome = await self._run_prompt(
                 prompt=prompt,
                 cwd=session.cwd,
                 resume_session_id=resume_session_id,
+                session_id=session_id,
                 session=session,
                 native_turn_id=native_turn_id,
             )
@@ -449,6 +525,12 @@ class ClaudeCliLocalProvider:
                 error=str(exc),
             )
         updated = self._update_after_run(session, outcome)
+        if outcome.status == "done" and not outcome.emitted_text:
+            updated = self._sync_local_transcript(
+                updated,
+                native_turn_id=native_turn_id,
+                skip_user_text=prompt,
+            )
         emitter = self._emitter()
         if emitter is None:
             return
@@ -512,6 +594,16 @@ def _claude_session_id(session: NativeAgentSession) -> str:
     return str(session.metadata.get("claude_session_id", "") or "")
 
 
+def _session_id_for_new_cli_run(session: NativeAgentSession) -> str:
+    if _claude_session_id(session):
+        return ""
+    try:
+        UUID(session.native_session_id)
+    except (TypeError, ValueError):
+        return ""
+    return session.native_session_id
+
+
 def _local_session_metadata(local_session: ClaudeLocalSession) -> dict[str, str]:
     metadata = {
         "claude_session_id": local_session.session_id,
@@ -526,6 +618,33 @@ def _local_session_metadata(local_session: ClaudeLocalSession) -> dict[str, str]
     if local_session.permission_mode:
         metadata["permission_mode"] = local_session.permission_mode
     return metadata
+
+
+def _merged_import_title(
+    existing: NativeAgentSession,
+    local_session: ClaudeLocalSession,
+) -> str:
+    if not existing.title:
+        return local_session.title
+    if not local_session.title or _is_fallback_title(
+        local_session.title,
+        local_session.session_id,
+    ):
+        return existing.title
+    if (
+        _is_fallback_title(existing.title, local_session.session_id)
+        or _is_longer_version_of_title(existing.title, local_session.title)
+    ):
+        return local_session.title
+    return existing.title
+
+
+def _is_fallback_title(title: str, session_id: str) -> bool:
+    return title == f"Claude {session_id[:8]}"
+
+
+def _is_longer_version_of_title(existing_title: str, local_title: str) -> bool:
+    return existing_title != local_title and existing_title.startswith(local_title)
 
 
 def _new_turn_id() -> str:

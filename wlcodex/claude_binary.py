@@ -47,6 +47,7 @@ class ClaudeCliCapabilities:
     model: bool = False
     effort: bool = False
     resume: bool = False
+    session_id: bool = False
     probe_error: str = ""
 
     @classmethod
@@ -149,6 +150,7 @@ def parse_claude_help(help_text: str) -> ClaudeCliCapabilities:
         model="--model" in help_text,
         effort="--effort" in help_text,
         resume="--resume" in help_text,
+        session_id="--session-id" in help_text,
     )
 
 

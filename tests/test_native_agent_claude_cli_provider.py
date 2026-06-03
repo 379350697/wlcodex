@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
@@ -57,6 +58,109 @@ class BlockingClaudeEngine:
             event_type="text",
             session_id="claude-real-1",
         )
+
+
+class SilentClaudeEngine:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def send_streaming(self, request):
+        self.requests.append(request)
+        if False:
+            yield AgentStreamEvent(delta="", event_type="text")
+
+
+class JsonlAppendingClaudeEngine:
+    enabled = True
+
+    def __init__(self, *, session_id: str, session_path: Path) -> None:
+        self.session_id = session_id
+        self.session_path = session_path
+        self.requests = []
+
+    async def send_streaming(self, request):
+        self.requests.append(request)
+        with self.session_path.open("a", encoding="utf-8") as handle:
+            for row in [
+                {
+                    "type": "user",
+                    "uuid": "user-continued",
+                    "sessionId": self.session_id,
+                    "timestamp": "2026-06-03T09:00:00.000Z",
+                    "message": {"role": "user", "content": request.prompt},
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "assistant-continued",
+                    "sessionId": self.session_id,
+                    "timestamp": "2026-06-03T09:00:01.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "jsonl answer"}],
+                    },
+                },
+            ]:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        yield AgentStreamEvent(event_type="session", session_id=self.session_id)
+
+
+class JsonlStreamingClaudeEngine:
+    enabled = True
+
+    def __init__(self, *, session_id: str, session_path: Path) -> None:
+        self.session_id = session_id
+        self.session_path = session_path
+        self.requests = []
+
+    async def send_streaming(self, request):
+        self.requests.append(request)
+        self.session_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.session_path.open("a", encoding="utf-8") as handle:
+            for row in [
+                {
+                    "type": "user",
+                    "uuid": "user-live",
+                    "sessionId": self.session_id,
+                    "timestamp": "2026-06-03T09:01:00.000Z",
+                    "message": {"role": "user", "content": request.prompt},
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "assistant-live",
+                    "sessionId": self.session_id,
+                    "timestamp": "2026-06-03T09:01:01.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "live answer"}],
+                    },
+                },
+            ]:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        yield AgentStreamEvent(
+            delta="live answer",
+            event_type="text",
+            session_id=self.session_id,
+        )
+        yield AgentStreamEvent(event_type="session", session_id=self.session_id)
+
+
+class StaticSessionIndex:
+    def __init__(self, sessions):
+        self.sessions = sessions
+
+    def list_recent(self, limit: int = 50):
+        return self.sessions[:limit]
+
+    def get(self, session_id: str):
+        for session in self.sessions:
+            if session.session_id == session_id:
+                return session
+        return None
+
+    def read_transcript(self, session_id: str):
+        return []
 
 
 def _provider(
@@ -144,14 +248,14 @@ async def test_claude_cli_provider_starts_session_and_records_agent_run(
 
     assert result.provider == "claude"
     assert result.provider_engine == "cli-local"
-    assert result.native_session_id.startswith("claude-cli-")
+    UUID(result.native_session_id)
     assert result.agent_run_id > 0
     assert result.status == "started"
     assert result.turn_running is True
     await provider.wait_for_background_tasks()
     assert engine.requests[0].prompt == "say hi"
     assert engine.requests[0].workspace_path == str(tmp_path)
-    assert engine.requests[0].extra == {}
+    assert engine.requests[0].extra == {"session_id": result.native_session_id}
     session = store.get_by_native_session_id(
         provider="claude",
         provider_engine="cli-local",
@@ -160,6 +264,40 @@ async def test_claude_cli_provider_starts_session_and_records_agent_run(
     assert session is not None
     assert session.status == "done"
     assert session.metadata["claude_session_id"] == "claude-real-1"
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_provider_marks_silent_cli_run_failed(
+    tmp_path: Path,
+) -> None:
+    provider, store, engine, runtime_store = _provider(
+        tmp_path,
+        engine=SilentClaudeEngine(),
+    )
+
+    result = await provider.start_session(str(tmp_path), "say hi")
+    await provider.wait_for_background_tasks()
+
+    assert engine.requests[0].prompt == "say hi"
+    session = store.get_by_native_session_id(
+        provider="claude",
+        provider_engine="cli-local",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    assert session.status == "failed"
+    assert session.metadata["error"] == (
+        "Claude CLI completed without output or session id."
+    )
+    events = runtime_store.list_by_agent_run(result.agent_run_id)
+    assert [event.event_type for event in events] == [
+        EventType.AGENT_RUN_STARTED,
+        EventType.USER_MESSAGE_RECEIVED,
+        EventType.AGENT_RUN_FAILED,
+    ]
+    assert events[-1].payload["error"] == (
+        "Claude CLI completed without output or session id."
+    )
 
 
 @pytest.mark.asyncio
@@ -189,7 +327,7 @@ async def test_claude_cli_provider_create_session_does_not_call_engine(
     result = await provider.create_session(str(tmp_path))
 
     assert result.status == "created"
-    assert result.native_session_id.startswith("claude-cli-")
+    UUID(result.native_session_id)
     assert engine.requests == []
 
 
@@ -205,7 +343,7 @@ async def test_claude_cli_provider_create_then_continue_starts_without_resume(
     assert result.status == "continued"
     assert result.turn_running is True
     await provider.wait_for_background_tasks()
-    assert engine.requests[0].extra == {}
+    assert engine.requests[0].extra == {"session_id": created.native_session_id}
     session = store.get_by_native_session_id(
         provider="claude",
         provider_engine="cli-local",
@@ -323,6 +461,98 @@ async def test_claude_cli_provider_imports_local_claude_sessions_on_list(
 
 
 @pytest.mark.asyncio
+async def test_claude_cli_provider_refreshes_fallback_title_from_local_session(
+    tmp_path: Path,
+) -> None:
+    session_id = "37373737-3737-4737-8737-373737373737"
+    provider, store, _engine, _runtime_store = _provider(
+        tmp_path,
+        session_index=StaticSessionIndex(
+            [
+                SimpleNamespace(
+                    session_id=session_id,
+                    title="Claude history recap",
+                    cwd="/repo",
+                    created_at="2026-06-03T08:36:15.853Z",
+                    updated_at="2026-06-03T08:36:19.298Z",
+                    source_path="/repo/session.jsonl",
+                    entrypoint="",
+                    version="",
+                    git_branch="",
+                    permission_mode="",
+                )
+            ]
+        ),
+    )
+    store.get_or_create_session(
+        provider="claude",
+        provider_engine="cli-local",
+        native_session_id=session_id,
+        title="Claude 37373737",
+        cwd="/repo",
+        source_kind="claude_cli_local",
+        status="done",
+        metadata={"claude_session_id": session_id},
+    )
+
+    await provider.list_sessions(50)
+
+    imported = store.get_by_native_session_id(
+        provider="claude",
+        provider_engine="cli-local",
+        native_session_id=session_id,
+    )
+    assert imported is not None
+    assert imported.title == "Claude history recap"
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_provider_shortens_previous_summary_title(
+    tmp_path: Path,
+) -> None:
+    session_id = "38383838-3838-4838-8838-383838383838"
+    provider, store, _engine, _runtime_store = _provider(
+        tmp_path,
+        session_index=StaticSessionIndex(
+            [
+                SimpleNamespace(
+                    session_id=session_id,
+                    title="First sentence.",
+                    cwd="/repo",
+                    created_at="2026-06-03T08:36:15.853Z",
+                    updated_at="2026-06-03T08:36:19.298Z",
+                    source_path="/repo/session.jsonl",
+                    entrypoint="",
+                    version="",
+                    git_branch="",
+                    permission_mode="",
+                )
+            ]
+        ),
+    )
+    store.get_or_create_session(
+        provider="claude",
+        provider_engine="cli-local",
+        native_session_id=session_id,
+        title="First sentence. Second sentence that used to make the UI too long.",
+        cwd="/repo",
+        source_kind="claude_cli_local",
+        status="done",
+        metadata={"claude_session_id": session_id},
+    )
+
+    await provider.list_sessions(50)
+
+    imported = store.get_by_native_session_id(
+        provider="claude",
+        provider_engine="cli-local",
+        native_session_id=session_id,
+    )
+    assert imported is not None
+    assert imported.title == "First sentence."
+
+
+@pytest.mark.asyncio
 async def test_claude_cli_provider_continues_imported_local_session_with_resume(
     tmp_path: Path,
 ) -> None:
@@ -351,6 +581,97 @@ async def test_claude_cli_provider_continues_imported_local_session_with_resume(
     assert engine.requests[0].extra == {
         "resume_session_id": "44444444-4444-4444-8444-444444444444"
     }
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_provider_syncs_jsonl_output_after_continue(
+    tmp_path: Path,
+) -> None:
+    session_id = "66666666-6666-4666-8666-666666666666"
+    session_path = _write_claude_session(
+        tmp_path,
+        session_id,
+        [
+            {
+                "type": "user",
+                "uuid": "user-1",
+                "sessionId": session_id,
+                "timestamp": "2026-06-03T08:36:15.853Z",
+                "cwd": "/repo",
+                "message": {"role": "user", "content": "hello"},
+            },
+            {
+                "type": "assistant",
+                "uuid": "assistant-1",
+                "sessionId": session_id,
+                "timestamp": "2026-06-03T08:36:19.298Z",
+                "cwd": "/repo",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "world"}],
+                },
+            },
+        ],
+    )
+    engine = JsonlAppendingClaudeEngine(
+        session_id=session_id,
+        session_path=session_path,
+    )
+    provider, _store, _engine, runtime_store = _provider(tmp_path, engine=engine)
+    attached = await provider.attach_session(session_id)
+
+    await provider.continue_session(session_id, "next question")
+    await provider.wait_for_background_tasks()
+
+    events = runtime_store.list_by_agent_run(attached.agent_run_id)
+    assert [
+        (event.event_type, event.payload.get("text") or event.payload.get("delta"))
+        for event in events
+    ] == [
+        (EventType.USER_MESSAGE_RECEIVED, "hello"),
+        (EventType.MODEL_TEXT_DELTA, "world"),
+        (EventType.AGENT_RUN_STARTED, None),
+        (EventType.USER_MESSAGE_RECEIVED, "next question"),
+        (EventType.MODEL_TEXT_DELTA, "jsonl answer"),
+        (EventType.AGENT_RUN_COMPLETED, None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_provider_does_not_duplicate_streamed_jsonl_on_sync(
+    tmp_path: Path,
+) -> None:
+    session_id = "77777777-7777-4777-8777-777777777777"
+    session_path = (
+        tmp_path / ".claude" / "projects" / "-repo" / f"{session_id}.jsonl"
+    )
+    engine = JsonlStreamingClaudeEngine(
+        session_id=session_id,
+        session_path=session_path,
+    )
+    provider, store, _engine, runtime_store = _provider(tmp_path, engine=engine)
+
+    result = await provider.start_session(str(tmp_path), "live question")
+    await provider.wait_for_background_tasks()
+    await provider.read_session(result.native_session_id)
+
+    events = runtime_store.list_by_agent_run(result.agent_run_id)
+    assert [
+        (event.event_type, event.payload.get("text") or event.payload.get("delta"))
+        for event in events
+    ] == [
+        (EventType.AGENT_RUN_STARTED, None),
+        (EventType.USER_MESSAGE_RECEIVED, "live question"),
+        (EventType.MODEL_TEXT_DELTA, "live answer"),
+        (EventType.AGENT_RUN_COMPLETED, None),
+    ]
+    session = store.get_by_native_session_id(
+        provider="claude",
+        provider_engine="cli-local",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    assert session.metadata["claude_synced_message_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -440,10 +761,11 @@ def _write_claude_session(
     root: Path,
     session_id: str,
     rows: list[dict],
-) -> None:
+) -> Path:
     path = root / ".claude" / "projects" / "-repo" / f"{session_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
         encoding="utf-8",
     )
+    return path

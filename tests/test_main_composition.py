@@ -819,6 +819,60 @@ def test_create_live_stream_components_wires_single_claude_cli_engine(
     assert components.server._native_registry is components.native_registry
 
 
+def test_create_live_stream_components_allows_native_without_token_for_loopback_testing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.config import (
+        AppConfig,
+        ApprovalConfig,
+        BackendConfig,
+        CodexConfig,
+        CodexNativeConfig,
+        DisplayConfig,
+        LiveStreamConfig,
+        StorageConfig,
+        TaskConfig,
+        TelegramConfig,
+        WorkspaceConfig,
+    )
+    from wlcodex.main import _create_live_stream_components
+    from wlcodex.runtime_event_store import RuntimeEventStore
+
+    monkeypatch.delenv("WLCODEX_LIVE_STREAM_TOKEN", raising=False)
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    runtime_store = RuntimeEventStore(ledger._conn)
+    config = AppConfig(
+        telegram=TelegramConfig("BOT_TOKEN", frozenset({1})),
+        codex=CodexConfig("codex", "127.0.0.1", 17431, "on-request", "workspace-write"),
+        storage=StorageConfig(
+            tmp_path / "db.sqlite3",
+            tmp_path / "logs",
+            tmp_path / "worktrees",
+        ),
+        display=DisplayConfig(2, 40, 3500),
+        backend=BackendConfig(15, 60, 300, 3600, 3600, 20000),
+        approval=ApprovalConfig(3600, True),
+        task=TaskConfig(7200, 1800, 3600, 60, 120),
+        workspaces=(WorkspaceConfig("wlcodex", tmp_path, True),),
+        live_stream=LiveStreamConfig(
+            enabled=True,
+            host="127.0.0.1",
+            port=0,
+            allow_unauthenticated_loopback=True,
+        ),
+        codex_native=CodexNativeConfig(enabled=True, transport="proxy"),
+    )
+
+    components = _create_live_stream_components(config, runtime_store, ledger)
+
+    assert components is not None
+    assert components.server._native_controller is not None
+    assert components.server._access_token == ""
+    assert components.server._allow_unauthenticated_loopback is True
+
+
 def test_create_live_stream_components_rejects_native_without_token(
     monkeypatch,
     tmp_path: Path,
@@ -855,7 +909,12 @@ def test_create_live_stream_components_rejects_native_without_token(
         approval=ApprovalConfig(3600, True),
         task=TaskConfig(7200, 1800, 3600, 60, 120),
         workspaces=(WorkspaceConfig("wlcodex", tmp_path, True),),
-        live_stream=LiveStreamConfig(enabled=True, host="127.0.0.1", port=0),
+        live_stream=LiveStreamConfig(
+            enabled=True,
+            host="127.0.0.1",
+            port=0,
+            allow_unauthenticated_loopback=False,
+        ),
         codex_native=CodexNativeConfig(enabled=True, transport="proxy"),
     )
 

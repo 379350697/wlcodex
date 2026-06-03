@@ -101,6 +101,7 @@ class ClaudeLocalSessionIndex:
         version = ""
         git_branch = ""
         permission_mode = ""
+        title = ""
         for row in _iter_jsonl(path):
             row_session_id = str(row.get("sessionId") or "")
             if row_session_id:
@@ -114,6 +115,7 @@ class ClaudeLocalSessionIndex:
             version = str(row.get("version") or version)
             git_branch = str(row.get("gitBranch") or git_branch)
             permission_mode = str(row.get("permissionMode") or permission_mode)
+            title = _session_title_from_row(row) or title
         if not session_id:
             return None
         fallback_time = _mtime_iso(path)
@@ -121,7 +123,7 @@ class ClaudeLocalSessionIndex:
         updated_at = updated_at or fallback_time
         return ClaudeLocalSession(
             session_id=session_id,
-            title=f"Claude {session_id[:8]}",
+            title=title or _fallback_title(session_id),
             cwd=cwd,
             created_at=created_at,
             updated_at=updated_at,
@@ -151,6 +153,44 @@ def _message_text(message: Any) -> str:
     if not isinstance(message, dict):
         return ""
     return _content_text(message.get("content")).strip()
+
+
+def _session_title_from_row(row: dict[str, Any]) -> str:
+    for key in ("title", "summary"):
+        title = _normalize_title(row.get(key))
+        if title:
+            return title
+    if row.get("type") == "system" and row.get("subtype") == "away_summary":
+        return _normalize_title(row.get("content"))
+    return ""
+
+
+def _normalize_title(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    title = " ".join(value.split()).strip()
+    title = title.removesuffix("(disable recaps in /config)").strip()
+    title = _first_sentence(title)
+    return title[:160].strip()
+
+
+def _first_sentence(title: str) -> str:
+    sentence_ends: list[int] = []
+    for marker in (". ", "? ", "! "):
+        index = title.find(marker)
+        if index >= 0:
+            sentence_ends.append(index + 1)
+    for marker in ("。", "？", "！"):
+        index = title.find(marker)
+        if index >= 0:
+            sentence_ends.append(index + 1)
+    if sentence_ends:
+        return title[: min(sentence_ends)].strip()
+    return title
+
+
+def _fallback_title(session_id: str) -> str:
+    return f"Claude {session_id[:8]}"
 
 
 def _content_text(content: Any) -> str:

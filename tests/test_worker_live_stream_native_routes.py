@@ -260,6 +260,7 @@ async def test_native_sessions_requires_authorization_when_token_is_configured(
         hub=WorkerLiveStreamHub(store),
         native_controller=controller,
         access_token="secret",
+        allow_unauthenticated_loopback=False,
     )
     await server.start()
     try:
@@ -355,6 +356,47 @@ async def test_native_public_root_and_page_open_without_token(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_native_public_root_and_page_open_on_loopback_testing_with_token(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+        allow_unauthenticated_loopback=True,
+    )
+    await server.start()
+    try:
+        root_response = await _read_response(
+            server.host,
+            server.port,
+            "GET / HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        page_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 303 See Other" in root_response
+    assert "Location: /native/codex" in root_response
+    assert "访问令牌" not in root_response
+    assert "HTTP/1.1 200 OK" in page_response
+    assert "<title>Codex</title>" in page_response
+    assert "访问令牌" not in page_response
+
+
+@pytest.mark.asyncio
 async def test_native_sessions_returns_json_with_bearer_token(tmp_path: Path) -> None:
     store = _store(tmp_path)
     controller = FakeNativeController()
@@ -364,6 +406,7 @@ async def test_native_sessions_returns_json_with_bearer_token(tmp_path: Path) ->
         hub=WorkerLiveStreamHub(store),
         native_controller=controller,
         access_token="secret",
+        allow_unauthenticated_loopback=False,
     )
     await server.start()
     try:
@@ -402,6 +445,7 @@ async def test_native_models_route_returns_official_catalog(tmp_path: Path) -> N
         hub=WorkerLiveStreamHub(store),
         native_controller=controller,
         access_token="secret",
+        allow_unauthenticated_loopback=False,
     )
     await server.start()
     try:
@@ -449,6 +493,7 @@ async def test_native_start_route_creates_project_thread_with_model_settings(
         hub=WorkerLiveStreamHub(store),
         native_controller=controller,
         access_token="secret",
+        allow_unauthenticated_loopback=False,
     )
     await server.start()
     try:
@@ -1043,6 +1088,7 @@ async def test_native_root_and_unauthorized_page_show_token_entry(
         hub=WorkerLiveStreamHub(store),
         native_controller=controller,
         access_token="secret",
+        allow_unauthenticated_loopback=False,
     )
     await server.start()
     try:
@@ -1207,6 +1253,41 @@ async def test_native_codex_page_uses_project_context_for_new_chat(
 
 
 @pytest.mark.asyncio
+async def test_native_codex_page_merges_project_catalog_with_session_workspaces(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'const PROJECTS_URL = "/api/council/projects";' in response
+    assert "let projectCatalog = [];" in response
+    assert "async function loadProjects()" in response
+    assert "projectCatalog = Array.isArray(data.projects) ? data.projects : [];" in response
+    assert "addProjectOption(project.cwd, project.name);" in response
+    assert "for (const project of projectCatalog)" in response
+    assert "await loadProjects();" in response
+    assert "if (seen.size >= 4) break;" not in response
+
+
+@pytest.mark.asyncio
 async def test_native_routes_return_503_when_controller_is_unavailable(
     tmp_path: Path,
 ) -> None:
@@ -1244,6 +1325,7 @@ async def test_worker_stream_routes_require_auth_when_token_is_configured(
         port=0,
         hub=WorkerLiveStreamHub(store),
         access_token="secret",
+        allow_unauthenticated_loopback=False,
     )
     await server.start()
     try:
@@ -1440,6 +1522,42 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert 'submitPrompt("continue")' in response
     assert ".bubble" not in response
     assert "message assistant" not in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_hides_success_lifecycle_events_from_transcript(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "function shouldRenderStatusEvent(event)" in response
+    assert 'if (event.kind === "completed") return false;' in response
+    assert (
+        'if (event.kind === "lifecycle" && !isFailedStatus(payload.status)) '
+        "return false;"
+    ) in response
+    assert (
+        'if (event.kind === "lifecycle" && status === "running") '
+        'return `${PROVIDER_LABEL} 正在回复`;'
+    ) in response
 
 
 @pytest.mark.asyncio

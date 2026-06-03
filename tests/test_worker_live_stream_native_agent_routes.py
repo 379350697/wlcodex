@@ -118,6 +118,7 @@ async def _request_native_agent(
     *,
     provider: FakeProvider | None = None,
     access_token: str | None = None,
+    allow_unauthenticated_loopback: bool = True,
 ) -> tuple[str, FakeProvider]:
     fake_provider = provider or FakeProvider()
     server = WorkerLiveStreamServer(
@@ -126,6 +127,7 @@ async def _request_native_agent(
         hub=WorkerLiveStreamHub(_store(tmp_path)),
         native_registry=NativeAgentRegistry([fake_provider]),
         access_token=access_token,
+        allow_unauthenticated_loopback=allow_unauthenticated_loopback,
     )
     await server.start()
     try:
@@ -143,6 +145,7 @@ async def test_native_agent_registry_root_shows_token_entry_for_native_index(
         tmp_path,
         "GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
         access_token="secret",
+        allow_unauthenticated_loopback=False,
     )
 
     assert "HTTP/1.1 200 OK" in response
@@ -337,6 +340,7 @@ async def test_native_claude_token_entry_returns_to_claude(
         "GET /native/claude HTTP/1.1\r\n"
         "Host: test\r\nConnection: close\r\n\r\n",
         access_token="secret",
+        allow_unauthenticated_loopback=False,
     )
 
     assert "HTTP/1.1 401 Unauthorized" in response

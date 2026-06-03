@@ -65,6 +65,77 @@ def test_lists_local_claude_sessions_without_using_message_text_for_title(
     assert "private" not in session.title
 
 
+def test_uses_claude_away_summary_for_session_title(tmp_path: Path) -> None:
+    session_path = (
+        tmp_path
+        / ".claude"
+        / "projects"
+        / "-Users-wl-projects-wlcodex"
+        / "12121212-1212-4121-8121-121212121212.jsonl"
+    )
+    _write_jsonl(
+        session_path,
+        [
+            {
+                "type": "user",
+                "sessionId": "12121212-1212-4121-8121-121212121212",
+                "timestamp": "2026-06-03T08:36:15.853Z",
+                "message": {"role": "user", "content": "private prompt text"},
+            },
+            {
+                "type": "system",
+                "subtype": "away_summary",
+                "sessionId": "12121212-1212-4121-8121-121212121212",
+                "timestamp": "2026-06-03T08:36:19.298Z",
+                "content": (
+                    "Discussing how Claude Code local history is stored. "
+                    "(disable recaps in /config)"
+                ),
+            },
+        ],
+    )
+
+    session = ClaudeLocalSessionIndex(tmp_path / ".claude").get(
+        "12121212-1212-4121-8121-121212121212"
+    )
+
+    assert session is not None
+    assert session.title == "Discussing how Claude Code local history is stored."
+    assert "private" not in session.title
+
+
+def test_claude_away_summary_title_stops_at_first_sentence(tmp_path: Path) -> None:
+    session_path = (
+        tmp_path
+        / ".claude"
+        / "projects"
+        / "-Users-wl-projects-wlcodex"
+        / "13131313-1313-4131-8131-131313131313.jsonl"
+    )
+    _write_jsonl(
+        session_path,
+        [
+            {
+                "type": "system",
+                "subtype": "away_summary",
+                "sessionId": "13131313-1313-4131-8131-131313131313",
+                "timestamp": "2026-06-03T08:36:19.298Z",
+                "content": (
+                    "We were discussing how to set a workspace in Claude Code. "
+                    "The next sentence is useful context but too long for a title."
+                ),
+            },
+        ],
+    )
+
+    session = ClaudeLocalSessionIndex(tmp_path / ".claude").get(
+        "13131313-1313-4131-8131-131313131313"
+    )
+
+    assert session is not None
+    assert session.title == "We were discussing how to set a workspace in Claude Code."
+
+
 def test_reads_transcript_text_for_selected_session_only(tmp_path: Path) -> None:
     session_path = (
         tmp_path
