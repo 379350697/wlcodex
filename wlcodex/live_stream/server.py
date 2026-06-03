@@ -166,14 +166,23 @@ class WorkerLiveStreamServer:
                 )
                 return
 
-            if parsed.path in ("", "/") and self._native_controller is not None:
+            if parsed.path in ("", "/") and (
+                self._native_controller is not None or self._native_registry is not None
+            ):
                 if method != "GET":
                     await self._send_json(writer, 405, {"error": "method not allowed"})
                     return
+                native_landing_path = (
+                    "/native" if self._native_registry is not None else "/native/codex"
+                )
                 if not self._access_token:
-                    await self._send_redirect(writer, "/native/codex")
+                    await self._send_redirect(writer, native_landing_path)
                     return
-                await self._send_html(writer, 200, _native_token_entry_page())
+                await self._send_html(
+                    writer,
+                    200,
+                    _native_token_entry_page(native_landing_path),
+                )
                 return
 
             if parsed.path == "/native":

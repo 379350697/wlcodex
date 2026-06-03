@@ -136,6 +136,22 @@ async def _request_native_agent(
 
 
 @pytest.mark.asyncio
+async def test_native_agent_registry_root_shows_token_entry_for_native_index(
+    tmp_path: Path,
+) -> None:
+    response, provider = await _request_native_agent(
+        tmp_path,
+        "GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
+        access_token="secret",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "<title>WLCodex</title>" in response
+    assert 'location.replace("/native")' in response
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
 async def test_native_agent_status_route(tmp_path: Path) -> None:
     response, provider = await _request_native_agent(
         tmp_path,
