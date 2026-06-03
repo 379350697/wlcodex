@@ -23,11 +23,35 @@ class FakeAntigravityRunner:
         self.fail = fail
         self.calls = []
 
-    async def run(self, *, prompt: str, cwd: str, session_id: str):
-        self.calls.append((prompt, cwd, session_id))
+    async def run(
+        self,
+        *,
+        prompt: str,
+        cwd: str,
+        session_id: str,
+        conversation_id: str = "",
+        save_dir: str = "",
+        app_data_dir: str = "",
+        model: str = "",
+    ):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "cwd": cwd,
+                "session_id": session_id,
+                "conversation_id": conversation_id,
+                "save_dir": save_dir,
+                "app_data_dir": app_data_dir,
+                "model": model,
+            }
+        )
         if self.fail:
             raise RuntimeError("antigravity failed")
-        yield {"type": "assistant", "text": "done"}
+        yield {
+            "type": "assistant",
+            "text": "done",
+            "conversation_id": conversation_id or f"ag-{session_id}",
+        }
 
 
 class BlockingAntigravityRunner:
@@ -38,10 +62,34 @@ class BlockingAntigravityRunner:
         self.release = asyncio.Event()
         self.calls = []
 
-    async def run(self, *, prompt: str, cwd: str, session_id: str):
-        self.calls.append((prompt, cwd, session_id))
+    async def run(
+        self,
+        *,
+        prompt: str,
+        cwd: str,
+        session_id: str,
+        conversation_id: str = "",
+        save_dir: str = "",
+        app_data_dir: str = "",
+        model: str = "",
+    ):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "cwd": cwd,
+                "session_id": session_id,
+                "conversation_id": conversation_id,
+                "save_dir": save_dir,
+                "app_data_dir": app_data_dir,
+                "model": model,
+            }
+        )
         await self.release.wait()
-        yield {"type": "assistant", "text": "background done"}
+        yield {
+            "type": "assistant",
+            "text": "background done",
+            "conversation_id": conversation_id or f"ag-{session_id}",
+        }
 
 
 def _provider(
@@ -122,7 +170,9 @@ async def test_start_session_returns_before_sdk_runner_finishes_and_streams_even
     assert events[1].payload["text"] == "fix it"
 
     await asyncio.sleep(0)
-    assert runner.calls[0] == ("fix it", str(tmp_path), result.native_session_id)
+    assert runner.calls[0]["prompt"] == "fix it"
+    assert runner.calls[0]["cwd"] == str(tmp_path)
+    assert runner.calls[0]["session_id"] == result.native_session_id
     runner.release.set()
     await provider.wait_for_background_tasks()
 
@@ -154,8 +204,8 @@ async def test_start_session_uses_sdk_runner(tmp_path: Path) -> None:
     assert result.provider_engine == "sdk"
     assert result.status == "started"
     await provider.wait_for_background_tasks()
-    assert runner.calls[0][0] == "fix it"
-    assert runner.calls[0][1] == str(tmp_path)
+    assert runner.calls[0]["prompt"] == "fix it"
+    assert runner.calls[0]["cwd"] == str(tmp_path)
     session = store.get_by_native_session_id(
         provider="antigravity",
         provider_engine="sdk",
@@ -175,7 +225,9 @@ async def test_create_then_continue_uses_existing_session_id(tmp_path: Path) -> 
 
     assert result.status == "continued"
     await provider.wait_for_background_tasks()
-    assert runner.calls[0] == ("continue", str(tmp_path), created.native_session_id)
+    assert runner.calls[0]["prompt"] == "continue"
+    assert runner.calls[0]["cwd"] == str(tmp_path)
+    assert runner.calls[0]["session_id"] == created.native_session_id
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,7 @@ def test_native_agents_default_to_codex_only_compatibility(tmp_path: Path) -> No
     assert config.native_agents.codex.enabled is False
     assert config.native_agents.claude.enabled is False
     assert config.native_agents.claude.engine == "cli-local"
+    assert config.native_agents.antigravity.engine == "cli-local"
 
 
 def test_native_agents_parse_claude_sdk_deepseek(tmp_path: Path) -> None:
@@ -114,6 +115,68 @@ permission_mode = "acceptEdits"
     assert config.native_agents.claude.cli_local.model == "deepseek-v4-pro"
     assert config.native_agents.claude.cli_local.effort == "xhigh"
     assert config.native_agents.claude.cli_local.permission_mode == "acceptEdits"
+
+
+def test_native_agents_parse_antigravity_cli_local(tmp_path: Path) -> None:
+    config = load_config(
+        _write_config(
+            tmp_path,
+            """
+[native_agents]
+enabled = true
+default_provider = "antigravity"
+
+[native_agents.antigravity]
+enabled = true
+engine = "cli-local"
+
+[native_agents.antigravity.cli_local]
+binary = "/Users/wl/.local/bin/agy"
+print_timeout = "9m0s"
+dangerously_skip_permissions = true
+sandbox = true
+""",
+        )
+    )
+
+    assert config.native_agents.antigravity.enabled is True
+    assert config.native_agents.antigravity.engine == "cli-local"
+    assert config.native_agents.antigravity.cli_local.binary == "/Users/wl/.local/bin/agy"
+    assert config.native_agents.antigravity.cli_local.print_timeout == "9m0s"
+    assert config.native_agents.antigravity.cli_local.dangerously_skip_permissions is True
+    assert config.native_agents.antigravity.cli_local.sandbox is True
+
+
+def test_native_agents_parse_antigravity_sdk(tmp_path: Path) -> None:
+    config = load_config(
+        _write_config(
+            tmp_path,
+            """
+[native_agents.antigravity]
+enabled = true
+engine = "sdk"
+""",
+        )
+    )
+
+    assert config.native_agents.antigravity.engine == "sdk"
+
+
+def test_native_agents_reject_unknown_antigravity_engine(tmp_path: Path) -> None:
+    with pytest.raises(
+        ConfigError,
+        match="native_agents.antigravity.engine must be cli-local or sdk",
+    ):
+        load_config(
+            _write_config(
+                tmp_path,
+                """
+[native_agents.antigravity]
+enabled = true
+engine = "remote"
+""",
+            )
+        )
 
 
 def test_native_agents_reject_claude_engine_as_provider(tmp_path: Path) -> None:

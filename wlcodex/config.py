@@ -277,9 +277,20 @@ class NativeAgentsClaudeConfig:
 
 
 @dataclass(frozen=True)
+class NativeAgentsAntigravityCliLocalConfig:
+    binary: str = "auto"
+    print_timeout: str = "5m0s"
+    dangerously_skip_permissions: bool = False
+    sandbox: bool = False
+
+
+@dataclass(frozen=True)
 class NativeAgentsAntigravityConfig:
     enabled: bool = False
-    engine: str = "sdk"
+    engine: str = "cli-local"
+    cli_local: NativeAgentsAntigravityCliLocalConfig = (
+        NativeAgentsAntigravityCliLocalConfig()
+    )
 
 
 @dataclass(frozen=True)
@@ -665,6 +676,7 @@ def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
     antigravity_raw = dict(data.get("antigravity", {}) or {})
     cli_raw = dict(claude_raw.get("cli_local", {}) or {})
     sdk_raw = dict(claude_raw.get("sdk_deepseek", {}) or {})
+    antigravity_cli_raw = dict(antigravity_raw.get("cli_local", {}) or {})
 
     if "enabled" in cli_raw or "enabled" in sdk_raw:
         raise ConfigError(
@@ -678,9 +690,11 @@ def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
             "native_agents.claude.engine must be cli-local or sdk-deepseek"
         )
 
-    antigravity_engine = str(antigravity_raw.get("engine", "sdk"))
-    if antigravity_engine != "sdk":
-        raise ConfigError("native_agents.antigravity.engine must be sdk")
+    antigravity_engine = str(antigravity_raw.get("engine", "cli-local"))
+    if antigravity_engine not in {"cli-local", "sdk"}:
+        raise ConfigError(
+            "native_agents.antigravity.engine must be cli-local or sdk"
+        )
 
     try:
         cli_permission_mode = normalize_claude_permission_mode(
@@ -721,6 +735,19 @@ def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
         antigravity=NativeAgentsAntigravityConfig(
             enabled=bool(antigravity_raw.get("enabled", False)),
             engine=antigravity_engine,
+            cli_local=NativeAgentsAntigravityCliLocalConfig(
+                binary=str(antigravity_cli_raw.get("binary", "auto")),
+                print_timeout=str(
+                    antigravity_cli_raw.get("print_timeout", "5m0s")
+                ),
+                dangerously_skip_permissions=bool(
+                    antigravity_cli_raw.get(
+                        "dangerously_skip_permissions",
+                        False,
+                    )
+                ),
+                sandbox=bool(antigravity_cli_raw.get("sandbox", False)),
+            ),
         ),
     )
 

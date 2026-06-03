@@ -819,6 +819,82 @@ def test_create_live_stream_components_wires_single_claude_cli_engine(
     assert components.server._native_registry is components.native_registry
 
 
+def test_create_live_stream_components_wires_antigravity_cli_engine(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.config import (
+        AppConfig,
+        ApprovalConfig,
+        BackendConfig,
+        CodexConfig,
+        CodexNativeConfig,
+        DisplayConfig,
+        LiveStreamConfig,
+        NativeAgentsAntigravityCliLocalConfig,
+        NativeAgentsAntigravityConfig,
+        NativeAgentsCodexConfig,
+        NativeAgentsConfig,
+        StorageConfig,
+        TaskConfig,
+        TelegramConfig,
+        WorkspaceConfig,
+    )
+    from wlcodex.main import _create_live_stream_components
+    from wlcodex.runtime_event_store import RuntimeEventStore
+
+    monkeypatch.setenv("WLCODEX_LIVE_STREAM_TOKEN", "secret")
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    config = AppConfig(
+        telegram=TelegramConfig("BOT_TOKEN", frozenset({1})),
+        codex=CodexConfig("codex", "127.0.0.1", 17431, "on-request", "workspace-write"),
+        storage=StorageConfig(
+            tmp_path / "db.sqlite3",
+            tmp_path / "logs",
+            tmp_path / "worktrees",
+        ),
+        display=DisplayConfig(2, 40, 3500),
+        backend=BackendConfig(15, 60, 300, 3600, 3600, 20000),
+        approval=ApprovalConfig(3600, True),
+        task=TaskConfig(7200, 1800, 3600, 60, 120),
+        workspaces=(WorkspaceConfig("wlcodex", tmp_path, True),),
+        live_stream=LiveStreamConfig(
+            enabled=True,
+            host="127.0.0.1",
+            port=0,
+            allow_unauthenticated_loopback=False,
+        ),
+        codex_native=CodexNativeConfig(enabled=False),
+        native_agents=NativeAgentsConfig(
+            enabled=True,
+            codex=NativeAgentsCodexConfig(enabled=False),
+            antigravity=NativeAgentsAntigravityConfig(
+                enabled=True,
+                engine="cli-local",
+                cli_local=NativeAgentsAntigravityCliLocalConfig(
+                    binary="/tmp/agy",
+                    print_timeout="7m0s",
+                    dangerously_skip_permissions=True,
+                    sandbox=True,
+                ),
+            ),
+        ),
+    )
+
+    runtime_store = RuntimeEventStore(ledger._conn)
+    components = _create_live_stream_components(config, runtime_store, ledger)
+
+    assert components is not None
+    provider = components.native_registry.get("antigravity")
+    assert provider.provider_engine == "cli-local"
+    assert provider._runtime_store is runtime_store
+    assert provider._runner._config.binary == "/tmp/agy"
+    assert provider._runner._config.dangerously_skip_permissions is True
+    assert components.native_registry.maybe_get("codex") is None
+    assert components.server._native_registry is components.native_registry
+
+
 def test_create_live_stream_components_allows_native_without_token_for_loopback_testing(
     monkeypatch,
     tmp_path: Path,

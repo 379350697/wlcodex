@@ -361,13 +361,46 @@ def _create_live_stream_components(
                     )
 
             if config.native_agents.antigravity.enabled:
-                from wlcodex.native_agents.antigravity_provider import (
-                    AntigravitySdkProvider,
-                )
+                if config.native_agents.antigravity.engine == "cli-local":
+                    from wlcodex.native_agents.antigravity_cli_provider import (
+                        AntigravityCliConfig,
+                        AntigravityCliLocalProvider,
+                        AntigravityCliRunner,
+                    )
 
-                native_providers.append(
-                    AntigravitySdkProvider(session_store=native_agent_session_store)
-                )
+                    cli_config = config.native_agents.antigravity.cli_local
+                    native_providers.append(
+                        AntigravityCliLocalProvider(
+                            runner=AntigravityCliRunner(
+                                AntigravityCliConfig(
+                                    binary=cli_config.binary,
+                                    print_timeout=cli_config.print_timeout,
+                                    dangerously_skip_permissions=(
+                                        cli_config.dangerously_skip_permissions
+                                    ),
+                                    sandbox=cli_config.sandbox,
+                                )
+                            ),
+                            session_store=native_agent_session_store,
+                            runtime_store=runtime_store,
+                            default_cwd=str(
+                                config.workspace_by_alias(
+                                    config.conversation.default_workspace
+                                ).path
+                            ),
+                        )
+                    )
+                elif config.native_agents.antigravity.engine == "sdk":
+                    from wlcodex.native_agents.antigravity_provider import (
+                        AntigravitySdkProvider,
+                    )
+
+                    native_providers.append(
+                        AntigravitySdkProvider(
+                            session_store=native_agent_session_store,
+                            runtime_store=runtime_store,
+                        )
+                    )
     if native_providers:
         from wlcodex.native_agents.provider import NativeAgentRegistry
 

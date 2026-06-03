@@ -203,9 +203,16 @@ ccswitch_fallback_enabled = true
 ccswitch_db_path = "~/.cc-switch/cc-switch.db"
 
 [native_agents.antigravity]
-# SDK provider path. This does not depend on the system-level agy CLI.
+# cli-local reuses the local agy login state and conversation store.
+# sdk remains available for the Python google-antigravity SDK path.
 enabled = false
-engine = "sdk"
+engine = "cli-local"
+
+[native_agents.antigravity.cli_local]
+binary = "auto"
+print_timeout = "5m0s"
+dangerously_skip_permissions = false
+sandbox = false
 
 # Optional /auto digest rewriting:
 # - Default: rule-based local digest only, no network call.
