@@ -192,11 +192,12 @@ class AntigravityCliLocalProvider:
 
     async def list_sessions(self, limit: int = 50) -> list[NativeAgentSession]:
         self._import_local_sessions(limit=max(limit, 50))
-        return self._session_store.list_recent(
+        sessions = self._session_store.list_recent(
             provider=self.provider,
             provider_engine=self.provider_engine,
             limit=limit,
         )
+        return _hide_linked_local_duplicates(sessions)
 
     async def list_models(self) -> list[dict[str, Any]]:
         return []
@@ -399,6 +400,12 @@ class AntigravityCliLocalProvider:
             conversation_id=conversation_id,
         )
         updated = self._update_after_run(session, outcome)
+        if outcome.antigravity_conversation_id:
+            local_session = self._local_session_index.get(
+                outcome.antigravity_conversation_id
+            )
+            if local_session is not None:
+                updated = self._import_local_session(local_session)
         emitter = self._emitter()
         if emitter is None:
             return
@@ -458,14 +465,14 @@ class AntigravityCliLocalProvider:
         self,
         local_session: AntigravityLocalSession,
     ) -> NativeAgentSession:
-        existing = self._session_store.get_by_native_session_id(
-            provider=self.provider,
-            provider_engine=self.provider_engine,
-            native_session_id=local_session.session_id,
+        existing = self._find_session_by_antigravity_conversation_id(
+            local_session.session_id
         )
         if existing is None:
-            existing = self._find_session_by_antigravity_conversation_id(
-                local_session.session_id
+            existing = self._session_store.get_by_native_session_id(
+                provider=self.provider,
+                provider_engine=self.provider_engine,
+                native_session_id=local_session.session_id,
             )
         metadata = _local_session_metadata(local_session)
         if existing is not None:
@@ -590,6 +597,26 @@ def _control_result(
         turn_running=turn_running,
         status=status,
     )
+
+
+def _hide_linked_local_duplicates(
+    sessions: list[NativeAgentSession],
+) -> list[NativeAgentSession]:
+    claimed_conversation_ids = {
+        conversation_id
+        for session in sessions
+        if (
+            conversation_id := _antigravity_conversation_id(session)
+        )
+        and conversation_id != session.native_session_id
+    }
+    if not claimed_conversation_ids:
+        return sessions
+    return [
+        session
+        for session in sessions
+        if session.native_session_id not in claimed_conversation_ids
+    ]
 
 
 def _title_from_prompt(prompt: str) -> str:

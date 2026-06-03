@@ -304,6 +304,97 @@ async def test_cli_provider_recovers_conversation_id_from_latest_local_cwd(
 
 
 @pytest.mark.asyncio
+async def test_cli_provider_hides_local_duplicate_after_created_session_claims_pb(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    local_session = AntigravityLocalSession(
+        session_id="latest-conv",
+        title="Latest Local",
+        cwd=str(workspace),
+        created_at="2026-06-03T00:00:00+00:00",
+        updated_at="2026-06-03T00:00:01+00:00",
+        source_path=str(tmp_path / "latest-conv.pb"),
+    )
+
+    class RaceIndex(EmptyAntigravityIndex):
+        sessions: list[AntigravityLocalSession]
+
+        def __init__(self) -> None:
+            self.sessions = []
+
+        def list_recent(self, limit: int = 50):
+            return self.sessions[:limit]
+
+        def get(self, session_id: str):
+            if session_id == local_session.session_id:
+                return local_session
+            return None
+
+        def latest_for_cwd(self, cwd: str):
+            if cwd == str(workspace):
+                return local_session
+            return None
+
+    class BlockingNoIdRunner(FakeAntigravityCliRunner):
+        def __init__(self) -> None:
+            super().__init__(conversation_id="")
+            self.release = asyncio.Event()
+
+        async def run(
+            self,
+            *,
+            prompt: str,
+            cwd: str,
+            conversation_id: str = "",
+            extra_dirs: tuple[str, ...] = (),
+        ):
+            self.calls.append(
+                {
+                    "prompt": prompt,
+                    "cwd": cwd,
+                    "conversation_id": conversation_id,
+                    "extra_dirs": extra_dirs,
+                }
+            )
+            await self.release.wait()
+            yield {"type": "assistant", "text": "hello"}
+
+    local_index = RaceIndex()
+    runner = BlockingNoIdRunner()
+    provider, store, _runtime_store, _runner = _provider(
+        tmp_path,
+        runner=runner,
+        local_session_index=local_index,
+    )
+
+    result = await provider.start_session(str(workspace), "first")
+    local_index.sessions = [local_session]
+    during = await provider.list_sessions()
+    assert {session.native_session_id for session in during} == {
+        result.native_session_id,
+        "latest-conv",
+    }
+
+    runner.release.set()
+    await provider.wait_for_background_tasks()
+
+    sessions = await provider.list_sessions()
+    session_ids = [session.native_session_id for session in sessions]
+    assert result.native_session_id in session_ids
+    assert "latest-conv" not in session_ids
+    created = store.get_by_native_session_id(
+        provider="antigravity",
+        provider_engine="cli-local",
+        native_session_id=result.native_session_id,
+    )
+    assert created is not None
+    assert created.metadata["antigravity_conversation_id"] == "latest-conv"
+    assert created.metadata["antigravity_source_path"] == local_session.source_path
+
+
+@pytest.mark.asyncio
 async def test_cli_runner_builds_agy_print_command(monkeypatch, tmp_path: Path) -> None:
     from wlcodex.native_agents.antigravity_cli_provider import (
         AntigravityCliConfig,
