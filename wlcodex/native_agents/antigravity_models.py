@@ -3,14 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 
-DEFAULT_ANTIGRAVITY_MODEL = "Claude Opus 4.6"
+DEFAULT_ANTIGRAVITY_MODEL = "Claude Opus 4.6 (Thinking)"
 
 _ANTIGRAVITY_MODELS = (
-    "Claude Opus 4.6",
-    "Claude Sonnet 4.6",
-    "Gemini 3.5",
-    "Gemini 3.1",
-    "GPT",
+    "Claude Opus 4.6 (Thinking)",
+    "Claude Sonnet 4.6 (Thinking)",
+    "Gemini 3.5 Flash (Medium)",
+    "Gemini 3.5 Flash (High)",
+    "Gemini 3.5 Flash (Low)",
+    "Gemini 3.1 Pro (High)",
+    "Gemini 3.1 Pro (Low)",
+    "GPT-OSS 120B (Medium)",
 )
 
 

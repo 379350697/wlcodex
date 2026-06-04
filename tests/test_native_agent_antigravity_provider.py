@@ -269,17 +269,20 @@ async def test_sdk_provider_lists_antigravity_model_catalog(tmp_path: Path) -> N
     models = await provider.list_models()
 
     assert models[0] == {
-        "id": "Claude Opus 4.6",
-        "model": "Claude Opus 4.6",
-        "displayName": "Claude Opus 4.6",
+        "id": "Claude Opus 4.6 (Thinking)",
+        "model": "Claude Opus 4.6 (Thinking)",
+        "displayName": "Claude Opus 4.6 (Thinking)",
         "isDefault": True,
     }
     assert {model["model"] for model in models} == {
-        "Claude Opus 4.6",
-        "Claude Sonnet 4.6",
-        "Gemini 3.5",
-        "Gemini 3.1",
-        "GPT",
+        "Claude Opus 4.6 (Thinking)",
+        "Claude Sonnet 4.6 (Thinking)",
+        "Gemini 3.5 Flash (Medium)",
+        "Gemini 3.5 Flash (High)",
+        "Gemini 3.5 Flash (Low)",
+        "Gemini 3.1 Pro (High)",
+        "Gemini 3.1 Pro (Low)",
+        "GPT-OSS 120B (Medium)",
     }
 
 
