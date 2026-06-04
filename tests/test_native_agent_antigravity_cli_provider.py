@@ -357,6 +357,48 @@ async def test_cli_provider_ignores_stale_latest_local_cwd(
 
 
 @pytest.mark.asyncio
+async def test_cli_provider_empty_output_failure_mentions_cli_setup(
+    tmp_path: Path,
+) -> None:
+    class EmptyRunner(FakeAntigravityCliRunner):
+        async def run(
+            self,
+            *,
+            prompt: str,
+            cwd: str,
+            conversation_id: str = "",
+            extra_dirs: tuple[str, ...] = (),
+        ):
+            self.calls.append(
+                {
+                    "prompt": prompt,
+                    "cwd": cwd,
+                    "conversation_id": conversation_id,
+                    "extra_dirs": extra_dirs,
+                }
+            )
+            if False:
+                yield {}
+
+    provider, store, _runtime_store, _runner = _provider(
+        tmp_path,
+        runner=EmptyRunner(),
+    )
+
+    result = await provider.start_session(str(tmp_path), "first")
+    await provider.wait_for_background_tasks()
+
+    session = store.get_by_native_session_id(
+        provider="antigravity",
+        provider_engine="cli-local",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    assert session.status == "failed"
+    assert "Run agy" in session.metadata["error"]
+
+
+@pytest.mark.asyncio
 async def test_cli_provider_hides_local_duplicate_after_created_session_claims_pb(
     tmp_path: Path,
 ) -> None:

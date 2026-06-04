@@ -361,7 +361,11 @@ class AntigravityCliLocalProvider:
         if not emitted_text and not latest_conversation_id:
             return _RunOutcome(
                 status="failed",
-                error="Antigravity CLI completed without output or conversation id.",
+                error=(
+                    "Antigravity CLI completed without output or conversation id. "
+                    "Run agy in a local terminal, complete Google login/setup, "
+                    "then retry from WLCodex."
+                ),
             )
         return _RunOutcome(
             status="done",
