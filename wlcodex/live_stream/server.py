@@ -3284,8 +3284,8 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       const mirroredTranscript = isMirroredTranscriptEvent(event);
       if (!options.historical && !mirroredTranscript && payload.native_turn_id) nativeTurnId = payload.native_turn_id;
       if (options.historical || mirroredTranscript) return;
-      if (event.kind === "completed" || event.kind === "failed") {
-        if (!payload.native_turn_id || payload.native_turn_id === activeTurnId) activeTurnId = "";
+      if (isTerminalTurnEvent(event)) {
+        if (!payload.native_turn_id || payload.native_turn_id === activeTurnId || payload.native_turn_id === nativeTurnId) activeTurnId = "";
         nativeTurnRunning = false;
       } else if (
         event.kind === "text_delta" ||
@@ -3304,6 +3304,19 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       const itemId = String(payload.itemId || "");
       const turnId = String(payload.native_turn_id || payload.turnId || "");
       return itemId.startsWith("jsonl-") || turnId.startsWith("jsonl-turn:");
+    }
+    function isTerminalTurnEvent(event) {
+      const payload = (event && event.payload) || {};
+      const status = String(payload.status || "").trim().toLowerCase();
+      const action = String(payload.action || "").trim().toLowerCase();
+      if (event.kind === "completed" || event.kind === "failed") return true;
+      if (action === "turn_completed" || action === "turn_failed") return true;
+      return isCompletedStatus(status) || isFailedStatus(status);
+    }
+    function isCompletedStatus(status) {
+      return ["completed", "done", "succeeded", "success"].includes(
+        String(status || "").trim().toLowerCase()
+      );
     }
     function setComposerActivity(active) {
       composerActivityDot.classList.toggle("active", Boolean(active));
@@ -3816,7 +3829,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       return event.kind === "failed" || isFailedStatus(payload.status);
     }
     function isFailedStatus(status) {
-      return ["failed", "error", "cancelled", "canceled"].includes(
+      return ["failed", "error", "cancelled", "canceled", "interrupted", "aborted"].includes(
         String(status || "").trim().toLowerCase()
       );
     }

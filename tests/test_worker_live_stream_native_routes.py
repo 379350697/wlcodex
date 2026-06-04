@@ -1803,6 +1803,39 @@ async def test_worker_live_page_does_not_bind_historical_turns_as_current_contro
 
 
 @pytest.mark.asyncio
+async def test_worker_live_page_clears_running_composer_state_on_terminal_turn_events(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "function isTerminalTurnEvent(event)" in response
+    assert "isTerminalTurnEvent(event)" in response
+    assert '["completed", "done", "succeeded", "success"]' in response
+    assert '["failed", "error", "cancelled", "canceled", "interrupted", "aborted"]' in response
+    assert "nativeTurnRunning = false;" in response
+    assert 'continueButton.textContent = mode === "interrupt" ? "■" : "↑";' in response
+    assert "(!nativeTurnRunning && !composerHasDraft())" in response
+
+
+@pytest.mark.asyncio
 async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns(
     tmp_path: Path,
 ) -> None:
