@@ -2576,6 +2576,16 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .transcript-item { display: grid; gap: 7px; min-width: 0; padding: 0; }
     .transcript-meta { color: #9aa0aa; font-size: 13px; }
     .transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #f4f4f5; font-size: 17px; line-height: 1.62; }
+    .transcript-body p { margin: 0 0 13px; }
+    .transcript-body p:last-child { margin-bottom: 0; }
+    .transcript-body h3 { margin: 18px 0 8px; color: #ffffff; font-size: 18px; line-height: 1.35; }
+    .transcript-body h3:first-child { margin-top: 0; }
+    .transcript-body ul, .transcript-body ol { margin: 0 0 13px 1.3em; padding: 0; display: grid; gap: 6px; white-space: normal; }
+    .transcript-body li { padding-left: 2px; white-space: normal; }
+    .transcript-body strong { color: #ffffff; font-weight: 760; }
+    .transcript-body code { padding: 1px 5px; border-radius: 5px; background: #1d2027; color: #e5e7eb; font: .92em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .transcript-body pre { margin: 0 0 13px; overflow: auto; padding: 12px 13px; border: 1px solid #2e333d; border-radius: 8px; background: #111318; white-space: pre; }
+    .transcript-body pre code { padding: 0; border-radius: 0; background: transparent; font-size: 13px; line-height: 1.5; }
     .transcript-item.user { justify-self: end; justify-items: end; max-width: min(82%, 520px); }
     .transcript-item.user .transcript-meta { display: none; }
     .transcript-item.user .transcript-body { padding: 10px 13px; border: 1px solid #333842; border-radius: 18px 18px 4px 18px; background: #20242d; line-height: 1.5; }
@@ -2799,6 +2809,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     const sendStatus = document.getElementById("sendStatus");
     const streamPathBase = "__STREAM_PATH__";
     const agentRunId = __AGENT_RUN_ID__;
+    const CURRENT_TURN_EVENT_LIMIT = 5000;
     const RECENT_EVENT_LIMIT = 80;
     const OLDER_EVENT_LIMIT = 80;
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
@@ -3495,7 +3506,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       setInterval(pollEvents, 1000);
     });
     async function loadRecentEvents() {
-      let snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT, {currentTurn: true}));
+      let snapshot = await api(eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true}));
       if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
       loadedEvents = snapshot.events || [];
       if ((!loadedEvents.length || !hasLiveDisplayEvents(loadedEvents)) && nativeTurnId) {
@@ -3519,7 +3530,35 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       });
     }
     function isInternalEvent(event) {
-      return Boolean(event && event.type === "model.usage.updated");
+      return Boolean(
+        event && (
+          event.type === "model.usage.updated" ||
+          isNativeExecutionDetail(event) ||
+          isNativeReasoningDetail(event) ||
+          isNativeActivityDetail(event)
+        )
+      );
+    }
+    function isNativeFeedbackMode(event) {
+      const payload = (event && event.payload) || {};
+      return Boolean(nativeThreadId || payload.native_thread_id);
+    }
+    function isCommandEvent(event) {
+      return Boolean(event && (
+        event.kind === "command_started" ||
+        event.kind === "command_output" ||
+        event.kind === "command_completed" ||
+        event.kind === "command_failed"
+      ));
+    }
+    function isNativeExecutionDetail(event) {
+      return isNativeFeedbackMode(event) && isCommandEvent(event);
+    }
+    function isNativeReasoningDetail(event) {
+      return isNativeFeedbackMode(event) && event && event.kind === "reasoning_delta";
+    }
+    function isNativeActivityDetail(event) {
+      return isNativeFeedbackMode(event) && event && event.kind === "activity";
     }
     async function loadOlderEvents() {
       if (!oldestEventId || !previousEventCount) return;
@@ -3610,7 +3649,18 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       const incomingTurnId = eventFoldTurnId(event);
       const duplicateDisplayEvent = isDuplicateDisplayEvent(event, loadedEvents);
       loadedEvents.push(event);
-      if (isInternalEvent(event)) return;
+      if (isInternalEvent(event)) {
+        if (isNativeExecutionDetail(event)) {
+          handleHiddenNativeFeedback(event);
+        } else if (isNativeReasoningDetail(event)) {
+          handleHiddenNativeFeedback(event);
+        } else if (isNativeActivityDetail(event)) {
+          handleHiddenNativeFeedback(event);
+        } else if (event.id) {
+          cursor.textContent = "#" + event.id;
+        }
+        return;
+      }
       if (duplicateDisplayEvent) {
         applyNativeTurnState(event);
         updateComposerDisabled();
@@ -3852,7 +3902,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       if (event.kind === "user_message") renderTranscript(event, "user", "你");
       else if (event.kind === "text_delta") renderAssistant(event);
       else if (event.kind === "reasoning_delta") renderStatusEvent(event, "思考中", "busy");
-      else if (event.kind === "command_started" || event.kind === "command_output" || event.kind === "command_completed" || event.kind === "command_failed") renderToolCall(event);
+      else if (isCommandEvent(event)) renderToolCall(event);
       else if (event.kind === "diff_updated" || event.kind === "file_changed") renderFileChange(event);
       else if (event.kind === "approval_requested") renderApproval(event);
       else if (event.kind === "approval_resolved") {
@@ -3872,6 +3922,23 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     function renderCommand(event) {
       renderToolCall(event);
     }
+    function handleHiddenNativeFeedback(event) {
+      const payload = event.payload || {};
+      if (payload.native_thread_id) nativeThreadId = payload.native_thread_id;
+      applyNativeTurnState(event);
+      updateComposerDisabled();
+      if (isNativeExecutionDetail(event)) {
+        updateRunState(
+          nativeExecutionStatus(event),
+          event.kind === "command_failed" ? "failed" : "busy"
+        );
+      } else if (isNativeReasoningDetail(event)) {
+        updateRunState("思考中", "busy");
+      } else if (isNativeActivityDetail(event)) {
+        updateRunState(statusText(event, payload) || statusTitle(event, "处理中"), statusTone(event));
+      }
+      if (event.id) cursor.textContent = "#" + event.id;
+    }
     function renderTranscript(event, role, label) {
       const payload = event.payload || {};
       const key = transcriptKey(event, role);
@@ -3886,11 +3953,17 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         body.className = "transcript-body";
         row.append(meta, body);
         renderTarget.append(row);
-        node = {row, body};
+        node = {row, body, text: ""};
         transcriptNodes.set(key, node);
       }
-      renderTranscriptImages(node.body, payload.images || []);
-      appendText(node.body, payload.text || payload.delta || payload.summary || "");
+      const incomingText = payload.text || payload.delta || payload.summary || "";
+      if (role.includes("assistant")) {
+        node.text += String(payload.text || payload.delta || payload.summary || "");
+        renderMarkdownLite(node.body, node.text);
+      } else {
+        renderTranscriptImages(node.body, payload.images || []);
+        appendText(node.body, incomingText);
+      }
     }
     function renderTranscriptImages(target, images) {
       if (!Array.isArray(images) || !images.length || target.querySelector(".transcript-images")) return;
@@ -4054,6 +4127,100 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       if (!text) return;
       node.append(document.createTextNode(String(text)));
     }
+    function renderMarkdownLite(target, text) {
+      target.replaceChildren();
+      const normalized = String(text || "").replace(/\\r\\n/g, "\\n");
+      if (!normalized.trim()) return;
+      const lines = normalized.split("\\n");
+      let paragraph = [];
+      let list = null;
+      function flushParagraph() {
+        if (!paragraph.length) return;
+        const block = document.createElement("p");
+        appendInlineMarkdown(block, paragraph.join("\\n").trim());
+        target.append(block);
+        paragraph = [];
+      }
+      function flushList() {
+        if (!list) return;
+        target.append(list.node);
+        list = null;
+      }
+      for (let index = 0; index < lines.length; index++) {
+        const line = lines[index];
+        if (line.trim().startsWith("```")) {
+          flushParagraph();
+          flushList();
+          const codeLines = [];
+          index += 1;
+          while (index < lines.length && !lines[index].trim().startsWith("```")) {
+            codeLines.push(lines[index]);
+            index += 1;
+          }
+          const pre = document.createElement("pre");
+          const code = document.createElement("code");
+          code.textContent = codeLines.join("\\n");
+          pre.append(code);
+          target.append(pre);
+          continue;
+        }
+        if (!line.trim()) {
+          flushParagraph();
+          flushList();
+          continue;
+        }
+        const heading = line.match(/^#{1,3}\\s+(.+)$/);
+        if (heading) {
+          flushParagraph();
+          flushList();
+          const block = document.createElement("h3");
+          appendInlineMarkdown(block, heading[1].trim());
+          target.append(block);
+          continue;
+        }
+        const unordered = line.match(/^\\s*[-*]\\s+(.+)$/);
+        const ordered = line.match(/^\\s*\\d+[.)]\\s+(.+)$/);
+        if (unordered || ordered) {
+          flushParagraph();
+          const type = ordered ? "ol" : "ul";
+          if (!list || list.type !== type) {
+            flushList();
+            list = {type, node: document.createElement(type)};
+          }
+          const item = document.createElement("li");
+          appendInlineMarkdown(item, (unordered || ordered)[1].trim());
+          list.node.append(item);
+          continue;
+        }
+        paragraph.push(line);
+      }
+      flushParagraph();
+      flushList();
+    }
+    function appendInlineMarkdown(target, text) {
+      const source = String(text || "");
+      const pattern = /(`[^`]+`|\\*\\*[^*]+\\*\\*)/g;
+      let cursor = 0;
+      for (const match of source.matchAll(pattern)) {
+        if (match.index > cursor) {
+          target.append(document.createTextNode(source.slice(cursor, match.index)));
+        }
+        const token = match[0];
+        if (token.startsWith("`")) {
+          const code = document.createElement("code");
+          code.textContent = token.slice(1, -1);
+          target.append(code);
+        } else {
+          const strong = document.createElement("strong");
+          strong.textContent = token.slice(2, -2);
+          target.append(strong);
+        }
+        cursor = match.index + token.length;
+      }
+      if (cursor < source.length) {
+        target.append(document.createTextNode(source.slice(cursor)));
+      }
+    }
     function commandTitle(payload) {
       if (payload.command) return String(payload.command);
       const item = payload.item || {};
@@ -4065,6 +4232,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       if (kind === "command_completed") return "完成";
       if (kind === "command_failed") return "失败";
       return "输出";
+    }
+    function nativeExecutionStatus(event) {
+      if (event.kind === "command_failed") return "执行失败";
+      if (event.kind === "command_completed") return `${PROVIDER_LABEL} 正在整理回复`;
+      return `${PROVIDER_LABEL} 正在处理`;
     }
     function statusTone(event) {
       if (event.kind === "completed") return "done";

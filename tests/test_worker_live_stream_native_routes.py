@@ -1742,8 +1742,10 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
+    assert "CURRENT_TURN_EVENT_LIMIT" in response
+    assert "const CURRENT_TURN_EVENT_LIMIT = 5000;" in response
     assert "RECENT_EVENT_LIMIT" in response
-    assert 'eventsPath("tail=" + RECENT_EVENT_LIMIT, {currentTurn: true})' in response
+    assert 'eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true})' in response
     assert "hasLiveDisplayEvents" in response
     assert "model.usage.updated" in response
     assert "function loadRecentEvents" in response
@@ -1762,6 +1764,82 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "previous_event_count" in response
     assert "new EventSource(streamPath)" not in response
     assert "new EventSource(streamPathWithCursor" in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_renders_assistant_markdown_blocks(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "function renderMarkdownLite(target, text)" in response
+    assert "function appendInlineMarkdown(target, text)" in response
+    assert 'replace(/\\r\\n/g, "\\n")' in response
+    assert 'paragraph.join("\\n").trim()' in response
+    assert 'codeLines.join("\\n")' in response
+    assert "renderMarkdownLite(node.body, node.text);" in response
+    assert "node.text += String(payload.text || payload.delta || payload.summary || \"\");" in response
+    assert ".transcript-body p" in response
+    assert ".transcript-body ul" in response
+    assert ".transcript-body pre" in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_hides_native_execution_details_from_user_feedback(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "function isNativeExecutionDetail(event)" in response
+    assert "function isNativeActivityDetail(event)" in response
+    assert "function handleHiddenNativeFeedback(event)" in response
+    assert "return Boolean(nativeThreadId || payload.native_thread_id);" in response
+    assert "if (isNativeExecutionDetail(event)) {" in response
+    assert "isNativeActivityDetail(event)" in response
+    assert "handleHiddenNativeFeedback(event);" in response
+    assert "else if (isNativeExecutionDetail(event)) renderToolCall(event);" not in response
+    assert (
+        'else if (event.kind === "command_started" || event.kind === "command_output" '
+        '|| event.kind === "command_completed" || event.kind === "command_failed") '
+        "renderToolCall(event);"
+        not in response
+    )
 
 
 @pytest.mark.asyncio
