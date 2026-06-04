@@ -1606,6 +1606,13 @@ def test_live_page_exposes_workflow_handoff_controls() -> None:
     assert "location.href = result.target_url;" in response
 
 
+def test_live_page_handoff_warning_newlines_are_js_escaped() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert '? "\\n" + preview.warnings.join("\\n")' in response
+    assert '? "\n" + preview.warnings.join("\n")' not in response
+
+
 def test_live_page_waits_during_active_turn_when_provider_cannot_steer() -> None:
     response = _live_page(42, native_provider="antigravity")
 

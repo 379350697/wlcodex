@@ -3660,7 +3660,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     }
     function renderHandoffPreview(preview) {
       const warnings = Array.isArray(preview.warnings) && preview.warnings.length
-        ? "\n" + preview.warnings.join("\n")
+        ? "\\n" + preview.warnings.join("\\n")
         : "";
       handoffPreviewEl.hidden = false;
       handoffPreviewEl.className = "handoff-preview ok";
