@@ -1585,6 +1585,27 @@ def test_live_page_gates_active_turn_controls_with_provider_capabilities() -> No
     assert "message assistant" not in response
 
 
+def test_live_page_exposes_workflow_handoff_controls() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert 'id="handoffButton"' in response
+    assert ">接棒执行</button>" in response
+    assert 'id="handoffPanel"' in response
+    assert 'data-provider="codex"' in response
+    assert 'data-provider="claude"' in response
+    assert 'data-provider="antigravity"' in response
+    assert 'id="handoffIntent"' in response
+    assert 'id="handoffNote"' in response
+    assert "async function previewHandoff" in response
+    assert "async function executeHandoff" in response
+    assert '"/api/native/workflows/handoffs/preview"' in response
+    assert '"/api/native/workflows/handoffs/execute"' in response
+    assert "source_provider: PROVIDER" in response
+    assert "source_thread_id: nativeThreadId" in response
+    assert "target_provider: handoffTargetProvider" in response
+    assert "location.href = result.target_url;" in response
+
+
 def test_live_page_waits_during_active_turn_when_provider_cannot_steer() -> None:
     response = _live_page(42, native_provider="antigravity")
 

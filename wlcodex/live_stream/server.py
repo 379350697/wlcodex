@@ -2801,8 +2801,22 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .composer-settings { position: relative; flex: 1; display: flex; gap: 8px; min-width: 0; }
     .setting-pill { min-height: 38px; border-radius: 19px; padding: 0 14px; background: #2a2a2d; color: #f4f4f5; border: 0; font-size: 14px; font-weight: 760; white-space: nowrap; }
     .setting-pill.permissions { flex: 0 0 auto; }
+    .setting-pill.handoff { flex: 0 0 auto; background: #1f2937; border: 1px solid #3f4550; }
     .model-popover { position: absolute; left: 0; bottom: 48px; width: min(330px, calc(100vw - 32px)); border: 1px solid #3a3a40; border-radius: 22px; background: #222225; box-shadow: 0 20px 54px rgba(0,0,0,.55); overflow: hidden; z-index: 6; }
     .model-popover[hidden] { display: none; }
+    .handoff-panel { position: absolute; left: 0; bottom: 48px; width: min(370px, calc(100vw - 32px)); display: grid; gap: 10px; padding: 12px; border: 1px solid #3a3a40; border-radius: 18px; background: #181b22; box-shadow: 0 20px 54px rgba(0,0,0,.55); z-index: 7; }
+    .handoff-panel[hidden] { display: none; }
+    .handoff-targets, .handoff-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .handoff-target, .handoff-action { min-height: 38px; border-radius: 12px; border: 1px solid #3f4550; background: #20242e; color: #f4f4f5; padding: 7px 8px; font-size: 14px; }
+    .handoff-target.selected, .handoff-action.primary { background: #f4f4f5; color: #101114; border-color: transparent; }
+    .handoff-intent, .handoff-note { width: 100%; border: 1px solid #3f4550; border-radius: 12px; background: #11141b; color: #f4f4f5; font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .handoff-intent { min-height: 38px; padding: 0 10px; }
+    .handoff-note { min-height: 58px; padding: 9px 10px; resize: vertical; }
+    .handoff-preview { max-height: 190px; overflow: auto; border: 1px solid #30333a; border-radius: 12px; background: #0f1117; padding: 10px; color: #d8dee9; font-size: 13px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .handoff-preview.error { border-color: #7f1d1d; color: #fca5a5; }
+    .handoff-preview.ok { border-color: #14532d; color: #bbf7d0; }
+    .handoff-preview pre { margin: 7px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #e5e7eb; }
+    .handoff-actions { grid-template-columns: 1fr 1fr; }
     .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid #343439; color: #f4f4f5; }
     .setting-row:last-child { border-bottom: 0; }
     .setting-label { display: grid; gap: 5px; min-width: 0; font-size: 16px; font-weight: 760; }
@@ -2870,6 +2884,28 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         <div class="composer-settings">
           <button class="setting-pill" id="modelSettingsButton" type="button">加载模型</button>
           <button class="setting-pill permissions" type="button">默认权限</button>
+          <button class="setting-pill handoff" id="handoffButton" type="button">接棒执行</button>
+          <div class="handoff-panel" id="handoffPanel" hidden>
+            <div class="handoff-targets" id="handoffTargets">
+              <button class="handoff-target" type="button" data-provider="codex">Codex</button>
+              <button class="handoff-target" type="button" data-provider="claude">Claude</button>
+              <button class="handoff-target" type="button" data-provider="antigravity">Antigravity</button>
+            </div>
+            <select class="handoff-intent" id="handoffIntent" aria-label="接棒意图">
+              <option value="auto">自动判断</option>
+              <option value="execute_plan">执行计划</option>
+              <option value="fix_bug">修复 Bug</option>
+              <option value="implement_feature">做小功能</option>
+              <option value="continue_work">继续工作</option>
+              <option value="custom">自定义</option>
+            </select>
+            <textarea class="handoff-note" id="handoffNote" rows="2" placeholder="补充给下一个智能体"></textarea>
+            <div class="handoff-preview" id="handoffPreview" hidden></div>
+            <div class="handoff-actions">
+              <button class="handoff-action" id="handoffPreviewButton" type="button">预览</button>
+              <button class="handoff-action primary" id="handoffExecuteButton" type="button" disabled>执行</button>
+            </div>
+          </div>
           <div class="model-popover" id="modelPopover" hidden>
             <div class="setting-row" role="button" tabindex="0">
               <span class="setting-label">模型<span class="setting-value" id="modelSettingValue">加载模型</span></span>
@@ -2967,6 +3003,15 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     const steerChoice = document.getElementById("steerChoice");
     const queueChoice = document.getElementById("queueChoice");
     const sendStatus = document.getElementById("sendStatus");
+    const handoffButton = document.getElementById("handoffButton");
+    const handoffPanel = document.getElementById("handoffPanel");
+    const handoffTargets = document.getElementById("handoffTargets");
+    const handoffTargetButtons = Array.from(handoffTargets.querySelectorAll(".handoff-target"));
+    const handoffIntent = document.getElementById("handoffIntent");
+    const handoffNote = document.getElementById("handoffNote");
+    const handoffPreviewEl = document.getElementById("handoffPreview");
+    const handoffPreviewButton = document.getElementById("handoffPreviewButton");
+    const handoffExecuteButton = document.getElementById("handoffExecuteButton");
     const streamPathBase = "__STREAM_PATH__";
     const agentRunId = __AGENT_RUN_ID__;
     const CURRENT_TURN_EVENT_LIMIT = 5000;
@@ -2984,6 +3029,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     let providerCapabilities = {};
     let savedModelSettings = loadSavedModelSettings();
     let modelSettingsDirty = false;
+    let handoffTargetProvider = "";
+    let handoffPreviewPayload = null;
+    let handoffBusy = false;
     historyFold.onclick = loadOlderEvents;
     async function api(path, options = {}) {
       const response = await fetch(path, {
@@ -3013,6 +3061,12 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     async function nativeControl(action, body) {
       if (!nativeThreadId) throw new Error(`${PROVIDER_LABEL} 会话未连接`);
       return api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/${action}`, {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+    }
+    function workflowApi(path, body) {
+      return api(path, {
         method: "POST",
         body: JSON.stringify(body)
       });
@@ -3323,10 +3377,19 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     queueChoice.onclick = () => submitPrompt("continue");
     steerButton.onclick = () => submitPrompt("steer");
     interruptButton.onclick = interruptNativeTurn;
+    handoffButton.onclick = toggleHandoffPanel;
+    handoffPreviewButton.onclick = previewHandoff;
+    handoffExecuteButton.onclick = executeHandoff;
+    handoffIntent.onchange = resetHandoffPreview;
+    handoffNote.oninput = resetHandoffPreview;
+    for (const button of handoffTargetButtons) {
+      button.onclick = () => selectHandoffTarget(button.dataset.provider || "");
+    }
     modelSettingsButton.onclick = () => {
       const willClose = !modelPopover.hidden;
       if (willClose) saveModelSettingsIfChanged();
       modelPopover.hidden = willClose;
+      if (!willClose) handoffPanel.hidden = true;
       if (willClose) {
         modelOptions.hidden = true;
         serviceTierOptions.hidden = true;
@@ -3508,6 +3571,130 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     function setComposerActivity(active) {
       composerActivityDot.classList.toggle("active", Boolean(active));
     }
+    function toggleHandoffPanel() {
+      if (handoffPanel.hidden && !handoffTargetProvider) {
+        selectHandoffTarget(preferredHandoffTarget());
+      }
+      modelPopover.hidden = true;
+      modelOptions.hidden = true;
+      serviceTierOptions.hidden = true;
+      reasoningOptions.hidden = true;
+      handoffPanel.hidden = !handoffPanel.hidden;
+      updateHandoffControls();
+    }
+    function preferredHandoffTarget() {
+      const providers = ["codex", "claude", "antigravity"];
+      return providers.find(provider => provider !== PROVIDER) || "codex";
+    }
+    function selectHandoffTarget(provider) {
+      handoffTargetProvider = provider || "codex";
+      for (const button of handoffTargetButtons) {
+        button.classList.toggle("selected", button.dataset.provider === handoffTargetProvider);
+      }
+      resetHandoffPreview();
+    }
+    function resetHandoffPreview() {
+      handoffPreviewPayload = null;
+      handoffExecuteButton.disabled = true;
+      handoffPreviewEl.hidden = true;
+      handoffPreviewEl.textContent = "";
+      handoffPreviewEl.className = "handoff-preview";
+    }
+    async function previewHandoff() {
+      if (!nativeThreadId) {
+        setHandoffStatus(`${PROVIDER_LABEL} 会话未连接`, "error");
+        return;
+      }
+      if (!handoffTargetProvider) selectHandoffTarget(preferredHandoffTarget());
+      const cwd = currentWorkspaceCwd();
+      if (!cwd) {
+        setHandoffStatus("工作目录未知", "error");
+        return;
+      }
+      handoffBusy = true;
+      updateHandoffControls();
+      setHandoffStatus("预览中", "");
+      try {
+        handoffPreviewPayload = await workflowApi("/api/native/workflows/handoffs/preview", {
+          source_provider: PROVIDER,
+          source_thread_id: nativeThreadId,
+          source_turn_id: activeTurnId || nativeTurnId,
+          target_provider: handoffTargetProvider,
+          cwd,
+          intent: handoffIntent.value,
+          user_note: handoffNote.value
+        });
+        renderHandoffPreview(handoffPreviewPayload);
+      } catch (error) {
+        handoffPreviewPayload = null;
+        setHandoffStatus(error.message || "接棒预览失败", "error");
+      } finally {
+        handoffBusy = false;
+        updateHandoffControls();
+      }
+    }
+    async function executeHandoff() {
+      if (!handoffPreviewPayload) await previewHandoff();
+      if (!handoffPreviewPayload) return;
+      handoffBusy = true;
+      updateHandoffControls();
+      setHandoffStatus("启动中", "");
+      try {
+        const result = await workflowApi("/api/native/workflows/handoffs/execute", {
+          workflow_run_id: handoffPreviewPayload.workflow_run_id,
+          preview_id: handoffPreviewPayload.preview_id,
+          target_provider: handoffTargetProvider,
+          cwd: currentWorkspaceCwd(),
+          prompt: handoffPreviewPayload.prompt || ""
+        });
+        if (result.target_url) {
+          if (token) location.href = handoffUrlWithToken(result.target_url);
+          else location.href = result.target_url;
+        }
+      } catch (error) {
+        setHandoffStatus(error.message || "接棒执行失败", "error");
+      } finally {
+        handoffBusy = false;
+        updateHandoffControls();
+      }
+    }
+    function renderHandoffPreview(preview) {
+      const warnings = Array.isArray(preview.warnings) && preview.warnings.length
+        ? "\n" + preview.warnings.join("\n")
+        : "";
+      handoffPreviewEl.hidden = false;
+      handoffPreviewEl.className = "handoff-preview ok";
+      handoffPreviewEl.innerHTML = `${escapeHtml(preview.intent || "auto")}${escapeHtml(warnings)}<pre>${escapeHtml(preview.prompt || "")}</pre>`;
+      handoffExecuteButton.disabled = false;
+    }
+    function setHandoffStatus(text, tone) {
+      handoffPreviewEl.hidden = !text;
+      handoffPreviewEl.textContent = text || "";
+      handoffPreviewEl.className = "handoff-preview" + (tone ? " " + tone : "");
+    }
+    function updateHandoffControls() {
+      handoffButton.disabled = sendingPrompt || !nativeThreadId;
+      handoffPreviewButton.disabled = handoffBusy || !nativeThreadId || !handoffTargetProvider;
+      handoffExecuteButton.disabled = handoffBusy || !handoffPreviewPayload;
+      for (const button of handoffTargetButtons) button.disabled = handoffBusy;
+      handoffIntent.disabled = handoffBusy;
+      handoffNote.disabled = handoffBusy;
+    }
+    function currentWorkspaceCwd() {
+      const queryCwd = params.get("cwd") || "";
+      if (queryCwd) return queryCwd;
+      for (let index = loadedEvents.length - 1; index >= 0; index--) {
+        const payload = (loadedEvents[index] && loadedEvents[index].payload) || {};
+        const cwd = payload.cwd || payload.workdir || payload.working_directory || payload.workspace || "";
+        if (typeof cwd === "string" && cwd.startsWith("/")) return cwd;
+      }
+      return "";
+    }
+    function handoffUrlWithToken(url) {
+      const target = new URL(url, location.origin);
+      target.searchParams.set("token", token);
+      return target.pathname + "?" + target.searchParams.toString();
+    }
     function updateComposerDisabled() {
       const mode = primaryComposerAction();
       const requiresTurn = mode === "interrupt" || mode === "steer";
@@ -3533,6 +3720,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       reasoningSelector.disabled = sendingPrompt || nativeTurnRunning || reasoningSelector.options.length <= 1;
       serviceTierSelector.disabled = sendingPrompt || nativeTurnRunning || serviceTierSelector.options.length <= 1;
       interruptButton.disabled = sendingPrompt || !canInterruptActiveTurn() || !nativeThreadId || !activeTurnId;
+      updateHandoffControls();
       syncSettingOptionsDisabled();
       setComposerActivity(nativeTurnRunning || sendingPrompt);
     }
