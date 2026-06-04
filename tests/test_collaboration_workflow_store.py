@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from wlcodex.collaboration.models import HandoffArtifact, HandoffIntent
 from wlcodex.collaboration.workflow_store import WorkflowRunStore
 from wlcodex.db import Ledger
@@ -73,3 +75,66 @@ def test_record_execution_links_target_session(tmp_path) -> None:
     assert loaded_run.status == "running"
     assert loaded_run.target_provider == "antigravity"
     assert loaded_run.target_thread_id == "target-2"
+
+
+def test_record_execution_rejects_unknown_preview(tmp_path) -> None:
+    store = _store(tmp_path)
+    preview = store.create_preview(
+        source_provider="codex",
+        source_thread_id="source-1",
+        source_turn_id="",
+        target_provider="claude",
+        cwd="/repo",
+        intent=HandoffIntent.IMPLEMENT_FEATURE,
+        prompt="Implement it.",
+        artifacts=[],
+        warnings=[],
+    )
+
+    with pytest.raises(KeyError, match="unknown handoff preview id"):
+        store.record_execution(
+            workflow_run_id=preview.workflow_run_id,
+            preview_id="preview_missing",
+            target_provider="claude",
+            target_thread_id="target-1",
+            target_agent_run_id=1,
+            submitted_prompt="Edited prompt.",
+            status="running",
+        )
+
+
+def test_record_execution_rejects_preview_from_another_run(tmp_path) -> None:
+    store = _store(tmp_path)
+    first = store.create_preview(
+        source_provider="codex",
+        source_thread_id="source-1",
+        source_turn_id="",
+        target_provider="claude",
+        cwd="/repo",
+        intent=HandoffIntent.IMPLEMENT_FEATURE,
+        prompt="Implement it.",
+        artifacts=[],
+        warnings=[],
+    )
+    second = store.create_preview(
+        source_provider="antigravity",
+        source_thread_id="source-2",
+        source_turn_id="",
+        target_provider="claude",
+        cwd="/repo",
+        intent=HandoffIntent.FIX_BUG,
+        prompt="Fix it.",
+        artifacts=[],
+        warnings=[],
+    )
+
+    with pytest.raises(ValueError, match="does not belong to workflow run"):
+        store.record_execution(
+            workflow_run_id=first.workflow_run_id,
+            preview_id=second.preview_id,
+            target_provider="claude",
+            target_thread_id="target-1",
+            target_agent_run_id=1,
+            submitted_prompt="Edited prompt.",
+            status="running",
+        )

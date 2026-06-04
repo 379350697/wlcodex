@@ -188,6 +188,10 @@ class WorkflowRunStore:
         status: str,
     ) -> StoredWorkflowStep:
         self.get_run(workflow_run_id)
+        self._verify_preview_belongs_to_run(
+            preview_id=preview_id,
+            workflow_run_id=workflow_run_id,
+        )
         now = _now()
         step_id = _new_id("step")
         self._conn.execute(
@@ -236,6 +240,28 @@ class WorkflowRunStore:
         if row is None:
             raise KeyError(f"unknown workflow step id: {step_id}")
         return _step(row)
+
+    def _verify_preview_belongs_to_run(
+        self,
+        *,
+        preview_id: str,
+        workflow_run_id: str,
+    ) -> None:
+        row = self._conn.execute(
+            """
+            SELECT workflow_run_id FROM collaboration_workflow_previews
+            WHERE preview_id = ?
+            """,
+            (preview_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown handoff preview id: {preview_id}")
+        preview_run_id = str(row["workflow_run_id"])
+        if preview_run_id != workflow_run_id:
+            raise ValueError(
+                f"handoff preview {preview_id} does not belong to workflow run "
+                f"{workflow_run_id}"
+            )
 
 
 def _new_id(prefix: str) -> str:
