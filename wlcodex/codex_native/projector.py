@@ -337,6 +337,32 @@ class NativeCodexEventProjector:
             session_conversation_id=session.conversation_id,
         )
 
+    def project_agent_message(
+        self,
+        *,
+        native_thread_id: str,
+        native_turn_id: str,
+        text: str,
+        item_id: str,
+    ) -> list[RuntimeEvent]:
+        session = self._session_store.get_or_create_session(
+            native_thread_id=native_thread_id,
+        )
+        return self._append_backend_event(
+            event_type="agent_message",
+            native_thread_id=native_thread_id,
+            native_turn_id=native_turn_id,
+            payload={
+                "threadId": native_thread_id,
+                "turnId": native_turn_id,
+                "message": text,
+                "item": {"id": item_id},
+                "itemId": item_id,
+            },
+            session_agent_run_id=session.agent_run_id,
+            session_conversation_id=session.conversation_id,
+        )
+
     def _append_backend_event(
         self,
         *,

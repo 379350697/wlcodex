@@ -42,6 +42,20 @@ def test_model_text_delta_maps_to_text_delta_kind() -> None:
     assert stream.payload == {"delta": "hello"}
 
 
+def test_model_message_completed_maps_to_message_completed_kind() -> None:
+    runtime = _event(
+        EventType.MODEL_MESSAGE_COMPLETED,
+        {"text": "final answer"},
+        event_id=15,
+    )
+
+    stream = stream_event_from_runtime(runtime)
+
+    assert stream.type == EventType.MODEL_MESSAGE_COMPLETED
+    assert stream.kind == "message_completed"
+    assert stream.payload == {"text": "final answer"}
+
+
 def test_agent_run_heartbeat_maps_to_lifecycle_kind() -> None:
     runtime = _event(EventType.AGENT_RUN_HEARTBEAT, {"status": "running"}, event_id=14)
 

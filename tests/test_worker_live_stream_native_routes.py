@@ -1792,14 +1792,51 @@ async def test_worker_live_page_renders_assistant_markdown_blocks(
     assert "HTTP/1.1 200 OK" in response
     assert "function renderMarkdownLite(target, text)" in response
     assert "function appendInlineMarkdown(target, text)" in response
+    assert "function appendMarkdownLink(target, label, href)" in response
     assert 'replace(/\\r\\n/g, "\\n")' in response
     assert 'paragraph.join("\\n").trim()' in response
     assert 'codeLines.join("\\n")' in response
+    assert "\\[([^\\]]+)\\]\\(([^)]+)\\)" in response
     assert "renderMarkdownLite(node.body, node.text);" in response
-    assert "node.text += String(payload.text || payload.delta || payload.summary || \"\");" in response
+    assert "node.text += String(incomingText);" in response
+    assert "node.text = String(incomingText);" in response
     assert ".transcript-body p" in response
     assert ".transcript-body ul" in response
     assert ".transcript-body pre" in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_replaces_delta_with_completed_assistant_message(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert '"message_completed"' in response
+    assert 'event.kind === "message_completed"' in response
+    assert "hasCompletedAssistantMessageForTurn" in response
+    assert "return event.kind === \"text_delta\" || event.kind === \"message_completed\";" in response
+    assert "node.text = String(incomingText);" in response
+    assert "node.row.dataset.completed = \"true\";" in response
+    assert "assistantMessageKey(event)" in response
+    assert "foldTranscriptPreviewText(group, \"message_completed\")" in response
 
 
 @pytest.mark.asyncio
@@ -2009,8 +2046,12 @@ async def test_worker_live_page_fold_keeps_native_transcript_previews(
     assert "function renderFoldPreview(head, group)" in response
     assert "foldTranscriptPreviewText(group, \"user_message\")" in response
     assert "foldTranscriptPreviewText(group, \"text_delta\")" in response
+    assert "foldTranscriptPreviewText(group, \"message_completed\")" in response
     assert "appendFoldPreviewLine(preview, \"user\", userText);" in response
-    assert "appendFoldPreviewLine(preview, \"assistant\", assistantText);" in response
+    assert (
+        'appendFoldPreviewLine(preview, "assistant", '
+        "completedAssistantText || assistantText);"
+    ) in response
     assert ".turn-fold[open] .turn-fold-preview { display: none; }" in response
     assert "/turn-summary" not in response
     assert "summarize" not in response

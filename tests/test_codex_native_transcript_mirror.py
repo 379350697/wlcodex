@@ -97,6 +97,66 @@ def test_transcript_mirror_imports_official_jsonl_tail_without_duplicates(
     assert events[0].payload["native_turn_id"] == events[1].payload["native_turn_id"]
 
 
+def test_transcript_mirror_imports_task_complete_last_agent_message(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    thread_id = "019e924a-7709-78d1-963e-418444ea667e"
+    root = tmp_path / "sessions"
+    _write_session_jsonl(
+        root,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-06-04T11:00:14.300Z",
+                "type": "turn_context",
+                "payload": {"turn_id": "official-turn-1"},
+            },
+            {
+                "timestamp": "2026-06-04T11:00:14.310Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "评估这个文档",
+                },
+            },
+            {
+                "timestamp": "2026-06-04T11:07:51.614Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "official-turn-1",
+                    "last_agent_message": (
+                        "结论：这份文档**方向大体正确**。\n\n"
+                        "**主要正确点**\n"
+                        "- `controller.py` 单类过大\n"
+                    ),
+                },
+            },
+        ],
+    )
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+        tail_lines=20,
+    )
+
+    projected_count = mirror.sync_thread(thread_id)
+    session = session_store.get_by_thread_id(thread_id)
+    assert session is not None
+    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+
+    assert projected_count == 2
+    assert [event.event_type for event in events] == [
+        EventType.USER_MESSAGE_RECEIVED,
+        EventType.MODEL_MESSAGE_COMPLETED,
+    ]
+    assert events[1].payload["text"].startswith("结论：这份文档")
+    assert events[1].payload["native_turn_id"] == "official-turn-1"
+    assert str(events[1].payload["itemId"]).startswith("jsonl-assistant-final:")
+
+
 def test_transcript_mirror_uses_official_turn_context_id(tmp_path: Path) -> None:
     session_store, runtime_store = _stores(tmp_path)
     thread_id = "019e7bae-f168-7881-82e6-515d49a51fec"

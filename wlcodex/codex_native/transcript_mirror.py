@@ -107,6 +107,13 @@ class CodexSessionTranscriptMirror:
                         "item": {"id": item.item_id},
                     },
                 )
+            elif item.role == "assistant_final":
+                projected = self._projector.project_agent_message(
+                    native_thread_id=native_thread_id,
+                    native_turn_id=item.turn_id,
+                    text=item.text,
+                    item_id=item.item_id,
+                )
             else:
                 projected = []
             self._seen_item_ids.add(item.item_id)
@@ -172,7 +179,27 @@ def _parse_transcript_items(
         timestamp = str(row.get("timestamp") or "")
         if row_turn_id:
             current_turn_id = row_turn_id
-        if payload_type in {"task_started", "task_complete", "turn_aborted"}:
+        if payload_type in {"task_started", "turn_aborted"}:
+            continue
+        if payload_type == "task_complete":
+            text = _text(payload.get("last_agent_message"))
+            if not text:
+                continue
+            item_turn_id = row_turn_id or current_turn_id
+            items.append(
+                _TranscriptItem(
+                    role="assistant_final",
+                    text=text,
+                    timestamp=timestamp,
+                    turn_id=item_turn_id,
+                    item_id=_stable_id(
+                        "jsonl-assistant-final",
+                        native_thread_id,
+                        item_turn_id,
+                        text,
+                    ),
+                )
+            )
             continue
         if payload_type == "user_message":
             text = _text(payload.get("message"))
@@ -207,7 +234,21 @@ def _parse_transcript_items(
                     ),
                 )
             )
-    return items
+    return _dedupe_transcript_items(items)
+
+
+def _dedupe_transcript_items(items: list[_TranscriptItem]) -> list[_TranscriptItem]:
+    final_texts = {
+        (item.turn_id, item.text)
+        for item in items
+        if item.role == "assistant_final"
+    }
+    result: list[_TranscriptItem] = []
+    for item in items:
+        if item.role == "assistant" and (item.turn_id, item.text) in final_texts:
+            continue
+        result.append(item)
+    return result
 
 
 def _json_object(line: str) -> dict[str, Any] | None:

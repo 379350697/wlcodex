@@ -2583,6 +2583,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .transcript-body ul, .transcript-body ol { margin: 0 0 13px 1.3em; padding: 0; display: grid; gap: 6px; white-space: normal; }
     .transcript-body li { padding-left: 2px; white-space: normal; }
     .transcript-body strong { color: #ffffff; font-weight: 760; }
+    .transcript-body a { color: #93c5fd; text-decoration: none; border-bottom: 1px solid rgba(147, 197, 253, .45); }
     .transcript-body code { padding: 1px 5px; border-radius: 5px; background: #1d2027; color: #e5e7eb; font: .92em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .transcript-body pre { margin: 0 0 13px; overflow: auto; padding: 12px 13px; border: 1px solid #2e333d; border-radius: 8px; background: #111318; white-space: pre; }
     .transcript-body pre code { padding: 0; border-radius: 0; background: transparent; font-size: 13px; line-height: 1.5; }
@@ -3587,6 +3588,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         "activity",
         "user_message",
         "text_delta",
+        "message_completed",
         "reasoning_delta",
         "command_started",
         "command_output",
@@ -3667,6 +3669,14 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         if (event.id) cursor.textContent = "#" + event.id;
         return;
       }
+      if (isOfficialAssistantTranscriptEvent(event)) {
+        rebuildStream();
+        applyNativeTurnState(event);
+        updateComposerDisabled();
+        if (event.id) cursor.textContent = "#" + event.id;
+        window.scrollTo(0, document.body.scrollHeight);
+        return;
+      }
       if (previousLatestTurnId && incomingTurnId && incomingTurnId !== previousLatestTurnId) {
         rebuildStream();
         applyNativeTurnState(event);
@@ -3695,10 +3705,18 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       });
     }
     function dedupeDisplayEvents(sourceEvents) {
+      const officialAssistantTurns = completedAssistantTurnSet(sourceEvents);
       const seen = new Set();
       const result = [];
       for (const event of sourceEvents) {
         if (isInternalEvent(event)) continue;
+        if (
+          event.kind === "text_delta" &&
+          officialAssistantTurns.has(assistantTurnKey(event)) &&
+          !isOfficialAssistantTranscriptEvent(event)
+        ) {
+          continue;
+        }
         const key = mirroredDisplayKey(event);
         if (key) {
           if (seen.has(key)) continue;
@@ -3707,6 +3725,37 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         result.push(event);
       }
       return result;
+    }
+    function completedAssistantTurnSet(sourceEvents) {
+      const turns = new Set();
+      for (const event of sourceEvents) {
+        if (isOfficialAssistantTranscriptEvent(event)) {
+          const key = assistantTurnKey(event);
+          if (key) turns.add(key);
+        }
+      }
+      return turns;
+    }
+    function isAssistantMessageEvent(event) {
+      return event.kind === "text_delta" || event.kind === "message_completed";
+    }
+    function isOfficialAssistantTranscriptEvent(event) {
+      if (!isAssistantMessageEvent(event)) return false;
+      const payload = (event && event.payload) || {};
+      const itemId = String(payload.itemId || payload.item_id || "");
+      return event.kind === "message_completed" || itemId.startsWith("jsonl-assistant");
+    }
+    function hasCompletedAssistantMessageForTurn(event) {
+      const key = assistantTurnKey(event);
+      if (!key) return false;
+      return loadedEvents.some(previous => (
+        isOfficialAssistantTranscriptEvent(previous) &&
+        assistantTurnKey(previous) === key
+      ));
+    }
+    function assistantTurnKey(event) {
+      const payload = (event && event.payload) || {};
+      return String(payload.native_turn_id || payload.turnId || "");
     }
     function isDuplicateDisplayEvent(event, previousEvents) {
       const key = mirroredDisplayKey(event);
@@ -3765,11 +3814,14 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     function renderFoldPreview(head, group) {
       const userText = foldTranscriptPreviewText(group, "user_message");
       const assistantText = foldTranscriptPreviewText(group, "text_delta");
-      if (!userText && !assistantText) return;
+      const completedAssistantText = foldTranscriptPreviewText(group, "message_completed");
+      if (!userText && !assistantText && !completedAssistantText) return;
       const preview = document.createElement("div");
       preview.className = "turn-fold-preview";
       if (userText) appendFoldPreviewLine(preview, "user", userText);
-      if (assistantText) appendFoldPreviewLine(preview, "assistant", assistantText);
+      if (completedAssistantText || assistantText) {
+        appendFoldPreviewLine(preview, "assistant", completedAssistantText || assistantText);
+      }
       head.append(preview);
     }
     function appendFoldPreviewLine(preview, role, text) {
@@ -3863,6 +3915,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       if (itemId) return `${event.kind}:${itemId}`;
       if (event.kind === "user_message") return `user:${turnId}:user`;
       if (event.kind === "text_delta") return `assistant:${turnId}:assistant`;
+      if (event.kind === "message_completed") return `assistant:${turnId}:completed`;
       if (event.kind === "reasoning_delta") return `reasoning:${turnId}:reasoning`;
       if (
         event.kind === "command_started" ||
@@ -3900,7 +3953,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       renderTarget = options.target || renderTarget || events;
       try {
       if (event.kind === "user_message") renderTranscript(event, "user", "你");
-      else if (event.kind === "text_delta") renderAssistant(event);
+      else if (event.kind === "text_delta" || event.kind === "message_completed") renderAssistant(event);
       else if (event.kind === "reasoning_delta") renderStatusEvent(event, "思考中", "busy");
       else if (isCommandEvent(event)) renderToolCall(event);
       else if (event.kind === "diff_updated" || event.kind === "file_changed") renderFileChange(event);
@@ -3958,7 +4011,12 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       }
       const incomingText = payload.text || payload.delta || payload.summary || "";
       if (role.includes("assistant")) {
-        node.text += String(payload.text || payload.delta || payload.summary || "");
+        if (event.kind === "message_completed") {
+          node.text = String(incomingText);
+          node.row.dataset.completed = "true";
+        } else {
+          node.text += String(incomingText);
+        }
         renderMarkdownLite(node.body, node.text);
       } else {
         renderTranscriptImages(node.body, payload.images || []);
@@ -4117,7 +4175,14 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     }
     function transcriptKey(event, role) {
       const payload = event.payload || {};
+      if (role.includes("assistant")) return ["assistant", assistantMessageKey(event)].join(":");
       return [role, payload.native_turn_id || "", payload.itemId || role].join(":");
+    }
+    function assistantMessageKey(event) {
+      const payload = (event && event.payload) || {};
+      const itemId = String(payload.itemId || payload.item_id || "");
+      if (itemId.startsWith("jsonl-assistant")) return itemId;
+      return `${payload.native_turn_id || payload.turnId || ""}:assistant`;
     }
     function statusKey(event) {
       const payload = event.payload || {};
@@ -4199,14 +4264,16 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     }
     function appendInlineMarkdown(target, text) {
       const source = String(text || "");
-      const pattern = /(`[^`]+`|\\*\\*[^*]+\\*\\*)/g;
+      const pattern = /(\\[([^\\]]+)\\]\\(([^)]+)\\)|`[^`]+`|\\*\\*[^*]+\\*\\*)/g;
       let cursor = 0;
       for (const match of source.matchAll(pattern)) {
         if (match.index > cursor) {
           target.append(document.createTextNode(source.slice(cursor, match.index)));
         }
         const token = match[0];
-        if (token.startsWith("`")) {
+        if (token.startsWith("[")) {
+          appendMarkdownLink(target, match[2] || "", match[3] || "");
+        } else if (token.startsWith("`")) {
           const code = document.createElement("code");
           code.textContent = token.slice(1, -1);
           target.append(code);
@@ -4220,6 +4287,16 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       if (cursor < source.length) {
         target.append(document.createTextNode(source.slice(cursor)));
       }
+    }
+    function appendMarkdownLink(target, label, href) {
+      const anchor = document.createElement("a");
+      anchor.textContent = label || href;
+      anchor.href = href || "#";
+      if (!String(href || "").startsWith("/")) {
+        anchor.target = "_blank";
+        anchor.rel = "noreferrer";
+      }
+      target.append(anchor);
     }
     function commandTitle(payload) {
       if (payload.command) return String(payload.command);

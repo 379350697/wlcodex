@@ -12,6 +12,7 @@ _KIND_BY_EVENT_TYPE = {
     EventType.AGENT_RUN_ACTIVITY: "activity",
     EventType.USER_MESSAGE_RECEIVED: "user_message",
     EventType.MODEL_TEXT_DELTA: "text_delta",
+    EventType.MODEL_MESSAGE_COMPLETED: "message_completed",
     EventType.MODEL_REASONING_DELTA: "reasoning_delta",
     EventType.COMMAND_STARTED: "command_started",
     EventType.COMMAND_OUTPUT_DELTA: "command_output",

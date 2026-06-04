@@ -212,6 +212,23 @@ def _map_agent_message_delta(
     )]
 
 
+def _map_agent_message(
+    src: CodexRuntimeSource, payload: dict
+) -> list[RuntimeEvent]:
+    text = payload.get("message", payload.get("text", ""))
+    item = payload.get("item")
+    item_id = ""
+    if isinstance(item, dict):
+        item_id = item.get("id", "")
+    elif payload.get("itemId"):
+        item_id = str(payload.get("itemId"))
+    return [src._make(
+        EventType.MODEL_MESSAGE_COMPLETED,
+        {"text": text, "itemId": item_id},
+        visibility=Visibility.USER,
+    )]
+
+
 def _map_reasoning_delta(
     src: CodexRuntimeSource, payload: dict
 ) -> list[RuntimeEvent]:
@@ -440,6 +457,7 @@ _EVENT_MAP: dict[str, object] = {
     "turn_completed": _map_turn_completed,
     "item_started": _map_item_started,
     "item_completed": _map_item_completed,
+    "agent_message": _map_agent_message,
     "agent_message_delta": _map_agent_message_delta,
     "reasoning_delta": _map_reasoning_delta,
     "token_usage_updated": _map_token_usage,
