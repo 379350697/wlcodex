@@ -82,7 +82,7 @@ class AntigravityCliRunner:
                 start_new_session=True,
             )
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
+                _communicate_with_auth_detection(proc),
                 timeout=self._config.request_timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
@@ -695,6 +695,55 @@ def _timestamp_seconds(value: str) -> float:
         return datetime.fromisoformat(value).timestamp()
     except (TypeError, ValueError):
         return 0.0
+
+
+async def _communicate_with_auth_detection(
+    proc: asyncio.subprocess.Process,
+) -> tuple[bytes, bytes]:
+    if getattr(proc, "stdout", None) is None and getattr(proc, "stderr", None) is None:
+        return await proc.communicate()
+
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    tasks = [
+        asyncio.create_task(_read_process_stream(proc.stdout, stdout_chunks, proc)),
+        asyncio.create_task(_read_process_stream(proc.stderr, stderr_chunks, proc)),
+        asyncio.create_task(proc.wait()),
+    ]
+    try:
+        await asyncio.gather(*tasks)
+    except RuntimeError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if getattr(proc, "returncode", None) is None:
+            proc.kill()
+            await proc.wait()
+        raise
+    return b"".join(stdout_chunks), b"".join(stderr_chunks)
+
+
+async def _read_process_stream(
+    stream: Any,
+    chunks: list[bytes],
+    proc: asyncio.subprocess.Process,
+) -> None:
+    if stream is None:
+        return
+    while True:
+        chunk = await stream.readline()
+        if not chunk:
+            return
+        chunks.append(chunk)
+        auth_error = _authentication_error_message(_decode_chunks(chunks))
+        if auth_error:
+            if getattr(proc, "returncode", None) is None:
+                proc.kill()
+            raise RuntimeError(auth_error)
+
+
+def _decode_chunks(chunks: list[bytes]) -> str:
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def _authentication_error_message(text: str) -> str:

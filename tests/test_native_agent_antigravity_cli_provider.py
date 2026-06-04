@@ -555,3 +555,76 @@ async def test_cli_runner_rejects_authentication_prompt_as_failure(
                 cwd=str(tmp_path),
             )
         ]
+
+
+@pytest.mark.asyncio
+async def test_cli_runner_fails_fast_when_authentication_prompt_streams(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        AntigravityCliConfig,
+        AntigravityCliRunner,
+    )
+
+    class FakeStream:
+        def __init__(self, lines: list[bytes]) -> None:
+            self._lines = lines
+
+        async def readline(self):
+            await asyncio.sleep(0)
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+    class FakeProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.stdout = FakeStream([b"Authentication required. Please log in.\n"])
+            self.stderr = FakeStream([])
+            self.killed = False
+
+        async def communicate(self):
+            await asyncio.sleep(3600)
+            return b"", b""
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            while self.returncode is None:
+                await asyncio.sleep(0.01)
+            return self.returncode
+
+    fake_process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return fake_process
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    fake_binary = tmp_path / "agy"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = AntigravityCliRunner(AntigravityCliConfig(binary=str(fake_binary)))
+
+    with pytest.raises(RuntimeError, match="authentication required"):
+        await asyncio.wait_for(
+            _collect_runner_events(runner, tmp_path),
+            timeout=0.2,
+        )
+    assert fake_process.killed is True
+
+
+async def _collect_runner_events(runner, tmp_path: Path):
+    return [
+        event
+        async for event in runner.run(
+            prompt="hello",
+            cwd=str(tmp_path),
+        )
+    ]
