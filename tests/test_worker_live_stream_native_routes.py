@@ -1585,6 +1585,18 @@ def test_live_page_gates_active_turn_controls_with_provider_capabilities() -> No
     assert "message assistant" not in response
 
 
+def test_live_page_waits_during_active_turn_when_provider_cannot_steer() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert 'if (!nativeTurnRunning) return "continue";' in response
+    assert 'if (canSteerActiveTurn() && composerHasDraft()) return "choose";' in response
+    assert (
+        'if (canInterruptActiveTurn() && !composerHasDraft()) return "interrupt";'
+        in response
+    )
+    assert 'mode === "wait" ? "等待当前轮"' in response
+
+
 @pytest.mark.asyncio
 async def test_worker_live_page_hides_success_lifecycle_events_from_transcript(
     tmp_path: Path,

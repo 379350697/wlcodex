@@ -3368,11 +3368,10 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       return Boolean(promptInput.value.trim() || imageAttachments.length);
     }
     function primaryComposerAction() {
-      if (nativeTurnRunning && !composerHasDraft()) {
-        return canInterruptActiveTurn() ? "interrupt" : "wait";
-      }
-      if (nativeTurnRunning && canSteerActiveTurn()) return "choose";
-      return "continue";
+      if (!nativeTurnRunning) return "continue";
+      if (canSteerActiveTurn() && composerHasDraft()) return "choose";
+      if (canInterruptActiveTurn() && !composerHasDraft()) return "interrupt";
+      return "wait";
     }
     function applyNativeTurnState(event, options = {}) {
       const payload = event.payload || {};
