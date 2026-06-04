@@ -123,7 +123,6 @@ class AntigravityCliRunner:
         extra_dirs: tuple[str, ...],
     ) -> tuple[str, ...]:
         args: list[str] = [
-            "--print",
             "--print-timeout",
             self._config.print_timeout,
         ]
@@ -136,7 +135,7 @@ class AntigravityCliRunner:
             args.append("--dangerously-skip-permissions")
         if self._config.sandbox:
             args.append("--sandbox")
-        args.append(prompt)
+        args.extend(["--print", prompt])
         return tuple(args)
 
 
@@ -241,7 +240,7 @@ class AntigravityCliLocalProvider:
             session=session,
             native_turn_id=native_turn_id,
             prompt=prompt,
-            conversation_id=native_session_id,
+            conversation_id="",
         )
         return _control_result(
             session,

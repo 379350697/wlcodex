@@ -158,7 +158,7 @@ async def test_cli_provider_start_session_runs_in_background_and_streams_events(
     ]
     await asyncio.sleep(0)
     assert runner.calls[0]["prompt"] == "say hi"
-    assert runner.calls[0]["conversation_id"] == result.native_session_id
+    assert runner.calls[0]["conversation_id"] == ""
 
     runner.release.set()
     await provider.wait_for_background_tasks()
@@ -170,7 +170,7 @@ async def test_cli_provider_start_session_runs_in_background_and_streams_events(
     )
     assert session is not None
     assert session.status == "done"
-    assert session.metadata["antigravity_conversation_id"] == result.native_session_id
+    assert session.metadata["antigravity_conversation_id"] == "ag-conv-1"
     events = runtime_store.list_by_agent_run(session.agent_run_id)
     assert [event.event_type for event in events] == [
         EventType.AGENT_RUN_STARTED,
@@ -201,23 +201,23 @@ async def test_cli_provider_read_and_continue_use_saved_conversation_id(
     await provider.wait_for_background_tasks()
 
     assert runner.calls[1]["prompt"] == "second"
-    assert runner.calls[1]["conversation_id"] == result.native_session_id
+    assert runner.calls[1]["conversation_id"] == "ag-conv-1"
 
 
 @pytest.mark.asyncio
-async def test_cli_provider_start_session_pins_agy_conversation_to_native_session_id(
+async def test_cli_provider_start_session_does_not_resume_agy_conversation_by_id(
     tmp_path: Path,
 ) -> None:
     runner = BlockingAntigravityCliRunner()
     provider, _store, _runtime_store, _runner = _provider(tmp_path, runner=runner)
 
-    result = await asyncio.wait_for(
+    _result = await asyncio.wait_for(
         provider.start_session(str(tmp_path), "start isolated"),
         timeout=0.05,
     )
 
     await asyncio.sleep(0)
-    assert runner.calls[0]["conversation_id"] == result.native_session_id
+    assert runner.calls[0]["conversation_id"] == ""
 
     runner.release.set()
     await provider.wait_for_background_tasks()
@@ -336,7 +336,7 @@ async def test_cli_provider_imports_local_db_history(
 
 
 @pytest.mark.asyncio
-async def test_cli_provider_keeps_pinned_conversation_id_over_latest_local_cwd(
+async def test_cli_provider_recovers_conversation_id_from_isolated_local_cwd(
     tmp_path: Path,
 ) -> None:
     class LatestIndex(EmptyAntigravityIndex):
@@ -384,7 +384,7 @@ async def test_cli_provider_keeps_pinned_conversation_id_over_latest_local_cwd(
         native_session_id=result.native_session_id,
     )
     assert session is not None
-    assert session.metadata["antigravity_conversation_id"] == result.native_session_id
+    assert session.metadata["antigravity_conversation_id"] == "latest-conv"
 
 
 @pytest.mark.asyncio
@@ -437,7 +437,7 @@ async def test_cli_provider_ignores_stale_latest_local_cwd(
     )
     assert session is not None
     assert session.status == "done"
-    assert session.metadata["antigravity_conversation_id"] == result.native_session_id
+    assert "antigravity_conversation_id" not in session.metadata
 
 
 @pytest.mark.asyncio
@@ -625,7 +625,6 @@ async def test_cli_runner_builds_agy_print_command(monkeypatch, tmp_path: Path) 
     args, kwargs = commands[0]
     assert args == (
         str(fake_binary),
-        "--print",
         "--print-timeout",
         "7m0s",
         "--conversation",
@@ -636,6 +635,7 @@ async def test_cli_runner_builds_agy_print_command(monkeypatch, tmp_path: Path) 
         str(tmp_path / "extra"),
         "--dangerously-skip-permissions",
         "--sandbox",
+        "--print",
         "hello",
     )
     assert kwargs["cwd"] == str(tmp_path)
