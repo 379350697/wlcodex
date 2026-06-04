@@ -1,0 +1,203 @@
+/* WLCodex — shared design tokens and component styles */
+
+/* ── Reset ────────────────────────────────────────────── */
+
+:root { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+
+/* ── Design Tokens ────────────────────────────────────── */
+
+:root {
+  /* Background layers */
+  --bg-root:     #000;
+  --bg-elevated: #0d0e12;
+  --bg-surface:  #111217;
+  --bg-input:    #12151d;
+  --bg-interact: #20242d;
+
+  /* Borders */
+  --border-subtle:  #24262d;
+  --border-default: #30333a;
+  --border-input:   #3f4550;
+
+  /* Text */
+  --text-primary:   #f7f7f8;
+  --text-secondary: #d4d7de;
+  --text-muted:     #9ca3af;
+  --text-heading:   #ffffff;
+
+  /* Semantic colors */
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-error:   #ef4444;
+  --color-link:    #93c5fd;
+
+  /* Button colors */
+  --btn-primary-bg:    #f4f4f5;
+  --btn-primary-color: #101114;
+  --btn-secondary-bg:  #1b1f29;
+
+  /* Timing */
+  --duration-fast:   150ms;
+  --duration-normal: 200ms;
+  --ease-default: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Radii */
+  --radius-sm:     8px;
+  --radius-md:     10px;
+  --radius-lg:     13px;
+  --radius-pill:   28px;
+  --radius-circle: 50%;
+}
+
+/* ── Body Defaults ────────────────────────────────────── */
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--font-sans);
+  background: var(--bg-root);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Circle Navigation Buttons ────────────────────────── */
+
+.circle {
+  display: grid;
+  place-items: center;
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  border: 1px solid var(--border-default);
+  background: #202126;
+  color: #fff;
+  text-decoration: none;
+  font-size: 30px;
+  line-height: 1;
+  transition: background var(--duration-fast) ease, transform var(--duration-fast) ease;
+}
+
+.circle:hover { background: #2a2d35; }
+
+.circle:active { transform: scale(0.90); background: #343840; }
+
+#back:active { transform: scale(0.90) translateX(-2px); }
+
+/* ── Buttons ──────────────────────────────────────────── */
+
+button {
+  min-height: 44px;
+  border: 0;
+  border-radius: var(--radius-md);
+  padding: 8px 14px;
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-color);
+  font-weight: 760;
+  font-size: 15px;
+  font-family: inherit;
+  transition: opacity var(--duration-fast) var(--ease-default),
+              background var(--duration-fast) var(--ease-default);
+}
+
+button:disabled {
+  opacity: .56;
+  cursor: not-allowed;
+}
+
+button:not(:disabled):hover { filter: brightness(0.92); }
+
+button:not(.secondary):not(.warn):not(:disabled):hover { background: #e8e8e9; }
+
+button:not(:disabled):active {
+  transform: scale(0.97);
+  transition-duration: 50ms;
+}
+
+button.secondary {
+  border: 1px solid var(--border-input);
+  background: var(--btn-secondary-bg);
+  color: var(--text-primary);
+}
+
+button.secondary:not(:disabled):hover {
+  background: #252a36;
+  border-color: #4f5560;
+}
+
+button.warn {
+  background: #b91c1c;
+  color: #fff;
+}
+
+.primary-action:not(:disabled):active { transform: scale(0.93); }
+
+/* Loading spinner */
+button.loading {
+  pointer-events: none;
+  position: relative;
+  color: transparent !important;
+}
+
+button.loading::after {
+  content: "";
+  position: absolute;
+  width: 18px; height: 18px;
+  top: 50%; left: 50%;
+  margin: -9px 0 0 -9px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: btnSpin 0.5s linear infinite;
+}
+
+@keyframes btnSpin { to { transform: rotate(360deg); } }
+
+/* ── Inputs ───────────────────────────────────────────── */
+
+input, textarea, select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  padding: 11px 12px;
+}
+
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--color-link);
+  box-shadow: 0 0 0 3px rgba(147, 197, 253, 0.15);
+}
+
+/* ── Empty State ──────────────────────────────────────── */
+
+.empty {
+  color: var(--text-muted);
+  padding: 24px 0;
+  text-align: center;
+}
+
+/* ── Focus Visible ────────────────────────────────────── */
+
+*:focus-visible {
+  outline: 2px solid var(--color-link);
+  outline-offset: 2px;
+}
+
+/* ── Reduced Motion ───────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

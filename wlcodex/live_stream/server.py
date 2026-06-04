@@ -1817,6 +1817,7 @@ def _native_provider_index_html(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Native Agents</title>
+  <link rel="stylesheet" href="/static/base.css">
   <link rel="stylesheet" href="/static/native_index.css">
 </head>
 <body>
@@ -1836,12 +1837,11 @@ def _council_review_page() -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>议会审核</title>
+  <link rel="stylesheet" href="/static/base.css">
   <style>
-    :root { color-scheme: dark; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #050506; color: #f7f7f8; }
+    body { background: #050506; }
     header { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: center; min-height: 72px; padding: 10px 18px; background: rgba(5,5,6,.96); border-bottom: 1px solid #26282f; }
-    .circle { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 50%; border: 1px solid #34363d; background: #202126; color: #fff; text-decoration: none; font-size: 28px; line-height: 1; }
+    .circle { width: 46px; height: 46px; font-size: 28px; }
     h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
     .config-link { min-height: 42px; padding: 0 14px; border-radius: 21px; border: 1px solid #34363d; color: #f7f7f8; display: inline-grid; place-items: center; text-decoration: none; font-weight: 720; }
     main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 18px; width: min(1180px, 100%); margin: 0 auto; padding: 18px; }
@@ -1849,7 +1849,7 @@ def _council_review_page() -> str:
     .panel { border: 1px solid #2f3138; background: #111217; border-radius: 8px; padding: 14px; }
     .stack { display: grid; gap: 12px; }
     label { display: grid; gap: 6px; color: #d4d7de; font-size: 14px; font-weight: 680; }
-    input, textarea, select { width: 100%; min-width: 0; border: 1px solid #383b43; border-radius: 8px; background: #1b1d24; color: #f7f7f8; font: inherit; padding: 11px 12px; }
+    input, textarea, select { border: 1px solid #383b43; border-radius: 8px; background: #1b1d24; }
     textarea { min-height: 124px; resize: vertical; line-height: 1.48; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .run { min-height: 48px; border: 0; border-radius: 8px; background: #f7f7f8; color: #050506; font-weight: 800; font-size: 16px; }
@@ -2110,12 +2110,11 @@ def _council_seats_page() -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>议会席位配置</title>
+  <link rel="stylesheet" href="/static/base.css">
   <style>
-    :root { color-scheme: dark; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #050506; color: #f7f7f8; }
+    body { background: #050506; }
     header { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: center; min-height: 72px; padding: 10px 18px; background: rgba(5,5,6,.96); border-bottom: 1px solid #26282f; }
-    .circle { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 50%; border: 1px solid #34363d; background: #202126; color: #fff; text-decoration: none; font-size: 28px; line-height: 1; }
+    .circle { width: 46px; height: 46px; font-size: 28px; }
     h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
     .review-link, button.save { min-height: 42px; padding: 0 14px; border-radius: 21px; border: 1px solid #34363d; color: #f7f7f8; background: #202126; display: inline-grid; place-items: center; text-decoration: none; font-weight: 720; }
     main { display: grid; gap: 14px; width: min(980px, 100%); margin: 0 auto; padding: 18px; }
@@ -2127,7 +2126,7 @@ def _council_seats_page() -> str:
     .role { font-weight: 820; font-size: 17px; }
     .mission { color: #aeb4bf; font-size: 13px; line-height: 1.45; }
     label { display: grid; gap: 5px; color: #d4d7de; font-size: 12px; font-weight: 680; }
-    input, select { width: 100%; min-width: 0; border: 1px solid #383b43; border-radius: 8px; background: #1b1d24; color: #f7f7f8; font: inherit; padding: 10px 11px; }
+    input, select { border: 1px solid #383b43; border-radius: 8px; background: #1b1d24; padding: 10px 11px; }
     .switch { width: 54px; height: 32px; }
     @media (max-width: 760px) {
       header { grid-template-columns: 46px 1fr; }
@@ -2257,10 +2256,9 @@ def _native_token_entry_page(return_to: str = "/native/codex") -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WLCodex</title>
+  <link rel="stylesheet" href="/static/base.css">
   <style>
-    :root { color-scheme: dark; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 26px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #000; color: #f7f7f8; }
+    body { display: grid; place-items: center; padding: 26px; }
     main { width: min(420px, 100%); display: grid; gap: 18px; }
     h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
     p { margin: 0; color: #aeb4bf; line-height: 1.5; }
@@ -2332,10 +2330,9 @@ def _native_login_ticket_page(ticket: str, provider_name: str = "codex") -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Codex</title>
+  <link rel="stylesheet" href="/static/base.css">
   <style>
-    :root {{ color-scheme: dark; }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 26px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #000; color: #f7f7f8; }}
+    body {{ display: grid; place-items: center; padding: 26px; }}
     main {{ width: min(420px, 100%); display: grid; gap: 18px; }}
     h1 {{ margin: 0; font-size: 28px; letter-spacing: 0; }}
     p {{ margin: 0; color: #aeb4bf; line-height: 1.5; }}
@@ -2366,14 +2363,12 @@ def _native_codex_page(provider_name: str = "codex") -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>__PROVIDER_LABEL__</title>
+  <link rel="stylesheet" href="/static/base.css">
   <style>
-    :root { color-scheme: dark; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #000; color: #f7f7f8; }
     header { position: sticky; top: 0; z-index: 2; padding: 18px 20px 10px; background: #000; }
     .topbar { position: relative; display: grid; grid-template-columns: 54px 1fr 54px; align-items: center; min-height: 54px; }
     h1 { margin: 0; text-align: center; font-size: 22px; font-weight: 760; letter-spacing: 0; }
-    .circle { width: 50px; height: 50px; border-radius: 50%; border: 1px solid #30333a; background: #1f2024; color: #fff; font-size: 30px; line-height: 1; }
+    .circle { border-color: #30333a; background: #1f2024; }
     .menu { font-size: 24px; }
     .devices { display: flex; gap: 10px; overflow-x: auto; padding: 14px 0 4px; scrollbar-width: none; }
     .device-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 9px; max-width: 82vw; min-height: 44px; border-radius: 24px; padding: 0 18px; border: 0; background: #fff; color: #111; font-size: 16px; font-weight: 760; }
@@ -2393,12 +2388,29 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .nav-row.active .label, .project.active .label { color: #fff; }
     .nav-row.active .icon-chat, .project.active .icon-folder { border-color: #fff; }
     .project.active .icon-folder:before { border-color: #fff; }
+    .nav-row:not(:disabled):hover,
+    .project:not(:disabled):hover,
+    .recent:not(:disabled):hover {
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 12px;
+    }
+    .nav-row.active, .project.active {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      border-left: 3px solid var(--color-link);
+      padding-left: 12px;
+    }
+    .nav-row:active, .project:active, .recent:active {
+      background: rgba(255, 255, 255, 0.07);
+    }
     .label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; font-weight: 650; }
     .section-title { margin: 26px 0 12px; color: #c8c8d0; font-size: 15px; }
     .recent { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; min-height: 64px; padding: 6px 0; }
     .recent-copy { min-width: 0; overflow: hidden; }
     .recent-title { display: -webkit-box; max-height: 2.56em; white-space: normal; line-height: 1.28; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
     .recent.active .label { color: #fff; }
+    .recent .time { transition: color var(--duration-fast) ease; }
+    .recent:hover .time { color: var(--text-secondary); }
     .more-sessions { border: 0; border-top: 1px solid #24262d; margin-top: 8px; padding-top: 8px; }
     .more-sessions summary { min-height: 44px; list-style: none; cursor: pointer; color: #c8c8d0; font-size: 15px; }
     .more-sessions summary::-webkit-details-marker { display: none; }
@@ -2712,13 +2724,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>__SAFE_TITLE__</title>
+  <link rel="stylesheet" href="/static/base.css">
   <style>
-    :root { color-scheme: dark; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #000; color: #f7f7f8; }
     .native-mobile-shell, .codex-run-shell { min-height: 100vh; background: #000; }
     header { position: sticky; top: 0; z-index: 3; display: grid; grid-template-columns: 54px 1fr 54px; align-items: center; gap: 8px; min-height: 78px; padding: 10px 20px 8px; background: rgba(0,0,0,.96); border-bottom: 1px solid #25262b; backdrop-filter: blur(16px); }
-    .circle { width: 50px; height: 50px; border-radius: 50%; border: 1px solid #34363d; background: #202126; color: #fff; font-size: 30px; line-height: 1; }
+    .circle { border-color: #34363d; }
     .screen-title { min-width: 0; text-align: center; }
     h1 { margin: 0; font-size: 22px; font-weight: 780; letter-spacing: 0; }
     .subtitle { margin-top: 5px; color: #9ca3af; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2727,14 +2737,15 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .reconnecting .status-dot { background: #ef4444; }
     main { padding: 12px 20px 150px; }
     .codex-status-flow { position: sticky; top: 78px; z-index: 2; display: grid; grid-template-columns: 12px 1fr auto; gap: 10px; align-items: center; min-height: 42px; margin: 0 -20px 8px; padding: 10px 20px; background: rgba(0,0,0,.94); border-bottom: 1px solid #17181c; color: #c8c8d0; font-size: 14px; }
-    .run-pulse { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 16px rgba(34,197,94,.7); }
-    .run-state.busy .run-pulse { background: #f59e0b; box-shadow: 0 0 16px rgba(245,158,11,.7); }
+    .run-pulse { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 16px rgba(34,197,94,.7); transition: background 300ms ease, box-shadow 300ms ease; }
+    .run-state.busy .run-pulse { background: #f59e0b; box-shadow: 0 0 16px rgba(245,158,11,.7); animation: statusPulse 2s ease-in-out infinite; }
     .run-state.failed .run-pulse { background: #ef4444; box-shadow: 0 0 16px rgba(239,68,68,.7); }
+    @keyframes statusPulse { 0%, 100% { box-shadow: 0 0 8px rgba(245,158,11,.3); } 50% { box-shadow: 0 0 20px rgba(245,158,11,.7); } }
     .event-cursor { color: #777b86; font-size: 12px; }
     .codex-transcript { display: grid; gap: 18px; padding-top: 8px; }
     .transcript-item { display: grid; gap: 7px; min-width: 0; padding: 0; }
     .transcript-meta { color: #9aa0aa; font-size: 13px; }
-    .transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #f4f4f5; font-size: 17px; line-height: 1.62; }
+    .transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #f4f4f5; font-size: 17px; line-height: 1.68; letter-spacing: 0.01em; }
     .transcript-body p { margin: 0 0 13px; }
     .transcript-body p:last-child { margin-bottom: 0; }
     .transcript-body h3 { margin: 18px 0 8px; color: #ffffff; font-size: 18px; line-height: 1.35; }
@@ -2742,15 +2753,21 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .transcript-body ul, .transcript-body ol { margin: 0 0 13px 1.3em; padding: 0; display: grid; gap: 6px; white-space: normal; }
     .transcript-body li { padding-left: 2px; white-space: normal; }
     .transcript-body strong { color: #ffffff; font-weight: 760; }
-    .transcript-body a { color: #93c5fd; text-decoration: none; border-bottom: 1px solid rgba(147, 197, 253, .45); }
-    .transcript-body code { padding: 1px 5px; border-radius: 5px; background: #1d2027; color: #e5e7eb; font: .92em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .transcript-body pre { margin: 0 0 13px; overflow: auto; padding: 12px 13px; border: 1px solid #2e333d; border-radius: 8px; background: #111318; white-space: pre; }
+    .transcript-body a { color: #93c5fd; text-decoration: none; border-bottom: 1px solid rgba(147, 197, 253, .45); transition: border-color 150ms ease; }
+    .transcript-body a:hover { border-bottom-color: rgba(147, 197, 253, .7); }
+    .transcript-body code { padding: 1px 5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06); background: #1d2027; color: #c4ccdb; font: .88em var(--font-mono); }
+    .transcript-body pre { margin: 0 0 13px; overflow: auto; padding: 14px 16px; border: 1px solid #2e333d; border-radius: 8px; background: #0c0e14; white-space: pre; scrollbar-width: thin; scrollbar-color: #383c46 transparent; }
     .transcript-body pre code { padding: 0; border-radius: 0; background: transparent; font-size: 13px; line-height: 1.5; }
     .transcript-item.user { justify-self: end; justify-items: end; max-width: min(82%, 520px); }
     .transcript-item.user .transcript-meta { display: none; }
-    .transcript-item.user .transcript-body { padding: 10px 13px; border: 1px solid #333842; border-radius: 18px 18px 4px 18px; background: #20242d; line-height: 1.5; }
+    .transcript-item.user .transcript-body { padding: 10px 13px; border: 1px solid #333842; border-radius: 20px 20px 4px 20px; background: #1c2030; line-height: 1.5; }
     .transcript-item.local-pending .transcript-body { opacity: .86; }
     .transcript-item.assistant { justify-self: start; max-width: 100%; padding-left: 22px; border-left: 2px solid #30333a; }
+    .transcript-item { animation: messageEnter 250ms var(--ease-default) forwards; }
+    .transcript-item.user { animation-name: userMessageEnter; }
+    .transcript-item.no-animate { animation: none; }
+    @keyframes messageEnter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes userMessageEnter { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
     .transcript-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
     .transcript-image { width: min(180px, 52vw); max-height: 180px; border-radius: 12px; object-fit: cover; border: 1px solid #3f4550; background: #050506; }
     .status-event { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; color: #aeb4bf; font-size: 14px; line-height: 1.5; }
@@ -2760,9 +2777,12 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .status-event.failed:before { background: #ef4444; }
     .status-title { display: block; color: #d4d4d8; font-weight: 700; }
     .status-detail { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .composer-activity-dot { width: 7px; height: 7px; margin: 8px 0 14px 2px; border-radius: 50%; background: #f4f4f5; opacity: .72; transition: width .18s ease, height .18s ease, opacity .18s ease, transform .18s ease; }
-    .composer-activity-dot.active { width: 13px; height: 13px; opacity: 1; animation: composerPulse 1.15s ease-in-out infinite; }
-    @keyframes composerPulse { 0%, 100% { transform: scale(.82); } 50% { transform: scale(1.18); } }
+    .composer-activity { display: flex; gap: 5px; align-items: center; height: 20px; margin: 8px 0 14px 2px; opacity: 0; transition: opacity 200ms ease; }
+    .composer-activity.active { opacity: 1; }
+    .composer-activity-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); animation: typingBounce 1.4s ease-in-out infinite; }
+    .composer-activity-dot:nth-child(2) { animation-delay: 0.15s; }
+    .composer-activity-dot:nth-child(3) { animation-delay: 0.30s; }
+    @keyframes typingBounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-6px); opacity: 1; } }
     .history-fold { width: 100%; min-height: 38px; margin: 2px 0 10px; border: 0; border-bottom: 1px solid #24262d; border-radius: 0; background: transparent; color: #b8bdc8; text-align: left; font-size: 15px; }
     .history-fold[hidden] { display: none; }
     .turn-fold { border: 0; border-bottom: 1px solid #24262d; border-radius: 0; background: transparent; overflow: visible; }
@@ -2772,12 +2792,13 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .turn-fold-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
     .turn-fold-chevron { flex: 0 0 auto; color: #aeb4bf; font-size: 18px; transition: transform .16s ease; }
     .turn-fold[open] .turn-fold-chevron { transform: rotate(90deg); }
-    .turn-fold-preview { display: grid; gap: 8px; padding: 0 0 8px; }
-    .turn-fold[open] .turn-fold-preview { display: none; }
+    .turn-fold-preview { display: grid; grid-template-rows: 1fr; gap: 8px; padding: 0 0 8px; opacity: 1; transition: grid-template-rows 200ms ease, opacity 150ms ease; }
+    .turn-fold[open] .turn-fold-preview { grid-template-rows: 0fr; opacity: 0; overflow: hidden; padding: 0; }
     .turn-fold-preview-line { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.42; }
     .turn-fold-preview-user { justify-self: end; max-width: min(82%, 520px); padding: 8px 11px; border: 1px solid #333842; border-radius: 15px 15px 4px 15px; background: #20242d; color: #f4f4f5; }
     .turn-fold-preview-assistant { justify-self: start; padding-left: 18px; border-left: 2px solid #30333a; color: #cfd3dc; }
-    .turn-fold-body { display: grid; gap: 18px; padding: 12px 0 18px; }
+    .turn-fold-body { display: grid; grid-template-rows: 0fr; gap: 18px; padding: 12px 0 18px; opacity: 0; overflow: hidden; transition: grid-template-rows 200ms ease, opacity 200ms ease 50ms; }
+    .turn-fold[open] .turn-fold-body { grid-template-rows: 1fr; opacity: 1; }
     .codex-tool-call, .file-change-card, .approval-card { border: 1px solid #30333a; background: #0f1014; border-radius: 10px; overflow: hidden; }
     .codex-tool-call.failed { border-color: #7f1d1d; }
     .tool-head, .file-head, .approval-head { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 11px 12px; border-bottom: 1px solid #26282f; }
@@ -2799,11 +2820,13 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 8px; padding: 10px 16px 16px; background: linear-gradient(to top, #000 86%, rgba(0,0,0,0)); border-top: 1px solid #272930; }
     .composer-tools { display: flex; gap: 8px; align-items: center; min-width: 0; }
     .composer-settings { position: relative; flex: 1; display: flex; gap: 8px; min-width: 0; }
-    .setting-pill { min-height: 38px; border-radius: 19px; padding: 0 14px; background: #2a2a2d; color: #f4f4f5; border: 0; font-size: 14px; font-weight: 760; white-space: nowrap; }
+    .setting-pill { min-height: 38px; border-radius: 19px; padding: 0 14px; background: #2a2a2d; color: #f4f4f5; border: 1px solid transparent; font-size: 14px; font-weight: 760; white-space: nowrap; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
+    .setting-pill.modified { border-color: rgba(147, 197, 253, 0.35); background: #1e2435; }
+    .setting-pill:not(:disabled):hover { background: #353538; }
     .setting-pill.permissions { flex: 0 0 auto; }
     .setting-pill.handoff { flex: 0 0 auto; background: #1f2937; border: 1px solid #3f4550; }
-    .model-popover { position: absolute; left: 0; bottom: 48px; width: min(330px, calc(100vw - 32px)); border: 1px solid #3a3a40; border-radius: 22px; background: #222225; box-shadow: 0 20px 54px rgba(0,0,0,.55); overflow: hidden; z-index: 6; }
-    .model-popover[hidden] { display: none; }
+    .model-popover { position: absolute; left: 0; bottom: 48px; width: min(330px, calc(100vw - 32px)); border: 1px solid #3a3a40; border-radius: 22px; background: #222225; box-shadow: 0 20px 54px rgba(0,0,0,.55); overflow: hidden; z-index: 6; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
+    .model-popover.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
     .handoff-panel { position: absolute; left: 0; bottom: 48px; width: min(370px, calc(100vw - 32px)); display: grid; gap: 10px; padding: 12px; border: 1px solid #3a3a40; border-radius: 18px; background: #181b22; box-shadow: 0 20px 54px rgba(0,0,0,.55); z-index: 7; }
     .handoff-panel[hidden] { display: none; }
     .handoff-targets, .handoff-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
@@ -2829,7 +2852,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .setting-option.selected { background: #34343a; color: #fff; }
     .setting-option-check { color: #f4f4f5; font-weight: 800; }
     .attach-button { width: 40px; min-height: 38px; padding: 0; border-radius: 11px; background: #20242e; color: #f4f4f5; border: 1px solid #3f4550; font-size: 24px; line-height: 1; }
-    .send-status { min-width: 66px; color: #9ca3af; font-size: 12px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .send-status { min-width: 66px; color: #9ca3af; font-size: 12px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color 300ms ease, opacity 300ms ease; }
     .send-status.error { color: #fca5a5; }
     .send-status.ok { color: #86efac; }
     .attachment-strip { display: flex; gap: 8px; min-height: 54px; overflow-x: auto; padding-bottom: 2px; }
@@ -2845,14 +2868,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .dock-row { display: flex; gap: 10px; min-width: 0; align-items: center; }
     .dock-actions { display: flex; gap: 10px; min-width: 0; }
     .dock-actions[hidden] { display: none; }
-    input { flex: 1; min-width: 0; min-height: 54px; border-radius: 13px; border: 1px solid #3f4550; background: #12151d; color: #f4f4f5; padding: 0 14px; font-size: 16px; }
-    button { min-height: 44px; border: 0; border-radius: 10px; padding: 8px 14px; background: #f4f4f5; color: #101114; font-weight: 760; font-size: 15px; }
-    button:disabled { opacity: .56; }
+    input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid #3f4550; background: #12151d; color: #f4f4f5; padding: 0 14px; font-size: 16px; }
     .primary-action { flex: 0 0 56px; width: 56px; min-height: 56px; border-radius: 15px; padding: 0; display: grid; place-items: center; font-size: 28px; line-height: 1; }
     .primary-action.stop { font-size: 24px; }
-    button.secondary { border: 1px solid #3f4550; background: #1b1f29; color: #f4f4f5; }
-    button.warn { background: #b91c1c; color: #fff; }
-    .empty { color: #8d93a0; padding: 24px 0; text-align: center; }
     @media (min-width: 820px) {
       main { max-width: 780px; margin: 0 auto; }
       .codex-input-dock { left: 50%; transform: translateX(-50%); width: min(780px, 100%); }
@@ -2877,7 +2895,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       </section>
       <button class="history-fold" id="historyFold" hidden>更早的消息</button>
       <section class="codex-transcript" id="events"><div class="empty" id="empty">等待 __PROVIDER_LABEL_TEXT__ 转录</div></section>
-      <div class="composer-activity-dot" id="composerActivityDot" aria-hidden="true"></div>
+      <div class="composer-activity" id="composerActivity" aria-hidden="true">
+        <span class="composer-activity-dot"></span>
+        <span class="composer-activity-dot"></span>
+        <span class="composer-activity-dot"></span>
+      </div>
     </main>
     <section class="codex-input-dock">
       <div class="composer-tools">
@@ -2906,7 +2928,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
               <button class="handoff-action primary" id="handoffExecuteButton" type="button" disabled>执行</button>
             </div>
           </div>
-          <div class="model-popover" id="modelPopover" hidden>
+          <div class="model-popover closed" id="modelPopover">
             <div class="setting-row" role="button" tabindex="0">
               <span class="setting-label">模型<span class="setting-value" id="modelSettingValue">加载模型</span></span>
               <span></span>
@@ -2964,7 +2986,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     const runStatus = document.getElementById("runStatus");
     const runStateLabel = document.getElementById("runStateLabel");
     const historyFold = document.getElementById("historyFold");
-    const composerActivityDot = document.getElementById("composerActivityDot");
+    const composerActivity = document.getElementById("composerActivity");
     const params = new URLSearchParams(location.search);
     const token = params.get("token") || "";
     const PROVIDER = __PROVIDER_JSON__;
@@ -3386,9 +3408,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       button.onclick = () => selectHandoffTarget(button.dataset.provider || "");
     }
     modelSettingsButton.onclick = () => {
-      const willClose = !modelPopover.hidden;
+      const willClose = !modelPopover.classList.contains("closed");
       if (willClose) saveModelSettingsIfChanged();
-      modelPopover.hidden = willClose;
+      modelPopover.classList.toggle("closed", willClose);
       if (!willClose) handoffPanel.hidden = true;
       if (willClose) {
         modelOptions.hidden = true;
@@ -3481,6 +3503,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       closeInterruptionChoice();
       updateComposerDisabled();
       setSendStatus(action === "steer" ? "修正中" : "发送中", "");
+      continueButton.classList.add("loading");
       try {
         const result = await nativeControl(action, body);
         if (result && result.turn_id) nativeTurnId = result.turn_id;
@@ -3497,6 +3520,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         setSendStatus(error.message || "发送失败", "error");
       } finally {
         sendingPrompt = false;
+        continueButton.classList.remove("loading");
         updateComposerDisabled();
       }
     }
@@ -3569,13 +3593,13 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       );
     }
     function setComposerActivity(active) {
-      composerActivityDot.classList.toggle("active", Boolean(active));
+      composerActivity.classList.toggle("active", Boolean(active));
     }
     function toggleHandoffPanel() {
       if (handoffPanel.hidden && !handoffTargetProvider) {
         selectHandoffTarget(preferredHandoffTarget());
       }
-      modelPopover.hidden = true;
+      modelPopover.classList.add("closed");
       modelOptions.hidden = true;
       serviceTierOptions.hidden = true;
       reasoningOptions.hidden = true;
@@ -3731,6 +3755,12 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       syncSettingOptionsSelection(modelOptions, modelSelector);
       syncSettingOptionsSelection(reasoningOptions, reasoningSelector);
       syncSettingOptionsSelection(serviceTierOptions, serviceTierSelector);
+      const defaultModel = modelCatalog.find(model => model.isDefault) || modelCatalog[0] || null;
+      const currentModel = selectedModelCatalogEntry();
+      const modelChanged = currentModel && defaultModel && (currentModel.model || currentModel.id || "") !== (defaultModel.model || defaultModel.id || "");
+      const effortChanged = currentModel && modelSelector.value && reasoningSelector.value && reasoningSelector.value !== (currentModel.defaultReasoningEffort || "");
+      const tierChanged = serviceTierSelector.value && serviceTierSelector.value !== (String(currentModel ? currentModel.defaultServiceTier || "" : "").toLowerCase());
+      modelSettingsButton.classList.toggle("modified", modelChanged || effortChanged || tierChanged);
     }
     function selectedOptionText(select, fallback) {
       const option = select && select.options ? select.options[select.selectedIndex] : null;
@@ -4315,8 +4345,8 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       const previousTarget = renderTarget;
       renderTarget = options.target || renderTarget || events;
       try {
-      if (event.kind === "user_message") renderTranscript(event, "user", "你");
-      else if (event.kind === "text_delta" || event.kind === "message_completed") renderAssistant(event);
+      if (event.kind === "user_message") renderTranscript(event, "user", "你", options);
+      else if (event.kind === "text_delta" || event.kind === "message_completed") renderAssistant(event, options);
       else if (event.kind === "reasoning_delta") renderStatusEvent(event, "思考中", "busy");
       else if (isCommandEvent(event)) renderToolCall(event);
       else if (event.kind === "diff_updated" || event.kind === "file_changed") renderFileChange(event);
@@ -4332,8 +4362,8 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       }
       if (options.scroll !== false) window.scrollTo(0, document.body.scrollHeight);
     }
-    function renderAssistant(event) {
-      renderTranscript(event, "assistant", PROVIDER_LABEL);
+    function renderAssistant(event, opts = {}) {
+      renderTranscript(event, "assistant", PROVIDER_LABEL, opts);
     }
     function renderCommand(event) {
       renderToolCall(event);
@@ -4355,13 +4385,14 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       }
       if (event.id) cursor.textContent = "#" + event.id;
     }
-    function renderTranscript(event, role, label) {
+    function renderTranscript(event, role, label, opts = {}) {
       const payload = event.payload || {};
       const key = transcriptKey(event, role);
       let node = transcriptNodes.get(key);
       if (!node) {
         const row = document.createElement("article");
         row.className = "transcript-item " + role;
+        if (opts.historical) row.classList.add("no-animate");
         const meta = document.createElement("div");
         meta.className = "transcript-meta";
         meta.textContent = label;
@@ -4733,8 +4764,9 @@ def _legacy_live_page(agent_run_id: int) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{safe_title}</title>
+  <link rel="stylesheet" href="/static/base.css">
   <style>
-    body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; background: #101114; color: #f4f4f5; }}
+    body {{ background: #101114; }}
     header {{ position: sticky; top: 0; padding: 12px 16px; background: #191b20; border-bottom: 1px solid #30333a; }}
     main {{ padding: 12px 12px 132px; }}
     .event {{ white-space: pre-wrap; border-bottom: 1px solid #30333a; padding: 10px 4px; }}
@@ -4745,8 +4777,8 @@ def _legacy_live_page(agent_run_id: int) -> str:
     .controls {{ position: fixed; left: 0; right: 0; bottom: 0; display: grid; gap: 8px; padding: 10px; background: #101114; border-top: 1px solid #30333a; }}
     .row {{ display: flex; gap: 8px; min-width: 0; }}
     input {{ flex: 1; min-width: 0; border-radius: 8px; border: 1px solid #3f4550; background: #17191f; color: #f4f4f5; padding: 11px; font-size: 15px; }}
-    button {{ min-height: 40px; border: 0; border-radius: 8px; padding: 9px 12px; background: #f4f4f5; color: #101114; font-weight: 700; }}
-    button.secondary {{ border: 1px solid #3f4550; background: #1b1e25; color: #f4f4f5; }}
+    button {{ min-height: 40px; }}
+    button.secondary {{ background: #1b1e25; color: #f4f4f5; }}
     button.warn {{ background: #f87171; color: #1b0707; }}
     .approval-actions {{ display: flex; gap: 8px; margin-top: 8px; }}
   </style>

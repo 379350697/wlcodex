@@ -1553,7 +1553,7 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "await pollEvents();" in response
     assert "function primaryComposerAction" in response
     assert "function applyNativeTurnState" in response
-    assert 'id="composerActivityDot"' in response
+    assert 'id="composerActivity"' in response
     assert "function setComposerActivity" in response
     assert "continueButton.textContent = mode === \"interrupt\" ? \"■\" : \"↑\";" in response
     assert 'const requiresTurn = mode === "interrupt" || mode === "steer";' in response
@@ -2153,7 +2153,7 @@ async def test_worker_live_page_fold_keeps_native_transcript_previews(
         'appendFoldPreviewLine(preview, "assistant", '
         "completedAssistantText || assistantText);"
     ) in response
-    assert ".turn-fold[open] .turn-fold-preview { display: none; }" in response
+    assert ".turn-fold[open] .turn-fold-preview { grid-template-rows: 0fr;" in response
     assert "/turn-summary" not in response
     assert "summarize" not in response
 
