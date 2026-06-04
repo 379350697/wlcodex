@@ -51,6 +51,20 @@ def test_detects_execute_plan_from_spec_and_plan_paths() -> None:
     assert result.confidence == "high"
 
 
+def test_newest_bug_request_takes_priority_over_old_plan_artifacts() -> None:
+    result = detect_handoff_intent(
+        recent_user_text="刚才的 plan 执行失败并报错",
+        session_summary="Older context had a spec and plan.",
+        artifacts=[
+            HandoffArtifact(kind="spec", path="docs/superpowers/specs/feature.md"),
+            HandoffArtifact(kind="plan", path="docs/superpowers/plans/feature.md"),
+        ],
+    )
+
+    assert result.intent == HandoffIntent.FIX_BUG
+    assert result.confidence == "high"
+
+
 def test_detects_fix_bug_from_error_context() -> None:
     result = detect_handoff_intent(
         recent_user_text="继续的时候出现 NotImplementedError",
@@ -104,6 +118,23 @@ def test_execute_plan_prompt_references_paths_and_says_execute_not_rewrite() -> 
     assert "/Users/wl/projects/wlcodex" in preview.prompt
 
 
+def test_forced_execute_plan_without_plan_artifacts_warns_user() -> None:
+    preview = build_handoff_preview(
+        HandoffPreviewInput(
+            source_provider="codex",
+            source_thread_id="source-session",
+            target_provider="claude",
+            cwd="/repo",
+            recent_user_text="强制按计划执行",
+            requested_intent=HandoffIntent.EXECUTE_PLAN,
+            artifacts=[],
+        )
+    )
+
+    assert preview.intent == HandoffIntent.EXECUTE_PLAN
+    assert any("spec and plan artifacts" in warning for warning in preview.warnings)
+
+
 def test_bug_prompt_requires_evidence_before_fix() -> None:
     preview = build_handoff_preview(
         HandoffPreviewInput(
@@ -139,6 +170,22 @@ def test_feature_prompt_keeps_scope_narrow() -> None:
     assert preview.intent == HandoffIntent.IMPLEMENT_FEATURE
     assert "inspect existing code patterns first" in preview.prompt.lower()
     assert "keep scope narrow" in preview.prompt.lower()
+
+
+def test_custom_prompt_without_user_note_warns_user() -> None:
+    preview = build_handoff_preview(
+        HandoffPreviewInput(
+            source_provider="antigravity",
+            source_thread_id="source-session",
+            target_provider="claude",
+            cwd="/repo",
+            recent_user_text="交给下一个",
+            requested_intent=HandoffIntent.CUSTOM,
+        )
+    )
+
+    assert preview.intent == HandoffIntent.CUSTOM
+    assert any("custom" in warning.lower() for warning in preview.warnings)
 
 
 def test_continue_work_prompt_avoids_replaying_old_assistant_output() -> None:
@@ -177,3 +224,4 @@ def test_prompt_builder_trims_raw_transcript_and_keeps_latest_request() -> None:
     assert "最新请求：只执行新内容" in preview.prompt
     assert len(preview.prompt) < len(long_transcript)
     assert preview.prompt.count("old assistant output") < 40
+    assert "[truncated]" in preview.prompt

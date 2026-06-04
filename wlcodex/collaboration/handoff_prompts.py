@@ -50,7 +50,13 @@ def detect_handoff_intent(
 ) -> IntentDetectionResult:
     kinds = {artifact.kind.lower() for artifact in artifacts}
     paths = " ".join(artifact.path.lower() for artifact in artifacts)
-    text = f"{recent_user_text}\n{session_summary}".lower()
+    newest_text = recent_user_text.lower()
+    if any(marker in newest_text for marker in BUG_MARKERS):
+        return IntentDetectionResult(
+            HandoffIntent.FIX_BUG,
+            "high",
+            "Bug or error language was detected in the newest user request.",
+        )
     if {"spec", "plan"}.issubset(kinds) or (
         "docs/superpowers/specs/" in paths
         and "docs/superpowers/plans/" in paths
@@ -60,6 +66,7 @@ def detect_handoff_intent(
             "high",
             "Spec and plan artifacts were detected.",
         )
+    text = f"{recent_user_text}\n{session_summary}".lower()
     if any(marker in text for marker in BUG_MARKERS):
         return IntentDetectionResult(
             HandoffIntent.FIX_BUG,
@@ -255,9 +262,10 @@ def _artifact_paths(artifacts: Iterable[HandoffArtifact], kind: str) -> list[str
 
 def _compact_text(text: str) -> str:
     compact = text.strip()
-    if len(compact) <= _MAX_RENDERED_CONTEXT_CHARS:
+    limit = min(MAX_SUMMARY_CHARS, _MAX_RENDERED_CONTEXT_CHARS)
+    if len(compact) <= limit:
         return compact
-    return compact[-_MAX_RENDERED_CONTEXT_CHARS:].lstrip()
+    return "[truncated]\n" + compact[-limit:].lstrip()
 
 
 def _warnings(
@@ -267,6 +275,17 @@ def _warnings(
     warnings = []
     if detection.confidence == "low":
         warnings.append(detection.reason)
+    if _has_spec_and_plan(request.artifacts) and detection.intent == HandoffIntent.FIX_BUG:
+        warnings.append(
+            "Spec and plan artifacts were detected, but the newest user request "
+            "looks like a bug or error."
+        )
+    if request.requested_intent == HandoffIntent.EXECUTE_PLAN and not _has_spec_and_plan(
+        request.artifacts
+    ):
+        warnings.append("execute_plan requested without spec and plan artifacts.")
+    if request.requested_intent == HandoffIntent.CUSTOM and not request.user_note.strip():
+        warnings.append("custom handoff requested without a user note.")
     if not request.cwd.strip():
         warnings.append("Missing workspace path.")
     if not request.source_provider.strip():
@@ -274,3 +293,12 @@ def _warnings(
     if not request.target_provider.strip():
         warnings.append("Missing target provider.")
     return warnings
+
+
+def _has_spec_and_plan(artifacts: list[HandoffArtifact]) -> bool:
+    kinds = {artifact.kind.lower() for artifact in artifacts}
+    paths = " ".join(artifact.path.lower() for artifact in artifacts)
+    return {"spec", "plan"}.issubset(kinds) or (
+        "docs/superpowers/specs/" in paths
+        and "docs/superpowers/plans/" in paths
+    )
