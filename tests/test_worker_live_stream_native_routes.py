@@ -11,7 +11,7 @@ import pytest
 from wlcodex.db import Ledger
 from wlcodex.jsonrpc import JsonRpcError
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
-from wlcodex.live_stream.server import WorkerLiveStreamServer
+from wlcodex.live_stream.server import WorkerLiveStreamServer, _live_page
 from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import RuntimeEvent
@@ -1517,6 +1517,11 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "function submitPrompt" in response
     assert "continueButton.onclick = () => submitPrompt();" in response
     assert 'throw new Error(`${PROVIDER_LABEL} 会话未连接`);' in response
+    assert "let providerCapabilities = {};" in response
+    assert "async function loadProviderCapabilities()" in response
+    assert "await api(`${API_BASE}/capabilities`)" in response
+    assert "function canSteerActiveTurn()" in response
+    assert "function canInterruptActiveTurn()" in response
     assert "await pollEvents();" in response
     assert "function primaryComposerAction" in response
     assert "function applyNativeTurnState" in response
@@ -1525,6 +1530,8 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "continueButton.textContent = mode === \"interrupt\" ? \"■\" : \"↑\";" in response
     assert 'const requiresTurn = mode === "interrupt" || mode === "steer";' in response
     assert "requiresTurn && !activeTurnId" in response
+    assert "steerButton.hidden = !canSteerActiveTurn();" in response
+    assert "interruptButton.hidden = !canInterruptActiveTurn();" in response
     assert 'class="dock-actions" hidden' in response
     assert "function readImageAttachment" in response
     assert "function renderAttachments" in response
@@ -1535,6 +1542,18 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert 'submitPrompt("steer")' in response
     assert 'submitPrompt("continue")' in response
     assert ".bubble" not in response
+
+
+def test_live_page_gates_active_turn_controls_with_provider_capabilities() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert "let providerCapabilities = {};" in response
+    assert "async function loadProviderCapabilities()" in response
+    assert "await api(`${API_BASE}/capabilities`)" in response
+    assert "function canSteerActiveTurn()" in response
+    assert "function canInterruptActiveTurn()" in response
+    assert "steerButton.hidden = !canSteerActiveTurn();" in response
+    assert "interruptButton.hidden = !canInterruptActiveTurn();" in response
     assert "message assistant" not in response
 
 

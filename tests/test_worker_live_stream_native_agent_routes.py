@@ -81,6 +81,35 @@ class FakeProvider:
         )
 
 
+class FakeNoSteerProvider(FakeProvider):
+    provider = "antigravity"
+    provider_engine = "cli-local"
+
+    def capabilities(self):
+        self.calls.append(("capabilities",))
+        return NativeAgentCapabilities(
+            can_list_sessions=True,
+            can_start_session=True,
+            can_continue_session=True,
+            can_steer_active_turn=False,
+            disabled_reasons={
+                "can_steer_active_turn": (
+                    "Antigravity CLI continuation starts a new prompt turn."
+                )
+            },
+        )
+
+    async def steer_session(
+        self,
+        native_session_id: str,
+        expected_turn_id: str,
+        prompt: str,
+        **kwargs: Any,
+    ):
+        self.calls.append(("steer_session", native_session_id, expected_turn_id, prompt))
+        raise NotImplementedError("Antigravity CLI provider does not support steering")
+
+
 def test_fake_provider_contract_shape() -> None:
     registry = NativeAgentRegistry([FakeProvider()])
 
@@ -181,6 +210,33 @@ async def test_native_agent_capabilities_route(tmp_path: Path) -> None:
     payload = _json_body(response)
     assert payload["can_list_sessions"] is True
     assert payload["can_continue_session"] is True
+    assert provider.calls == [("capabilities",)]
+
+
+@pytest.mark.asyncio
+async def test_native_agent_steer_route_reports_disabled_capability(
+    tmp_path: Path,
+) -> None:
+    provider = FakeNoSteerProvider()
+    body = json.dumps(
+        {"prompt": "steer this turn", "expected_turn_id": "turn-running"}
+    )
+
+    response, provider = await _request_native_agent(
+        tmp_path,
+        "POST /api/native/antigravity/sessions/session-1/steer HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        provider=provider,
+    )
+
+    assert "HTTP/1.1 409" in response
+    assert _json_body(response) == {
+        "error": "Antigravity CLI continuation starts a new prompt turn."
+    }
     assert provider.calls == [("capabilities",)]
 
 

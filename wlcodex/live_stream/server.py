@@ -683,6 +683,14 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 200, _json_object(session))
             return
         if method == "POST" and action == "continue" and len(parts) == 2:
+            capabilities = provider.capabilities()
+            if not capabilities.can_continue_session:
+                await self._send_json(
+                    writer,
+                    409,
+                    {"error": _native_disabled_reason(capabilities, "can_continue_session")},
+                )
+                return
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
                 return
@@ -699,6 +707,14 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 200, _json_object(result))
             return
         if method == "POST" and action == "steer" and len(parts) == 2:
+            capabilities = provider.capabilities()
+            if not capabilities.can_steer_active_turn:
+                await self._send_json(
+                    writer,
+                    409,
+                    {"error": _native_disabled_reason(capabilities, "can_steer_active_turn")},
+                )
+                return
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
                 return
@@ -719,6 +735,14 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 200, _json_object(result))
             return
         if method == "POST" and action == "interrupt" and len(parts) == 2:
+            capabilities = provider.capabilities()
+            if not capabilities.can_interrupt:
+                await self._send_json(
+                    writer,
+                    409,
+                    {"error": _native_disabled_reason(capabilities, "can_interrupt")},
+                )
+                return
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
                 return
@@ -1439,6 +1463,15 @@ def _json_object(value: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return dict(raw)
     return {"value": value}
+
+
+def _native_disabled_reason(capabilities: Any, key: str) -> str:
+    reasons = getattr(capabilities, "disabled_reasons", {})
+    if isinstance(reasons, dict):
+        reason = str(reasons.get(key) or "").strip()
+        if reason:
+            return reason
+    return "native provider capability is disabled"
 
 
 class _ServerNativeProviderResolver:
@@ -2822,6 +2855,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     let sendingPrompt = false;
     let nativeTurnRunning = false;
     let modelCatalog = [];
+    let providerCapabilities = {};
     let savedModelSettings = loadSavedModelSettings();
     let modelSettingsDirty = false;
     historyFold.onclick = loadOlderEvents;
@@ -2835,6 +2869,20 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         throw new Error(body.error || response.statusText);
       }
       return response.json().catch(() => ({}));
+    }
+    async function loadProviderCapabilities() {
+      try {
+        providerCapabilities = await api(`${API_BASE}/capabilities`);
+      } catch (_error) {
+        providerCapabilities = {};
+      }
+      updateComposerDisabled();
+    }
+    function canSteerActiveTurn() {
+      return providerCapabilities.can_steer_active_turn !== false;
+    }
+    function canInterruptActiveTurn() {
+      return providerCapabilities.can_interrupt !== false;
     }
     async function nativeControl(action, body) {
       if (!nativeThreadId) throw new Error(`${PROVIDER_LABEL} 会话未连接`);
@@ -3287,8 +3335,10 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       return Boolean(promptInput.value.trim() || imageAttachments.length);
     }
     function primaryComposerAction() {
-      if (nativeTurnRunning && !composerHasDraft()) return "interrupt";
-      if (nativeTurnRunning) return "choose";
+      if (nativeTurnRunning && !composerHasDraft()) {
+        return canInterruptActiveTurn() ? "interrupt" : "wait";
+      }
+      if (nativeTurnRunning && canSteerActiveTurn()) return "choose";
       return "continue";
     }
     function applyNativeTurnState(event, options = {}) {
@@ -3336,25 +3386,28 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     function updateComposerDisabled() {
       const mode = primaryComposerAction();
       const requiresTurn = mode === "interrupt" || mode === "steer";
+      steerButton.hidden = !canSteerActiveTurn();
+      interruptButton.hidden = !canInterruptActiveTurn();
       continueButton.textContent = mode === "interrupt" ? "■" : "↑";
       continueButton.classList.toggle("stop", mode === "interrupt");
       continueButton.setAttribute(
         "aria-label",
-        mode === "interrupt" ? "中断当前轮" : nativeTurnRunning ? "发送到当前轮" : "发送"
+        mode === "interrupt" ? "中断当前轮" : mode === "wait" ? "等待当前轮" : nativeTurnRunning ? "发送到当前轮" : "发送"
       );
       continueButton.disabled = (
         sendingPrompt ||
         !nativeThreadId ||
+        mode === "wait" ||
         (requiresTurn && !activeTurnId) ||
         (!nativeTurnRunning && !composerHasDraft())
       );
-      steerButton.disabled = sendingPrompt || !nativeThreadId || !activeTurnId;
+      steerButton.disabled = sendingPrompt || !canSteerActiveTurn() || !nativeThreadId || !activeTurnId;
       attachmentButton.disabled = sendingPrompt;
       modelSelector.disabled = sendingPrompt || nativeTurnRunning;
       modelSettingsButton.disabled = false;
       reasoningSelector.disabled = sendingPrompt || nativeTurnRunning || reasoningSelector.options.length <= 1;
       serviceTierSelector.disabled = sendingPrompt || nativeTurnRunning || serviceTierSelector.options.length <= 1;
-      interruptButton.disabled = sendingPrompt || !nativeThreadId || !activeTurnId;
+      interruptButton.disabled = sendingPrompt || !canInterruptActiveTurn() || !nativeThreadId || !activeTurnId;
       syncSettingOptionsDisabled();
       setComposerActivity(nativeTurnRunning || sendingPrompt);
     }
@@ -3375,9 +3428,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       return (option && option.textContent ? option.textContent : fallback) || fallback;
     }
     function openInterruptionChoice() {
-      if (!nativeTurnRunning || !composerHasDraft()) return;
+      if (!nativeTurnRunning || !composerHasDraft() || !canSteerActiveTurn()) return;
       interruptionChoice.hidden = false;
-      steerChoice.disabled = sendingPrompt || !activeTurnId;
+      steerChoice.disabled = sendingPrompt || !canSteerActiveTurn() || !activeTurnId;
       queueChoice.disabled = sendingPrompt || !nativeThreadId;
     }
     function closeInterruptionChoice() {
@@ -3498,6 +3551,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       }
     }
     updateComposerDisabled();
+    loadProviderCapabilities();
     loadModelCatalog();
     attachNative().then(() => {
       return loadRecentEvents();
