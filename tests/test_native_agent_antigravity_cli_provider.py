@@ -394,6 +394,62 @@ async def test_cli_provider_strips_replayed_assistant_prefix_on_continue(
 
 
 @pytest.mark.asyncio
+async def test_cli_provider_strips_replayed_assistant_prefix_across_chunks(
+    tmp_path: Path,
+) -> None:
+    class ChunkedReplayRunner(FakeAntigravityCliRunner):
+        async def run(
+            self,
+            *,
+            prompt: str,
+            cwd: str,
+            conversation_id: str = "",
+            model: str = "",
+            extra_dirs: tuple[str, ...] = (),
+        ):
+            self.calls.append(
+                {
+                    "prompt": prompt,
+                    "cwd": cwd,
+                    "conversation_id": conversation_id,
+                    "model": model,
+                    "extra_dirs": extra_dirs,
+                }
+            )
+            if conversation_id:
+                for text in ("first\n", "middle\n", "second\n"):
+                    yield {
+                        "type": "assistant",
+                        "text": text,
+                        "conversation_id": conversation_id,
+                    }
+            else:
+                for text in ("first\n", "middle\n"):
+                    yield {
+                        "type": "assistant",
+                        "text": text,
+                        "conversation_id": "ag-conv-1",
+                    }
+
+    provider, _store, _runtime_store, _runner = _provider(
+        tmp_path,
+        runner=ChunkedReplayRunner(),
+    )
+
+    result = await provider.start_session(str(tmp_path), "first")
+    await provider.wait_for_background_tasks()
+
+    await provider.continue_session(result.native_session_id, "second")
+    await provider.wait_for_background_tasks()
+
+    payload = await provider.read_session(result.native_session_id)
+    assistant_turns = [
+        turn["text"] for turn in payload["turns"] if turn["role"] == "assistant"
+    ]
+    assert assistant_turns == ["first\nmiddle\n", "second\n"]
+
+
+@pytest.mark.asyncio
 async def test_cli_provider_start_session_does_not_resume_agy_conversation_by_id(
     tmp_path: Path,
 ) -> None:
