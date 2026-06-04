@@ -102,6 +102,32 @@ async def test_health_endpoint(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_static_css_endpoint_serves_package_asset(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /static/native_index.css HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    headers, body = response.split("\r\n\r\n", 1)
+    assert "HTTP/1.1 200 OK" in headers
+    assert "Content-Type: text/css; charset=utf-8" in headers
+    assert "Cache-Control: no-cache" in headers
+    assert ".provider-index" in body
+
+
+@pytest.mark.asyncio
 async def test_snapshot_endpoint_returns_events(tmp_path: Path) -> None:
     store = _store(tmp_path)
     saved = store.append(_event(42, {"delta": "hello"}))

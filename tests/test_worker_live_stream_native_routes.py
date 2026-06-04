@@ -324,6 +324,34 @@ async def test_native_routes_allow_public_loopback_when_token_is_disabled(
 
 
 @pytest.mark.asyncio
+async def test_native_provider_index_links_static_stylesheet(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([FakeAntigravityProvider()]),
+        access_token=None,
+        allow_unauthenticated_loopback=True,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert '<link rel="stylesheet" href="/static/native_index.css">' in response
+    assert "Antigravity" in response
+
+
+@pytest.mark.asyncio
 async def test_native_public_root_and_page_open_without_token(tmp_path: Path) -> None:
     store = _store(tmp_path)
     controller = FakeNativeController()

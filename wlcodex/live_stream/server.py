@@ -43,6 +43,11 @@ _MAX_NATIVE_IMAGE_ATTACHMENTS = 8
 _LOGIN_TICKET_TTL_SECONDS = 5 * 60
 _LOGIN_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 _COUNCIL_PROJECTS_ROOT = Path.home() / "projects"
+_STATIC_ASSET_DIR = Path(__file__).with_name("static")
+_STATIC_CONTENT_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+}
 
 
 class RequestBodyTooLarge(ValueError):
@@ -164,6 +169,13 @@ class WorkerLiveStreamServer:
                     200,
                     {"status": "ok", "service": "worker-live-stream"},
                 )
+                return
+
+            if parsed.path.startswith("/static/"):
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                await self._send_static_asset(writer, parsed.path)
                 return
 
             if parsed.path in ("", "/") and (
@@ -1180,6 +1192,37 @@ class WorkerLiveStreamServer:
             body.encode("utf-8"),
         )
 
+    async def _send_static_asset(
+        self,
+        writer: asyncio.StreamWriter,
+        path: str,
+    ) -> None:
+        relative = unquote(path.removeprefix("/static/")).strip("/")
+        if not relative:
+            await self._send_json(writer, 404, {"error": "not found"})
+            return
+        content_type = _STATIC_CONTENT_TYPES.get(Path(relative).suffix)
+        if content_type is None:
+            await self._send_json(writer, 404, {"error": "not found"})
+            return
+        asset_path = (_STATIC_ASSET_DIR / relative).resolve()
+        static_root = _STATIC_ASSET_DIR.resolve()
+        try:
+            asset_path.relative_to(static_root)
+        except ValueError:
+            await self._send_json(writer, 404, {"error": "not found"})
+            return
+        if not asset_path.is_file():
+            await self._send_json(writer, 404, {"error": "not found"})
+            return
+        await _send_response(
+            writer,
+            200,
+            content_type,
+            asset_path.read_bytes(),
+            extra_headers={"Cache-Control": "no-cache"},
+        )
+
     async def _send_redirect(
         self,
         writer: asyncio.StreamWriter,
@@ -1681,17 +1724,7 @@ def _native_provider_index_html(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Native Agents</title>
-  <style>
-    :root {{ color-scheme: dark; }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin: 0; min-height: 100vh; padding: 28px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #000; color: #f7f7f8; }}
-    main {{ display: grid; gap: 14px; max-width: 560px; margin: 0 auto; }}
-    h1 {{ margin: 0 0 8px; font-size: 28px; letter-spacing: 0; }}
-    .provider {{ display: grid; gap: 4px; min-height: 64px; align-content: center; padding: 12px 0; border-bottom: 1px solid #24262d; color: inherit; text-decoration: none; }}
-    .provider.council {{ border-bottom-color: #334155; }}
-    .provider span {{ font-size: 20px; font-weight: 760; }}
-    .provider small, .empty {{ color: #9ca3af; }}
-  </style>
+  <link rel="stylesheet" href="/static/native_index.css">
 </head>
 <body>
   <main>
