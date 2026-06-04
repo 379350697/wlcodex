@@ -2296,6 +2296,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     let selected = null;
     let selectedProjectCwd = "";
     let sessions = [];
+    let projectRoot = "";
     let projectCatalog = [];
     const SESSION_PREVIEW_LIMIT = 10;
     const devicesEl = document.getElementById("devices");
@@ -2342,8 +2343,10 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     async function loadProjects() {
       try {
         const data = await api(PROJECTS_URL);
+        projectRoot = String(data.root || "");
         projectCatalog = Array.isArray(data.projects) ? data.projects : [];
       } catch (_error) {
+        projectRoot = "";
         projectCatalog = [];
       }
     }
@@ -2376,6 +2379,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
         addProjectOption(project.cwd, project.name);
       }
       for (const session of sessions) {
+        if (!isKnownProjectWorkspace(session.cwd)) continue;
         addProjectOption(session.cwd || "", lastPath(session.cwd || ""));
       }
       if (selectedProjectCwd && !selectedProjectRendered) projectsEl.appendChild(projectNewChat);
@@ -2482,6 +2486,16 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     promptEl.addEventListener("input", renderSessions);
     function sessionProjectKey(session) {
       return String((session && session.cwd) || "");
+    }
+    function isKnownProjectWorkspace(cwd) {
+      const value = String(cwd || "");
+      if (!value) return false;
+      if (projectCatalog.some(project => String(project.cwd || "") === value)) return true;
+      if (!projectRoot) return false;
+      const normalizedRoot = projectRoot.endsWith("/") ? projectRoot : projectRoot + "/";
+      if (!value.startsWith(normalizedRoot)) return false;
+      const parts = value.slice(normalizedRoot.length).split("/").filter(Boolean);
+      return parts.length === 1;
     }
     function sortedSessions() {
       return [...sessions].sort((left, right) => {

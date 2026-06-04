@@ -1253,7 +1253,7 @@ async def test_native_codex_page_uses_project_context_for_new_chat(
 
 
 @pytest.mark.asyncio
-async def test_native_codex_page_merges_project_catalog_with_session_workspaces(
+async def test_native_codex_page_filters_session_workspace_projects_to_projects_root(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -1278,11 +1278,19 @@ async def test_native_codex_page_merges_project_catalog_with_session_workspaces(
 
     assert "HTTP/1.1 200 OK" in response
     assert 'const PROJECTS_URL = "/api/council/projects";' in response
+    assert 'let projectRoot = "";' in response
     assert "let projectCatalog = [];" in response
     assert "async function loadProjects()" in response
+    assert 'projectRoot = String(data.root || "");' in response
     assert "projectCatalog = Array.isArray(data.projects) ? data.projects : [];" in response
     assert "addProjectOption(project.cwd, project.name);" in response
     assert "for (const project of projectCatalog)" in response
+    assert "for (const session of sessions)" in response
+    assert "if (!isKnownProjectWorkspace(session.cwd)) continue;" in response
+    assert "function isKnownProjectWorkspace(cwd)" in response
+    assert "projectCatalog.some(project => String(project.cwd || \"\") === value)" in response
+    assert "const normalizedRoot = projectRoot.endsWith(\"/\") ? projectRoot : projectRoot + \"/\";" in response
+    assert "return parts.length === 1;" in response
     assert "await loadProjects();" in response
     assert "if (seen.size >= 4) break;" not in response
 
