@@ -237,6 +237,46 @@ async def test_preview_extracts_real_thread_turn_items(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_preview_extracts_markdown_file_links_once(tmp_path) -> None:
+    source = ServiceFakeProvider(
+        "antigravity",
+        session_payload={
+            "thread": {"cwd": "/repo"},
+            "turns": [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "[docs/superpowers/specs/a.md]"
+                        "(file:///repo/docs/superpowers/specs/a.md)\n"
+                        "[docs/superpowers/plans/a.md]"
+                        "(file:///repo/docs/superpowers/plans/a.md)"
+                    ),
+                }
+            ],
+        },
+    )
+    target = ServiceFakeProvider("claude")
+    service = _service(tmp_path, [source, target])
+
+    preview = await service.preview_handoff(
+        source_provider="antigravity",
+        source_thread_id="source-session",
+        source_turn_id="",
+        target_provider="claude",
+        cwd="",
+        intent="execute_plan",
+        user_note="",
+    )
+
+    assert [artifact["path"] for artifact in preview["artifacts"]] == [
+        "docs/superpowers/specs/a.md",
+        "docs/superpowers/plans/a.md",
+    ]
+    assert "- spec: docs/superpowers/specs/a.md](file" not in preview["prompt"]
+    assert "Spec paths: docs/superpowers/specs/a.md](file" not in preview["prompt"]
+
+
+@pytest.mark.asyncio
 async def test_execute_handoff_uses_edited_prompt_and_returns_target_url(
     tmp_path,
 ) -> None:

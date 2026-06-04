@@ -15,7 +15,7 @@ from wlcodex.native_agents.provider import NativeAgentRegistry
 
 
 _ARTIFACT_PATH_RE = re.compile(
-    r"(docs/(?:superpowers/(?:specs|plans)|bugs)/[^\s,;:]+)",
+    r"(docs/(?:superpowers/(?:specs|plans)|bugs)/[^\s,;:\]\)]+)",
 )
 
 
