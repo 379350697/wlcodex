@@ -68,6 +68,7 @@ class WorkerLiveStreamServer:
         turn_summary_config: LiveTurnSummaryConfig | None = None,
         turn_summary_client: DigestClient | None = None,
         native_transcript_mirror: Any = None,
+        workflow_service: Any = None,
     ) -> None:
         if host not in ("127.0.0.1", "localhost"):
             raise ValueError(f"Worker live stream server is loopback-only, got {host!r}")
@@ -81,6 +82,7 @@ class WorkerLiveStreamServer:
         self._turn_summary_config = turn_summary_config or LiveTurnSummaryConfig.from_env()
         self._turn_summary_client = turn_summary_client
         self._native_transcript_mirror = native_transcript_mirror
+        self._workflow_service = workflow_service
         self._server: asyncio.AbstractServer | None = None
         self._client_tasks: set[asyncio.Task[None]] = set()
         self._council_runs: dict[str, dict[str, Any]] = {}
@@ -264,6 +266,17 @@ class WorkerLiveStreamServer:
                     await self._send_json(writer, 405, {"error": "method not allowed"})
                     return
                 await self._send_native_page(writer, native_provider, headers, query)
+                return
+
+            if parsed.path.startswith("/api/native/workflows/"):
+                await self._handle_workflow_route(
+                    reader,
+                    writer,
+                    method,
+                    parsed.path,
+                    headers,
+                    query,
+                )
                 return
 
             if parsed.path.startswith("/api/native/"):
@@ -765,6 +778,86 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 200, _json_object(result))
             return
         await self._send_json(writer, 404, {"error": "not found"})
+
+    async def _handle_workflow_route(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        query: dict[str, list[str]],
+    ) -> None:
+        if self._workflow_service is None:
+            await self._send_json(
+                writer,
+                503,
+                {"error": "workflow service unavailable"},
+            )
+            return
+        if not self._is_authorized(
+            writer,
+            headers,
+            query,
+            require_token=(
+                self._native_registry is not None
+                or self._native_controller is not None
+            ),
+        ):
+            await self._send_json(writer, 401, {"error": "unauthorized"})
+            return
+
+        if path not in (
+            "/api/native/workflows/handoffs/preview",
+            "/api/native/workflows/handoffs/execute",
+        ):
+            await self._send_json(writer, 404, {"error": "not found"})
+            return
+        if method != "POST":
+            await self._send_json(writer, 405, {"error": "method not allowed"})
+            return
+        body = await self._read_request_json(writer, reader, headers)
+        if body is None:
+            return
+
+        try:
+            if path == "/api/native/workflows/handoffs/preview":
+                result = await self._workflow_service.preview_handoff(
+                    source_provider=str(
+                        body.get("source_provider") or body.get("sourceProvider") or ""
+                    ),
+                    source_thread_id=str(
+                        body.get("source_thread_id") or body.get("sourceThreadId") or ""
+                    ),
+                    source_turn_id=str(
+                        body.get("source_turn_id") or body.get("sourceTurnId") or ""
+                    ),
+                    target_provider=str(
+                        body.get("target_provider") or body.get("targetProvider") or ""
+                    ),
+                    cwd=str(body.get("cwd") or ""),
+                    intent=str(body.get("intent") or ""),
+                    user_note=str(body.get("user_note") or body.get("userNote") or ""),
+                )
+            else:
+                result = await self._workflow_service.execute_handoff(
+                    workflow_run_id=str(
+                        body.get("workflow_run_id") or body.get("workflowRunId") or ""
+                    ),
+                    preview_id=str(body.get("preview_id") or body.get("previewId") or ""),
+                    target_provider=str(
+                        body.get("target_provider") or body.get("targetProvider") or ""
+                    ),
+                    cwd=str(body.get("cwd") or ""),
+                    prompt=str(body.get("prompt") or ""),
+                )
+        except KeyError as exc:
+            await self._send_json(writer, 404, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            await self._send_json(writer, 409, {"error": str(exc)})
+            return
+        await self._send_json(writer, 200, _json_object(result))
 
     async def _handle_council_route(
         self,

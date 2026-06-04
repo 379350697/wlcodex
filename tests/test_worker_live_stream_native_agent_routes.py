@@ -110,6 +110,33 @@ class FakeNoSteerProvider(FakeProvider):
         raise NotImplementedError("Antigravity CLI provider does not support steering")
 
 
+class FakeWorkflowService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, ...]] = []
+
+    async def preview_handoff(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("preview_handoff", kwargs))
+        return {
+            "workflow_run_id": "wf_1",
+            "preview_id": "preview_1",
+            "intent": "execute_plan",
+            "target_provider": kwargs["target_provider"],
+            "prompt": "handoff prompt",
+            "warnings": [],
+        }
+
+    async def execute_handoff(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("execute_handoff", kwargs))
+        return {
+            "workflow_run_id": kwargs["workflow_run_id"],
+            "step_id": "step_1",
+            "target_provider": kwargs["target_provider"],
+            "target_thread_id": "claude-thread-1",
+            "target_url": "/workers/9/live?native_provider=claude&native_thread_id=claude-thread-1",
+            "status": "running",
+        }
+
+
 def test_fake_provider_contract_shape() -> None:
     registry = NativeAgentRegistry([FakeProvider()])
 
@@ -164,6 +191,32 @@ async def _request_native_agent(
     finally:
         await server.stop()
     return response, fake_provider
+
+
+async def _request_native_agent_with_workflow(
+    tmp_path: Path,
+    request: str,
+    *,
+    access_token: str | None = None,
+    allow_unauthenticated_loopback: bool = True,
+) -> tuple[str, FakeProvider, FakeWorkflowService]:
+    fake_provider = FakeProvider()
+    workflow_service = FakeWorkflowService()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(_store(tmp_path)),
+        native_registry=NativeAgentRegistry([fake_provider]),
+        workflow_service=workflow_service,
+        access_token=access_token,
+        allow_unauthenticated_loopback=allow_unauthenticated_loopback,
+    )
+    await server.start()
+    try:
+        response = await _read_response(server.host, server.port, request)
+    finally:
+        await server.stop()
+    return response, fake_provider, workflow_service
 
 
 @pytest.mark.asyncio
@@ -281,6 +334,92 @@ async def test_native_agent_start_session_route(tmp_path: Path) -> None:
                 "effort": None,
                 "service_tier": None,
                 "images": None,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_workflow_handoff_preview_route(tmp_path: Path) -> None:
+    body = json.dumps(
+        {
+            "source_provider": "antigravity",
+            "source_thread_id": "thread-1",
+            "source_turn_id": "turn-2",
+            "target_provider": "claude",
+            "cwd": "/repo",
+            "intent": "execute_plan",
+            "user_note": "按计划执行",
+        }
+    )
+
+    response, provider, workflow_service = await _request_native_agent_with_workflow(
+        tmp_path,
+        "POST /api/native/workflows/handoffs/preview HTTP/1.1\r\n"
+        "Host: test\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["workflow_run_id"] == "wf_1"
+    assert payload["preview_id"] == "preview_1"
+    assert payload["prompt"] == "handoff prompt"
+    assert provider.calls == []
+    assert workflow_service.calls == [
+        (
+            "preview_handoff",
+            {
+                "source_provider": "antigravity",
+                "source_thread_id": "thread-1",
+                "source_turn_id": "turn-2",
+                "target_provider": "claude",
+                "cwd": "/repo",
+                "intent": "execute_plan",
+                "user_note": "按计划执行",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_workflow_handoff_execute_route(tmp_path: Path) -> None:
+    body = json.dumps(
+        {
+            "workflow_run_id": "wf_1",
+            "preview_id": "preview_1",
+            "target_provider": "claude",
+            "cwd": "/repo",
+            "prompt": "handoff prompt",
+        }
+    )
+
+    response, _provider, workflow_service = await _request_native_agent_with_workflow(
+        tmp_path,
+        "POST /api/native/workflows/handoffs/execute HTTP/1.1\r\n"
+        "Host: test\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["step_id"] == "step_1"
+    assert payload["target_url"] == (
+        "/workers/9/live?native_provider=claude&native_thread_id=claude-thread-1"
+    )
+    assert workflow_service.calls == [
+        (
+            "execute_handoff",
+            {
+                "workflow_run_id": "wf_1",
+                "preview_id": "preview_1",
+                "target_provider": "claude",
+                "cwd": "/repo",
+                "prompt": "handoff prompt",
             },
         )
     ]
