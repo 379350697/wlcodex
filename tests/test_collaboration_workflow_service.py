@@ -140,6 +140,58 @@ async def test_preview_reads_source_and_does_not_start_target(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_preview_extracts_real_thread_turn_items(tmp_path) -> None:
+    source = ServiceFakeProvider(
+        "codex",
+        session_payload={
+            "thread": {
+                "id": "thread-real",
+                "turns": [
+                    {
+                        "id": "turn-1",
+                        "items": [
+                            {
+                                "type": "userMessage",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "请让 Claude 执行 docs/superpowers/plans/a.md",
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "agentMessage",
+                                "text": (
+                                    "Spec ready at docs/superpowers/specs/a.md. "
+                                    "Plan ready at docs/superpowers/plans/a.md."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+    target = ServiceFakeProvider("claude")
+    service = _service(tmp_path, [source, target])
+
+    preview = await service.preview_handoff(
+        source_provider="codex",
+        source_thread_id="thread-real",
+        source_turn_id="",
+        target_provider="claude",
+        cwd="/repo",
+        intent="auto",
+        user_note="",
+    )
+
+    assert preview["intent"] == "execute_plan"
+    assert "请让 Claude 执行 docs/superpowers/plans/a.md" in preview["prompt"]
+    assert "docs/superpowers/specs/a.md" in preview["prompt"]
+    assert "docs/superpowers/plans/a.md" in preview["prompt"]
+
+
+@pytest.mark.asyncio
 async def test_execute_handoff_uses_edited_prompt_and_returns_target_url(
     tmp_path,
 ) -> None:

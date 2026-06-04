@@ -140,8 +140,22 @@ def _target_url(agent_run_id: int, provider: str, native_session_id: str) -> str
 
 
 def _session_turns(session: dict[str, Any]) -> list[dict[str, Any]]:
-    raw_turns = session.get("turns", [])
-    return [turn for turn in raw_turns if isinstance(turn, dict)]
+    raw_turns = session.get("turns")
+    if not isinstance(raw_turns, list) or not raw_turns:
+        thread = session.get("thread")
+        raw_turns = thread.get("turns", []) if isinstance(thread, dict) else []
+    turns: list[dict[str, Any]] = []
+    for turn in raw_turns:
+        if not isinstance(turn, dict):
+            continue
+        items = turn.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    turns.append(_turn_from_item(item))
+            continue
+        turns.append(turn)
+    return turns
 
 
 def _turn_text(turn: dict[str, Any]) -> str:
@@ -159,6 +173,17 @@ def _turn_text(turn: dict[str, Any]) -> str:
                 parts.append(item)
         return "\n".join(parts)
     return ""
+
+
+def _turn_from_item(item: dict[str, Any]) -> dict[str, Any]:
+    item_type = str(item.get("type") or "")
+    if item_type == "userMessage":
+        role = "user"
+    elif item_type == "agentMessage":
+        role = "assistant"
+    else:
+        role = str(item.get("role") or "unknown")
+    return {"role": role, "content": item.get("content", item.get("text", ""))}
 
 
 def _newest_user_text(turns: list[dict[str, Any]]) -> str:
