@@ -34,6 +34,7 @@ from wlcodex.runtime_events import EventType
 class AntigravityCliConfig:
     binary: str = "auto"
     print_timeout: str = "5m0s"
+    default_model: str = "Gemini 3.5 Flash (Medium)"
     request_timeout_seconds: float = 330.0
     dangerously_skip_permissions: bool = False
     sandbox: bool = False
@@ -64,6 +65,7 @@ class AntigravityCliRunner:
         prompt: str,
         cwd: str,
         conversation_id: str = "",
+        model: str = "",
         extra_dirs: tuple[str, ...] = (),
     ):
         if not self.available:
@@ -72,6 +74,7 @@ class AntigravityCliRunner:
             prompt=prompt,
             cwd=cwd,
             conversation_id=conversation_id,
+            model=model,
             extra_dirs=extra_dirs,
         )
         proc: asyncio.subprocess.Process | None = None
@@ -120,6 +123,7 @@ class AntigravityCliRunner:
         prompt: str,
         cwd: str,
         conversation_id: str,
+        model: str,
         extra_dirs: tuple[str, ...],
     ) -> tuple[str, ...]:
         args: list[str] = [
@@ -135,6 +139,9 @@ class AntigravityCliRunner:
             args.append("--dangerously-skip-permissions")
         if self._config.sandbox:
             args.append("--sandbox")
+        selected_model = model or self._config.default_model
+        if selected_model:
+            args.extend(["--model", selected_model])
         args.extend(["--print", prompt])
         return tuple(args)
 
@@ -241,6 +248,7 @@ class AntigravityCliLocalProvider:
             native_turn_id=native_turn_id,
             prompt=prompt,
             conversation_id="",
+            model=str(kwargs.get("model") or ""),
         )
         return _control_result(
             session,
@@ -299,6 +307,7 @@ class AntigravityCliLocalProvider:
             native_turn_id=native_turn_id,
             prompt=prompt,
             conversation_id=_antigravity_conversation_id(session),
+            model=str(kwargs.get("model") or ""),
         )
         return _control_result(
             session,
@@ -339,6 +348,7 @@ class AntigravityCliLocalProvider:
         prompt: str,
         native_turn_id: str,
         conversation_id: str,
+        model: str,
     ) -> _RunOutcome:
         latest_conversation_id = conversation_id
         emitted_text = False
@@ -349,6 +359,7 @@ class AntigravityCliLocalProvider:
                 prompt=prompt,
                 cwd=execution_cwd,
                 conversation_id=conversation_id,
+                model=model,
                 extra_dirs=_runner_extra_dirs(session, execution_cwd),
             ):
                 event_conversation_id = str(event.get("conversation_id") or "")
@@ -398,6 +409,7 @@ class AntigravityCliLocalProvider:
         native_turn_id: str,
         prompt: str,
         conversation_id: str,
+        model: str,
     ) -> None:
         emitter = self._emitter()
         if emitter is not None:
@@ -409,6 +421,7 @@ class AntigravityCliLocalProvider:
                 native_turn_id=native_turn_id,
                 prompt=prompt,
                 conversation_id=conversation_id,
+                model=model,
             )
         )
         self._background_tasks.add(task)
@@ -421,12 +434,14 @@ class AntigravityCliLocalProvider:
         native_turn_id: str,
         prompt: str,
         conversation_id: str,
+        model: str,
     ) -> None:
         outcome = await self._run_prompt(
             session=session,
             prompt=prompt,
             native_turn_id=native_turn_id,
             conversation_id=conversation_id,
+            model=model,
         )
         updated = self._update_after_run(session, outcome)
         if outcome.antigravity_conversation_id:

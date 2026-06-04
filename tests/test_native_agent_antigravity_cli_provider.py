@@ -38,6 +38,7 @@ class FakeAntigravityCliRunner:
         prompt: str,
         cwd: str,
         conversation_id: str = "",
+        model: str = "",
         extra_dirs: tuple[str, ...] = (),
     ):
         self.calls.append(
@@ -45,6 +46,7 @@ class FakeAntigravityCliRunner:
                 "prompt": prompt,
                 "cwd": cwd,
                 "conversation_id": conversation_id,
+                "model": model,
                 "extra_dirs": extra_dirs,
             }
         )
@@ -68,6 +70,7 @@ class BlockingAntigravityCliRunner(FakeAntigravityCliRunner):
         prompt: str,
         cwd: str,
         conversation_id: str = "",
+        model: str = "",
         extra_dirs: tuple[str, ...] = (),
     ):
         self.calls.append(
@@ -75,6 +78,7 @@ class BlockingAntigravityCliRunner(FakeAntigravityCliRunner):
                 "prompt": prompt,
                 "cwd": cwd,
                 "conversation_id": conversation_id,
+                "model": model,
                 "extra_dirs": extra_dirs,
             }
         )
@@ -257,6 +261,29 @@ async def test_cli_provider_start_session_uses_isolated_execution_cwd(
 
 
 @pytest.mark.asyncio
+async def test_cli_provider_forwards_explicit_model_to_runner(
+    tmp_path: Path,
+) -> None:
+    runner = BlockingAntigravityCliRunner()
+    provider, _store, _runtime_store, _runner = _provider(tmp_path, runner=runner)
+
+    await asyncio.wait_for(
+        provider.start_session(
+            str(tmp_path),
+            "start with model",
+            model="Claude Sonnet 4.6 (Thinking)",
+        ),
+        timeout=0.05,
+    )
+
+    await asyncio.sleep(0)
+    assert runner.calls[0]["model"] == "Claude Sonnet 4.6 (Thinking)"
+
+    runner.release.set()
+    await provider.wait_for_background_tasks()
+
+
+@pytest.mark.asyncio
 async def test_cli_provider_imports_local_pb_history_and_can_continue_it(
     tmp_path: Path,
 ) -> None:
@@ -382,6 +409,7 @@ async def test_cli_provider_recovers_conversation_id_from_isolated_local_cwd(
             prompt: str,
             cwd: str,
             conversation_id: str = "",
+            model: str = "",
             extra_dirs: tuple[str, ...] = (),
         ):
             self.calls.append(
@@ -389,6 +417,7 @@ async def test_cli_provider_recovers_conversation_id_from_isolated_local_cwd(
                     "prompt": prompt,
                     "cwd": cwd,
                     "conversation_id": conversation_id,
+                    "model": model,
                     "extra_dirs": extra_dirs,
                 }
             )
@@ -434,6 +463,7 @@ async def test_cli_provider_ignores_stale_latest_local_cwd(
             prompt: str,
             cwd: str,
             conversation_id: str = "",
+            model: str = "",
             extra_dirs: tuple[str, ...] = (),
         ):
             self.calls.append(
@@ -441,6 +471,7 @@ async def test_cli_provider_ignores_stale_latest_local_cwd(
                     "prompt": prompt,
                     "cwd": cwd,
                     "conversation_id": conversation_id,
+                    "model": model,
                     "extra_dirs": extra_dirs,
                 }
             )
@@ -476,6 +507,7 @@ async def test_cli_provider_empty_output_failure_mentions_cli_setup(
             prompt: str,
             cwd: str,
             conversation_id: str = "",
+            model: str = "",
             extra_dirs: tuple[str, ...] = (),
         ):
             self.calls.append(
@@ -483,6 +515,7 @@ async def test_cli_provider_empty_output_failure_mentions_cli_setup(
                     "prompt": prompt,
                     "cwd": cwd,
                     "conversation_id": conversation_id,
+                    "model": model,
                     "extra_dirs": extra_dirs,
                 }
             )
@@ -552,6 +585,7 @@ async def test_cli_provider_hides_local_duplicate_after_created_session_claims_p
             prompt: str,
             cwd: str,
             conversation_id: str = "",
+            model: str = "",
             extra_dirs: tuple[str, ...] = (),
         ):
             self.calls.append(
@@ -559,6 +593,7 @@ async def test_cli_provider_hides_local_duplicate_after_created_session_claims_p
                     "prompt": prompt,
                     "cwd": cwd,
                     "conversation_id": conversation_id,
+                    "model": model,
                     "extra_dirs": extra_dirs,
                 }
             )
@@ -660,6 +695,8 @@ async def test_cli_runner_builds_agy_print_command(monkeypatch, tmp_path: Path) 
         str(tmp_path / "extra"),
         "--dangerously-skip-permissions",
         "--sandbox",
+        "--model",
+        "Gemini 3.5 Flash (Medium)",
         "--print",
         "hello",
     )
