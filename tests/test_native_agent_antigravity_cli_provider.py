@@ -450,6 +450,107 @@ async def test_cli_provider_strips_replayed_assistant_prefix_across_chunks(
 
 
 @pytest.mark.asyncio
+async def test_cli_provider_strips_replay_from_middle_of_assistant_history(
+    tmp_path: Path,
+) -> None:
+    class MiddleReplayRunner(FakeAntigravityCliRunner):
+        async def run(
+            self,
+            *,
+            prompt: str,
+            cwd: str,
+            conversation_id: str = "",
+            model: str = "",
+            extra_dirs: tuple[str, ...] = (),
+        ):
+            self.calls.append(
+                {
+                    "prompt": prompt,
+                    "cwd": cwd,
+                    "conversation_id": conversation_id,
+                    "model": model,
+                    "extra_dirs": extra_dirs,
+                }
+            )
+            if conversation_id:
+                for text in (
+                    "Spec 已落盘：完整设计规格\n",
+                    "Plan 已落盘：完整实施计划\n",
+                    "只返回新的 plan 摘要\n",
+                ):
+                    yield {
+                        "type": "assistant",
+                        "text": text,
+                        "conversation_id": conversation_id,
+                    }
+            else:
+                for text in (
+                    "Intro：前置探索结果\n",
+                    "Spec 已落盘：完整设计规格\n",
+                    "Plan 已落盘：完整实施计划\n",
+                ):
+                    yield {
+                        "type": "assistant",
+                        "text": text,
+                        "conversation_id": "ag-conv-1",
+                    }
+
+    provider, _store, _runtime_store, _runner = _provider(
+        tmp_path,
+        runner=MiddleReplayRunner(),
+    )
+
+    result = await provider.start_session(str(tmp_path), "first")
+    await provider.wait_for_background_tasks()
+
+    await provider.continue_session(result.native_session_id, "second")
+    await provider.wait_for_background_tasks()
+
+    payload = await provider.read_session(result.native_session_id)
+    assistant_turns = [
+        turn["text"] for turn in payload["turns"] if turn["role"] == "assistant"
+    ]
+    assert assistant_turns == [
+        "Intro：前置探索结果\nSpec 已落盘：完整设计规格\nPlan 已落盘：完整实施计划\n",
+        "只返回新的 plan 摘要\n",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_runtime_turns_include_recent_events_after_long_history(
+    tmp_path: Path,
+) -> None:
+    runner = FakeAntigravityCliRunner()
+    provider, store, runtime_store, _runner = _provider(tmp_path, runner=runner)
+
+    result = await provider.create_session(str(tmp_path))
+    session = store.get_by_native_session_id(
+        provider="antigravity",
+        provider_engine="cli-local",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    emitter = provider._emitter()
+    assert emitter is not None
+
+    for index in range(1005):
+        emitter.heartbeat(session, native_turn_id=f"noise-{index}")
+    emitter.user_message(session, native_turn_id="recent-turn", text="plan")
+    emitter.text_delta(session, native_turn_id="recent-turn", delta="recent plan\n")
+
+    payload = await provider.read_session(result.native_session_id)
+
+    assert payload["turns"] == [
+        {"role": "user", "text": "plan", "native_turn_id": "recent-turn"},
+        {
+            "role": "assistant",
+            "text": "recent plan\n",
+            "native_turn_id": "recent-turn",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_cli_provider_start_session_does_not_resume_agy_conversation_by_id(
     tmp_path: Path,
 ) -> None:

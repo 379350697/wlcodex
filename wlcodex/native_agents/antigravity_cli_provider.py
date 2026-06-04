@@ -53,6 +53,8 @@ class _RunOutcome:
 
 
 _EXECUTION_CWD_METADATA_KEY = "antigravity_execution_cwd"
+_RUNTIME_TURN_EVENT_LIMIT = 50_000
+_REPLAY_MATCH_MIN_CHARS = 8
 
 
 class AntigravityCliRunner:
@@ -385,7 +387,8 @@ class AntigravityCliLocalProvider:
         latest_conversation_id = conversation_id
         emitted_text = False
         execution_cwd = _session_execution_cwd(session)
-        remaining_replay_prefix = _assistant_transcript_text(self._runtime_turns(session))
+        replay_transcript = _assistant_transcript_text(self._runtime_turns(session))
+        remaining_replay_prefix = replay_transcript
         Path(execution_cwd).mkdir(parents=True, exist_ok=True)
         try:
             async for event in self._runner.run(
@@ -402,6 +405,7 @@ class AntigravityCliLocalProvider:
                     text, remaining_replay_prefix = _strip_replayed_assistant_prefix(
                         text,
                         remaining_replay_prefix,
+                        replay_transcript=replay_transcript,
                     )
                 if text:
                     emitted_text = True
@@ -650,7 +654,7 @@ class AntigravityCliLocalProvider:
         assistant_by_key: OrderedDict[str, dict[str, str]] = OrderedDict()
         for event in self._runtime_store.list_by_agent_run(
             session.agent_run_id,
-            limit=1000,
+            limit=_RUNTIME_TURN_EVENT_LIMIT,
         ):
             payload = event.payload
             if str(payload.get("native_thread_id") or "") != session.native_session_id:
@@ -833,14 +837,46 @@ def _assistant_transcript_text(turns: list[dict[str, str]]) -> str:
 def _strip_replayed_assistant_prefix(
     text: str,
     replay_prefix: str,
+    *,
+    replay_transcript: str = "",
 ) -> tuple[str, str]:
     if not text or not replay_prefix:
         return text, replay_prefix
+    replay_prefix = _select_replayed_assistant_prefix(
+        text,
+        replay_prefix,
+        replay_transcript,
+    )
+    if not replay_prefix:
+        return text, ""
     if replay_prefix.startswith(text):
         return "", replay_prefix[len(text) :]
     if text.startswith(replay_prefix):
         return text[len(replay_prefix) :], ""
     return text, ""
+
+
+def _select_replayed_assistant_prefix(
+    text: str,
+    replay_prefix: str,
+    replay_transcript: str,
+) -> str:
+    if replay_prefix.startswith(text) or text.startswith(replay_prefix):
+        return replay_prefix
+    if len(text.strip()) < _REPLAY_MATCH_MIN_CHARS:
+        return ""
+    index = replay_transcript.rfind(text)
+    if index >= 0:
+        return replay_transcript[index:]
+    overlap = min(len(text), len(replay_transcript))
+    for length in range(overlap, _REPLAY_MATCH_MIN_CHARS - 1, -1):
+        candidate = text[:length]
+        if (
+            len(candidate.strip()) >= _REPLAY_MATCH_MIN_CHARS
+            and replay_transcript.endswith(candidate)
+        ):
+            return candidate
+    return ""
 
 
 def _local_session_started_after(
