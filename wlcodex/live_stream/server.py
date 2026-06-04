@@ -3607,10 +3607,6 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       }
       if (!handoffTargetProvider) selectHandoffTarget(preferredHandoffTarget());
       const cwd = currentWorkspaceCwd();
-      if (!cwd) {
-        setHandoffStatus("工作目录未知", "error");
-        return;
-      }
       handoffBusy = true;
       updateHandoffControls();
       setHandoffStatus("预览中", "");
@@ -3644,7 +3640,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
           workflow_run_id: handoffPreviewPayload.workflow_run_id,
           preview_id: handoffPreviewPayload.preview_id,
           target_provider: handoffTargetProvider,
-          cwd: currentWorkspaceCwd(),
+          cwd: handoffPreviewPayload.cwd || currentWorkspaceCwd(),
           prompt: handoffPreviewPayload.prompt || ""
         });
         if (result.target_url) {

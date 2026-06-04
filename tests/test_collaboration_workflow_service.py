@@ -140,6 +140,51 @@ async def test_preview_reads_source_and_does_not_start_target(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_preview_falls_back_to_source_session_cwd(tmp_path) -> None:
+    source = ServiceFakeProvider(
+        "antigravity",
+        session_payload={
+            "thread": {"cwd": "/Users/wl/projects/wlcodex"},
+            "turns": [
+                {
+                    "role": "user",
+                    "content": "执行 docs/superpowers/plans/a.md",
+                },
+            ],
+        },
+    )
+    target = ServiceFakeProvider("claude")
+    service = _service(tmp_path, [source, target])
+
+    preview = await service.preview_handoff(
+        source_provider="antigravity",
+        source_thread_id="source-session",
+        source_turn_id="",
+        target_provider="claude",
+        cwd="",
+        intent="execute_plan",
+        user_note="",
+    )
+
+    assert preview["cwd"] == "/Users/wl/projects/wlcodex"
+    assert "Workspace: /Users/wl/projects/wlcodex" in preview["prompt"]
+
+    result = await service.execute_handoff(
+        workflow_run_id=preview["workflow_run_id"],
+        preview_id=preview["preview_id"],
+        target_provider="claude",
+        cwd=preview["cwd"],
+        prompt=preview["prompt"],
+    )
+
+    assert result["target_provider"] == "claude"
+    assert target.calls[-1][0:2] == (
+        "start_session",
+        "/Users/wl/projects/wlcodex",
+    )
+
+
+@pytest.mark.asyncio
 async def test_preview_extracts_real_thread_turn_items(tmp_path) -> None:
     source = ServiceFakeProvider(
         "codex",

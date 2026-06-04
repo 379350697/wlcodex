@@ -45,6 +45,7 @@ class WorkflowService:
         source = self._registry.get(source_provider)
         self._registry.get(target_provider)
         session = await source.read_session(source_thread_id)
+        resolved_cwd = cwd.strip() or _session_cwd(session)
         turns = _session_turns(session)
         recent_user_text = _newest_user_text(turns)
         session_summary = _session_summary(turns)
@@ -54,7 +55,7 @@ class WorkflowService:
                 source_provider=source_provider,
                 source_thread_id=source_thread_id,
                 target_provider=target_provider,
-                cwd=cwd,
+                cwd=resolved_cwd,
                 recent_user_text=recent_user_text,
                 session_summary=session_summary,
                 artifacts=artifacts,
@@ -67,7 +68,7 @@ class WorkflowService:
             source_thread_id=source_thread_id,
             source_turn_id=source_turn_id,
             target_provider=target_provider,
-            cwd=cwd,
+            cwd=resolved_cwd,
             intent=preview.intent,
             prompt=preview.prompt,
             artifacts=preview.artifacts,
@@ -78,6 +79,7 @@ class WorkflowService:
             {
                 "workflow_run_id": stored.workflow_run_id,
                 "preview_id": stored.preview_id,
+                "cwd": stored.cwd,
             }
         )
         return payload
@@ -141,6 +143,15 @@ def _target_url(agent_run_id: int, provider: str, native_session_id: str) -> str
         f"/workers/{agent_run_id}/live?native_provider={quote(provider, safe='')}"
         f"&native_thread_id={quote(native_session_id, safe='')}"
     )
+
+
+def _session_cwd(session: dict[str, Any]) -> str:
+    thread = session.get("thread")
+    if isinstance(thread, dict):
+        cwd = str(thread.get("cwd") or "").strip()
+        if cwd:
+            return cwd
+    return str(session.get("cwd") or "").strip()
 
 
 def _session_turns(session: dict[str, Any]) -> list[dict[str, Any]]:

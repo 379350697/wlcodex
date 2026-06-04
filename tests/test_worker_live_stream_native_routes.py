@@ -1606,6 +1606,13 @@ def test_live_page_exposes_workflow_handoff_controls() -> None:
     assert "location.href = result.target_url;" in response
 
 
+def test_live_page_handoff_preview_allows_backend_cwd_resolution() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert 'setHandoffStatus("工作目录未知"' not in response
+    assert "cwd: handoffPreviewPayload.cwd || currentWorkspaceCwd()" in response
+
+
 def test_live_page_handoff_warning_newlines_are_js_escaped() -> None:
     response = _live_page(42, native_provider="antigravity")
 
