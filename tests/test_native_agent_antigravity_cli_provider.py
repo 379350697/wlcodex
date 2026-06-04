@@ -132,6 +132,57 @@ def _provider(
 
 
 @pytest.mark.asyncio
+async def test_cli_provider_lists_antigravity_model_catalog_with_opus_default(
+    tmp_path: Path,
+) -> None:
+    provider, _store, _runtime_store, _runner = _provider(tmp_path)
+
+    models = await provider.list_models()
+
+    assert models == [
+        {
+            "id": "Claude Opus 4.6",
+            "model": "Claude Opus 4.6",
+            "displayName": "Claude Opus 4.6",
+            "isDefault": True,
+        },
+        {
+            "id": "Claude Sonnet 4.6",
+            "model": "Claude Sonnet 4.6",
+            "displayName": "Claude Sonnet 4.6",
+            "isDefault": False,
+        },
+        {
+            "id": "Gemini 3.5",
+            "model": "Gemini 3.5",
+            "displayName": "Gemini 3.5",
+            "isDefault": False,
+        },
+        {
+            "id": "Gemini 3.1",
+            "model": "Gemini 3.1",
+            "displayName": "Gemini 3.1",
+            "isDefault": False,
+        },
+        {
+            "id": "GPT",
+            "model": "GPT",
+            "displayName": "GPT",
+            "isDefault": False,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_capabilities_include_model_catalog(tmp_path: Path) -> None:
+    provider, _store, _runtime_store, _runner = _provider(tmp_path)
+
+    caps = provider.capabilities()
+
+    assert caps.can_list_models is True
+
+
+@pytest.mark.asyncio
 async def test_cli_provider_start_session_runs_in_background_and_streams_events(
     tmp_path: Path,
 ) -> None:
@@ -748,7 +799,7 @@ async def test_cli_runner_builds_agy_print_command(monkeypatch, tmp_path: Path) 
         "--dangerously-skip-permissions",
         "--sandbox",
         "--model",
-        "Gemini 3.5 Flash (Medium)",
+        "Claude Opus 4.6",
         "--print",
         "hello",
     )

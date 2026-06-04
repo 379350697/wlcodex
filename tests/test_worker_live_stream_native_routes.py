@@ -12,6 +12,7 @@ from wlcodex.db import Ledger
 from wlcodex.jsonrpc import JsonRpcError
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.server import WorkerLiveStreamServer
+from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import RuntimeEvent
 
@@ -190,6 +191,11 @@ class FakeNativeController:
     ) -> dict[str, Any]:
         self.calls.append(("resolve_approval", codex_request_id, response))
         return {"codex_request_id": codex_request_id, "status": "resolved"}
+
+
+class FakeAntigravityProvider:
+    provider = "antigravity"
+    provider_engine = "cli-local"
 
 
 def _store(tmp_path: Path) -> RuntimeEventStore:
@@ -1631,6 +1637,36 @@ async def test_worker_live_page_uses_official_model_catalog_settings(
     assert "function syncSettingOptionsDisabled" in response
     assert "reasoningSelector.disabled = sendingPrompt || nativeTurnRunning" in response
     assert "serviceTierSelector.disabled = sendingPrompt || nativeTurnRunning" in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_uses_provider_scoped_model_catalog_for_antigravity(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([FakeAntigravityProvider()]),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_provider=antigravity&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'const PROVIDER = "antigravity";' in response
+    assert 'const API_BASE = "/api/native/antigravity";' in response
+    assert "api(`${API_BASE}/models`)" in response
+    assert "body.model = savedModelSettings.model;" in response
 
 
 @pytest.mark.asyncio

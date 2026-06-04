@@ -11,6 +11,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from wlcodex.claude_binary import sanitized_claude_env
+from wlcodex.native_agents.antigravity_models import (
+    DEFAULT_ANTIGRAVITY_MODEL,
+    antigravity_model_catalog,
+)
 from wlcodex.native_agents.antigravity_local_sessions import (
     AntigravityLocalSession,
     AntigravityLocalSessionIndex,
@@ -34,7 +38,7 @@ from wlcodex.runtime_events import EventType
 class AntigravityCliConfig:
     binary: str = "auto"
     print_timeout: str = "5m0s"
-    default_model: str = "Gemini 3.5 Flash (Medium)"
+    default_model: str = DEFAULT_ANTIGRAVITY_MODEL
     request_timeout_seconds: float = 330.0
     dangerously_skip_permissions: bool = False
     sandbox: bool = False
@@ -187,6 +191,7 @@ class AntigravityCliLocalProvider:
     def capabilities(self) -> NativeAgentCapabilities:
         return NativeAgentCapabilities(
             can_list_sessions=True,
+            can_list_models=True,
             can_start_session=True,
             can_resume_session=True,
             can_read_history=True,
@@ -217,7 +222,14 @@ class AntigravityCliLocalProvider:
         return _hide_linked_local_duplicates(sessions)
 
     async def list_models(self) -> list[dict[str, Any]]:
-        return []
+        return antigravity_model_catalog(default_model=self._runner_default_model())
+
+    def _runner_default_model(self) -> str:
+        config = getattr(self._runner, "_config", None)
+        return str(
+            getattr(config, "default_model", DEFAULT_ANTIGRAVITY_MODEL)
+            or DEFAULT_ANTIGRAVITY_MODEL
+        )
 
     async def start_session(
         self,

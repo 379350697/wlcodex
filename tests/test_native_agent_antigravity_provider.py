@@ -258,7 +258,29 @@ def test_capabilities_expose_antigravity_sdk_provider(tmp_path: Path) -> None:
     assert provider.provider == "antigravity"
     assert provider.provider_engine == "sdk"
     assert provider.capabilities().can_start_session is True
+    assert provider.capabilities().can_list_models is True
     assert provider.capabilities().can_steer_active_turn is False
+
+
+@pytest.mark.asyncio
+async def test_sdk_provider_lists_antigravity_model_catalog(tmp_path: Path) -> None:
+    provider, _store, _runtime_store, _runner = _provider(tmp_path)
+
+    models = await provider.list_models()
+
+    assert models[0] == {
+        "id": "Claude Opus 4.6",
+        "model": "Claude Opus 4.6",
+        "displayName": "Claude Opus 4.6",
+        "isDefault": True,
+    }
+    assert {model["model"] for model in models} == {
+        "Claude Opus 4.6",
+        "Claude Sonnet 4.6",
+        "Gemini 3.5",
+        "Gemini 3.1",
+        "GPT",
+    }
 
 
 def test_antigravity_runtime_event_source_exists() -> None:

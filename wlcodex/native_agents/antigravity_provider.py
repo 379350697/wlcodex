@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from wlcodex.native_agents.antigravity_models import antigravity_model_catalog
 from wlcodex.native_agents.models import (
     NativeAgentCapabilities,
     NativeAgentControlResult,
@@ -99,6 +100,7 @@ class AntigravitySdkProvider:
     def capabilities(self) -> NativeAgentCapabilities:
         return NativeAgentCapabilities(
             can_list_sessions=True,
+            can_list_models=True,
             can_start_session=True,
             can_resume_session=True,
             can_read_history=True,
@@ -127,7 +129,7 @@ class AntigravitySdkProvider:
         )
 
     async def list_models(self) -> list[dict[str, Any]]:
-        return []
+        return antigravity_model_catalog()
 
     async def start_session(
         self,
