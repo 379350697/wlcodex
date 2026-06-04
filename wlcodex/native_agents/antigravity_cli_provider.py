@@ -353,6 +353,7 @@ class AntigravityCliLocalProvider:
         latest_conversation_id = conversation_id
         emitted_text = False
         execution_cwd = _session_execution_cwd(session)
+        replay_prefix = _assistant_transcript_text(self._runtime_turns(session))
         Path(execution_cwd).mkdir(parents=True, exist_ok=True)
         try:
             async for event in self._runner.run(
@@ -365,6 +366,8 @@ class AntigravityCliLocalProvider:
                 event_conversation_id = str(event.get("conversation_id") or "")
                 latest_conversation_id = event_conversation_id or latest_conversation_id
                 text = extract_native_agent_text(event)
+                if text:
+                    text = _strip_replayed_assistant_prefix(text, replay_prefix)
                 if text:
                     emitted_text = True
                     self._emit_text_delta(
@@ -742,6 +745,16 @@ def _runner_extra_dirs(
     if str(Path(session.cwd).expanduser()) == str(Path(execution_cwd).expanduser()):
         return ()
     return (session.cwd,)
+
+
+def _assistant_transcript_text(turns: list[dict[str, str]]) -> str:
+    return "".join(turn["text"] for turn in turns if turn["role"] == "assistant")
+
+
+def _strip_replayed_assistant_prefix(text: str, replay_prefix: str) -> str:
+    if replay_prefix and text.startswith(replay_prefix):
+        return text[len(replay_prefix) :]
+    return text
 
 
 def _local_session_started_after(
