@@ -8,6 +8,7 @@ from wlcodex.runtime_events import EventType, RuntimeEvent
 
 _KIND_BY_EVENT_TYPE = {
     EventType.AGENT_RUN_STARTED: "lifecycle",
+    EventType.AGENT_RUN_HEARTBEAT: "lifecycle",
     EventType.AGENT_RUN_ACTIVITY: "activity",
     EventType.USER_MESSAGE_RECEIVED: "user_message",
     EventType.MODEL_TEXT_DELTA: "text_delta",

@@ -42,6 +42,16 @@ def test_model_text_delta_maps_to_text_delta_kind() -> None:
     assert stream.payload == {"delta": "hello"}
 
 
+def test_agent_run_heartbeat_maps_to_lifecycle_kind() -> None:
+    runtime = _event(EventType.AGENT_RUN_HEARTBEAT, {"status": "running"}, event_id=14)
+
+    stream = stream_event_from_runtime(runtime)
+
+    assert stream.type == EventType.AGENT_RUN_HEARTBEAT
+    assert stream.kind == "lifecycle"
+    assert stream.payload == {"status": "running"}
+
+
 def test_command_output_maps_to_command_output_kind() -> None:
     runtime = _event(EventType.COMMAND_OUTPUT_DELTA, {"delta": "pytest"}, event_id=12)
 

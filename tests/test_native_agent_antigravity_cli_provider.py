@@ -90,6 +90,37 @@ class BlockingAntigravityCliRunner(FakeAntigravityCliRunner):
         }
 
 
+class SilentBlockingAntigravityCliRunner(FakeAntigravityCliRunner):
+    def __init__(self) -> None:
+        super().__init__(conversation_id="ag-conv-1")
+        self.release = asyncio.Event()
+
+    async def run(
+        self,
+        *,
+        prompt: str,
+        cwd: str,
+        conversation_id: str = "",
+        model: str = "",
+        extra_dirs: tuple[str, ...] = (),
+    ):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "cwd": cwd,
+                "conversation_id": conversation_id,
+                "model": model,
+                "extra_dirs": extra_dirs,
+            }
+        )
+        await self.release.wait()
+        yield {
+            "type": "assistant",
+            "text": "finished",
+            "conversation_id": conversation_id or "ag-conv-1",
+        }
+
+
 class EmptyAntigravityIndex:
     def list_recent(self, limit: int = 50):
         return []
@@ -252,6 +283,39 @@ async def test_cli_provider_start_session_runs_in_background_and_streams_events(
         EventType.AGENT_RUN_COMPLETED,
     ]
     assert events[2].payload["delta"] == "background hello"
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_emits_heartbeat_while_runner_is_silent(
+    tmp_path: Path,
+) -> None:
+    runner = SilentBlockingAntigravityCliRunner()
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = NativeAgentSessionStore(ledger)
+    runtime_store = RuntimeEventStore(ledger._conn)
+    provider = AntigravityCliLocalProvider(
+        runner=runner,
+        session_store=store,
+        runtime_store=runtime_store,
+        default_cwd=str(tmp_path),
+        local_session_index=EmptyAntigravityIndex(),
+        heartbeat_interval_seconds=0.01,
+    )
+
+    result = await provider.start_session(cwd=str(tmp_path), prompt="slow review")
+
+    heartbeat = await _wait_for_runtime_event(
+        runtime_store,
+        result.agent_run_id,
+        EventType.AGENT_RUN_HEARTBEAT,
+    )
+    assert heartbeat.payload["native_thread_id"] == result.native_session_id
+    assert heartbeat.payload["native_turn_id"] == result.turn_id
+    assert heartbeat.payload["status"] == "running"
+
+    runner.release.set()
+    await provider.wait_for_background_tasks()
 
 
 @pytest.mark.asyncio
@@ -965,6 +1029,72 @@ async def test_cli_runner_fails_fast_when_authentication_prompt_streams(
     assert fake_process.killed is True
 
 
+@pytest.mark.asyncio
+async def test_cli_runner_yields_stdout_before_process_exits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        AntigravityCliConfig,
+        AntigravityCliRunner,
+    )
+
+    release_process = asyncio.Event()
+
+    class FakeStream:
+        def __init__(self, lines: list[bytes]) -> None:
+            self._lines = lines
+
+        async def readline(self):
+            await asyncio.sleep(0)
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+    class FakeProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.stdout = FakeStream([b"partial output\n"])
+            self.stderr = FakeStream([])
+            self.killed = False
+
+        async def wait(self):
+            await release_process.wait()
+            self.returncode = 0
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+            release_process.set()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    fake_binary = tmp_path / "agy"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = AntigravityCliRunner(AntigravityCliConfig(binary=str(fake_binary)))
+
+    stream = runner.run(prompt="hello", cwd=str(tmp_path), conversation_id="conv-1")
+    first = await asyncio.wait_for(anext(stream), timeout=0.2)
+
+    assert first == {
+        "type": "assistant",
+        "text": "partial output\n",
+        "conversation_id": "conv-1",
+    }
+    assert release_process.is_set() is False
+
+    release_process.set()
+    assert [event async for event in stream] == []
+
+
 async def _collect_runner_events(runner, tmp_path: Path):
     return [
         event
@@ -973,3 +1103,17 @@ async def _collect_runner_events(runner, tmp_path: Path):
             cwd=str(tmp_path),
         )
     ]
+
+
+async def _wait_for_runtime_event(
+    runtime_store: RuntimeEventStore,
+    agent_run_id: int,
+    event_type: str,
+):
+    for _ in range(100):
+        events = runtime_store.list_by_agent_run(agent_run_id)
+        for event in events:
+            if event.event_type == event_type:
+                return event
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"missing runtime event: {event_type}")

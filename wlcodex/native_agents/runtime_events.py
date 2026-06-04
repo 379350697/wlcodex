@@ -73,6 +73,19 @@ class NativeAgentRuntimeEmitter:
             },
         )
 
+    def heartbeat(
+        self,
+        session: NativeAgentSession,
+        *,
+        native_turn_id: str,
+    ) -> RuntimeEvent:
+        return self._append(
+            session,
+            native_turn_id=native_turn_id,
+            event_type=EventType.AGENT_RUN_HEARTBEAT,
+            payload={"status": "running"},
+        )
+
     def completed(self, session: NativeAgentSession, *, native_turn_id: str) -> RuntimeEvent:
         return self._append(
             session,

@@ -92,10 +92,28 @@ class AntigravityCliRunner:
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
-            stdout, stderr = await asyncio.wait_for(
-                _communicate_with_auth_detection(proc),
-                timeout=self._config.request_timeout_seconds,
+            stdout_queue: asyncio.Queue[bytes] = asyncio.Queue()
+            communicate_task = asyncio.create_task(
+                _communicate_with_auth_detection(
+                    proc,
+                    stdout_queue=stdout_queue,
+                )
             )
+            streamed_stdout = False
+            async for chunk in _iter_stdout_chunks_until_complete(
+                communicate_task,
+                stdout_queue,
+                timeout=self._config.request_timeout_seconds,
+            ):
+                streamed_stdout = True
+                text = chunk.decode("utf-8", errors="replace")
+                if text:
+                    yield {
+                        "type": "assistant",
+                        "text": text,
+                        "conversation_id": conversation_id,
+                    }
+            stdout, stderr = communicate_task.result()
         except asyncio.TimeoutError as exc:
             if proc is not None:
                 proc.kill()
@@ -114,7 +132,7 @@ class AntigravityCliRunner:
             raise RuntimeError(cli_error)
         if proc.returncode not in (0, None):
             raise RuntimeError((error_text or text or "Antigravity CLI failed").strip())
-        if text:
+        if text and not streamed_stdout:
             yield {
                 "type": "assistant",
                 "text": text,
@@ -162,6 +180,7 @@ class AntigravityCliLocalProvider:
         runner: Any | None = None,
         default_cwd: str = "",
         local_session_index: Any | None = None,
+        heartbeat_interval_seconds: float = 15.0,
     ) -> None:
         self._session_store = session_store
         self._runtime_store = runtime_store
@@ -171,6 +190,7 @@ class AntigravityCliLocalProvider:
             local_session_index or AntigravityLocalSessionIndex()
         )
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
 
     async def wait_for_background_tasks(self) -> None:
         while self._background_tasks:
@@ -451,13 +471,25 @@ class AntigravityCliLocalProvider:
         conversation_id: str,
         model: str,
     ) -> None:
-        outcome = await self._run_prompt(
+        done_event = asyncio.Event()
+        heartbeat_task = self._heartbeat_task(
             session=session,
-            prompt=prompt,
             native_turn_id=native_turn_id,
-            conversation_id=conversation_id,
-            model=model,
+            done_event=done_event,
         )
+        try:
+            outcome = await self._run_prompt(
+                session=session,
+                prompt=prompt,
+                native_turn_id=native_turn_id,
+                conversation_id=conversation_id,
+                model=model,
+            )
+        finally:
+            done_event.set()
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
         updated = self._update_after_run(session, outcome)
         if outcome.antigravity_conversation_id:
             local_session = self._local_session_index.get(
@@ -476,6 +508,38 @@ class AntigravityCliLocalProvider:
                 native_turn_id=native_turn_id,
                 error=outcome.error or "Antigravity CLI run failed",
             )
+
+    def _heartbeat_task(
+        self,
+        *,
+        session: NativeAgentSession,
+        native_turn_id: str,
+        done_event: asyncio.Event,
+    ) -> asyncio.Task[None] | None:
+        if self._runtime_store is None or self._heartbeat_interval_seconds <= 0:
+            return None
+        return asyncio.create_task(
+            self._emit_heartbeats(
+                session=session,
+                native_turn_id=native_turn_id,
+                done_event=done_event,
+            )
+        )
+
+    async def _emit_heartbeats(
+        self,
+        *,
+        session: NativeAgentSession,
+        native_turn_id: str,
+        done_event: asyncio.Event,
+    ) -> None:
+        while not done_event.is_set():
+            await asyncio.sleep(self._heartbeat_interval_seconds)
+            if done_event.is_set():
+                return
+            emitter = self._emitter()
+            if emitter is not None:
+                emitter.heartbeat(session, native_turn_id=native_turn_id)
 
     def _update_after_run(
         self,
@@ -783,8 +847,61 @@ def _timestamp_seconds(value: str) -> float:
         return 0.0
 
 
+async def _iter_stdout_chunks_until_complete(
+    communicate_task: asyncio.Task[tuple[bytes, bytes]],
+    stdout_queue: asyncio.Queue[bytes],
+    *,
+    timeout: float,
+):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        if not stdout_queue.empty():
+            yield stdout_queue.get_nowait()
+            continue
+
+        if communicate_task.done() and stdout_queue.empty():
+            exc = communicate_task.exception()
+            if exc is not None:
+                raise exc
+            return
+
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            communicate_task.cancel()
+            await asyncio.gather(communicate_task, return_exceptions=True)
+            raise asyncio.TimeoutError
+
+        get_task = asyncio.create_task(stdout_queue.get())
+        done, _pending = await asyncio.wait(
+            {communicate_task, get_task},
+            timeout=remaining,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            get_task.cancel()
+            communicate_task.cancel()
+            await asyncio.gather(get_task, communicate_task, return_exceptions=True)
+            raise asyncio.TimeoutError
+
+        if communicate_task in done:
+            exc = communicate_task.exception()
+            if exc is not None:
+                get_task.cancel()
+                await asyncio.gather(get_task, return_exceptions=True)
+                raise exc
+
+        if get_task in done:
+            yield get_task.result()
+        else:
+            get_task.cancel()
+            await asyncio.gather(get_task, return_exceptions=True)
+
+
 async def _communicate_with_auth_detection(
     proc: asyncio.subprocess.Process,
+    *,
+    stdout_queue: asyncio.Queue[bytes] | None = None,
 ) -> tuple[bytes, bytes]:
     if getattr(proc, "stdout", None) is None and getattr(proc, "stderr", None) is None:
         return await proc.communicate()
@@ -792,7 +909,14 @@ async def _communicate_with_auth_detection(
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
     tasks = [
-        asyncio.create_task(_read_process_stream(proc.stdout, stdout_chunks, proc)),
+        asyncio.create_task(
+            _read_process_stream(
+                proc.stdout,
+                stdout_chunks,
+                proc,
+                stdout_queue=stdout_queue,
+            )
+        ),
         asyncio.create_task(_read_process_stream(proc.stderr, stderr_chunks, proc)),
         asyncio.create_task(proc.wait()),
     ]
@@ -813,6 +937,8 @@ async def _read_process_stream(
     stream: Any,
     chunks: list[bytes],
     proc: asyncio.subprocess.Process,
+    *,
+    stdout_queue: asyncio.Queue[bytes] | None = None,
 ) -> None:
     if stream is None:
         return
@@ -821,11 +947,19 @@ async def _read_process_stream(
         if not chunk:
             return
         chunks.append(chunk)
-        auth_error = _authentication_error_message(_decode_chunks(chunks))
+        decoded = _decode_chunks(chunks)
+        auth_error = _authentication_error_message(decoded)
         if auth_error:
             if getattr(proc, "returncode", None) is None:
                 proc.kill()
             raise RuntimeError(auth_error)
+        cli_error = _cli_error_message(decoded)
+        if cli_error:
+            if getattr(proc, "returncode", None) is None:
+                proc.kill()
+            raise RuntimeError(cli_error)
+        if stdout_queue is not None:
+            await stdout_queue.put(chunk)
 
 
 def _decode_chunks(chunks: list[bytes]) -> str:
