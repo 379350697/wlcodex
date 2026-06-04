@@ -1620,6 +1620,13 @@ def test_live_page_handoff_warning_newlines_are_js_escaped() -> None:
     assert '? "\n" + preview.warnings.join("\n")' not in response
 
 
+def test_live_page_defines_handoff_preview_escape_helper() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert "function escapeHtml(value)" in response
+    assert "escapeHtml(preview.prompt || \"\")" in response
+
+
 def test_live_page_waits_during_active_turn_when_provider_cannot_steer() -> None:
     response = _live_page(42, native_provider="antigravity")
 

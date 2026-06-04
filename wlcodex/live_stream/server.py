@@ -4555,6 +4555,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       if (!text) return;
       node.append(document.createTextNode(String(text)));
     }
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
     function renderMarkdownLite(target, text) {
       target.replaceChildren();
       const normalized = String(text || "").replace(/\\r\\n/g, "\\n");
