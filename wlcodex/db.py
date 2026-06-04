@@ -263,6 +263,63 @@ class Ledger:
             CREATE INDEX IF NOT EXISTS idx_native_agent_sessions_agent_run
                 ON native_agent_sessions(agent_run_id);
 
+            CREATE TABLE IF NOT EXISTS collaboration_workflow_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workflow_run_id TEXT NOT NULL UNIQUE,
+                workflow_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_provider TEXT NOT NULL,
+                source_thread_id TEXT NOT NULL,
+                source_turn_id TEXT NOT NULL DEFAULT '',
+                target_provider TEXT NOT NULL DEFAULT '',
+                target_thread_id TEXT NOT NULL DEFAULT '',
+                cwd TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_collaboration_workflow_runs_source
+                ON collaboration_workflow_runs(source_provider, source_thread_id, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_collaboration_workflow_runs_target
+                ON collaboration_workflow_runs(target_provider, target_thread_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS collaboration_workflow_previews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                preview_id TEXT NOT NULL UNIQUE,
+                workflow_run_id TEXT NOT NULL,
+                intent TEXT NOT NULL,
+                target_provider TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                artifacts_json TEXT NOT NULL DEFAULT '[]',
+                warnings_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(workflow_run_id) REFERENCES collaboration_workflow_runs(workflow_run_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_collaboration_workflow_previews_run
+                ON collaboration_workflow_previews(workflow_run_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS collaboration_workflow_steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                step_id TEXT NOT NULL UNIQUE,
+                workflow_run_id TEXT NOT NULL,
+                preview_id TEXT NOT NULL DEFAULT '',
+                step_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                assigned_provider TEXT NOT NULL,
+                target_thread_id TEXT NOT NULL DEFAULT '',
+                target_agent_run_id INTEGER NOT NULL DEFAULT 0,
+                submitted_prompt TEXT NOT NULL DEFAULT '',
+                output_summary TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(workflow_run_id) REFERENCES collaboration_workflow_runs(workflow_run_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_collaboration_workflow_steps_run
+                ON collaboration_workflow_steps(workflow_run_id, id);
+
             CREATE TABLE IF NOT EXISTS orchestration_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conversation_id INTEGER NOT NULL,
