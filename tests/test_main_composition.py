@@ -823,6 +823,8 @@ def test_create_live_stream_components_wires_antigravity_cli_engine(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    from wlcodex.collaboration.workflow_service import WorkflowService
+    from wlcodex.collaboration.workflow_store import WorkflowRunStore
     from wlcodex.config import (
         AppConfig,
         ApprovalConfig,
@@ -893,6 +895,9 @@ def test_create_live_stream_components_wires_antigravity_cli_engine(
     assert provider._runner._config.dangerously_skip_permissions is True
     assert components.native_registry.maybe_get("codex") is None
     assert components.server._native_registry is components.native_registry
+    assert isinstance(components.workflow_service, WorkflowService)
+    assert isinstance(components.workflow_service._store, WorkflowRunStore)
+    assert components.server._workflow_service is components.workflow_service
 
 
 def test_create_live_stream_components_allows_native_without_token_for_loopback_testing(

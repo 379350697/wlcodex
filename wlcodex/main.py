@@ -226,6 +226,7 @@ def _create_live_stream_components(
     native_registry = None
     native_providers = []
     native_transcript_mirror = None
+    workflow_service = None
     native_agents_enabled = bool(getattr(config.native_agents, "enabled", False))
     native_codex_requested = bool(getattr(config.codex_native, "enabled", False)) or (
         native_agents_enabled and bool(getattr(config.native_agents.codex, "enabled", False))
@@ -402,9 +403,15 @@ def _create_live_stream_components(
                         )
                     )
     if native_providers:
+        from wlcodex.collaboration import WorkflowRunStore, WorkflowService
         from wlcodex.native_agents.provider import NativeAgentRegistry
 
         native_registry = NativeAgentRegistry(native_providers)
+        if ledger is not None:
+            workflow_service = WorkflowService(
+                registry=native_registry,
+                store=WorkflowRunStore(ledger),
+            )
     server = WorkerLiveStreamServer(
         host=config.live_stream.host,
         port=config.live_stream.port,
@@ -416,6 +423,7 @@ def _create_live_stream_components(
             config.live_stream.allow_unauthenticated_loopback
         ),
         native_transcript_mirror=native_transcript_mirror,
+        workflow_service=workflow_service,
     )
     logger.info(
         "Worker live stream configured at http://%s:%s",
@@ -428,6 +436,7 @@ def _create_live_stream_components(
         native_client=native_client,
         native_controller=native_controller,
         native_registry=native_registry,
+        workflow_service=workflow_service,
     )
 
 
