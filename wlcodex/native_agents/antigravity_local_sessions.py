@@ -41,9 +41,10 @@ class AntigravityLocalSessionIndex:
         if not session_id:
             return None
         for root in self._roots:
-            direct = root / "conversations" / f"{session_id}.pb"
-            if direct.exists():
-                return _session_from_file(root, direct, _cwd_by_session(root))
+            for suffix in (".pb", ".db"):
+                direct = root / "conversations" / f"{session_id}{suffix}"
+                if direct.exists():
+                    return _session_from_file(root, direct, _cwd_by_session(root))
         for session in self.list_recent(limit=1000):
             if session.session_id == session_id:
                 return session
@@ -63,7 +64,10 @@ def _conversation_files(root: Path) -> list[Path]:
     conversations = root / "conversations"
     if not conversations.exists():
         return []
-    return [path for path in conversations.glob("*.pb") if path.is_file()]
+    files: list[Path] = []
+    for suffix in ("*.pb", "*.db"):
+        files.extend(path for path in conversations.glob(suffix) if path.is_file())
+    return files
 
 
 def _cwd_by_session(root: Path) -> dict[str, str]:

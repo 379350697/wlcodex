@@ -158,7 +158,7 @@ async def test_cli_provider_start_session_runs_in_background_and_streams_events(
     ]
     await asyncio.sleep(0)
     assert runner.calls[0]["prompt"] == "say hi"
-    assert runner.calls[0]["conversation_id"] == ""
+    assert runner.calls[0]["conversation_id"] == result.native_session_id
 
     runner.release.set()
     await provider.wait_for_background_tasks()
@@ -170,7 +170,7 @@ async def test_cli_provider_start_session_runs_in_background_and_streams_events(
     )
     assert session is not None
     assert session.status == "done"
-    assert session.metadata["antigravity_conversation_id"] == "ag-conv-1"
+    assert session.metadata["antigravity_conversation_id"] == result.native_session_id
     events = runtime_store.list_by_agent_run(session.agent_run_id)
     assert [event.event_type for event in events] == [
         EventType.AGENT_RUN_STARTED,
@@ -201,7 +201,59 @@ async def test_cli_provider_read_and_continue_use_saved_conversation_id(
     await provider.wait_for_background_tasks()
 
     assert runner.calls[1]["prompt"] == "second"
-    assert runner.calls[1]["conversation_id"] == "ag-conv-1"
+    assert runner.calls[1]["conversation_id"] == result.native_session_id
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_start_session_pins_agy_conversation_to_native_session_id(
+    tmp_path: Path,
+) -> None:
+    runner = BlockingAntigravityCliRunner()
+    provider, _store, _runtime_store, _runner = _provider(tmp_path, runner=runner)
+
+    result = await asyncio.wait_for(
+        provider.start_session(str(tmp_path), "start isolated"),
+        timeout=0.05,
+    )
+
+    await asyncio.sleep(0)
+    assert runner.calls[0]["conversation_id"] == result.native_session_id
+
+    runner.release.set()
+    await provider.wait_for_background_tasks()
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_start_session_uses_isolated_execution_cwd(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runner = BlockingAntigravityCliRunner()
+    provider, store, _runtime_store, _runner = _provider(tmp_path, runner=runner)
+
+    result = await asyncio.wait_for(
+        provider.start_session(str(workspace), "start isolated"),
+        timeout=0.05,
+    )
+
+    await asyncio.sleep(0)
+    call = runner.calls[0]
+    assert call["cwd"] != str(workspace)
+    assert str(result.native_session_id) in str(call["cwd"])
+    assert call["extra_dirs"] == (str(workspace),)
+    assert Path(str(call["cwd"])).exists()
+
+    session = store.get_by_native_session_id(
+        provider="antigravity",
+        provider_engine="cli-local",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    assert session.metadata["antigravity_execution_cwd"] == call["cwd"]
+
+    runner.release.set()
+    await provider.wait_for_background_tasks()
 
 
 @pytest.mark.asyncio
@@ -252,7 +304,39 @@ async def test_cli_provider_imports_local_pb_history_and_can_continue_it(
 
 
 @pytest.mark.asyncio
-async def test_cli_provider_recovers_conversation_id_from_latest_local_cwd(
+async def test_cli_provider_imports_local_db_history(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = tmp_path / "antigravity-cli"
+    conversations = root / "conversations"
+    cache = root / "cache"
+    conversations.mkdir(parents=True)
+    cache.mkdir(parents=True)
+    (conversations / "db-conv.db").write_bytes(b"SQLite format 3\x00")
+    (cache / "last_conversations.json").write_text(
+        json.dumps({str(workspace): "db-conv"}),
+        encoding="utf-8",
+    )
+    local_index = AntigravityLocalSessionIndex(roots=(root,))
+    provider, _store, _runtime_store, _runner = _provider(
+        tmp_path,
+        local_session_index=local_index,
+    )
+
+    sessions = await provider.list_sessions()
+
+    imported = [session for session in sessions if session.native_session_id == "db-conv"]
+    assert len(imported) == 1
+    assert imported[0].cwd == str(workspace)
+    assert imported[0].metadata["antigravity_source_path"] == str(
+        conversations / "db-conv.db"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_keeps_pinned_conversation_id_over_latest_local_cwd(
     tmp_path: Path,
 ) -> None:
     class LatestIndex(EmptyAntigravityIndex):
@@ -300,7 +384,7 @@ async def test_cli_provider_recovers_conversation_id_from_latest_local_cwd(
         native_session_id=result.native_session_id,
     )
     assert session is not None
-    assert session.metadata["antigravity_conversation_id"] == "latest-conv"
+    assert session.metadata["antigravity_conversation_id"] == result.native_session_id
 
 
 @pytest.mark.asyncio
@@ -353,7 +437,7 @@ async def test_cli_provider_ignores_stale_latest_local_cwd(
     )
     assert session is not None
     assert session.status == "done"
-    assert "antigravity_conversation_id" not in session.metadata
+    assert session.metadata["antigravity_conversation_id"] == result.native_session_id
 
 
 @pytest.mark.asyncio
@@ -432,7 +516,7 @@ async def test_cli_provider_hides_local_duplicate_after_created_session_claims_p
                 return local_session
             return None
 
-    class BlockingNoIdRunner(FakeAntigravityCliRunner):
+    class BlockingExternalIdRunner(FakeAntigravityCliRunner):
         def __init__(self) -> None:
             super().__init__(conversation_id="")
             self.release = asyncio.Event()
@@ -454,10 +538,14 @@ async def test_cli_provider_hides_local_duplicate_after_created_session_claims_p
                 }
             )
             await self.release.wait()
-            yield {"type": "assistant", "text": "hello"}
+            yield {
+                "type": "assistant",
+                "text": "hello",
+                "conversation_id": local_session.session_id,
+            }
 
     local_index = RaceIndex()
-    runner = BlockingNoIdRunner()
+    runner = BlockingExternalIdRunner()
     provider, store, _runtime_store, _runner = _provider(
         tmp_path,
         runner=runner,
@@ -597,6 +685,38 @@ async def test_cli_runner_rejects_authentication_prompt_as_failure(
                 cwd=str(tmp_path),
             )
         ]
+
+
+@pytest.mark.asyncio
+async def test_cli_runner_rejects_cli_error_text_as_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        AntigravityCliConfig,
+        AntigravityCliRunner,
+    )
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"Error: timed out waiting for response\n", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    fake_binary = tmp_path / "agy"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = AntigravityCliRunner(AntigravityCliConfig(binary=str(fake_binary)))
+
+    with pytest.raises(RuntimeError, match="timed out waiting for response"):
+        await _collect_runner_events(runner, tmp_path)
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
@@ -44,6 +45,9 @@ class _RunOutcome:
     antigravity_conversation_id: str = ""
     error: str = ""
     emitted_text: bool = False
+
+
+_EXECUTION_CWD_METADATA_KEY = "antigravity_execution_cwd"
 
 
 class AntigravityCliRunner:
@@ -98,6 +102,9 @@ class AntigravityCliRunner:
         auth_error = _authentication_error_message(f"{text}\n{error_text}")
         if auth_error:
             raise RuntimeError(auth_error)
+        cli_error = _cli_error_message(error_text or text)
+        if cli_error:
+            raise RuntimeError(cli_error)
         if proc.returncode not in (0, None):
             raise RuntimeError((error_text or text or "Antigravity CLI failed").strip())
         if text:
@@ -224,13 +231,17 @@ class AntigravityCliLocalProvider:
             source_kind="antigravity_cli_local",
             status="running",
             last_turn_id=native_turn_id,
-            metadata={},
+            metadata={
+                _EXECUTION_CWD_METADATA_KEY: _wlcodex_execution_cwd(
+                    native_session_id
+                )
+            },
         )
         self._start_background_prompt(
             session=session,
             native_turn_id=native_turn_id,
             prompt=prompt,
-            conversation_id="",
+            conversation_id=native_session_id,
         )
         return _control_result(
             session,
@@ -250,7 +261,11 @@ class AntigravityCliLocalProvider:
             cwd=cwd or self._default_cwd,
             source_kind="antigravity_cli_local",
             status="created",
-            metadata={},
+            metadata={
+                _EXECUTION_CWD_METADATA_KEY: _wlcodex_execution_cwd(
+                    native_session_id
+                )
+            },
         )
         return _control_result(session, status="created")
 
@@ -328,11 +343,14 @@ class AntigravityCliLocalProvider:
     ) -> _RunOutcome:
         latest_conversation_id = conversation_id
         emitted_text = False
+        execution_cwd = _session_execution_cwd(session)
+        Path(execution_cwd).mkdir(parents=True, exist_ok=True)
         try:
             async for event in self._runner.run(
                 prompt=prompt,
-                cwd=session.cwd,
+                cwd=execution_cwd,
                 conversation_id=conversation_id,
+                extra_dirs=_runner_extra_dirs(session, execution_cwd),
             ):
                 event_conversation_id = str(event.get("conversation_id") or "")
                 latest_conversation_id = event_conversation_id or latest_conversation_id
@@ -352,17 +370,18 @@ class AntigravityCliLocalProvider:
                 emitted_text=emitted_text,
             )
         if not latest_conversation_id:
-            latest = self._local_session_index.latest_for_cwd(session.cwd)
+            latest = self._local_session_index.latest_for_cwd(execution_cwd)
             if latest is not None and _local_session_started_after(
                 latest,
                 session.created_at,
             ):
                 latest_conversation_id = latest.session_id
-        if not emitted_text and not latest_conversation_id:
+        if not emitted_text:
             return _RunOutcome(
                 status="failed",
+                antigravity_conversation_id=latest_conversation_id,
                 error=(
-                    "Antigravity CLI completed without output or conversation id. "
+                    "Antigravity CLI completed without assistant output. "
                     "Run agy in a local terminal, complete Google login/setup, "
                     "then retry from WLCodex."
                 ),
@@ -687,6 +706,30 @@ def _new_turn_id() -> str:
     return f"cli-local-turn-{uuid4()}"
 
 
+def _wlcodex_execution_cwd(native_session_id: str) -> str:
+    return str(
+        Path(tempfile.gettempdir())
+        / "wlcodex-antigravity-cli"
+        / native_session_id
+    )
+
+
+def _session_execution_cwd(session: NativeAgentSession) -> str:
+    value = str(session.metadata.get(_EXECUTION_CWD_METADATA_KEY, "") or "").strip()
+    return value or session.cwd
+
+
+def _runner_extra_dirs(
+    session: NativeAgentSession,
+    execution_cwd: str,
+) -> tuple[str, ...]:
+    if not session.cwd:
+        return ()
+    if str(Path(session.cwd).expanduser()) == str(Path(execution_cwd).expanduser()):
+        return ()
+    return (session.cwd,)
+
+
 def _local_session_started_after(
     local_session: AntigravityLocalSession,
     started_at: str,
@@ -758,6 +801,13 @@ def _authentication_error_message(text: str) -> str:
         "Antigravity CLI authentication required. Run agy in a local terminal, "
         "complete Google login, then retry from WLCodex."
     )
+
+
+def _cli_error_message(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("Error:"):
+        return stripped
+    return ""
 
 
 def _resolve_antigravity_binary(binary: str) -> str:
