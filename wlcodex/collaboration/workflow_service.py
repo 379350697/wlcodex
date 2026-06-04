@@ -97,6 +97,10 @@ class WorkflowService:
                 f"handoff preview {preview_id} does not belong to workflow run "
                 f"{workflow_run_id}"
             )
+        if preview.target_provider != target_provider:
+            raise ValueError("target provider does not match preview")
+        if preview.cwd != cwd:
+            raise ValueError("workspace does not match preview")
         target = self._registry.get(target_provider)
         capabilities = target.capabilities()
         if not capabilities.can_start_session:

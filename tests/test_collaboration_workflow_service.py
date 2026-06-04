@@ -253,3 +253,80 @@ async def test_execute_rejects_target_without_start_capability(tmp_path) -> None
             cwd="/repo",
             prompt=preview["prompt"],
         )
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_target_provider_mismatch(tmp_path) -> None:
+    source = ServiceFakeProvider("codex")
+    target = ServiceFakeProvider("claude")
+    other_target = ServiceFakeProvider("antigravity")
+    service = _service(tmp_path, [source, target, other_target])
+    preview = await service.preview_handoff(
+        source_provider="codex",
+        source_thread_id="source-session",
+        source_turn_id="",
+        target_provider="claude",
+        cwd="/repo",
+        intent="auto",
+        user_note="",
+    )
+
+    with pytest.raises(ValueError, match="target provider does not match preview"):
+        await service.execute_handoff(
+            workflow_run_id=preview["workflow_run_id"],
+            preview_id=preview["preview_id"],
+            target_provider="antigravity",
+            cwd="/repo",
+            prompt=preview["prompt"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_cwd_mismatch(tmp_path) -> None:
+    source = ServiceFakeProvider("codex")
+    target = ServiceFakeProvider("claude")
+    service = _service(tmp_path, [source, target])
+    preview = await service.preview_handoff(
+        source_provider="codex",
+        source_thread_id="source-session",
+        source_turn_id="",
+        target_provider="claude",
+        cwd="/repo",
+        intent="auto",
+        user_note="",
+    )
+
+    with pytest.raises(ValueError, match="workspace does not match preview"):
+        await service.execute_handoff(
+            workflow_run_id=preview["workflow_run_id"],
+            preview_id=preview["preview_id"],
+            target_provider="claude",
+            cwd="/other",
+            prompt=preview["prompt"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_handoff_escapes_target_url_values(tmp_path) -> None:
+    source = ServiceFakeProvider("codex")
+    target = ServiceFakeProvider("claude/dev")
+    service = _service(tmp_path, [source, target])
+    preview = await service.preview_handoff(
+        source_provider="codex",
+        source_thread_id="source-session",
+        source_turn_id="",
+        target_provider="claude/dev",
+        cwd="/repo",
+        intent="auto",
+        user_note="",
+    )
+
+    result = await service.execute_handoff(
+        workflow_run_id=preview["workflow_run_id"],
+        preview_id=preview["preview_id"],
+        target_provider="claude/dev",
+        cwd="/repo",
+        prompt=preview["prompt"],
+    )
+
+    assert "native_provider=claude%2Fdev" in result["target_url"]
