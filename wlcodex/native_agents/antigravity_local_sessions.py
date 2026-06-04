@@ -51,11 +51,10 @@ class AntigravityLocalSessionIndex:
         return None
 
     def latest_for_cwd(self, cwd: str) -> AntigravityLocalSession | None:
-        normalized = str(Path(cwd).expanduser()) if cwd else ""
-        if not normalized:
+        if not cwd:
             return None
         for session in self.list_recent(limit=1000):
-            if session.cwd and str(Path(session.cwd).expanduser()) == normalized:
+            if session.cwd and _same_cwd(session.cwd, cwd):
                 return session
         return None
 
@@ -146,6 +145,17 @@ def _title_from_markdown(path: Path) -> str:
 
 def _fallback_title(session_id: str) -> str:
     return f"Antigravity {session_id[:8]}"
+
+
+def _same_cwd(left: str, right: str) -> bool:
+    return _normalized_cwd(left) == _normalized_cwd(right)
+
+
+def _normalized_cwd(cwd: str) -> str:
+    try:
+        return str(Path(cwd).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError):
+        return str(Path(cwd).expanduser())
 
 
 def _mtime_iso(path: Path) -> str:

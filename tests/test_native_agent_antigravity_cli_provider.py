@@ -335,6 +335,31 @@ async def test_cli_provider_imports_local_db_history(
     )
 
 
+def test_antigravity_local_session_index_matches_equivalent_cwd_paths(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    workspace_alias = tmp_path / "workspace-alias"
+    workspace_alias.symlink_to(workspace, target_is_directory=True)
+    root = tmp_path / "antigravity-cli"
+    conversations = root / "conversations"
+    cache = root / "cache"
+    conversations.mkdir(parents=True)
+    cache.mkdir(parents=True)
+    (conversations / "equivalent-cwd.db").write_bytes(b"SQLite format 3\x00")
+    (cache / "last_conversations.json").write_text(
+        json.dumps({str(workspace_alias): "equivalent-cwd"}),
+        encoding="utf-8",
+    )
+
+    local_index = AntigravityLocalSessionIndex(roots=(root,))
+
+    session = local_index.latest_for_cwd(str(workspace))
+    assert session is not None
+    assert session.session_id == "equivalent-cwd"
+
+
 @pytest.mark.asyncio
 async def test_cli_provider_recovers_conversation_id_from_isolated_local_cwd(
     tmp_path: Path,
