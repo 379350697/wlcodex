@@ -4,6 +4,7 @@ import asyncio
 import shutil
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -94,6 +95,9 @@ class AntigravityCliRunner:
 
         text = stdout.decode("utf-8", errors="replace") if stdout else ""
         error_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+        auth_error = _authentication_error_message(f"{text}\n{error_text}")
+        if auth_error:
+            raise RuntimeError(auth_error)
         if proc.returncode not in (0, None):
             raise RuntimeError((error_text or text or "Antigravity CLI failed").strip())
         if text:
@@ -349,7 +353,10 @@ class AntigravityCliLocalProvider:
             )
         if not latest_conversation_id:
             latest = self._local_session_index.latest_for_cwd(session.cwd)
-            if latest is not None:
+            if latest is not None and _local_session_started_after(
+                latest,
+                session.created_at,
+            ):
                 latest_conversation_id = latest.session_id
         if not emitted_text and not latest_conversation_id:
             return _RunOutcome(
@@ -674,6 +681,30 @@ def _is_longer_version_of_title(existing_title: str, local_title: str) -> bool:
 
 def _new_turn_id() -> str:
     return f"cli-local-turn-{uuid4()}"
+
+
+def _local_session_started_after(
+    local_session: AntigravityLocalSession,
+    started_at: str,
+) -> bool:
+    return _timestamp_seconds(local_session.updated_at) >= _timestamp_seconds(started_at)
+
+
+def _timestamp_seconds(value: str) -> float:
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _authentication_error_message(text: str) -> str:
+    lowered = text.lower()
+    if "authentication required" not in lowered and "authentication timed out" not in lowered:
+        return ""
+    return (
+        "Antigravity CLI authentication required. Run agy in a local terminal, "
+        "complete Google login, then retry from WLCodex."
+    )
 
 
 def _resolve_antigravity_binary(binary: str) -> str:
