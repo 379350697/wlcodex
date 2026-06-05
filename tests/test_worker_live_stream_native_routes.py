@@ -1784,7 +1784,7 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "function applyNativeTurnState" in response
     assert 'id="composerActivity"' in response
     assert "function setComposerActivity" in response
-    assert "continueButton.textContent = mode === \"interrupt\" ? \"■\" : \"↑\";" in response
+    assert "continueButton.innerHTML = mode === \"interrupt\" ? ICONS.stop : ICONS.send;" in response
     assert 'const requiresTurn = mode === "interrupt" || mode === "steer";' in response
     assert "requiresTurn && !activeTurnId" in response
     assert "steerButton.hidden = !canSteerActiveTurn();" in response
@@ -2039,6 +2039,13 @@ async def test_worker_live_page_shows_approval_resolution_state(
     assert "button.classList.toggle(\"selected\", selected);" in response
     assert "button.classList.toggle(\"muted\", state !== \"idle\" && !selected);" in response
     assert "function approvalResolvedAction" in response
+    assert "function resolvedApprovalEventFor(requestId)" in response
+    assert "function hasUnresolvedApprovalRequests(sourceEvents)" in response
+    assert "hasUnresolvedApprovalRequests(loadedEvents)" in response
+    assert "const alreadyResolved = resolvedApprovalEventFor(requestId);" in response
+    assert 'setApprovalState(card, approvalResolvedAction(alreadyResolved), "resolved");' in response
+    assert "const resolved = resolvedApprovalEventFor(requestId);" in response
+    assert 'setApprovalState(card, approvalResolvedAction(resolved), "resolved");' in response
     assert "const action = approvalResolvedAction(event, card);" in response
     assert 'setApprovalState(card, action, "resolved");' in response
     assert 'setApprovalState(card, "approve_once", "resolved");' not in response
@@ -2142,9 +2149,9 @@ def test_live_page_uses_native_codex_font_scale_for_all_native_providers() -> No
     for provider in ("codex", "claude", "antigravity"):
         response = _live_page(42, native_provider=provider)
 
-        assert ".transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #f4f4f5; font-size: 15px; line-height: 1.55;" in response
+        assert ".transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: 15px; line-height: 1.55;" in response
         assert ".transcript-body pre code { padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }" in response
-        assert "input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid #3f4550; background: #12151d; color: #f4f4f5; padding: 0 14px; font-size: 15px; }" in response
+        assert "input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 0 14px; font-size: 15px; }" in response
 
 
 @pytest.mark.asyncio
@@ -2179,6 +2186,38 @@ async def test_worker_live_page_replaces_delta_with_completed_assistant_message(
     assert "node.row.dataset.completed = \"true\";" in response
     assert "assistantMessageKey(event)" in response
     assert "foldTranscriptPreviewText(group, \"message_completed\")" in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_orders_mirrored_transcript_items_before_completed_reply(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "function orderTranscriptGroupEvents(group)" in response
+    assert "function displayEventOrder(event)" in response
+    assert "function transcriptItemOrder(event)" in response
+    assert "foldGroups(dedupeDisplayEvents(loadedEvents)).map(orderTranscriptGroupEvents)" in response
+    assert "hasCompletedAssistantMessageForTurn(event)" in response
+    assert "rebuildStream();" in response
 
 
 @pytest.mark.asyncio
@@ -2288,7 +2327,7 @@ async def test_worker_live_page_clears_running_composer_state_on_terminal_turn_e
     assert '["completed", "done", "succeeded", "success"]' in response
     assert '["failed", "error", "cancelled", "canceled", "interrupted", "aborted"]' in response
     assert "nativeTurnRunning = false;" in response
-    assert 'continueButton.textContent = mode === "interrupt" ? "■" : "↑";' in response
+    assert 'continueButton.innerHTML = mode === "interrupt" ? ICONS.stop : ICONS.send;' in response
     assert "(!nativeTurnRunning && !composerHasDraft())" in response
 
 
@@ -2324,7 +2363,7 @@ async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns
     assert "function foldMessageCount(group)" in response
     assert "if (isInternalEvent(event)) continue;" in response
     assert "function dedupeDisplayEvents(sourceEvents)" in response
-    assert "const groups = foldGroups(dedupeDisplayEvents(loadedEvents));" in response
+    assert "const groups = foldGroups(dedupeDisplayEvents(loadedEvents)).map(orderTranscriptGroupEvents);" in response
     assert "title.textContent = turnFoldTitle(group);" in response
     assert "nativeTurnId !== latestTurnId" in response
     assert "completed || nativeTurnId !== latestTurnId" not in response

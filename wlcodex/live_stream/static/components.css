@@ -1,0 +1,184 @@
+/* WLCodex — shared component styles (model popover, settings, composer) */
+
+/* ── Model Popover ─────────────────────────────────────── */
+
+.model-popover {
+  position: absolute;
+  left: 0;
+  bottom: 48px;
+  width: min(330px, calc(100vw - 32px));
+  border: 1px solid var(--border-popover);
+  border-radius: 22px;
+  background: var(--bg-popover);
+  box-shadow: var(--shadow-popover);
+  overflow: hidden;
+  z-index: 6;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: bottom left;
+  transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default);
+}
+
+.model-popover.closed {
+  opacity: 0;
+  transform: translateY(8px) scale(0.96);
+  pointer-events: none;
+}
+
+/* ── Setting Rows ──────────────────────────────────────── */
+
+.setting-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 76px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border-section);
+  color: var(--btn-primary-bg);
+}
+
+.setting-row[hidden] { display: none; }
+
+.setting-row:last-child { border-bottom: 0; }
+
+.setting-label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 760;
+}
+
+.setting-value {
+  color: var(--text-dim);
+  font-size: 14px;
+  font-weight: var(--weight-medium);
+}
+
+.setting-chevron {
+  color: var(--btn-primary-bg);
+  font-size: 28px;
+  line-height: 1;
+}
+
+.model-selector, .setting-selector {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── Setting Options ───────────────────────────────────── */
+
+.setting-options {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 12px;
+  border-bottom: 1px solid var(--border-section);
+  background: var(--bg-setting-options);
+}
+
+.setting-options[hidden] { display: none; }
+
+.setting-option {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  border-radius: 13px;
+  padding: 7px 11px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 15px;
+  text-align: left;
+}
+
+.setting-option.selected {
+  background: var(--bg-option-selected);
+  color: #fff;
+}
+
+button.setting-option:not(.secondary):not(.warn):not(:disabled):hover {
+  background: var(--bg-option-hover);
+  filter: none;
+}
+
+.setting-option-check {
+  color: var(--btn-primary-bg);
+  font-weight: var(--weight-black);
+}
+
+/* ── Composer Setting Pills ────────────────────────────── */
+
+.setting-pill {
+  min-height: 38px;
+  max-width: 100%;
+  border-radius: 19px;
+  padding: 0 14px;
+  overflow: hidden;
+  background: var(--bg-pill);
+  color: var(--btn-primary-bg);
+  border: 1px solid transparent;
+  font-size: 14px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease;
+}
+
+.setting-pill.modified {
+  border-color: rgba(147, 197, 253, 0.35);
+  background: var(--bg-pill-modified);
+}
+
+button.setting-pill:not(.secondary):not(.warn):not(:disabled):hover {
+  background: var(--bg-pill-hover);
+  filter: none;
+}
+
+/* ── Attachment Shared Structure ───────────────────────── */
+
+.attachment-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.attachment-strip[hidden] { display: none; }
+
+.attachment-chip {
+  position: relative;
+  flex: 0 0 auto;
+  display: grid;
+  align-items: center;
+  border: 1px solid var(--border-default);
+  background: var(--bg-attachment);
+  padding: 4px;
+  color: var(--btn-primary-bg);
+}
+
+.attachment-chip img {
+  object-fit: cover;
+  background: var(--bg-canvas);
+}
+
+.attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.attachment-remove {
+  padding: 0;
+  border-radius: 50%;
+  background: var(--bg-remove-btn);
+  color: var(--btn-primary-bg);
+}

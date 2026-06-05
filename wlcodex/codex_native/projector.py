@@ -293,6 +293,7 @@ class NativeCodexEventProjector:
         self,
         *,
         native_thread_id: str,
+        native_turn_id: str = "",
         request_id: str,
         response: dict[str, Any],
     ) -> list[RuntimeEvent]:
@@ -302,9 +303,10 @@ class NativeCodexEventProjector:
         return self._append_backend_event(
             event_type="approval_resolved",
             native_thread_id=native_thread_id,
-            native_turn_id="",
+            native_turn_id=native_turn_id,
             payload={
                 "threadId": native_thread_id,
+                "turnId": native_turn_id,
                 "codexRequestId": request_id,
                 "response": response,
             },

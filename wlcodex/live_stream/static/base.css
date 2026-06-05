@@ -10,42 +10,131 @@
 
 :root {
   /* Background layers */
-  --bg-root:     #000;
-  --bg-elevated: #0d0e12;
-  --bg-surface:  #111217;
-  --bg-input:    #12151d;
-  --bg-interact: #20242d;
+  --bg-root:          #000;
+  --bg-elevated:      #0d0e12;
+  --bg-surface:       #111217;
+  --bg-input:         #12151d;
+  --bg-interact:      #20242d;
+  --bg-canvas:        #050506;
+  --bg-popover:       #222225;
+  --bg-composer-input:#1c1c20;
+  --bg-attachment:    #11141b;
+  --bg-chip-off:      #2d2d31;
+  --bg-code:          #1d2027;
+  --bg-user-bubble:   #1c2030;
+  --bg-remove-btn:    #272b35;
+  --bg-setting-options: #1d1d20;
+  --bg-pill:          #2a2a2d;
+  --bg-pill-hover:    #353538;
+  --bg-pill-modified: #1e2435;
+  --bg-option-hover:  #2a2a30;
+  --bg-option-selected: #34343a;
 
   /* Borders */
-  --border-subtle:  #24262d;
-  --border-default: #30333a;
-  --border-input:   #3f4550;
+  --border-subtle:    #24262d;
+  --border-default:   #30333a;
+  --border-input:     #3f4550;
+  --border-popover:   #3a3a40;
+  --border-section:   #343439;
+  --border-header:    #26282f;
+  --border-card:      #2f3138;
+  --border-input-alt: #383b43;
+  --border-code:      #2e333d;
+  --border-council:   #334155;
 
   /* Text */
-  --text-primary:   #f7f7f8;
-  --text-secondary: #d4d7de;
-  --text-muted:     #9ca3af;
-  --text-heading:   #ffffff;
+  --text-primary:     #f7f7f8;
+  --text-secondary:   #d4d7de;
+  --text-muted:       #9ca3af;
+  --text-heading:     #ffffff;
+  --text-placeholder: #aeb4bf;
+  --text-dim:         #c8c8d0;
+  --text-meta:        #8d93a0;
+  --text-code:        #c4ccdb;
 
   /* Semantic colors */
-  --color-success: #22c55e;
-  --color-warning: #f59e0b;
-  --color-error:   #ef4444;
-  --color-link:    #93c5fd;
+  --color-success:    #22c55e;
+  --color-warning:    #f59e0b;
+  --color-error:      #ef4444;
+  --color-link:       #93c5fd;
+  --color-error-bg:   #b91c1c;
+  --color-error-light: #fca5a5;
+  --color-error-text: #fecaca;
 
   /* Button colors */
-  --btn-primary-bg:    #f4f4f5;
-  --btn-primary-color: #101114;
-  --btn-secondary-bg:  #1b1f29;
+  --btn-primary-bg:          #f4f4f5;
+  --btn-primary-color:       #101114;
+  --btn-secondary-bg:        #1b1f29;
+  --btn-primary-hover:       #e8e8e9;
+  --btn-secondary-hover-bg:  #252a36;
+  --btn-secondary-hover-border: #4f5560;
+  --btn-warn-bg:             #b91c1c;
+  --btn-warn-color:          #ffffff;
+  --btn-ghost-hover:         rgba(255,255,255,0.04);
+  --btn-ghost-active:        rgba(255,255,255,0.07);
+  --btn-active-bg:           rgba(147,197,253,0.12);
+  --btn-active-hover:        rgba(147,197,253,0.14);
+  --btn-active-press:        rgba(147,197,253,0.16);
 
-  /* Timing */
-  --duration-fast:   150ms;
-  --duration-normal: 200ms;
-  --ease-default: cubic-bezier(0.4, 0, 0.2, 1);
+  /* Button sizing */
+  --btn-height-sm:   38px;
+  --btn-height-md:   44px;
+  --btn-height-lg:   52px;
+  --btn-radius-sm:   var(--radius-sm);
+  --btn-radius-md:   var(--radius-md);
+  --btn-radius-lg:   var(--radius-lg);
+  --btn-radius-xl:   14px;
+  --btn-radius-pill: var(--radius-pill);
+
+  /* Spacing (4px base) */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
 
   /* Typography */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Font size scale */
+  --text-xs:   12px;
+  --text-sm:   13px;
+  --text-base: 14px;
+  --text-md:   15px;
+  --text-lg:   17px;
+  --text-xl:   20px;
+  --text-2xl:  22px;
+  --text-3xl:  28px;
+
+  /* Line height scale */
+  --leading-tight:   1.28;
+  --leading-snug:    1.35;
+  --leading-normal:  1.45;
+  --leading-relaxed: 1.55;
+
+  /* Font weights */
+  --weight-medium:    500;
+  --weight-semibold:  650;
+  --weight-bold:      700;
+  --weight-extrabold: 760;
+  --weight-black:     800;
+
+  /* Circle navigation */
+  --circle-bg:        #202126;
+  --circle-bg-hover:  #2a2d35;
+  --circle-bg-active: #343840;
+
+  /* Shadows */
+  --shadow-popover: 0 20px 54px rgba(0,0,0,0.55);
+
+  /* Timing */
+  --duration-fast:    150ms;
+  --duration-normal:  200ms;
+  --duration-slow:    300ms;
+  --ease-default: cubic-bezier(0.4, 0, 0.2, 1);
 
   /* Radii */
   --radius-sm:     8px;
@@ -75,17 +164,17 @@ body {
   height: 50px;
   border-radius: 50%;
   border: 1px solid var(--border-default);
-  background: #202126;
-  color: #fff;
+  background: var(--circle-bg);
+  color: var(--text-heading);
   text-decoration: none;
   font-size: 30px;
   line-height: 1;
   transition: background var(--duration-fast) ease, transform var(--duration-fast) ease;
 }
 
-.circle:hover { background: #2a2d35; }
+.circle:hover { background: var(--circle-bg-hover); }
 
-.circle:active { transform: scale(0.90); background: #343840; }
+.circle:active { transform: scale(0.90); background: var(--circle-bg-active); }
 
 #back:active { transform: scale(0.90) translateX(-2px); }
 
@@ -98,7 +187,7 @@ button {
   padding: 8px 14px;
   background: var(--btn-primary-bg);
   color: var(--btn-primary-color);
-  font-weight: 760;
+  font-weight: var(--weight-extrabold);
   font-size: 15px;
   font-family: inherit;
   transition: opacity var(--duration-fast) var(--ease-default),
@@ -112,7 +201,7 @@ button:disabled {
 
 button:not(:disabled):hover { filter: brightness(0.92); }
 
-button:not(.secondary):not(.warn):not(:disabled):hover { background: #e8e8e9; }
+button:not(.secondary):not(.warn):not(:disabled):hover { background: var(--btn-primary-hover); }
 
 button:not(:disabled):active {
   transform: scale(0.97);
@@ -126,13 +215,13 @@ button.secondary {
 }
 
 button.secondary:not(:disabled):hover {
-  background: #252a36;
-  border-color: #4f5560;
+  background: var(--btn-secondary-hover-bg);
+  border-color: var(--btn-secondary-hover-border);
 }
 
 button.warn {
-  background: #b91c1c;
-  color: #fff;
+  background: var(--btn-warn-bg);
+  color: var(--btn-warn-color);
 }
 
 .primary-action:not(:disabled):active { transform: scale(0.93); }
@@ -190,6 +279,20 @@ input:focus, textarea:focus, select:focus {
 *:focus-visible {
   outline: 2px solid var(--color-link);
   outline-offset: 2px;
+}
+
+/* ── Icon SVGs ─────────────────────────────────────────── */
+
+.circle svg,
+.setting-chevron svg,
+.attach-button svg,
+.primary-action svg,
+.attachment-remove svg,
+.setting-option-check svg {
+  display: block;
+  width: 1em;
+  height: 1em;
+  pointer-events: none;
 }
 
 /* ── Reduced Motion ───────────────────────────────────── */

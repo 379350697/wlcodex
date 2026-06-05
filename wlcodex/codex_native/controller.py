@@ -491,6 +491,11 @@ class CodexNativeController:
         self._client.resolve_request(codex_request_id, protocol_response)
         self._projector.project_approval_resolved(
             native_thread_id=native_thread_id,
+            native_turn_id=str(
+                approval_payload.get("native_turn_id")
+                or approval_payload.get("turnId")
+                or ""
+            ),
             request_id=codex_request_id,
             response=protocol_response,
         )

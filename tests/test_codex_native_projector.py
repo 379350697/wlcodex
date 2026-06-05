@@ -214,6 +214,27 @@ def test_projector_maps_reasoning_and_patch_notifications(tmp_path: Path) -> Non
     assert events[1].payload["diff"] == "@@ patch"
 
 
+def test_projector_preserves_approval_resolved_turn_id(tmp_path: Path) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    projector = NativeCodexEventProjector(session_store, runtime_store)
+
+    projected = projector.project_approval_resolved(
+        native_thread_id="thread_approval",
+        native_turn_id="turn_approval",
+        request_id="request_1",
+        response={"decision": "accept"},
+    )
+
+    session = session_store.get_by_thread_id("thread_approval")
+    assert session is not None
+    events = runtime_store.list_by_agent_run(session.agent_run_id)
+    assert projected == events
+    assert [event.event_type for event in events] == [EventType.APPROVAL_RESOLVED]
+    assert events[0].payload["native_thread_id"] == "thread_approval"
+    assert events[0].payload["native_turn_id"] == "turn_approval"
+    assert events[0].payload["codexRequestId"] == "request_1"
+
+
 def test_projector_reads_official_thread_turns_and_deduplicates_history(
     tmp_path: Path,
 ) -> None:
