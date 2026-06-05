@@ -634,17 +634,18 @@ class WorkerLiveStreamServer:
                 return
             prompt = str(body.get("prompt", ""))
             model = _optional_nonempty_string(body.get("model"))
+            images = _safe_image_attachments(body.get("images"))
             service_tier = _optional_nonempty_string(
                 body.get("service_tier") or body.get("serviceTier")
             )
-            if prompt.strip():
+            if prompt.strip() or images:
                 result = await target.start_session(
                     str(body.get("cwd", "")),
                     prompt,
                     model=model,
                     effort=_optional_nonempty_string(body.get("effort")),
                     service_tier=service_tier,
-                    images=_safe_image_attachments(body.get("images")),
+                    images=images,
                 )
             else:
                 result = await target.create_session(
@@ -2469,7 +2470,15 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .setting-option.selected { background: #34343a; color: #fff; }
     button.setting-option:not(.secondary):not(.warn):not(:disabled):hover { background: #2a2a30; filter: none; }
     .setting-option-check { color: #f4f4f5; font-weight: 800; }
-    .start-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
+    .attach-button { width: 56px; height: 56px; padding: 0; border-radius: 28px; border: 1px solid #3a3a40; background: #1c1c20; color: #f7f7f8; font-size: 26px; line-height: 1; }
+    button.attach-button:not(.secondary):not(.warn):not(:disabled):hover { background: #2a2a30; filter: none; }
+    .attachment-strip { display: flex; gap: 8px; min-height: 48px; overflow-x: auto; padding-bottom: 1px; }
+    .attachment-strip[hidden] { display: none; }
+    .attachment-chip { position: relative; flex: 0 0 auto; display: grid; grid-template-columns: 42px minmax(76px, 1fr) 26px; align-items: center; gap: 7px; max-width: 220px; min-height: 46px; border: 1px solid #30333a; border-radius: 12px; background: #11141b; padding: 4px; color: #f4f4f5; }
+    .attachment-chip img { width: 42px; height: 38px; border-radius: 8px; object-fit: cover; background: #050506; }
+    .attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d4d4d8; font-size: 12px; }
+    .attachment-remove { width: 26px; min-height: 26px; padding: 0; border-radius: 50%; background: #272b35; color: #f4f4f5; font-size: 15px; }
+    .start-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; }
     input { min-width: 0; height: 56px; border-radius: 28px; border: 1px solid #3a3a40; background: #1c1c20; color: #f7f7f8; padding: 0 20px; font-size: 17px; }
     button.chat { height: 56px; min-width: 118px; border-radius: 28px; border: 0; background: #fff; color: #000; font-size: 17px; font-weight: 760; }
   </style>
@@ -2535,7 +2544,10 @@ def _native_codex_page(provider_name: str = "codex") -> str:
         </div>
       </div>
     </div>
+    <div class="attachment-strip" id="attachmentStrip" hidden></div>
     <div class="start-row">
+      <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
+      <input id="imageInput" type="file" accept="image/*" multiple hidden>
       <input id="prompt" placeholder="搜索聊天或开始新聊天">
       <button class="chat" id="send">聊天</button>
     </div>
@@ -2562,6 +2574,9 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     const projectsEl = document.getElementById("projects");
     const promptEl = document.getElementById("prompt");
     const controlsEl = document.querySelector(".controls");
+    const attachmentButton = document.getElementById("attachmentButton");
+    const imageInput = document.getElementById("imageInput");
+    const attachmentStrip = document.getElementById("attachmentStrip");
     const chatRow = document.getElementById("chat");
     const projectNewChat = document.getElementById("projectNewChat");
     const projectNewChatMeta = document.getElementById("projectNewChatMeta");
@@ -2584,6 +2599,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     let modelCatalog = [];
     let savedModelSettings = loadSavedModelSettings();
     let modelSettingsDirty = false;
+    let imageAttachments = [];
 
     async function api(path, options = {}) {
       const res = await fetch(path, {
@@ -3072,17 +3088,35 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       if (settings.model) body.model = settings.model;
       if (settings.effort) body.effort = settings.effort;
       if (settings.service_tier) body.service_tier = settings.service_tier;
+      if (imageAttachments.length) {
+        body.images = imageAttachments.map(image => ({
+          url: image.url,
+          filename: image.filename,
+          mime_type: image.mime_type
+        }));
+      }
       const result = await api(`${API_BASE}/sessions/start`, {
         method: "POST",
         body: JSON.stringify(body)
       });
+      promptEl.value = "";
+      imageAttachments = [];
+      renderAttachments();
       openLive(result);
     }
 
-    function focusProjectPrompt() {
+    async function handleProjectNewChat() {
       if (!selectedProjectCwd) return;
+      if (composerHasDraft()) {
+        await startNewChat(promptEl.value.trim());
+        return;
+      }
       updateContextHint();
       promptEl.focus();
+    }
+
+    function composerHasDraft() {
+      return Boolean(promptEl.value.trim() || imageAttachments.length);
     }
 
     async function openLive(session = selected) {
@@ -3094,15 +3128,27 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       location.href = `/workers/${session.agent_run_id}/live?${params.toString()}`;
     }
     document.getElementById("send").onclick = async () => {
-      const prompt = promptEl.value.trim();
-      if (!prompt) {
+      if (!composerHasDraft()) {
         promptEl.focus();
         return;
       }
-      await startNewChat(prompt);
+      await startNewChat(promptEl.value.trim());
     };
     document.getElementById("chat").onclick = () => selectProject("");
-    projectNewChat.onclick = focusProjectPrompt;
+    projectNewChat.onclick = handleProjectNewChat;
+    attachmentButton.onclick = () => imageInput.click();
+    imageInput.onchange = async () => {
+      const files = Array.from(imageInput.files || []);
+      imageInput.value = "";
+      for (const file of files) {
+        try {
+          imageAttachments.push(await readImageAttachment(file));
+        } catch (error) {
+          projectNewChatMeta.textContent = error.message || "图片读取失败";
+        }
+      }
+      renderAttachments();
+    };
     modelSettingsButton.onclick = () => {
       const willClose = !modelPopover.classList.contains("closed");
       if (willClose) saveModelSettingsIfChanged();
@@ -3169,6 +3215,88 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       const project = selectedProjectCwd ? lastPath(selectedProjectCwd) : "";
       controlsEl.dataset.project = project;
       promptEl.placeholder = project ? `在 ${project} 中开始新聊天或搜索` : "搜索聊天或开始新聊天";
+    }
+    async function readImageAttachment(file) {
+      const dataUrl = await readFileAsDataUrl(file);
+      try {
+        return await resizeImageAttachment(file, dataUrl);
+      } catch (_error) {
+        return {
+          url: dataUrl,
+          filename: file.name || "image",
+          mime_type: file.type || "image/*"
+        };
+      }
+    }
+    function readFileAsDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("图片读取失败"));
+        reader.readAsDataURL(file);
+      });
+    }
+    function resizeImageAttachment(file, dataUrl) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => {
+          const maxSide = 1280;
+          const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+          if (!Number.isFinite(scale) || scale <= 0) {
+            reject(new Error("图片尺寸无效"));
+            return;
+          }
+          const width = Math.max(1, Math.round(image.width * scale));
+          const height = Math.max(1, Math.round(image.height * scale));
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext("2d");
+          if (!context) {
+            reject(new Error("图片处理失败"));
+            return;
+          }
+          context.drawImage(image, 0, 0, width, height);
+          const mime = file.type === "image/png" && file.size < 900000
+            ? "image/png"
+            : "image/jpeg";
+          const url = scale < 1 || file.size > 1200000
+            ? canvas.toDataURL(mime, .86)
+            : dataUrl;
+          resolve({
+            url,
+            filename: file.name || "image",
+            mime_type: mime
+          });
+        };
+        image.onerror = () => reject(new Error("图片解码失败"));
+        image.src = dataUrl;
+      });
+    }
+    function renderAttachments() {
+      attachmentStrip.innerHTML = "";
+      attachmentStrip.hidden = imageAttachments.length === 0;
+      imageAttachments.forEach((attachment, index) => {
+        const chip = document.createElement("div");
+        chip.className = "attachment-chip";
+        const preview = document.createElement("img");
+        preview.src = attachment.url;
+        preview.alt = "";
+        const name = document.createElement("span");
+        name.className = "attachment-name";
+        name.textContent = attachment.filename || "image";
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "attachment-remove";
+        remove.setAttribute("aria-label", "移除照片");
+        remove.textContent = "×";
+        remove.onclick = () => {
+          imageAttachments.splice(index, 1);
+          renderAttachments();
+        };
+        chip.append(preview, name, remove);
+        attachmentStrip.append(chip);
+      });
     }
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));

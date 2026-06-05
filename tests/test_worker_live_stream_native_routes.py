@@ -611,6 +611,60 @@ async def test_native_start_route_creates_project_thread_with_model_settings(
 
 
 @pytest.mark.asyncio
+async def test_native_start_route_starts_thread_with_image_only_prompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    body = json.dumps(
+        {
+            "cwd": "/Users/wl/projects/wlcodex",
+            "prompt": "",
+            "model": "gpt-5.5",
+            "effort": "high",
+            "images": [{"url": "data:image/png;base64,abc", "filename": "photo.png"}],
+        }
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/start HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert _json_body(response)["native_thread_id"] == "thread-new"
+    assert controller.calls == [
+        (
+            "start_session",
+            "/Users/wl/projects/wlcodex",
+            "",
+            "gpt-5.5",
+            "high",
+            None,
+            [{"url": "data:image/png;base64,abc", "filename": "photo.png"}],
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_native_start_route_creates_empty_project_thread_without_prompt(
     tmp_path: Path,
 ) -> None:
@@ -1317,7 +1371,7 @@ async def test_native_codex_page_uses_project_context_for_new_chat(
     assert "sessionProjectKey(session) === selectedProjectCwd" in response
     assert 'id="projectNewChat"' in response
     assert "function renderProjectAction()" in response
-    assert "function focusProjectPrompt()" in response
+    assert "async function handleProjectNewChat()" in response
     assert "async function startNewChat(prompt)" in response
     assert 'const API_BASE = "/api/native/codex";' in response
     assert "api(`${API_BASE}/sessions/start`" in response
@@ -1369,7 +1423,7 @@ async def test_native_codex_page_keeps_workspace_selection_dark_and_layout_stabl
 
 
 @pytest.mark.asyncio
-async def test_native_codex_project_new_chat_waits_for_first_prompt(
+async def test_native_codex_project_new_chat_starts_when_draft_exists(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -1393,8 +1447,10 @@ async def test_native_codex_project_new_chat_waits_for_first_prompt(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert "function focusProjectPrompt()" in response
-    assert "projectNewChat.onclick = focusProjectPrompt;" in response
+    assert "async function handleProjectNewChat()" in response
+    assert "if (composerHasDraft()) {" in response
+    assert "await startNewChat(promptEl.value.trim());" in response
+    assert "projectNewChat.onclick = handleProjectNewChat;" in response
     assert 'await startNewChat("");' not in response
 
 
@@ -1428,6 +1484,9 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert 'id="modelSelector"' in response
     assert 'id="reasoningSelector"' in response
     assert 'id="serviceTierSelector"' in response
+    assert 'id="attachmentButton"' in response
+    assert 'id="imageInput"' in response
+    assert 'id="attachmentStrip"' in response
     assert "async function loadModelCatalog()" in response
     assert "api(`${API_BASE}/models`)" in response
     assert "function renderReasoningAndSpeed" in response
@@ -1442,6 +1501,11 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "if (settings.model) body.model = settings.model;" in response
     assert "if (settings.effort) body.effort = settings.effort;" in response
     assert "if (settings.service_tier) body.service_tier = settings.service_tier;" in response
+    assert "if (imageAttachments.length) {" in response
+    assert "body.images = imageAttachments.map(image => ({" in response
+    assert "function readImageAttachment(file)" in response
+    assert "function renderAttachments()" in response
+    assert "attachmentButton.onclick = () => imageInput.click();" in response
     assert "function sessionModelSettingsLabel(session)" in response
     assert "function sessionMetaText(session)" in response
     assert "const metadata = (session && session.metadata) || {};" in response
