@@ -4947,6 +4947,7 @@ __ICONS_JS__
       const payload = (event && event.payload) || {};
       const itemId = String(payload.itemId || payload.item_id || "");
       if (!itemId.startsWith("jsonl-")) return "";
+      if (event.kind === "message_completed") return completedAssistantMessageKey(event);
       return itemId;
     }
     function isCanonicalTranscriptItem(event) {
@@ -5047,16 +5048,15 @@ __ICONS_JS__
       preview.append(line);
     }
     function foldTranscriptPreviewText(group, kind) {
-      const parts = [];
-      for (const event of group) {
+      for (let index = group.length - 1; index >= 0; index--) {
+        const event = group[index];
         if (event.kind !== kind) continue;
         const payload = event.payload || {};
         const text = String(payload.text || payload.delta || "").trim();
         if (!text) continue;
-        parts.push(text);
-        if (parts.join(" ").length >= 280) break;
+        return trimFoldPreview(text);
       }
-      return trimFoldPreview(parts.join(" "));
+      return "";
     }
     function trimFoldPreview(text) {
       const compact = String(text || "").replace(/\\s+/g, " ").trim();
@@ -5128,10 +5128,11 @@ __ICONS_JS__
       const payload = (event && event.payload) || {};
       const turnId = payload.native_turn_id || payload.turnId || "";
       const itemId = payload.itemId || payload.item_id || payload.codexRequestId || "";
+      if (event.kind === "lifecycle" || event.kind === "completed") return "";
+      if (event.kind === "message_completed") return `assistant:${completedAssistantMessageKey(event)}`;
       if (itemId) return `${event.kind}:${itemId}`;
       if (event.kind === "user_message") return `user:${turnId}:user`;
       if (event.kind === "text_delta") return `assistant:${turnId}:assistant`;
-      if (event.kind === "message_completed") return `assistant:${turnId}:completed`;
       if (event.kind === "reasoning_delta") return `reasoning:${turnId}:reasoning`;
       if (
         event.kind === "command_started" ||
@@ -5403,8 +5404,21 @@ __ICONS_JS__
     function assistantMessageKey(event) {
       const payload = (event && event.payload) || {};
       const itemId = String(payload.itemId || payload.item_id || "");
+      if (event.kind === "message_completed" && itemId.startsWith("jsonl-assistant")) {
+        return completedAssistantMessageKey(event);
+      }
       if (itemId.startsWith("jsonl-assistant")) return itemId;
       return `${payload.native_turn_id || payload.turnId || ""}:assistant`;
+    }
+    function completedAssistantMessageKey(event) {
+      const payload = (event && event.payload) || {};
+      const itemId = String(payload.itemId || payload.item_id || "");
+      if (itemId) return `${itemId}:${event.id || transcriptTextFingerprint(event)}`;
+      return `${payload.native_turn_id || payload.turnId || ""}:completed:${event.id || transcriptTextFingerprint(event)}`;
+    }
+    function transcriptTextFingerprint(event) {
+      const payload = (event && event.payload) || {};
+      return String(payload.text || payload.summary || payload.delta || "").slice(0, 160);
     }
     function statusKey(event) {
       const payload = event.payload || {};

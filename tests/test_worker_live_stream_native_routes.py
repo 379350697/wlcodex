@@ -2185,6 +2185,9 @@ async def test_worker_live_page_replaces_delta_with_completed_assistant_message(
     assert "node.text = String(incomingText);" in response
     assert "node.row.dataset.completed = \"true\";" in response
     assert "assistantMessageKey(event)" in response
+    assert "completedAssistantMessageKey(event)" in response
+    assert 'if (event.kind === "message_completed" && itemId.startsWith("jsonl-assistant"))' in response
+    assert 'return `${itemId}:${event.id || transcriptTextFingerprint(event)}`;' in response
     assert "foldTranscriptPreviewText(group, \"message_completed\")" in response
 
 
@@ -2362,6 +2365,7 @@ async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns
     assert "turnFoldTitle(group)" in response
     assert "function foldMessageCount(group)" in response
     assert "if (isInternalEvent(event)) continue;" in response
+    assert 'if (event.kind === "lifecycle" || event.kind === "completed") return "";' in response
     assert "function dedupeDisplayEvents(sourceEvents)" in response
     assert "const groups = foldGroups(dedupeDisplayEvents(loadedEvents)).map(orderTranscriptGroupEvents);" in response
     assert "title.textContent = turnFoldTitle(group);" in response
@@ -2437,6 +2441,7 @@ async def test_worker_live_page_fold_keeps_native_transcript_previews(
     assert 'inner.className = "turn-fold-body-inner";' in response
     assert "body.append(inner);" in response
     assert "renderTarget = inner;" in response
+    assert "for (let index = group.length - 1; index >= 0; index--)" in response
     assert ".turn-fold:not(.collapsed) .turn-fold-preview { grid-template-rows: 0fr;" in response
     assert "/turn-summary" not in response
     assert "summarize" not in response
