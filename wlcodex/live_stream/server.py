@@ -2908,7 +2908,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         <span class="event-cursor" id="cursor"></span>
       </section>
       <button class="history-fold" id="historyFold" hidden>更早的消息</button>
-      <section class="codex-transcript" id="events"><div class="empty" id="empty">等待 __PROVIDER_LABEL_TEXT__ 转录</div></section>
+      <section class="codex-transcript" id="events"><div class="empty" id="empty">输入消息开始 __PROVIDER_LABEL_TEXT__ 会话</div></section>
       <div class="composer-activity" id="composerActivity" aria-hidden="true">
         <span class="composer-activity-dot"></span>
         <span class="composer-activity-dot"></span>
