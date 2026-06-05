@@ -3466,7 +3466,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .turn-fold-preview-user { justify-self: end; max-width: min(82%, 520px); padding: 8px 11px; border: 1px solid #333842; border-radius: 15px 15px 4px 15px; background: var(--bg-interact); color: var(--btn-primary-bg); }
     .turn-fold-preview-assistant { justify-self: start; padding-left: 18px; border-left: 2px solid var(--border-default); color: var(--text-secondary); }
     .turn-fold-body { display: grid; grid-template-rows: 0fr; overflow: hidden; opacity: 0; transition: grid-template-rows 200ms ease, opacity 200ms ease 50ms; }
-    .turn-fold-body > * { min-height: 0; }
+    .turn-fold-body-inner { min-height: 0; overflow: hidden; }
     .turn-fold:not(.collapsed) .turn-fold-body { grid-template-rows: 1fr; opacity: 1; padding: 12px 0 18px; }
     .codex-tool-call, .file-change-card, .approval-card { border: 1px solid var(--border-default); background: #0f1014; border-radius: 10px; overflow: hidden; }
     .codex-tool-call.failed { border-color: #7f1d1d; }
@@ -5014,10 +5014,13 @@ __ICONS_JS__
       renderFoldPreview(head, group);
       const body = document.createElement("div");
       body.className = "turn-fold-body";
+      const inner = document.createElement("div");
+      inner.className = "turn-fold-body-inner";
+      body.append(inner);
       details.append(head, body);
       events.append(details);
       const previousTarget = renderTarget;
-      renderTarget = body;
+      renderTarget = inner;
       try {
         for (const event of group) render(event, {scroll: false, historical: true});
       } finally {

@@ -2433,6 +2433,10 @@ async def test_worker_live_page_fold_keeps_native_transcript_previews(
         'appendFoldPreviewLine(preview, "assistant", '
         "completedAssistantText || assistantText);"
     ) in response
+    assert ".turn-fold-body-inner { min-height: 0; overflow: hidden;" in response
+    assert 'inner.className = "turn-fold-body-inner";' in response
+    assert "body.append(inner);" in response
+    assert "renderTarget = inner;" in response
     assert ".turn-fold:not(.collapsed) .turn-fold-preview { grid-template-rows: 0fr;" in response
     assert "/turn-summary" not in response
     assert "summarize" not in response
