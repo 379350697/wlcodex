@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
@@ -23,6 +23,7 @@ from wlcodex.native_agents.models import (
 )
 from wlcodex.native_agents.session_store import NativeAgentSessionStore
 from wlcodex.runtime_event_store import RuntimeEventStore
+from wlcodex.runtime_events import EventType
 
 
 @dataclass(frozen=True)
@@ -54,12 +55,14 @@ class ClaudeCliLocalProvider:
         runtime_store: RuntimeEventStore | None = None,
         default_cwd: str = "",
         session_index: ClaudeLocalSessionIndex | None = None,
+        heartbeat_interval_seconds: float = 15.0,
     ) -> None:
         self._engine = engine
         self._session_store = session_store
         self._runtime_store = runtime_store
         self._default_cwd = default_cwd
         self._session_index = session_index or ClaudeLocalSessionIndex()
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def wait_for_background_tasks(self) -> None:
@@ -432,7 +435,12 @@ class ClaudeCliLocalProvider:
                     continue
                 emitter.user_message(session, native_turn_id=entry_turn_id, text=entry.text)
             elif entry.role == "assistant":
-                emitter.text_delta(session, native_turn_id=entry_turn_id, delta=entry.text)
+                emitter.message_completed(
+                    session,
+                    native_turn_id=entry_turn_id,
+                    text=entry.text,
+                    item_id=f"jsonl-assistant-final:{entry_turn_id}",
+                )
         metadata = dict(session.metadata)
         metadata["claude_synced_message_count"] = len(entries)
         return self._session_store.update_session(session.id, metadata=metadata)
@@ -444,7 +452,6 @@ class ClaudeCliLocalProvider:
         if self._runtime_store is None or session.agent_run_id <= 0:
             return Counter()
         counts: Counter[tuple[str, str]] = Counter()
-        assistant_parts: dict[str, list[str]] = defaultdict(list)
         for event in self._runtime_store.list_by_agent_run(
             session.agent_run_id,
             limit=1000,
@@ -452,23 +459,14 @@ class ClaudeCliLocalProvider:
             payload = event.payload
             if str(payload.get("native_thread_id") or "") != session.native_session_id:
                 continue
-            if event.event_type == "user.message.received":
+            if event.event_type == EventType.USER_MESSAGE_RECEIVED:
                 text = str(payload.get("text") or "").strip()
                 if text:
                     counts[("user", text)] += 1
-            elif event.event_type == "model.text.delta":
-                key = str(
-                    payload.get("itemId")
-                    or payload.get("native_turn_id")
-                    or f"assistant:{event.id}"
-                )
-                assistant_parts[key].append(
-                    str(payload.get("delta") or payload.get("text") or "")
-                )
-        for parts in assistant_parts.values():
-            text = "".join(parts).strip()
-            if text:
-                counts[("assistant", text)] += 1
+            elif event.event_type == EventType.MODEL_MESSAGE_COMPLETED:
+                text = str(payload.get("text") or payload.get("summary") or "").strip()
+                if text:
+                    counts[("assistant", text)] += 1
         return counts
 
     def _ensure_enabled(self) -> None:
@@ -509,6 +507,12 @@ class ClaudeCliLocalProvider:
         resume_session_id: str,
         session_id: str = "",
     ) -> None:
+        done_event = asyncio.Event()
+        heartbeat_task = self._heartbeat_task(
+            session=session,
+            native_turn_id=native_turn_id,
+            done_event=done_event,
+        )
         try:
             outcome = await self._run_prompt(
                 prompt=prompt,
@@ -524,8 +528,13 @@ class ClaudeCliLocalProvider:
                 claude_session_id=resume_session_id,
                 error=str(exc),
             )
+        finally:
+            done_event.set()
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
         updated = self._update_after_run(session, outcome)
-        if outcome.status == "done" and not outcome.emitted_text:
+        if outcome.status == "done":
             updated = self._sync_local_transcript(
                 updated,
                 native_turn_id=native_turn_id,
@@ -542,6 +551,38 @@ class ClaudeCliLocalProvider:
                 native_turn_id=native_turn_id,
                 error=outcome.error or "Claude CLI run failed",
             )
+
+    def _heartbeat_task(
+        self,
+        *,
+        session: NativeAgentSession,
+        native_turn_id: str,
+        done_event: asyncio.Event,
+    ) -> asyncio.Task[None] | None:
+        if self._runtime_store is None or self._heartbeat_interval_seconds <= 0:
+            return None
+        return asyncio.create_task(
+            self._emit_heartbeats(
+                session=session,
+                native_turn_id=native_turn_id,
+                done_event=done_event,
+            )
+        )
+
+    async def _emit_heartbeats(
+        self,
+        *,
+        session: NativeAgentSession,
+        native_turn_id: str,
+        done_event: asyncio.Event,
+    ) -> None:
+        while not done_event.is_set():
+            await asyncio.sleep(self._heartbeat_interval_seconds)
+            if done_event.is_set():
+                return
+            emitter = self._emitter()
+            if emitter is not None:
+                emitter.heartbeat(session, native_turn_id=native_turn_id)
 
     def _emitter(self) -> NativeAgentRuntimeEmitter | None:
         if self._runtime_store is None:

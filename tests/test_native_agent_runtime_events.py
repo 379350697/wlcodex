@@ -45,6 +45,12 @@ def test_emitter_appends_lifecycle_user_text_and_completion_events(
     emitter.started(session, native_turn_id="turn-1")
     emitter.user_message(session, native_turn_id="turn-1", text="fix it")
     emitter.text_delta(session, native_turn_id="turn-1", delta="done")
+    emitter.message_completed(
+        session,
+        native_turn_id="turn-1",
+        text="final done",
+        item_id="jsonl-assistant-final:turn-1",
+    )
     emitter.completed(session, native_turn_id="turn-1")
 
     events = runtime_store.list_by_agent_run(session.agent_run_id)
@@ -52,14 +58,18 @@ def test_emitter_appends_lifecycle_user_text_and_completion_events(
         EventType.AGENT_RUN_STARTED,
         EventType.USER_MESSAGE_RECEIVED,
         EventType.MODEL_TEXT_DELTA,
+        EventType.MODEL_MESSAGE_COMPLETED,
         EventType.AGENT_RUN_COMPLETED,
     ]
     assert [stream_event_from_runtime(event).kind for event in events] == [
         "lifecycle",
         "user_message",
         "text_delta",
+        "message_completed",
         "completed",
     ]
+    assert events[3].payload["text"] == "final done"
+    assert events[3].payload["itemId"] == "jsonl-assistant-final:turn-1"
     for event in events:
         assert event.payload["native_thread_id"] == "session-1"
         assert event.payload["native_turn_id"] == "turn-1"

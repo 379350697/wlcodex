@@ -168,6 +168,7 @@ def _provider(
     *,
     engine=None,
     session_index: ClaudeLocalSessionIndex | None = None,
+    heartbeat_interval_seconds: float = 15.0,
 ) -> tuple[
     ClaudeCliLocalProvider,
     NativeAgentSessionStore,
@@ -186,6 +187,7 @@ def _provider(
             runtime_store=runtime_store,
             default_cwd=str(tmp_path),
             session_index=session_index or ClaudeLocalSessionIndex(tmp_path / ".claude"),
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
         ),
         store,
         fake_engine,
@@ -236,6 +238,32 @@ async def test_claude_cli_provider_start_session_runs_in_background_and_streams_
         EventType.AGENT_RUN_COMPLETED,
     ]
     assert events[2].payload["delta"] == "background hello"
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_provider_emits_heartbeat_while_engine_is_silent(
+    tmp_path: Path,
+) -> None:
+    engine = BlockingClaudeEngine()
+    provider, _store, _engine, runtime_store = _provider(
+        tmp_path,
+        engine=engine,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    result = await provider.start_session(str(tmp_path), "slow review")
+
+    heartbeat = await _wait_for_runtime_event(
+        runtime_store,
+        result.agent_run_id,
+        EventType.AGENT_RUN_HEARTBEAT,
+    )
+    assert heartbeat.payload["native_thread_id"] == result.native_session_id
+    assert heartbeat.payload["native_turn_id"] == result.turn_id
+    assert heartbeat.payload["status"] == "running"
+
+    engine.release.set()
+    await provider.wait_for_background_tasks()
 
 
 @pytest.mark.asyncio
@@ -629,16 +657,24 @@ async def test_claude_cli_provider_syncs_jsonl_output_after_continue(
         for event in events
     ] == [
         (EventType.USER_MESSAGE_RECEIVED, "hello"),
-        (EventType.MODEL_TEXT_DELTA, "world"),
+        (EventType.MODEL_MESSAGE_COMPLETED, "world"),
         (EventType.AGENT_RUN_STARTED, None),
         (EventType.USER_MESSAGE_RECEIVED, "next question"),
-        (EventType.MODEL_TEXT_DELTA, "jsonl answer"),
+        (EventType.MODEL_MESSAGE_COMPLETED, "jsonl answer"),
         (EventType.AGENT_RUN_COMPLETED, None),
     ]
+    assistant_events = [
+        event
+        for event in events
+        if event.event_type == EventType.MODEL_MESSAGE_COMPLETED
+    ]
+    assert str(assistant_events[0].payload["itemId"]).startswith(
+        "jsonl-assistant-final:"
+    )
 
 
 @pytest.mark.asyncio
-async def test_claude_cli_provider_does_not_duplicate_streamed_jsonl_on_sync(
+async def test_claude_cli_provider_replaces_streamed_jsonl_with_completed_block_on_sync(
     tmp_path: Path,
 ) -> None:
     session_id = "77777777-7777-4777-8777-777777777777"
@@ -663,6 +699,7 @@ async def test_claude_cli_provider_does_not_duplicate_streamed_jsonl_on_sync(
         (EventType.AGENT_RUN_STARTED, None),
         (EventType.USER_MESSAGE_RECEIVED, "live question"),
         (EventType.MODEL_TEXT_DELTA, "live answer"),
+        (EventType.MODEL_MESSAGE_COMPLETED, "live answer"),
         (EventType.AGENT_RUN_COMPLETED, None),
     ]
     session = store.get_by_native_session_id(
@@ -713,7 +750,7 @@ async def test_claude_cli_provider_syncs_selected_local_transcript_once(
     events = runtime_store.list_by_agent_run(attached.agent_run_id)
     assert [(event.event_type, event.payload.get("text") or event.payload.get("delta")) for event in events] == [
         (EventType.USER_MESSAGE_RECEIVED, "hello"),
-        (EventType.MODEL_TEXT_DELTA, "world"),
+        (EventType.MODEL_MESSAGE_COMPLETED, "world"),
     ]
 
 
@@ -769,3 +806,19 @@ def _write_claude_session(
         encoding="utf-8",
     )
     return path
+
+
+async def _wait_for_runtime_event(
+    runtime_store: RuntimeEventStore,
+    agent_run_id: int,
+    event_type: str,
+    *,
+    timeout: float = 0.5,
+):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        for event in runtime_store.list_by_agent_run(agent_run_id):
+            if event.event_type == event_type:
+                return event
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"Timed out waiting for {event_type}")

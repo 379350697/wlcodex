@@ -73,6 +73,25 @@ class NativeAgentRuntimeEmitter:
             },
         )
 
+    def message_completed(
+        self,
+        session: NativeAgentSession,
+        *,
+        native_turn_id: str,
+        text: str,
+        item_id: str = "",
+    ) -> RuntimeEvent:
+        return self._append(
+            session,
+            native_turn_id=native_turn_id,
+            event_type=EventType.MODEL_MESSAGE_COMPLETED,
+            payload={
+                "text": text,
+                "summary": text,
+                "itemId": item_id or f"{self._provider}-assistant-final-{native_turn_id}",
+            },
+        )
+
     def heartbeat(
         self,
         session: NativeAgentSession,

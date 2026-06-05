@@ -14,10 +14,24 @@ main {
   margin: 0 auto;
 }
 
+.native-index-topbar {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr) 50px;
+  align-items: center;
+  gap: 8px;
+  min-height: 54px;
+}
+
 h1 {
-  margin: 0 0 8px;
+  margin: 0;
+  text-align: center;
   font-size: 28px;
   letter-spacing: 0;
+}
+
+.native-back:disabled {
+  opacity: .38;
+  filter: grayscale(1);
 }
 
 .provider {

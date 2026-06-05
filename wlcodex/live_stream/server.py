@@ -1822,7 +1822,11 @@ def _native_provider_index_html(
 </head>
 <body>
   <main>
-    <h1>Native Agents</h1>
+    <div class="native-index-topbar">
+      <button class="circle native-back" id="back" aria-label="back" aria-disabled="true" disabled>‹</button>
+      <h1>Native Agents</h1>
+      <span class="native-back-spacer" aria-hidden="true"></span>
+    </div>
     {council_links}
     {links}
   </main>
@@ -2489,6 +2493,13 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       return data;
     }
 
+    function tokenizedPath(path) {
+      if (!token) return path;
+      const params = new URLSearchParams();
+      params.set("token", token);
+      return `${path}?${params.toString()}`;
+    }
+
     async function loadStatus() {
       try {
         const status = await api(`${API_BASE}/status`);
@@ -2653,7 +2664,9 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     };
     document.getElementById("chat").onclick = () => selectProject("");
     projectNewChat.onclick = openProjectNewChat;
-    document.getElementById("back").onclick = () => history.back();
+    document.getElementById("back").onclick = () => {
+      location.href = tokenizedPath("/native");
+    };
     promptEl.addEventListener("input", renderSessions);
     function sessionProjectKey(session) {
       return String((session && session.cwd) || "");

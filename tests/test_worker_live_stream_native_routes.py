@@ -349,6 +349,39 @@ async def test_native_provider_index_links_static_stylesheet(tmp_path: Path) -> 
     assert "HTTP/1.1 200 OK" in response
     assert '<link rel="stylesheet" href="/static/native_index.css">' in response
     assert "Antigravity" in response
+    assert '<button class="circle native-back" id="back" aria-label="back" aria-disabled="true" disabled>' in response
+
+
+@pytest.mark.asyncio
+async def test_native_provider_page_back_button_returns_to_native_index(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([FakeAntigravityProvider()]),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/antigravity?token=secret HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'const PROVIDER = "antigravity";' in response
+    assert "function tokenizedPath(path)" in response
+    assert 'document.getElementById("back").onclick = () => {' in response
+    assert 'location.href = tokenizedPath("/native");' in response
+    assert "history.back()" not in response
 
 
 @pytest.mark.asyncio
@@ -1495,6 +1528,7 @@ async def test_worker_live_page_accepts_query_token_and_contains_native_controls
     assert 'const PROVIDER = "codex";' in response
     assert 'const API_BASE = "/api/native/codex";' in response
     assert "`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/${action}`" in response
+    assert "location.href = `/native/${encodeURIComponent(PROVIDER)}` + query;" in response
     assert "`${API_BASE}/approvals/${encodeURIComponent(requestId)}/resolve`" in response
     assert "attachNative" in response
     assert "syncNative" not in response
