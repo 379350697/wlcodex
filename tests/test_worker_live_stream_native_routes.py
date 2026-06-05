@@ -2153,7 +2153,7 @@ async def test_worker_live_page_fold_keeps_native_transcript_previews(
         'appendFoldPreviewLine(preview, "assistant", '
         "completedAssistantText || assistantText);"
     ) in response
-    assert ".turn-fold[open] .turn-fold-preview { grid-template-rows: 0fr;" in response
+    assert ".turn-fold:not(.collapsed) .turn-fold-preview { grid-template-rows: 0fr;" in response
     assert "/turn-summary" not in response
     assert "summarize" not in response
 

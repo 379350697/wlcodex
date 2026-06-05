@@ -2791,14 +2791,15 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .turn-fold-row { display: flex; gap: 6px; align-items: center; min-width: 0; }
     .turn-fold-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
     .turn-fold-chevron { flex: 0 0 auto; color: #aeb4bf; font-size: 18px; transition: transform .16s ease; }
-    .turn-fold[open] .turn-fold-chevron { transform: rotate(90deg); }
+    .turn-fold:not(.collapsed) .turn-fold-chevron { transform: rotate(90deg); }
     .turn-fold-preview { display: grid; grid-template-rows: 1fr; gap: 8px; padding: 0 0 8px; opacity: 1; transition: grid-template-rows 200ms ease, opacity 150ms ease; }
-    .turn-fold[open] .turn-fold-preview { grid-template-rows: 0fr; opacity: 0; overflow: hidden; padding: 0; }
+    .turn-fold:not(.collapsed) .turn-fold-preview { grid-template-rows: 0fr; opacity: 0; overflow: hidden; padding: 0; }
     .turn-fold-preview-line { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.42; }
     .turn-fold-preview-user { justify-self: end; max-width: min(82%, 520px); padding: 8px 11px; border: 1px solid #333842; border-radius: 15px 15px 4px 15px; background: #20242d; color: #f4f4f5; }
     .turn-fold-preview-assistant { justify-self: start; padding-left: 18px; border-left: 2px solid #30333a; color: #cfd3dc; }
-    .turn-fold-body { display: grid; grid-template-rows: 0fr; gap: 18px; padding: 12px 0 18px; opacity: 0; overflow: hidden; transition: grid-template-rows 200ms ease, opacity 200ms ease 50ms; }
-    .turn-fold[open] .turn-fold-body { grid-template-rows: 1fr; opacity: 1; }
+    .turn-fold-body { display: grid; grid-template-rows: 0fr; overflow: hidden; opacity: 0; transition: grid-template-rows 200ms ease, opacity 200ms ease 50ms; }
+    .turn-fold-body > * { min-height: 0; }
+    .turn-fold:not(.collapsed) .turn-fold-body { grid-template-rows: 1fr; opacity: 1; padding: 12px 0 18px; }
     .codex-tool-call, .file-change-card, .approval-card { border: 1px solid #30333a; background: #0f1014; border-radius: 10px; overflow: hidden; }
     .codex-tool-call.failed { border-color: #7f1d1d; }
     .tool-head, .file-head, .approval-head { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 11px 12px; border-bottom: 1px solid #26282f; }
@@ -4179,8 +4180,13 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         return;
       }
       const details = document.createElement("details");
-      details.className = "turn-fold";
+      details.className = "turn-fold collapsed";
+      details.setAttribute("open", "");
       const head = document.createElement("summary");
+      head.addEventListener("click", (e) => {
+        e.preventDefault();
+        details.classList.toggle("collapsed");
+      });
       const labelRow = document.createElement("div");
       labelRow.className = "turn-fold-row";
       const title = document.createElement("span");
