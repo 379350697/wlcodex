@@ -9,6 +9,20 @@ from wlcodex.native_agents.models import (
     NativeAgentStatus,
 )
 
+_REASONING_EFFORT_PRIORITY = {
+    "none": 0,
+    "minimal": 1,
+    "low": 2,
+    "medium": 3,
+    "normal": 3,
+    "default": 3,
+    "high": 4,
+    "xhigh": 5,
+    "extra_high": 5,
+    "max": 6,
+    "maximum": 6,
+}
+
 
 class CodexAppServerProvider:
     provider = "codex"
@@ -54,7 +68,8 @@ class CodexAppServerProvider:
         return [_session_from_codex(session) for session in sessions]
 
     async def list_models(self) -> list[dict[str, Any]]:
-        return await self._controller.list_models()
+        models = await self._controller.list_models()
+        return [_model_with_highest_reasoning_default(model) for model in models]
 
     async def start_session(
         self,
@@ -141,6 +156,7 @@ def _session_from_codex(session: Any) -> NativeAgentSession:
         activity_at=str(getattr(session, "activity_at", "") or ""),
         created_at=str(session.created_at),
         updated_at=str(session.updated_at),
+        metadata=_metadata_from_codex_session(session),
     )
 
 
@@ -155,3 +171,39 @@ def _result_from_codex(result: Any) -> NativeAgentControlResult:
         turn_running=bool(getattr(result, "turn_running", False)),
         status=str(getattr(result, "status", "ok")),
     )
+
+
+def _model_with_highest_reasoning_default(model: dict[str, Any]) -> dict[str, Any]:
+    efforts = model.get("supportedReasoningEfforts")
+    if not isinstance(efforts, list) or not efforts:
+        return model
+    highest = _highest_reasoning_effort(efforts)
+    if not highest:
+        return model
+    normalized = dict(model)
+    normalized["defaultReasoningEffort"] = highest
+    return normalized
+
+
+def _highest_reasoning_effort(efforts: list[Any]) -> str:
+    values: list[str] = []
+    for effort in efforts:
+        if isinstance(effort, dict):
+            value = effort.get("reasoningEffort") or effort.get("id")
+        else:
+            value = effort
+        value = str(value or "").strip()
+        if value:
+            values.append(value)
+    if not values:
+        return ""
+    return max(values, key=lambda value: _reasoning_rank(value))
+
+
+def _reasoning_rank(value: str) -> int:
+    return _REASONING_EFFORT_PRIORITY.get(value.strip().lower(), -1)
+
+
+def _metadata_from_codex_session(session: Any) -> dict[str, Any]:
+    metadata = getattr(session, "metadata", {})
+    return dict(metadata) if isinstance(metadata, dict) else {}

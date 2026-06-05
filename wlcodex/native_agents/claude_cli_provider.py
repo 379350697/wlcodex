@@ -125,7 +125,7 @@ class ClaudeCliLocalProvider:
         model = _engine_config_value(self._engine, "model")
         if not model:
             return []
-        effort = _engine_config_value(self._engine, "effort") or "medium"
+        effort = _engine_config_value(self._engine, "effort") or "max"
         return [
             {
                 "id": model,
@@ -156,7 +156,7 @@ class ClaudeCliLocalProvider:
             source_kind="claude_cli_local",
             status="running",
             last_turn_id=native_turn_id,
-            metadata={},
+            metadata=_engine_model_settings_metadata(self._engine),
         )
         self._start_background_prompt(
             session=session,
@@ -183,7 +183,7 @@ class ClaudeCliLocalProvider:
             cwd=cwd or self._default_cwd,
             source_kind="claude_cli_local",
             status="created",
-            metadata={},
+            metadata=_engine_model_settings_metadata(self._engine),
         )
         return _control_result(session, status="created")
 
@@ -215,6 +215,10 @@ class ClaudeCliLocalProvider:
             session.id,
             status="running",
             last_turn_id=native_turn_id,
+            metadata={
+                **session.metadata,
+                **_engine_model_settings_metadata(self._engine),
+            },
         )
         self._start_background_prompt(
             session=session,
@@ -314,6 +318,7 @@ class ClaudeCliLocalProvider:
         outcome: _RunOutcome,
     ) -> NativeAgentSession:
         metadata = dict(session.metadata)
+        metadata.update(_engine_model_settings_metadata(self._engine))
         if outcome.claude_session_id:
             metadata["claude_session_id"] = outcome.claude_session_id
         if outcome.error:
@@ -695,3 +700,13 @@ def _new_turn_id() -> str:
 def _engine_config_value(engine: Any, field: str) -> str:
     config = getattr(engine, "_config", None)
     return str(getattr(config, field, "") or "")
+
+
+def _engine_model_settings_metadata(engine: Any) -> dict[str, str]:
+    model = _engine_config_value(engine, "model")
+    if not model:
+        return {}
+    return {
+        "model": model,
+        "effort": _engine_config_value(engine, "effort") or "max",
+    }

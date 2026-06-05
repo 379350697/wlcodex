@@ -2382,7 +2382,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .laptop { width: 20px; height: 14px; border: 2px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
     .laptop:after { content: ""; position: absolute; left: -4px; right: -4px; bottom: -6px; height: 2px; background: currentColor; border-radius: 2px; }
     main { overflow-x: hidden; padding: 8px 22px calc(124px + env(safe-area-inset-bottom)); }
-    .nav-row, .project, .recent { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 62px; color: #f7f7f8; background: transparent; border: 0; width: 100%; padding: 0; text-align: left; }
+    .nav-row, .project, .recent { position: relative; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 62px; overflow: hidden; color: #f7f7f8; background: transparent; border: 0; border-radius: 12px; width: 100%; padding: 0; text-align: left; }
     .nav-row[hidden], .project-new-chat[hidden] { display: none; }
     .nav-row > span:nth-child(2), .project > span:nth-child(2) { min-width: 0; }
     .icon-folder, .icon-chat { width: 30px; height: 24px; border: 3px solid #f7f7f8; border-radius: 4px; position: relative; }
@@ -2392,20 +2392,46 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .nav-row.active .label, .project.active .label { color: #fff; }
     .nav-row.active .icon-chat, .project.active .icon-folder { border-color: #fff; }
     .project.active .icon-folder:before { border-color: #fff; }
-    .nav-row:not(:disabled):hover,
-    .project:not(:disabled):hover,
-    .recent:not(:disabled):hover {
+    button.nav-row::before,
+    button.project::before {
+      content: "";
+      position: absolute;
+      top: 10px;
+      bottom: 10px;
+      left: 0;
+      width: 3px;
+      border-radius: 999px;
+      background: transparent;
+    }
+    button.nav-row:not(.secondary):not(.warn):not(:disabled):hover,
+    button.project:not(.secondary):not(.warn):not(:disabled):hover,
+    button.recent:not(.secondary):not(.warn):not(:disabled):hover {
       background: rgba(255, 255, 255, 0.04);
-      border-radius: 12px;
+      filter: none;
     }
-    .nav-row.active, .project.active {
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 12px;
-      border-left: 3px solid var(--color-link);
-      padding-left: 12px;
+    button.nav-row.active,
+    button.project.active {
+      background: rgba(147, 197, 253, 0.12);
     }
-    .nav-row:active, .project:active, .recent:active {
+    button.nav-row.active::before,
+    button.project.active::before {
+      background: var(--color-link);
+    }
+    button.nav-row.active:not(.secondary):not(.warn):not(:disabled):hover,
+    button.project.active:not(.secondary):not(.warn):not(:disabled):hover {
+      background: rgba(147, 197, 253, 0.14);
+      filter: none;
+    }
+    button.nav-row:not(.secondary):not(.warn):not(:disabled):active,
+    button.project:not(.secondary):not(.warn):not(:disabled):active,
+    button.recent:not(.secondary):not(.warn):not(:disabled):active {
       background: rgba(255, 255, 255, 0.07);
+      transform: none;
+    }
+    button.nav-row.active:not(.secondary):not(.warn):not(:disabled):active,
+    button.project.active:not(.secondary):not(.warn):not(:disabled):active {
+      background: rgba(147, 197, 253, 0.16);
+      transform: none;
     }
     .label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; font-weight: 650; }
     .section-title { margin: 26px 0 12px; color: #c8c8d0; font-size: 15px; }
@@ -2422,7 +2448,28 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .time { max-width: 66px; overflow: hidden; color: #a9a9b2; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
     .meta { margin-top: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8d93a0; font-size: 12px; }
     .empty { color: #8d93a0; padding: 16px 0; }
-    .controls { position: fixed; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 12px 26px 18px; background: linear-gradient(to top, #000 82%, rgba(0,0,0,0)); }
+    .controls { position: fixed; left: 0; right: 0; bottom: 0; display: grid; gap: 9px; padding: 12px 26px 18px; background: linear-gradient(to top, #000 82%, rgba(0,0,0,0)); }
+    .composer-tools { display: flex; gap: 8px; align-items: center; min-width: 0; }
+    .composer-settings { position: relative; flex: 1; display: flex; gap: 8px; min-width: 0; }
+    .setting-pill { min-height: 38px; max-width: 100%; border-radius: 19px; padding: 0 14px; overflow: hidden; background: #2a2a2d; color: #f4f4f5; border: 1px solid transparent; font-size: 14px; font-weight: 760; text-overflow: ellipsis; white-space: nowrap; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
+    .setting-pill.modified { border-color: rgba(147, 197, 253, 0.35); background: #1e2435; }
+    button.setting-pill:not(.secondary):not(.warn):not(:disabled):hover { background: #353538; filter: none; }
+    .model-popover { position: absolute; left: 0; bottom: 48px; width: min(330px, calc(100vw - 52px)); border: 1px solid #3a3a40; border-radius: 22px; background: #222225; box-shadow: 0 20px 54px rgba(0,0,0,.55); overflow: hidden; z-index: 6; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
+    .model-popover.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
+    .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid #343439; color: #f4f4f5; }
+    .setting-row[hidden] { display: none; }
+    .setting-row:last-child { border-bottom: 0; }
+    .setting-label { display: grid; gap: 5px; min-width: 0; font-size: 16px; font-weight: 760; }
+    .setting-value { color: #b8bdc8; font-size: 14px; font-weight: 500; }
+    .setting-chevron { color: #f4f4f5; font-size: 28px; line-height: 1; }
+    .model-selector, .setting-selector { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
+    .setting-options { display: grid; gap: 6px; padding: 0 12px 12px; border-bottom: 1px solid #343439; background: #1d1d20; }
+    .setting-options[hidden] { display: none; }
+    .setting-option { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-height: 38px; border-radius: 13px; padding: 7px 11px; background: transparent; color: #d4d4d8; font-size: 15px; text-align: left; }
+    .setting-option.selected { background: #34343a; color: #fff; }
+    button.setting-option:not(.secondary):not(.warn):not(:disabled):hover { background: #2a2a30; filter: none; }
+    .setting-option-check { color: #f4f4f5; font-weight: 800; }
+    .start-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
     input { min-width: 0; height: 56px; border-radius: 28px; border: 1px solid #3a3a40; background: #1c1c20; color: #f7f7f8; padding: 0 20px; font-size: 17px; }
     button.chat { height: 56px; min-width: 118px; border-radius: 28px; border: 0; background: #fff; color: #000; font-size: 17px; font-weight: 760; }
   </style>
@@ -2454,8 +2501,44 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     <div id="sessions"></div>
   </main>
   <section class="controls">
-    <input id="prompt" placeholder="搜索聊天或开始新聊天">
-    <button class="chat" id="send">聊天</button>
+    <div class="composer-tools">
+      <div class="composer-settings">
+        <button class="setting-pill" id="modelSettingsButton" type="button">加载模型</button>
+        <div class="model-popover closed" id="modelPopover">
+          <div class="setting-row" id="modelSettingRow" role="button" tabindex="0">
+            <span class="setting-label">模型<span class="setting-value" id="modelSettingValue">加载模型</span></span>
+            <span></span>
+            <span class="setting-chevron">›</span>
+            <select id="modelSelector" class="model-selector" aria-label="选择模型">
+              <option value="">加载模型</option>
+            </select>
+          </div>
+          <div class="setting-options" id="modelOptions" hidden></div>
+          <div class="setting-row" id="serviceTierSettingRow" role="button" tabindex="0">
+            <span class="setting-label">速度<span class="setting-value" id="serviceTierSettingValue">正常</span></span>
+            <span></span>
+            <span class="setting-chevron">›</span>
+            <select id="serviceTierSelector" class="setting-selector" aria-label="选择速度">
+              <option value="">速度</option>
+            </select>
+          </div>
+          <div class="setting-options" id="serviceTierOptions" hidden></div>
+          <div class="setting-row" id="reasoningSettingRow" role="button" tabindex="0">
+            <span class="setting-label">推理<span class="setting-value" id="reasoningSettingValue">默认</span></span>
+            <span></span>
+            <span class="setting-chevron">›</span>
+            <select id="reasoningSelector" class="setting-selector" aria-label="选择推理程度">
+              <option value="">推理</option>
+            </select>
+          </div>
+          <div class="setting-options" id="reasoningOptions" hidden></div>
+        </div>
+      </div>
+    </div>
+    <div class="start-row">
+      <input id="prompt" placeholder="搜索聊天或开始新聊天">
+      <button class="chat" id="send">聊天</button>
+    </div>
   </section>
   <script>
     const PROVIDER = __PROVIDER_JSON__;
@@ -2482,6 +2565,25 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     const chatRow = document.getElementById("chat");
     const projectNewChat = document.getElementById("projectNewChat");
     const projectNewChatMeta = document.getElementById("projectNewChatMeta");
+    const modelSettingsButton = document.getElementById("modelSettingsButton");
+    const modelPopover = document.getElementById("modelPopover");
+    const modelSelector = document.getElementById("modelSelector");
+    const reasoningSelector = document.getElementById("reasoningSelector");
+    const serviceTierSelector = document.getElementById("serviceTierSelector");
+    const modelOptions = document.getElementById("modelOptions");
+    const reasoningOptions = document.getElementById("reasoningOptions");
+    const serviceTierOptions = document.getElementById("serviceTierOptions");
+    const modelSettingValue = document.getElementById("modelSettingValue");
+    const reasoningSettingValue = document.getElementById("reasoningSettingValue");
+    const serviceTierSettingValue = document.getElementById("serviceTierSettingValue");
+    const modelSettingRow = document.getElementById("modelSettingRow");
+    const reasoningSettingRow = document.getElementById("reasoningSettingRow");
+    const serviceTierSettingRow = document.getElementById("serviceTierSettingRow");
+    const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
+    const MODEL_SETTINGS_STORAGE_VERSION = 2;
+    let modelCatalog = [];
+    let savedModelSettings = loadSavedModelSettings();
+    let modelSettingsDirty = false;
 
     async function api(path, options = {}) {
       const res = await fetch(path, {
@@ -2536,6 +2638,324 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     async function loadHomeData() {
       await loadProjects();
       await loadSessions();
+    }
+
+    async function loadModelCatalog() {
+      try {
+        const result = await api(`${API_BASE}/models`);
+        modelCatalog = Array.isArray(result.models) ? result.models : [];
+        renderModelSettings();
+      } catch (error) {
+        modelCatalog = [];
+        modelSelector.innerHTML = `<option value="">${escapeHtml(error.message || "模型不可用")}</option>`;
+        reasoningSelector.innerHTML = `<option value="">推理</option>`;
+        serviceTierSelector.innerHTML = `<option value="">速度</option>`;
+        modelOptions.innerHTML = "";
+        reasoningOptions.innerHTML = "";
+        serviceTierOptions.innerHTML = "";
+        updateSettingVisibility();
+        updateSettingSummary();
+      }
+    }
+
+    function renderModelSettings() {
+      const visibleModels = modelCatalog.filter(model => !model.hidden);
+      const models = visibleModels.length ? visibleModels : modelCatalog;
+      modelSelector.innerHTML = "";
+      for (const model of models) {
+        const option = document.createElement("option");
+        option.value = model.model || model.id || "";
+        option.textContent = model.displayName || model.model || model.id || PROVIDER_LABEL;
+        option.selected = Boolean(model.isDefault);
+        modelSelector.append(option);
+      }
+      if (savedModelSettings.model && optionValueExists(modelSelector, savedModelSettings.model)) {
+        modelSelector.value = savedModelSettings.model;
+      } else if (!modelSelector.value && modelSelector.options.length) {
+        modelSelector.selectedIndex = 0;
+      }
+      renderSettingOptions(modelOptions, modelSelector, () => {
+        renderReasoningAndSpeed();
+        updateSettingSummary();
+      });
+      renderReasoningAndSpeed(savedModelSettings);
+      savedModelSettings = readSelectedModelSettings();
+      modelSettingsDirty = false;
+    }
+
+    function renderReasoningAndSpeed(preferredSettings = {}) {
+      const model = selectedModelCatalogEntry();
+      const efforts = Array.isArray(model && model.supportedReasoningEfforts)
+        ? model.supportedReasoningEfforts
+        : [];
+      const tiers = Array.isArray(model && model.serviceTiers) ? model.serviceTiers : [];
+      fillSelector(
+        reasoningSelector,
+        efforts,
+        item => item.reasoningEffort || item.id || "",
+        item => reasoningEffortLabel(item.reasoningEffort || item.id || ""),
+        preferredReasoningEffortDefault(model, efforts),
+        "推理"
+      );
+      fillServiceTierSelector(tiers, preferredServiceTierDefault(model, tiers));
+      if (
+        shouldApplyPreferredEffort(preferredSettings, model)
+        && optionValueExists(reasoningSelector, preferredSettings.effort)
+      ) {
+        reasoningSelector.value = preferredSettings.effort;
+      }
+      if (Object.prototype.hasOwnProperty.call(preferredSettings, "service_tier")
+        && optionValueExists(serviceTierSelector, preferredSettings.service_tier)) {
+        serviceTierSelector.value = preferredSettings.service_tier || "";
+      }
+      renderSettingOptions(reasoningOptions, reasoningSelector, updateSettingSummary);
+      renderSettingOptions(serviceTierOptions, serviceTierSelector, updateSettingSummary, {includeEmpty: true});
+      updateSettingVisibility();
+      updateSettingSummary();
+    }
+
+    function selectedModelCatalogEntry() {
+      return modelCatalog.find(model => {
+        return (model.model || model.id || "") === modelSelector.value;
+      }) || modelCatalog.find(model => model.isDefault) || modelCatalog[0] || null;
+    }
+
+    function fillSelector(select, items, valueFor, labelFor, defaultValue, fallbackLabel) {
+      select.innerHTML = "";
+      if (!items.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = fallbackLabel;
+        select.append(option);
+        return;
+      }
+      for (const item of items) {
+        const option = document.createElement("option");
+        option.value = valueFor(item) || "";
+        option.textContent = labelFor(item) || option.value || fallbackLabel;
+        option.selected = option.value === defaultValue;
+        select.append(option);
+      }
+      if (!select.value && select.options.length) select.selectedIndex = 0;
+    }
+
+    function fillServiceTierSelector(tiers, defaultValue) {
+      serviceTierSelector.innerHTML = "";
+      const normalOption = document.createElement("option");
+      normalOption.value = "";
+      normalOption.textContent = "正常";
+      normalOption.selected = !defaultValue;
+      serviceTierSelector.append(normalOption);
+      for (const tier of tiers) {
+        const value = tier.id || tier.serviceTier || tier.name || "";
+        if (!value) continue;
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = serviceTierLabel(value);
+        option.selected = Boolean(defaultValue && value === defaultValue);
+        serviceTierSelector.append(option);
+      }
+    }
+
+    function renderSettingOptions(container, select, onChoose, options = {}) {
+      container.innerHTML = "";
+      Array.from(select.options || []).forEach(option => {
+        if (!option.value && !options.includeEmpty) return;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.value = option.value;
+        button.className = "setting-option" + (option.selected ? " selected" : "");
+        button.textContent = option.textContent || option.value;
+        button.disabled = select.disabled;
+        if (option.selected) {
+          const check = document.createElement("span");
+          check.className = "setting-option-check";
+          check.textContent = "✓";
+          button.append(check);
+        }
+        button.onclick = () => {
+          const previousValue = select.value;
+          select.value = option.value;
+          if (select.value !== previousValue) markModelSettingsDirty();
+          syncSettingOptionsSelection(container, select);
+          container.hidden = true;
+          if (onChoose) onChoose();
+        };
+        container.append(button);
+      });
+    }
+
+    function syncSettingOptionsSelection(container, select) {
+      for (const button of Array.from(container.querySelectorAll(".setting-option"))) {
+        const selectedOption = button.dataset.value === select.value;
+        button.classList.toggle("selected", selectedOption);
+        const existingCheck = button.querySelector(".setting-option-check");
+        if (selectedOption && !existingCheck) {
+          const check = document.createElement("span");
+          check.className = "setting-option-check";
+          check.textContent = "✓";
+          button.append(check);
+        } else if (!selectedOption && existingCheck) {
+          existingCheck.remove();
+        }
+      }
+    }
+
+    function toggleSettingOptions(container) {
+      for (const node of [modelOptions, serviceTierOptions, reasoningOptions]) {
+        if (node !== container) node.hidden = true;
+      }
+      container.hidden = !container.hidden;
+    }
+
+    function updateSettingVisibility() {
+      reasoningSettingRow.hidden = reasoningSelector.options.length <= 1;
+      serviceTierSettingRow.hidden = serviceTierSelector.options.length <= 1;
+      if (reasoningSettingRow.hidden) reasoningOptions.hidden = true;
+      if (serviceTierSettingRow.hidden) serviceTierOptions.hidden = true;
+    }
+
+    function preferredServiceTierDefault(model, tiers) {
+      const defaultValue = String((model && model.defaultServiceTier) || "").toLowerCase();
+      if (!defaultValue || ["fast", "priority"].includes(defaultValue)) return "";
+      const match = tiers.find(tier => {
+        return String(tier.id || tier.serviceTier || tier.name || "").toLowerCase() === defaultValue;
+      });
+      return match ? match.id || match.serviceTier || match.name || "" : "";
+    }
+    function preferredReasoningEffortDefault(model, efforts) {
+      return highestReasoningEffort(efforts) || String((model && model.defaultReasoningEffort) || "");
+    }
+    function highestReasoningEffort(efforts) {
+      const ranked = (Array.isArray(efforts) ? efforts : [])
+        .map(item => String((item && (item.reasoningEffort || item.id)) || item || "").trim())
+        .filter(Boolean)
+        .sort((left, right) => reasoningEffortRank(right) - reasoningEffortRank(left));
+      return ranked[0] || "";
+    }
+    function reasoningEffortRank(value) {
+      const key = String(value || "").trim().toLowerCase();
+      if (key === "max" || key === "maximum") return 6;
+      if (key === "xhigh" || key === "extra_high") return 5;
+      if (key === "high") return 4;
+      if (key === "medium" || key === "normal" || key === "default") return 3;
+      if (key === "low") return 2;
+      if (key === "minimal") return 1;
+      if (key === "none") return 0;
+      return -1;
+    }
+    function shouldApplyPreferredEffort(preferredSettings, model) {
+      const effort = String((preferredSettings && preferredSettings.effort) || "");
+      if (!effort) return false;
+      const defaultEffort = preferredReasoningEffortDefault(model, Array.isArray(model && model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : []);
+      const catalogDefault = String((model && model.defaultReasoningEffort) || "");
+      if ((preferredSettings.version || 0) < MODEL_SETTINGS_STORAGE_VERSION
+        && catalogDefault
+        && effort === catalogDefault
+        && effort !== defaultEffort) {
+        return false;
+      }
+      return true;
+    }
+
+    function serviceTierLabel(value) {
+      const key = String(value || "").trim().toLowerCase();
+      if (["", "auto", "default", "normal", "standard"].includes(key)) return "正常";
+      if (key === "fast" || key === "priority") return "快速";
+      if (key === "flex") return "弹性";
+      return String(value || "速度");
+    }
+
+    function reasoningEffortLabel(value) {
+      const key = String(value || "").trim().toLowerCase();
+      if (["minimal", "none"].includes(key)) return "最少";
+      if (key === "low") return "低";
+      if (["medium", "default", "normal", ""].includes(key)) return "正常";
+      if (key === "high") return "高";
+      if (["xhigh", "extra_high"].includes(key)) return "极高";
+      if (["max", "maximum"].includes(key)) return "最大";
+      return String(value || "推理");
+    }
+
+    function loadSavedModelSettings() {
+      try {
+        return normalizeModelSettings(JSON.parse(localStorage.getItem(MODEL_SETTINGS_STORAGE_KEY) || "{}"));
+      } catch (_error) {
+        return normalizeModelSettings({});
+      }
+    }
+
+    function readSelectedModelSettings() {
+      return normalizeModelSettings({
+        model: modelSelector.value,
+        effort: reasoningSettingRow.hidden ? "" : reasoningSelector.value,
+        service_tier: serviceTierSettingRow.hidden ? "" : serviceTierSelector.value,
+        version: MODEL_SETTINGS_STORAGE_VERSION
+      });
+    }
+
+    function normalizeModelSettings(settings = {}) {
+      return {
+        model: typeof settings.model === "string" ? settings.model : "",
+        effort: typeof settings.effort === "string" ? settings.effort : "",
+        service_tier: typeof settings.service_tier === "string" ? settings.service_tier : "",
+        version: Number(settings.version || 0)
+      };
+    }
+
+    function optionValueExists(select, value) {
+      const normalized = String(value || "");
+      return Array.from(select.options || []).some(option => option.value === normalized);
+    }
+
+    function modelSettingsEqual(left, right) {
+      return left.model === right.model
+        && left.effort === right.effort
+        && left.service_tier === right.service_tier
+        && left.version === right.version;
+    }
+
+    function saveModelSettingsIfChanged() {
+      const nextSettings = readSelectedModelSettings();
+      const changed = modelSettingsDirty || !modelSettingsEqual(savedModelSettings, nextSettings);
+      savedModelSettings = nextSettings;
+      if (changed) {
+        try {
+          localStorage.setItem(MODEL_SETTINGS_STORAGE_KEY, JSON.stringify(savedModelSettings));
+        } catch (_error) {}
+      }
+      modelSettingsDirty = false;
+    }
+
+    function markModelSettingsDirty() {
+      modelSettingsDirty = true;
+    }
+
+    function updateSettingSummary() {
+      const modelText = selectedOptionText(modelSelector, "模型");
+      const effortText = selectedOptionText(reasoningSelector, "默认");
+      const tierText = selectedOptionText(serviceTierSelector, "正常");
+      modelSettingValue.textContent = modelText;
+      reasoningSettingValue.textContent = effortText;
+      serviceTierSettingValue.textContent = tierText;
+      const summaryParts = [modelText];
+      if (reasoningSelector.options.length > 1) summaryParts.push(effortText);
+      if (serviceTierSelector.options.length > 1) summaryParts.push(tierText);
+      modelSettingsButton.textContent = summaryParts.join(" · ");
+      syncSettingOptionsSelection(modelOptions, modelSelector);
+      syncSettingOptionsSelection(reasoningOptions, reasoningSelector);
+      syncSettingOptionsSelection(serviceTierOptions, serviceTierSelector);
+      const defaultModel = modelCatalog.find(model => model.isDefault) || modelCatalog[0] || null;
+      const currentModel = selectedModelCatalogEntry();
+      const modelChanged = currentModel && defaultModel && (currentModel.model || currentModel.id || "") !== (defaultModel.model || defaultModel.id || "");
+      const effortChanged = currentModel && reasoningSelector.options.length > 1 && reasoningSelector.value && reasoningSelector.value !== preferredReasoningEffortDefault(currentModel, Array.isArray(currentModel.supportedReasoningEfforts) ? currentModel.supportedReasoningEfforts : []);
+      const tierChanged = serviceTierSelector.options.length > 1 && serviceTierSelector.value && serviceTierSelector.value !== (String(currentModel ? currentModel.defaultServiceTier || "" : "").toLowerCase());
+      modelSettingsButton.classList.toggle("modified", modelChanged || effortChanged || tierChanged);
+    }
+
+    function selectedOptionText(select, fallback) {
+      const option = select && select.options ? select.options[select.selectedIndex] : null;
+      return (option && option.textContent ? option.textContent : fallback) || fallback;
     }
 
     function renderProjects() {
@@ -2610,13 +3030,30 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       for (const session of source) {
         const btn = document.createElement("button");
         btn.className = "recent" + (selected && selected.native_thread_id === session.native_thread_id ? " active" : "");
-        btn.innerHTML = `<span class="recent-copy"><span class="label recent-title">${escapeHtml(session.title || session.native_thread_id)}</span><span class="meta">${escapeHtml(lastPath(session.cwd || ""))} · ${escapeHtml(session.status || "")}</span></span><span class="time">${escapeHtml(relativeTime(sessionActivityAt(session)))}</span>`;
+        btn.innerHTML = `<span class="recent-copy"><span class="label recent-title">${escapeHtml(session.title || session.native_thread_id)}</span><span class="meta">${escapeHtml(sessionMetaText(session))}</span></span><span class="time">${escapeHtml(relativeTime(sessionActivityAt(session)))}</span>`;
         btn.onclick = () => {
           selected = session;
           openLive(session);
         };
         target.appendChild(btn);
       }
+    }
+    function sessionMetaText(session) {
+      const parts = [];
+      const workspace = lastPath(session.cwd || "");
+      const settings = sessionModelSettingsLabel(session);
+      if (workspace) parts.push(workspace);
+      if (settings) parts.push(settings);
+      if (session.status) parts.push(session.status);
+      return parts.join(" · ");
+    }
+    function sessionModelSettingsLabel(session) {
+      const metadata = (session && session.metadata) || {};
+      const parts = [];
+      if (metadata.model) parts.push(String(metadata.model));
+      if (metadata.effort) parts.push(reasoningEffortLabel(metadata.effort));
+      if (metadata.service_tier) parts.push(serviceTierLabel(metadata.service_tier));
+      return parts.join(" · ");
     }
 
     async function control(action, body) {
@@ -2629,21 +3066,23 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     }
 
     async function startNewChat(prompt) {
+      saveModelSettingsIfChanged();
+      const settings = readSelectedModelSettings();
+      const body = {cwd: selectedProjectCwd, prompt};
+      if (settings.model) body.model = settings.model;
+      if (settings.effort) body.effort = settings.effort;
+      if (settings.service_tier) body.service_tier = settings.service_tier;
       const result = await api(`${API_BASE}/sessions/start`, {
         method: "POST",
-        body: JSON.stringify({cwd: selectedProjectCwd, prompt})
+        body: JSON.stringify(body)
       });
       openLive(result);
     }
 
-    async function openProjectNewChat() {
+    function focusProjectPrompt() {
       if (!selectedProjectCwd) return;
-      projectNewChat.disabled = true;
-      try {
-        await startNewChat("");
-      } finally {
-        projectNewChat.disabled = false;
-      }
+      updateContextHint();
+      promptEl.focus();
     }
 
     async function openLive(session = selected) {
@@ -2663,7 +3102,44 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       await startNewChat(prompt);
     };
     document.getElementById("chat").onclick = () => selectProject("");
-    projectNewChat.onclick = openProjectNewChat;
+    projectNewChat.onclick = focusProjectPrompt;
+    modelSettingsButton.onclick = () => {
+      const willClose = !modelPopover.classList.contains("closed");
+      if (willClose) saveModelSettingsIfChanged();
+      modelPopover.classList.toggle("closed", willClose);
+      if (willClose) {
+        modelOptions.hidden = true;
+        serviceTierOptions.hidden = true;
+        reasoningOptions.hidden = true;
+      }
+    };
+    modelSelector.onchange = () => {
+      renderReasoningAndSpeed();
+      updateSettingSummary();
+      markModelSettingsDirty();
+    };
+    reasoningSelector.onchange = () => {
+      renderSettingOptions(reasoningOptions, reasoningSelector, updateSettingSummary);
+      updateSettingSummary();
+      markModelSettingsDirty();
+    };
+    serviceTierSelector.onchange = () => {
+      renderSettingOptions(serviceTierOptions, serviceTierSelector, updateSettingSummary, {includeEmpty: true});
+      updateSettingSummary();
+      markModelSettingsDirty();
+    };
+    modelSettingRow.onclick = event => {
+      if (event.target === modelSelector) return;
+      toggleSettingOptions(modelOptions);
+    };
+    serviceTierSettingRow.onclick = event => {
+      if (event.target === serviceTierSelector) return;
+      toggleSettingOptions(serviceTierOptions);
+    };
+    reasoningSettingRow.onclick = event => {
+      if (event.target === reasoningSelector) return;
+      toggleSettingOptions(reasoningOptions);
+    };
     document.getElementById("back").onclick = () => {
       location.href = tokenizedPath("/native");
     };
@@ -2712,6 +3188,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       return `${Math.round(hours / 24)}天`;
     }
     loadStatus();
+    loadModelCatalog();
     loadHomeData();
     setInterval(loadHomeData, 3000);
   </script>
@@ -2757,11 +3234,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .event-cursor { color: #777b86; font-size: 12px; }
     .codex-transcript { display: grid; gap: 18px; padding-top: 8px; }
     .transcript-item { display: grid; gap: 7px; min-width: 0; padding: 0; }
-    .transcript-meta { color: #9aa0aa; font-size: 13px; }
-    .transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #f4f4f5; font-size: 17px; line-height: 1.68; letter-spacing: 0.01em; }
+    .transcript-meta { color: #9aa0aa; font-size: 12px; }
+    .transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #f4f4f5; font-size: 15px; line-height: 1.55; letter-spacing: 0.01em; }
     .transcript-body p { margin: 0 0 13px; }
     .transcript-body p:last-child { margin-bottom: 0; }
-    .transcript-body h3 { margin: 18px 0 8px; color: #ffffff; font-size: 18px; line-height: 1.35; }
+    .transcript-body h3 { margin: 18px 0 8px; color: #ffffff; font-size: 16px; line-height: 1.35; }
     .transcript-body h3:first-child { margin-top: 0; }
     .transcript-body ul, .transcript-body ol { margin: 0 0 13px 1.3em; padding: 0; display: grid; gap: 6px; white-space: normal; }
     .transcript-body li { padding-left: 2px; white-space: normal; }
@@ -2770,7 +3247,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .transcript-body a:hover { border-bottom-color: rgba(147, 197, 253, .7); }
     .transcript-body code { padding: 1px 5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06); background: #1d2027; color: #c4ccdb; font: .88em var(--font-mono); }
     .transcript-body pre { margin: 0 0 13px; overflow: auto; padding: 14px 16px; border: 1px solid #2e333d; border-radius: 8px; background: #0c0e14; white-space: pre; scrollbar-width: thin; scrollbar-color: #383c46 transparent; }
-    .transcript-body pre code { padding: 0; border-radius: 0; background: transparent; font-size: 13px; line-height: 1.5; }
+    .transcript-body pre code { padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }
     .transcript-item.user { justify-self: end; justify-items: end; max-width: min(82%, 520px); }
     .transcript-item.user .transcript-meta { display: none; }
     .transcript-item.user .transcript-body { padding: 10px 13px; border: 1px solid #333842; border-radius: 20px 20px 4px 20px; background: #1c2030; line-height: 1.5; }
@@ -2882,7 +3359,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .dock-row { display: flex; gap: 10px; min-width: 0; align-items: center; }
     .dock-actions { display: flex; gap: 10px; min-width: 0; }
     .dock-actions[hidden] { display: none; }
-    input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid #3f4550; background: #12151d; color: #f4f4f5; padding: 0 14px; font-size: 16px; }
+    input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid #3f4550; background: #12151d; color: #f4f4f5; padding: 0 14px; font-size: 15px; }
     .primary-action { flex: 0 0 56px; width: 56px; min-height: 56px; border-radius: 15px; padding: 0; display: grid; place-items: center; font-size: 28px; line-height: 1; }
     .primary-action.stop { font-size: 24px; }
     @media (min-width: 820px) {
@@ -3054,6 +3531,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     const RECENT_EVENT_LIMIT = 80;
     const OLDER_EVENT_LIMIT = 80;
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
+    const MODEL_SETTINGS_STORAGE_VERSION = 2;
     const transcriptNodes = new Map();
     const statusNodes = new Map();
     const commandNodes = new Map();
@@ -3159,11 +3637,14 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         efforts,
         item => item.reasoningEffort || item.id || "",
         item => reasoningEffortLabel(item.reasoningEffort || item.id || ""),
-        model && model.defaultReasoningEffort,
+        preferredReasoningEffortDefault(model, efforts),
         "推理"
       );
       fillServiceTierSelector(tiers, preferredServiceTierDefault(model, tiers));
-      if (preferredSettings.effort && optionValueExists(reasoningSelector, preferredSettings.effort)) {
+      if (
+        shouldApplyPreferredEffort(preferredSettings, model)
+        && optionValueExists(reasoningSelector, preferredSettings.effort)
+      ) {
         reasoningSelector.value = preferredSettings.effort;
       }
       if (Object.prototype.hasOwnProperty.call(preferredSettings, "service_tier")
@@ -3282,6 +3763,40 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       });
       return match ? match.id || match.serviceTier || match.name || "" : "";
     }
+    function preferredReasoningEffortDefault(model, efforts) {
+      return highestReasoningEffort(efforts) || String((model && model.defaultReasoningEffort) || "");
+    }
+    function highestReasoningEffort(efforts) {
+      const ranked = (Array.isArray(efforts) ? efforts : [])
+        .map(item => String((item && (item.reasoningEffort || item.id)) || item || "").trim())
+        .filter(Boolean)
+        .sort((left, right) => reasoningEffortRank(right) - reasoningEffortRank(left));
+      return ranked[0] || "";
+    }
+    function reasoningEffortRank(value) {
+      const key = String(value || "").trim().toLowerCase();
+      if (key === "max" || key === "maximum") return 6;
+      if (key === "xhigh" || key === "extra_high") return 5;
+      if (key === "high") return 4;
+      if (key === "medium" || key === "normal" || key === "default") return 3;
+      if (key === "low") return 2;
+      if (key === "minimal") return 1;
+      if (key === "none") return 0;
+      return -1;
+    }
+    function shouldApplyPreferredEffort(preferredSettings, model) {
+      const effort = String((preferredSettings && preferredSettings.effort) || "");
+      if (!effort) return false;
+      const defaultEffort = preferredReasoningEffortDefault(model, Array.isArray(model && model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : []);
+      const catalogDefault = String((model && model.defaultReasoningEffort) || "");
+      if ((preferredSettings.version || 0) < MODEL_SETTINGS_STORAGE_VERSION
+        && catalogDefault
+        && effort === catalogDefault
+        && effort !== defaultEffort) {
+        return false;
+      }
+      return true;
+    }
     function serviceTierLabel(value) {
       const key = String(value || "").trim().toLowerCase();
       if (["", "auto", "default", "normal", "standard"].includes(key)) return "正常";
@@ -3310,14 +3825,16 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       return normalizeModelSettings({
         model: modelSelector.value,
         effort: reasoningSelector.value,
-        service_tier: serviceTierSelector.value
+        service_tier: serviceTierSelector.value,
+        version: MODEL_SETTINGS_STORAGE_VERSION
       });
     }
     function normalizeModelSettings(settings = {}) {
       return {
         model: typeof settings.model === "string" ? settings.model : "",
         effort: typeof settings.effort === "string" ? settings.effort : "",
-        service_tier: typeof settings.service_tier === "string" ? settings.service_tier : ""
+        service_tier: typeof settings.service_tier === "string" ? settings.service_tier : "",
+        version: Number(settings.version || 0)
       };
     }
     function optionValueExists(select, value) {
@@ -3327,7 +3844,8 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     function modelSettingsEqual(left, right) {
       return left.model === right.model
         && left.effort === right.effort
-        && left.service_tier === right.service_tier;
+        && left.service_tier === right.service_tier
+        && left.version === right.version;
     }
     function saveModelSettingsIfChanged() {
       if (!modelSettingsDirty) return;
@@ -3772,7 +4290,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       const defaultModel = modelCatalog.find(model => model.isDefault) || modelCatalog[0] || null;
       const currentModel = selectedModelCatalogEntry();
       const modelChanged = currentModel && defaultModel && (currentModel.model || currentModel.id || "") !== (defaultModel.model || defaultModel.id || "");
-      const effortChanged = currentModel && modelSelector.value && reasoningSelector.value && reasoningSelector.value !== (currentModel.defaultReasoningEffort || "");
+      const effortChanged = currentModel && modelSelector.value && reasoningSelector.value && reasoningSelector.value !== preferredReasoningEffortDefault(currentModel, Array.isArray(currentModel.supportedReasoningEfforts) ? currentModel.supportedReasoningEfforts : []);
       const tierChanged = serviceTierSelector.value && serviceTierSelector.value !== (String(currentModel ? currentModel.defaultServiceTier || "" : "").toLowerCase());
       modelSettingsButton.classList.toggle("modified", modelChanged || effortChanged || tierChanged);
     }

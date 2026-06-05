@@ -165,7 +165,7 @@ async def test_list_models_exposes_deepseek_reasoning_levels(tmp_path: Path) -> 
             "id": "deepseek-v4-pro",
             "model": "deepseek-v4-pro",
             "displayName": "deepseek-v4-pro",
-            "defaultReasoningEffort": "medium",
+            "defaultReasoningEffort": "xhigh",
             "supportedReasoningEfforts": [
                 {"reasoningEffort": "low", "description": "轻量"},
                 {"reasoningEffort": "medium", "description": "正常"},

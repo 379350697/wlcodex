@@ -867,6 +867,11 @@ async def test_controller_starts_new_project_session_with_model_settings(
     assert result.turn_running is True
     assert session is not None
     assert session.cwd == "/workspace/two"
+    assert session.metadata == {
+        "model": "gpt-5.5",
+        "effort": "medium",
+        "service_tier": "fast",
+    }
     assert client.calls == [
         ("start_thread", "/workspace/two", "gpt-5.5", "fast"),
         (
@@ -879,6 +884,30 @@ async def test_controller_starts_new_project_session_with_model_settings(
             [{"url": "data:image/png;base64,abc"}],
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_controller_continue_session_updates_model_settings_metadata(
+    tmp_path: Path,
+) -> None:
+    controller, _client, session_store, _runtime_store = _controller(tmp_path)
+    await controller.list_sessions()
+
+    await controller.continue_session(
+        "thread-1",
+        "continue with settings",
+        model="gpt-5.5",
+        effort="xhigh",
+        service_tier="priority",
+    )
+
+    session = session_store.get_by_thread_id("thread-1")
+    assert session is not None
+    assert session.metadata == {
+        "model": "gpt-5.5",
+        "effort": "xhigh",
+        "service_tier": "priority",
+    }
 
 
 @pytest.mark.asyncio

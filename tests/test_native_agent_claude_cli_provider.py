@@ -200,6 +200,7 @@ async def test_claude_cli_provider_start_session_runs_in_background_and_streams_
     tmp_path: Path,
 ) -> None:
     engine = BlockingClaudeEngine()
+    engine._config = SimpleNamespace(model="deepseek-v4-pro", effort="max")
     provider, store, _engine, runtime_store = _provider(tmp_path, engine=engine)
 
     result = await asyncio.wait_for(
@@ -230,6 +231,8 @@ async def test_claude_cli_provider_start_session_runs_in_background_and_streams_
     )
     assert session is not None
     assert session.status == "done"
+    assert session.metadata["model"] == "deepseek-v4-pro"
+    assert session.metadata["effort"] == "max"
     events = runtime_store.list_by_agent_run(result.agent_run_id)
     assert [event.event_type for event in events] == [
         EventType.AGENT_RUN_STARTED,
@@ -363,7 +366,9 @@ async def test_claude_cli_provider_create_session_does_not_call_engine(
 async def test_claude_cli_provider_create_then_continue_starts_without_resume(
     tmp_path: Path,
 ) -> None:
-    provider, store, engine, _runtime_store = _provider(tmp_path)
+    engine = FakeClaudeEngine()
+    engine._config = SimpleNamespace(model="deepseek-v4-pro", effort="high")
+    provider, store, engine, _runtime_store = _provider(tmp_path, engine=engine)
     created = await provider.create_session(str(tmp_path))
 
     result = await provider.continue_session(created.native_session_id, "first prompt")
@@ -379,6 +384,8 @@ async def test_claude_cli_provider_create_then_continue_starts_without_resume(
     )
     assert session is not None
     assert session.metadata["claude_session_id"] == "claude-real-1"
+    assert session.metadata["model"] == "deepseek-v4-pro"
+    assert session.metadata["effort"] == "high"
 
 
 def test_claude_cli_provider_capabilities_disable_active_turn_steering(
@@ -421,6 +428,19 @@ async def test_claude_cli_provider_lists_configured_model_and_reasoning(
             "serviceTiers": [],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_provider_defaults_missing_reasoning_to_max(
+    tmp_path: Path,
+) -> None:
+    engine = FakeClaudeEngine()
+    engine._config = SimpleNamespace(model="deepseek-v4-pro")
+    provider, _store, _engine, _runtime_store = _provider(tmp_path, engine=engine)
+
+    models = await provider.list_models()
+
+    assert models[0]["defaultReasoningEffort"] == "max"
 
 
 @pytest.mark.asyncio

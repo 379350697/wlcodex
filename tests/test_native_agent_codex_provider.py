@@ -35,11 +35,29 @@ class FakeCodexController:
                 activity_at="2026-06-01T00:00:00Z",
                 created_at="2026-06-01T00:00:00Z",
                 updated_at="2026-06-01T00:01:00Z",
+                metadata={
+                    "model": "gpt-5.5",
+                    "effort": "xhigh",
+                    "service_tier": "priority",
+                },
             )
         ]
 
     async def list_models(self):
-        return [{"id": "gpt-5.1-codex"}]
+        return [
+            {
+                "id": "gpt-5.5",
+                "model": "gpt-5.5",
+                "displayName": "GPT-5.5",
+                "defaultReasoningEffort": "medium",
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "Light"},
+                    {"reasoningEffort": "medium", "description": "Normal"},
+                    {"reasoningEffort": "high", "description": "Deep"},
+                    {"reasoningEffort": "xhigh", "description": "Very deep"},
+                ],
+            }
+        ]
 
     async def start_session(self, cwd: str, prompt: str, **kwargs):
         return NativeCodexControlResult(
@@ -65,6 +83,20 @@ async def test_codex_provider_normalizes_status_and_sessions() -> None:
     assert status.status_code == "enabled"
     assert sessions[0].provider == "codex"
     assert sessions[0].native_session_id == "thread-1"
+    assert sessions[0].metadata == {
+        "model": "gpt-5.5",
+        "effort": "xhigh",
+        "service_tier": "priority",
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_defaults_reasoning_to_highest_supported_effort() -> None:
+    provider = CodexAppServerProvider(FakeCodexController())
+
+    models = await provider.list_models()
+
+    assert models[0]["defaultReasoningEffort"] == "xhigh"
 
 
 @pytest.mark.asyncio

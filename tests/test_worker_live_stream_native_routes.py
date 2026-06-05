@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +17,20 @@ from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import RuntimeEvent
 
 
+_FAKE_SESSION_METADATA = {
+    "model": "gpt-5.5",
+    "effort": "high",
+    "service_tier": "fast",
+}
+
+
 @dataclass(frozen=True)
 class FakeNativeSession:
     native_thread_id: str
     agent_run_id: int
     activity_at: str = "2026-05-31T12:39:00+00:00"
     updated_at: str = "2026-05-31T13:00:00+00:00"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -30,6 +38,7 @@ class FakeNativeSession:
             "agent_run_id": self.agent_run_id,
             "activity_at": self.activity_at,
             "updated_at": self.updated_at,
+            "metadata": self.metadata,
         }
 
 
@@ -52,7 +61,13 @@ class FakeControlResult:
 class FakeNativeController:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
-        self.sessions = [FakeNativeSession("thread-1", 42)]
+        self.sessions = [
+            FakeNativeSession(
+                "thread-1",
+                42,
+                metadata=_FAKE_SESSION_METADATA,
+            )
+        ]
 
     async def status(self) -> dict[str, Any]:
         self.calls.append(("status",))
@@ -317,6 +332,7 @@ async def test_native_routes_allow_public_loopback_when_token_is_disabled(
                     "agent_run_id": 42,
                     "activity_at": "2026-05-31T12:39:00+00:00",
                     "updated_at": "2026-05-31T13:00:00+00:00",
+                    "metadata": _FAKE_SESSION_METADATA,
                 }
             ]
         }
@@ -496,6 +512,7 @@ async def test_native_sessions_returns_json_with_bearer_token(tmp_path: Path) ->
                     "agent_run_id": 42,
                     "activity_at": "2026-05-31T12:39:00+00:00",
                     "updated_at": "2026-05-31T13:00:00+00:00",
+                    "metadata": _FAKE_SESSION_METADATA,
                 }
             ]
         }
@@ -1300,7 +1317,7 @@ async def test_native_codex_page_uses_project_context_for_new_chat(
     assert "sessionProjectKey(session) === selectedProjectCwd" in response
     assert 'id="projectNewChat"' in response
     assert "function renderProjectAction()" in response
-    assert "async function openProjectNewChat()" in response
+    assert "function focusProjectPrompt()" in response
     assert "async function startNewChat(prompt)" in response
     assert 'const API_BASE = "/api/native/codex";' in response
     assert "api(`${API_BASE}/sessions/start`" in response
@@ -1317,6 +1334,120 @@ async def test_native_codex_page_uses_project_context_for_new_chat(
     assert "relativeTime(sessionActivityAt(session))" in response
     assert "Date.parse(sessionActivityAt(right))" in response
     assert "return session.activity_at || session.updated_at || \"\";" in response
+
+
+@pytest.mark.asyncio
+async def test_native_codex_page_keeps_workspace_selection_dark_and_layout_stable(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "button.project:not(.secondary):not(.warn):not(:disabled):hover" in response
+    assert "button.project.active" in response
+    assert "button.project.active::before" in response
+    assert "filter: none;" in response
+    assert "border-left: 3px solid var(--color-link);" not in response
+
+
+@pytest.mark.asyncio
+async def test_native_codex_project_new_chat_waits_for_first_prompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "function focusProjectPrompt()" in response
+    assert "projectNewChat.onclick = focusProjectPrompt;" in response
+    assert 'await startNewChat("");' not in response
+
+
+@pytest.mark.asyncio
+async def test_native_provider_index_page_exposes_model_settings_for_new_sessions(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'id="modelSettingsButton"' in response
+    assert 'id="modelPopover"' in response
+    assert 'id="modelSelector"' in response
+    assert 'id="reasoningSelector"' in response
+    assert 'id="serviceTierSelector"' in response
+    assert "async function loadModelCatalog()" in response
+    assert "api(`${API_BASE}/models`)" in response
+    assert "function renderReasoningAndSpeed" in response
+    assert "function highestReasoningEffort" in response
+    assert "function preferredReasoningEffortDefault" in response
+    assert "preferredReasoningEffortDefault(model, efforts)" in response
+    assert "function updateSettingVisibility" in response
+    assert "reasoningSettingRow.hidden = reasoningSelector.options.length <= 1;" in response
+    assert "serviceTierSettingRow.hidden = serviceTierSelector.options.length <= 1;" in response
+    assert "function readSelectedModelSettings()" in response
+    assert "saveModelSettingsIfChanged();" in response
+    assert "if (settings.model) body.model = settings.model;" in response
+    assert "if (settings.effort) body.effort = settings.effort;" in response
+    assert "if (settings.service_tier) body.service_tier = settings.service_tier;" in response
+    assert "function sessionModelSettingsLabel(session)" in response
+    assert "function sessionMetaText(session)" in response
+    assert "const metadata = (session && session.metadata) || {};" in response
+    assert "reasoningEffortLabel(metadata.effort" in response
+    assert "serviceTierLabel(metadata.service_tier" in response
+    assert 'const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";' in response
 
 
 @pytest.mark.asyncio
@@ -1747,6 +1878,9 @@ async def test_worker_live_page_uses_official_model_catalog_settings(
     assert "pointer-events: none" in response
     assert "function renderSettingOptions" in response
     assert "function fillServiceTierSelector" in response
+    assert "function highestReasoningEffort" in response
+    assert "function preferredReasoningEffortDefault" in response
+    assert "preferredReasoningEffortDefault(model, efforts)" in response
     assert "function serviceTierLabel" in response
     assert "function reasoningEffortLabel" in response
     assert 'if (key === "high") return "高";' in response
@@ -1938,6 +2072,15 @@ async def test_worker_live_page_renders_assistant_markdown_blocks(
     assert ".transcript-body p" in response
     assert ".transcript-body ul" in response
     assert ".transcript-body pre" in response
+
+
+def test_live_page_uses_native_codex_font_scale_for_all_native_providers() -> None:
+    for provider in ("codex", "claude", "antigravity"):
+        response = _live_page(42, native_provider=provider)
+
+        assert ".transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #f4f4f5; font-size: 15px; line-height: 1.55;" in response
+        assert ".transcript-body pre code { padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }" in response
+        assert "input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid #3f4550; background: #12151d; color: #f4f4f5; padding: 0 14px; font-size: 15px; }" in response
 
 
 @pytest.mark.asyncio

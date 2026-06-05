@@ -223,6 +223,7 @@ class Ledger:
                 status TEXT NOT NULL DEFAULT 'unknown',
                 last_turn_id TEXT NOT NULL DEFAULT '',
                 activity_at TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(agent_run_id) REFERENCES agent_runs(id),
@@ -641,6 +642,10 @@ class Ledger:
         self._add_column_if_missing(
             "native_codex_sessions", "activity_at",
             "activity_at TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "native_codex_sessions", "metadata_json",
+            "metadata_json TEXT NOT NULL DEFAULT '{}'",
         )
         self._conn.execute(
             """

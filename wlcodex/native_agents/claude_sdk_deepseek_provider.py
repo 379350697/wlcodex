@@ -31,7 +31,7 @@ class ClaudeSdkDeepSeekConfig:
     api_key_env: str = "DEEPSEEK_API_KEY"
     base_url: str = "https://api.deepseek.com/anthropic"
     model: str = "deepseek-v4-pro"
-    effort: str = "medium"
+    effort: str = "xhigh"
     ccswitch_fallback_enabled: bool = True
     ccswitch_db_path: str = str(DEFAULT_CCSWITCH_DB_PATH)
 

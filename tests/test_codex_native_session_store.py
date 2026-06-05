@@ -53,6 +53,27 @@ def test_update_session_updates_status_and_last_turn_id(tmp_path: Path) -> None:
     assert store._ledger.get_agent_run(session.agent_run_id).status == "running"
 
 
+def test_session_metadata_is_persisted_and_merged(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    created = store.get_or_create_session(
+        native_thread_id="thread_meta",
+        metadata={"model": "gpt-5.5", "effort": "xhigh"},
+    )
+    updated = store.update_session(
+        created.id,
+        metadata={"service_tier": "priority"},
+    )
+
+    assert created.metadata == {"model": "gpt-5.5", "effort": "xhigh"}
+    assert updated.metadata == {
+        "model": "gpt-5.5",
+        "effort": "xhigh",
+        "service_tier": "priority",
+    }
+    assert store.get_by_thread_id("thread_meta").metadata == updated.metadata
+
+
 def test_list_recent_returns_newest_first(tmp_path: Path) -> None:
     store = _store(tmp_path)
     first = store.get_or_create_session(native_thread_id="thread_1")

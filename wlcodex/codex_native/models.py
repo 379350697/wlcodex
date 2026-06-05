@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -29,6 +29,7 @@ class NativeCodexSession:
     activity_at: str
     created_at: str
     updated_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +45,7 @@ class NativeCodexSession:
             "activity_at": self.activity_at,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "metadata": self.metadata,
         }
 
 

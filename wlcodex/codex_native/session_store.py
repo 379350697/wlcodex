@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sqlite3
+from typing import Any
 
 from wlcodex.codex_native.models import NativeCodexSession
 from wlcodex.db import Ledger, _now
@@ -61,6 +63,7 @@ class NativeCodexSessionStore:
         status: str = "unknown",
         last_turn_id: str = "",
         activity_at: str = "",
+        metadata: dict[str, Any] | None = None,
     ) -> NativeCodexSession:
         existing = self.get_by_thread_id(native_thread_id)
         if existing is not None:
@@ -72,6 +75,7 @@ class NativeCodexSessionStore:
                 status=status or existing.status,
                 last_turn_id=last_turn_id or existing.last_turn_id,
                 activity_at=activity_at or existing.activity_at,
+                metadata=metadata,
             )
 
         conversation_id = self.get_or_create_native_conversation()
@@ -92,9 +96,10 @@ class NativeCodexSessionStore:
             """
             INSERT INTO native_codex_sessions (
                 native_thread_id, agent_run_id, conversation_id, title, cwd,
-                source_kind, status, last_turn_id, activity_at, created_at, updated_at
+                source_kind, status, last_turn_id, activity_at, metadata_json,
+                created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 native_thread_id,
@@ -106,6 +111,7 @@ class NativeCodexSessionStore:
                 status,
                 last_turn_id,
                 activity_at or now,
+                _metadata_json(metadata or {}),
                 now,
                 now,
             ),
@@ -127,6 +133,7 @@ class NativeCodexSessionStore:
         status: str | None = None,
         last_turn_id: str | None = None,
         activity_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> NativeCodexSession:
         existing = self._lookup_session(session_id, native_thread_id)
         if status is not None:
@@ -139,7 +146,7 @@ class NativeCodexSessionStore:
             """
             UPDATE native_codex_sessions
             SET title = ?, cwd = ?, source_kind = ?, status = ?,
-                last_turn_id = ?, activity_at = ?, updated_at = ?
+                last_turn_id = ?, activity_at = ?, metadata_json = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -149,6 +156,7 @@ class NativeCodexSessionStore:
                 status if status is not None else existing.status,
                 last_turn_id if last_turn_id is not None else existing.last_turn_id,
                 activity_at if activity_at is not None else existing.activity_at,
+                _metadata_json(_merged_metadata(existing.metadata, metadata)),
                 _now(),
                 existing.id,
             ),
@@ -222,4 +230,34 @@ def _session(row: sqlite3.Row) -> NativeCodexSession:
         activity_at=str(row["activity_at"]),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
+        metadata=_row_metadata(row),
     )
+
+
+def _row_metadata(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        raw = row["metadata_json"]
+    except (IndexError, KeyError):
+        return {}
+    if not raw:
+        return {}
+    try:
+        data = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _merged_metadata(
+    existing: dict[str, Any],
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if metadata is None:
+        return dict(existing)
+    merged = dict(existing)
+    merged.update(metadata)
+    return merged
+
+
+def _metadata_json(metadata: dict[str, Any]) -> str:
+    return json.dumps(metadata, ensure_ascii=False, sort_keys=True)

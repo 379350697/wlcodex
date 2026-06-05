@@ -185,9 +185,19 @@ class CodexNativeController:
         )
         native_thread_id = parse_thread_start_response(detail)
         turn_state = self._project_detail_header(native_thread_id, detail)
+        session = turn_state.session
+        metadata = _model_settings_metadata(
+            model=model,
+            service_tier=service_tier,
+        )
+        if metadata:
+            session = self._session_store.update_session(
+                session.id,
+                metadata=metadata,
+            )
         return NativeCodexControlResult(
             native_thread_id=native_thread_id,
-            agent_run_id=turn_state.session.agent_run_id,
+            agent_run_id=session.agent_run_id,
             turn_id=turn_state.turn_id,
             active_turn_id=turn_state.active_turn_id,
             turn_running=turn_state.turn_running,
@@ -317,6 +327,11 @@ class CodexNativeController:
             session.id,
             status="running",
             last_turn_id=turn_id,
+            metadata=_model_settings_metadata(
+                model=model,
+                effort=effort,
+                service_tier=service_tier,
+            ),
         )
         self._project_sent_prompt(
             native_thread_id=native_thread_id,
@@ -599,6 +614,7 @@ class CodexNativeController:
             ),
             status=_string_value(raw, "status") or "unknown",
             activity_at=_thread_activity_at(raw),
+            metadata=_thread_model_settings_metadata(raw),
         )
 
     def _register_handlers(self) -> None:
@@ -659,6 +675,41 @@ def _thread_activity_at(raw: dict[str, Any]) -> str:
     if isinstance(turns, list):
         return _turn_activity_at(_latest_turn(turns))
     return ""
+
+
+def _thread_model_settings_metadata(raw: dict[str, Any]) -> dict[str, Any]:
+    return _model_settings_metadata(
+        model=(
+            _string_value(raw, "model")
+            or _string_value(raw, "modelId")
+            or _string_value(raw, "model_id")
+        ),
+        effort=(
+            _string_value(raw, "effort")
+            or _string_value(raw, "reasoningEffort")
+            or _string_value(raw, "reasoning_effort")
+        ),
+        service_tier=(
+            _string_value(raw, "serviceTier")
+            or _string_value(raw, "service_tier")
+        ),
+    )
+
+
+def _model_settings_metadata(
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+    service_tier: str | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    if model:
+        metadata["model"] = str(model)
+    if effort:
+        metadata["effort"] = str(effort)
+    if service_tier:
+        metadata["service_tier"] = str(service_tier)
+    return metadata
 
 
 def _detail_activity_at(detail: dict[str, Any]) -> str:
