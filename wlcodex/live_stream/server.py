@@ -2800,7 +2800,6 @@ __ICONS_JS__
     const MODEL_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
     const PERMISSION_SETTINGS_STORAGE_VERSION = 1;
-    const PERMISSION_PRESETS = [
     const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
     let modelCatalog = [];
     let savedModelSettings = loadSavedModelSettings();
@@ -4030,7 +4029,6 @@ __ICONS_JS__
     const MODEL_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
     const PERMISSION_SETTINGS_STORAGE_VERSION = 1;
-    const PERMISSION_PRESETS = [
     const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
     const transcriptNodes = new Map();
     const statusNodes = new Map();

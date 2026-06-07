@@ -597,6 +597,12 @@ async def test_native_claude_page_uses_claude_api_base(tmp_path: Path) -> None:
     assert "<title>Claude</title>" in response
     assert "<h1>Claude</h1>" in response
     assert "/api/native/codex/sessions" not in response
+    assert '\"value\": "acceptEdits"' in response
+    assert '\"value\": "auto"' in response
+    assert '\"value\": "plan"' in response
+    assert '\"value\": "default"' in response
+    assert '\"value\": "dontAsk"' in response
+    assert '\"value\": "bypassPermissions"' in response
 
 
 @pytest.mark.asyncio
