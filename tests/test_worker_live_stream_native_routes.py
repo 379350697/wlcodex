@@ -1883,15 +1883,16 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
 
     assert ".prompt-card { width: auto; height: min(48vh, 620px);" in response
     assert ".transcript-item.prompt-message { justify-self: stretch;" in response
-    assert "margin-left: -6px; margin-right: -6px;" in response
+    assert "margin-left: 6px; margin-right: 6px;" in response
     assert ".transcript-item.prompt-message .transcript-meta { display: none;" in response
-    assert "background: #303033;" in response
+    assert "background: #303030;" in response
     assert ".prompt-card-head { display: flex;" in response
-    assert "min-height: 0; padding: 28px 26px 0;" in response
-    assert ".prompt-card-title { color: #f8fafc; font-size: 19px;" in response
+    assert "min-height: 0; padding: 20px 26px 0;" in response
+    assert ".prompt-card-title { color: #f8fafc; font-size: 16px;" in response
     assert ".transcript-body .prompt-card-body { min-height: 0; overflow: auto;" in response
-    assert "padding: 22px 26px 28px;" in response
-    assert "font: 14px/1.42 ui-monospace" in response
+    assert "padding: 16px 26px 28px;" in response
+    assert "font: 12px/1.42 ui-monospace" in response
+    assert "-webkit-text-size-adjust: 100%;" in response
     assert "border: 0;" in response
     assert "white-space: pre-wrap;" in response
     assert "function stripGeneratedPromptFence(text)" in response
@@ -1900,7 +1901,7 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert "preface: stripGeneratedPromptFence(source.slice(0, promptStart)).trim()" in response
     assert "const prompt = normalizeGeneratedPromptText(rawPrompt);" in response
     assert "function collapseGeneratedPromptHardWraps(text)" in response
-    assert 'return collapsed.replace(/\\s+(背景：)/g, "\\n\\n$1")' in response
+    assert 'return collapsed.replace(/\\s+(背景：)/g, "\\n\\n$1\\n")' in response
     assert "function splitGeneratedPromptText(text)" in response
     assert "function renderGeneratedPromptTranscript(target, text)" in response
     assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text);" in response
