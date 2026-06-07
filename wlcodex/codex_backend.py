@@ -202,6 +202,7 @@ def build_thread_start_params(
     approval_policy: str,
     sandbox: str,
     *,
+    approvals_reviewer: str | None = None,
     developer_instructions: str | None = None,
     base_instructions: str | None = None,
     config: dict[str, object] | None = None,
@@ -220,6 +221,8 @@ def build_thread_start_params(
         params["baseInstructions"] = base_instructions
     if config is not None:
         params["config"] = config
+    if approvals_reviewer is not None:
+        params["approvalsReviewer"] = approvals_reviewer
     if model is not None:
         params["model"] = model
     if personality is not None:
@@ -235,6 +238,7 @@ def build_turn_start_params(
     *,
     effort: str | None = None,
     approval_policy: str | None = None,
+    approvals_reviewer: str | None = None,
     sandbox_policy: dict[str, object] | None = None,
     output_schema: dict[str, object] | None = None,
     model: str | None = None,
@@ -252,6 +256,8 @@ def build_turn_start_params(
         params["effort"] = effort
     if approval_policy is not None:
         params["approvalPolicy"] = approval_policy
+    if approvals_reviewer is not None:
+        params["approvalsReviewer"] = approvals_reviewer
     if sandbox_policy is not None:
         params["sandboxPolicy"] = sandbox_policy
     if output_schema is not None:

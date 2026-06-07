@@ -219,6 +219,74 @@ async def test_native_client_continue_sends_model_and_images_without_collaborati
 
 
 @pytest.mark.asyncio
+async def test_native_client_sends_codex_permission_overrides() -> None:
+    def response_for(msg: dict[str, Any]) -> dict[str, Any] | None:
+        match msg["method"]:
+            case "initialize":
+                return {}
+            case "thread/start":
+                assert msg["params"] == {
+                    "cwd": "/repo",
+                    "model": "gpt-5.5",
+                    "serviceTier": "fast",
+                    "approvalPolicy": "on-request",
+                    "approvalsReviewer": "auto_review",
+                    "sandbox": "workspace-write",
+                }
+                return {"thread": {"id": "thread-1"}}
+            case "thread/resume":
+                assert msg["params"] == {"threadId": "thread-1"}
+                return {"threadId": "thread-1"}
+            case "turn/start":
+                assert msg["params"] == {
+                    "threadId": "thread-1",
+                    "input": [
+                        {"type": "text", "text": "continue", "text_elements": []}
+                    ],
+                    "effort": "high",
+                    "approvalPolicy": "never",
+                    "approvalsReviewer": "auto_review",
+                    "sandboxPolicy": {"type": "dangerFullAccess"},
+                }
+                return {"turn": {"id": "turn-2"}}
+        raise AssertionError(f"unexpected method: {msg['method']}")
+
+    transport = FakeTransport(response_for)
+    client = CodexNativeClient(
+        send_json=transport.send_json,
+        close=transport.close,
+    )
+    transport.client = client
+
+    detail = await client.start_thread(
+        "/repo",
+        model="gpt-5.5",
+        service_tier="fast",
+        approval_policy="on-request",
+        approvals_reviewer="auto_review",
+        sandbox="workspace-write",
+    )
+    turn_id = await client.continue_session(
+        "thread-1",
+        "continue",
+        effort="high",
+        approval_policy="never",
+        approvals_reviewer="auto_review",
+        sandbox_policy={"type": "dangerFullAccess"},
+    )
+
+    assert detail["thread"]["id"] == "thread-1"
+    assert turn_id == "turn-2"
+    assert _method_names(transport.sent) == [
+        "initialize",
+        "initialized",
+        "thread/start",
+        "thread/resume",
+        "turn/start",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_native_client_lists_official_model_catalog() -> None:
     def response_for(msg: dict[str, Any]) -> dict[str, Any] | None:
         match msg["method"]:

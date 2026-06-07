@@ -85,13 +85,48 @@ class FakeNativeClient:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> str:
-        if model is None and effort is None and service_tier is None and images is None:
+        if (
+            model is None
+            and effort is None
+            and service_tier is None
+            and images is None
+            and approval_policy is None
+            and approvals_reviewer is None
+            and sandbox_policy is None
+        ):
             self.calls.append(("continue_session", thread, prompt))
         else:
-            self.calls.append(
-                ("continue_session", thread, prompt, model, effort, service_tier, images)
-            )
+            if approval_policy is None and approvals_reviewer is None and sandbox_policy is None:
+                self.calls.append(
+                    (
+                        "continue_session",
+                        thread,
+                        prompt,
+                        model,
+                        effort,
+                        service_tier,
+                        images,
+                    )
+                )
+            else:
+                self.calls.append(
+                    (
+                        "continue_session",
+                        thread,
+                        prompt,
+                        model,
+                        effort,
+                        service_tier,
+                        images,
+                        approval_policy,
+                        approvals_reviewer,
+                        sandbox_policy,
+                    )
+                )
         detail = self.details.setdefault(thread, {"thread": {"id": thread}})
         detail_thread = detail.setdefault("thread", {"id": thread})
         if isinstance(detail_thread, dict):
@@ -108,13 +143,40 @@ class FakeNativeClient:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> str:
-        if model is None and effort is None and service_tier is None and images is None:
+        if (
+            model is None
+            and effort is None
+            and service_tier is None
+            and images is None
+            and approval_policy is None
+            and approvals_reviewer is None
+            and sandbox_policy is None
+        ):
             self.calls.append(("start_turn", thread, prompt))
         else:
-            self.calls.append(
-                ("start_turn", thread, prompt, model, effort, service_tier, images)
-            )
+            if approval_policy is None and approvals_reviewer is None and sandbox_policy is None:
+                self.calls.append(
+                    ("start_turn", thread, prompt, model, effort, service_tier, images)
+                )
+            else:
+                self.calls.append(
+                    (
+                        "start_turn",
+                        thread,
+                        prompt,
+                        model,
+                        effort,
+                        service_tier,
+                        images,
+                        approval_policy,
+                        approvals_reviewer,
+                        sandbox_policy,
+                    )
+                )
         detail = self.details.setdefault(thread, {"thread": {"id": thread}})
         detail_thread = detail.setdefault("thread", {"id": thread})
         if isinstance(detail_thread, dict):
@@ -128,8 +190,24 @@ class FakeNativeClient:
         *,
         model: str | None = None,
         service_tier: str | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox: str | None = None,
     ) -> dict[str, Any]:
-        self.calls.append(("start_thread", cwd, model, service_tier))
+        if approval_policy is None and approvals_reviewer is None and sandbox is None:
+            self.calls.append(("start_thread", cwd, model, service_tier))
+        else:
+            self.calls.append(
+                (
+                    "start_thread",
+                    cwd,
+                    model,
+                    service_tier,
+                    approval_policy,
+                    approvals_reviewer,
+                    sandbox,
+                )
+            )
         thread = {
             "id": "thread-new",
             "title": "",
@@ -887,6 +965,68 @@ async def test_controller_starts_new_project_session_with_model_settings(
 
 
 @pytest.mark.asyncio
+async def test_controller_passes_codex_permission_overrides_to_new_turns(
+    tmp_path: Path,
+) -> None:
+    controller, client, _session_store, _runtime_store = _controller(tmp_path)
+    await controller.list_sessions()
+
+    await controller.continue_session(
+        "thread-1",
+        "continue with permissions",
+        approval_policy="never",
+        approvals_reviewer="auto_review",
+        sandbox_policy={"type": "dangerFullAccess"},
+    )
+    await controller.start_session(
+        "/workspace/two",
+        "start with permissions",
+        approval_policy="on-request",
+        approvals_reviewer="auto_review",
+        sandbox="workspace-write",
+        sandbox_policy={"type": "workspaceWrite", "writableRoots": []},
+    )
+
+    assert client.calls == [
+        ("list_sessions", 50),
+        ("attach_session", "thread-1"),
+        (
+            "continue_session",
+            "thread-1",
+            "continue with permissions",
+            None,
+            None,
+            None,
+            None,
+            "never",
+            "auto_review",
+            {"type": "dangerFullAccess"},
+        ),
+        (
+            "start_thread",
+            "/workspace/two",
+            None,
+            None,
+            "on-request",
+            "auto_review",
+            "workspace-write",
+        ),
+        (
+            "start_turn",
+            "thread-new",
+            "start with permissions",
+            None,
+            None,
+            None,
+            None,
+            "on-request",
+            "auto_review",
+            {"type": "workspaceWrite", "writableRoots": []},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_controller_continue_session_updates_model_settings_metadata(
     tmp_path: Path,
 ) -> None:
@@ -933,6 +1073,7 @@ async def test_controller_start_session_retries_when_rollout_stays_briefly_missi
             effort: str | None = None,
             service_tier: str | None = None,
             images: list[dict[str, Any]] | None = None,
+            **_extra: Any,
         ) -> str:
             self.calls.append(
                 ("start_turn", thread, prompt, model, effort, service_tier, images)
@@ -1003,6 +1144,7 @@ async def test_controller_start_session_raises_when_rollout_never_becomes_ready(
             effort: str | None = None,
             service_tier: str | None = None,
             images: list[dict[str, Any]] | None = None,
+            **_extra: Any,
         ) -> str:
             self.calls.append(
                 ("start_turn", thread, prompt, model, effort, service_tier, images)
@@ -1056,6 +1198,7 @@ async def test_controller_start_session_retries_when_rollout_is_not_ready(
             effort: str | None = None,
             service_tier: str | None = None,
             images: list[dict[str, Any]] | None = None,
+            **_extra: Any,
         ) -> str:
             self.calls.append(
                 ("start_turn", thread, prompt, model, effort, service_tier, images)

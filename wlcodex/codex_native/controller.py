@@ -51,6 +51,9 @@ class _NativeClient(Protocol):
         *,
         model: str | None = None,
         service_tier: str | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox: str | None = None,
     ) -> dict[str, Any]: ...
 
     async def read_session(
@@ -71,6 +74,9 @@ class _NativeClient(Protocol):
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> str: ...
 
     async def start_turn(
@@ -82,6 +88,9 @@ class _NativeClient(Protocol):
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> str: ...
 
     async def steer_turn(
@@ -153,11 +162,18 @@ class CodexNativeController:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> NativeCodexControlResult:
         detail = await self._client.start_thread(
             cwd.strip(),
             model=model,
             service_tier=service_tier,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            sandbox=sandbox,
         )
         native_thread_id = parse_thread_start_response(detail)
         self._project_detail_header(native_thread_id, detail)
@@ -168,6 +184,9 @@ class CodexNativeController:
             effort=effort,
             service_tier=service_tier,
             images=images,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            sandbox_policy=sandbox_policy,
             resume_first=False,
         )
 
@@ -177,11 +196,17 @@ class CodexNativeController:
         *,
         model: str | None = None,
         service_tier: str | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox: str | None = None,
     ) -> NativeCodexControlResult:
         detail = await self._client.start_thread(
             cwd.strip(),
             model=model,
             service_tier=service_tier,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            sandbox=sandbox,
         )
         native_thread_id = parse_thread_start_response(detail)
         turn_state = self._project_detail_header(native_thread_id, detail)
@@ -251,6 +276,9 @@ class CodexNativeController:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> NativeCodexControlResult:
         native_thread_id = native_thread_id.strip()
         if not native_thread_id:
@@ -275,6 +303,9 @@ class CodexNativeController:
                     effort=effort,
                     service_tier=service_tier,
                     images=images,
+                    approval_policy=approval_policy,
+                    approvals_reviewer=approvals_reviewer,
+                    sandbox_policy=sandbox_policy,
                 )
             session = self._session_store.update_session(
                 session.id,
@@ -300,6 +331,9 @@ class CodexNativeController:
             effort=effort,
             service_tier=service_tier,
             images=images,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            sandbox_policy=sandbox_policy,
         )
 
     async def _start_new_turn(
@@ -311,6 +345,9 @@ class CodexNativeController:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
         resume_first: bool = True,
     ) -> NativeCodexControlResult:
         session = self._ensure_session(native_thread_id)
@@ -321,6 +358,9 @@ class CodexNativeController:
             effort=effort,
             service_tier=service_tier,
             images=images,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            sandbox_policy=sandbox_policy,
             resume_first=resume_first,
         )
         session = self._session_store.update_session(
@@ -355,6 +395,9 @@ class CodexNativeController:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
         resume_first: bool = True,
     ) -> str:
         for attempt in range(len(_ROLLOUT_NOT_READY_RETRY_DELAYS) + 1):
@@ -367,6 +410,9 @@ class CodexNativeController:
                         effort=effort,
                         service_tier=service_tier,
                         images=images,
+                        approval_policy=approval_policy,
+                        approvals_reviewer=approvals_reviewer,
+                        sandbox_policy=sandbox_policy,
                     )
                 return await self._client.start_turn(
                     native_thread_id,
@@ -375,6 +421,9 @@ class CodexNativeController:
                     effort=effort,
                     service_tier=service_tier,
                     images=images,
+                    approval_policy=approval_policy,
+                    approvals_reviewer=approvals_reviewer,
+                    sandbox_policy=sandbox_policy,
                 )
             except JsonRpcError as exc:
                 if (
@@ -405,6 +454,9 @@ class CodexNativeController:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> NativeCodexControlResult:
         native_thread_id = native_thread_id.strip()
         if not native_thread_id:
@@ -420,6 +472,9 @@ class CodexNativeController:
                 effort=effort,
                 service_tier=service_tier,
                 images=images,
+                approval_policy=approval_policy,
+                approvals_reviewer=approvals_reviewer,
+                sandbox_policy=sandbox_policy,
             )
         try:
             turn_id = await self._steer_active_turn(
@@ -437,6 +492,9 @@ class CodexNativeController:
                 effort=effort,
                 service_tier=service_tier,
                 images=images,
+                approval_policy=approval_policy,
+                approvals_reviewer=approvals_reviewer,
+                sandbox_policy=sandbox_policy,
             )
         session = self._session_store.update_session(
             session.id,

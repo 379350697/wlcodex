@@ -121,21 +121,48 @@ class FakeNativeController:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, Any] | None = None,
     ) -> FakeControlResult:
-        if model is None and effort is None and service_tier is None and images is None:
+        if (
+            model is None
+            and effort is None
+            and service_tier is None
+            and images is None
+            and approval_policy is None
+            and approvals_reviewer is None
+            and sandbox_policy is None
+        ):
             self.calls.append(("continue_session", native_thread_id, prompt))
         else:
-            self.calls.append(
-                (
-                    "continue_session",
-                    native_thread_id,
-                    prompt,
-                    model,
-                    effort,
-                    service_tier,
-                    images,
+            if approval_policy is None and approvals_reviewer is None and sandbox_policy is None:
+                self.calls.append(
+                    (
+                        "continue_session",
+                        native_thread_id,
+                        prompt,
+                        model,
+                        effort,
+                        service_tier,
+                        images,
+                    )
                 )
-            )
+            else:
+                self.calls.append(
+                    (
+                        "continue_session",
+                        native_thread_id,
+                        prompt,
+                        model,
+                        effort,
+                        service_tier,
+                        images,
+                        approval_policy,
+                        approvals_reviewer,
+                        sandbox_policy,
+                    )
+                )
         return FakeControlResult(native_thread_id, 42, "turn-2")
 
     async def start_session(
@@ -147,10 +174,36 @@ class FakeNativeController:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox: str | None = None,
+        sandbox_policy: dict[str, Any] | None = None,
     ) -> FakeControlResult:
-        self.calls.append(
-            ("start_session", cwd, prompt, model, effort, service_tier, images)
-        )
+        if (
+            approval_policy is None
+            and approvals_reviewer is None
+            and sandbox is None
+            and sandbox_policy is None
+        ):
+            self.calls.append(
+                ("start_session", cwd, prompt, model, effort, service_tier, images)
+            )
+        else:
+            self.calls.append(
+                (
+                    "start_session",
+                    cwd,
+                    prompt,
+                    model,
+                    effort,
+                    service_tier,
+                    images,
+                    approval_policy,
+                    approvals_reviewer,
+                    sandbox,
+                    sandbox_policy,
+                )
+            )
         return FakeControlResult("thread-new", 43, "turn-new")
 
     async def create_session(
@@ -159,8 +212,31 @@ class FakeNativeController:
         *,
         model: str | None = None,
         service_tier: str | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox: str | None = None,
+        sandbox_policy: dict[str, Any] | None = None,
     ) -> FakeControlResult:
-        self.calls.append(("create_session", cwd, model, service_tier))
+        if (
+            approval_policy is None
+            and approvals_reviewer is None
+            and sandbox is None
+            and sandbox_policy is None
+        ):
+            self.calls.append(("create_session", cwd, model, service_tier))
+        else:
+            self.calls.append(
+                (
+                    "create_session",
+                    cwd,
+                    model,
+                    service_tier,
+                    approval_policy,
+                    approvals_reviewer,
+                    sandbox,
+                    sandbox_policy,
+                )
+            )
         return FakeControlResult("thread-empty", 44, "", status="created")
 
     async def steer_session(
@@ -173,22 +249,50 @@ class FakeNativeController:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, Any] | None = None,
     ) -> FakeControlResult:
-        if model is None and effort is None and service_tier is None and images is None:
+        if (
+            model is None
+            and effort is None
+            and service_tier is None
+            and images is None
+            and approval_policy is None
+            and approvals_reviewer is None
+            and sandbox_policy is None
+        ):
             self.calls.append(("steer_session", native_thread_id, expected_turn_id, prompt))
         else:
-            self.calls.append(
-                (
-                    "steer_session",
-                    native_thread_id,
-                    expected_turn_id,
-                    prompt,
-                    model,
-                    effort,
-                    service_tier,
-                    images,
+            if approval_policy is None and approvals_reviewer is None and sandbox_policy is None:
+                self.calls.append(
+                    (
+                        "steer_session",
+                        native_thread_id,
+                        expected_turn_id,
+                        prompt,
+                        model,
+                        effort,
+                        service_tier,
+                        images,
+                    )
                 )
-            )
+            else:
+                self.calls.append(
+                    (
+                        "steer_session",
+                        native_thread_id,
+                        expected_turn_id,
+                        prompt,
+                        model,
+                        effort,
+                        service_tier,
+                        images,
+                        approval_policy,
+                        approvals_reviewer,
+                        sandbox_policy,
+                    )
+                )
         return FakeControlResult(native_thread_id, 42, expected_turn_id)
 
     async def interrupt_session(
@@ -611,6 +715,61 @@ async def test_native_start_route_creates_project_thread_with_model_settings(
 
 
 @pytest.mark.asyncio
+async def test_native_start_route_translates_codex_permission_mode(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    body = json.dumps(
+        {
+            "cwd": "/Users/wl/projects/wlcodex",
+            "prompt": "start read-only",
+            "permission_mode": "read_only",
+        }
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/start HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert controller.calls == [
+        (
+            "start_session",
+            "/Users/wl/projects/wlcodex",
+            "start read-only",
+            None,
+            None,
+            None,
+            None,
+            "on-request",
+            None,
+            "read-only",
+            {"type": "readOnly", "networkAccess": False},
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_native_start_route_starts_thread_with_image_only_prompt(
     tmp_path: Path,
 ) -> None:
@@ -700,6 +859,53 @@ async def test_native_start_route_creates_empty_project_thread_without_prompt(
     assert body_json["status"] == "created"
     assert controller.calls == [
         ("create_session", "/Users/wl/projects/wlcodex", None, None)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_start_route_passes_thread_permission_to_empty_session(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    body = json.dumps(
+        {"cwd": "/Users/wl/projects/wlcodex", "permission_mode": "full_access"}
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/start HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert controller.calls == [
+        (
+            "create_session",
+            "/Users/wl/projects/wlcodex",
+            None,
+            None,
+            "never",
+            None,
+            "danger-full-access",
+            None,
+        )
     ]
 
 
@@ -827,6 +1033,58 @@ async def test_native_continue_accepts_model_and_image_attachments(
             None,
             None,
             [{"url": "data:image/png;base64,abc", "filename": "photo.png"}],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_continue_route_translates_codex_permission_mode(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    body = json.dumps(
+        {
+            "prompt": "keep going",
+            "permission_mode": "full_access",
+        }
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/thread-1/continue HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert controller.calls == [
+        (
+            "continue_session",
+            "thread-1",
+            "keep going",
+            None,
+            None,
+            None,
+            None,
+            "never",
+            None,
+            {"type": "dangerFullAccess"},
         )
     ]
 
@@ -1480,7 +1738,12 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
 
     assert "HTTP/1.1 200 OK" in response
     assert 'id="modelSettingsButton"' in response
+    assert 'id="permissionSettingsButton"' in response
     assert 'id="modelPopover"' in response
+    assert 'id="permissionPopover"' in response
+    assert 'id="permissionSelector"' in response
+    assert 'id="permissionOptions"' in response
+    assert 'id="permissionSettingRow"' not in response
     assert 'id="modelSelector"' in response
     assert 'id="reasoningSelector"' in response
     assert 'id="serviceTierSelector"' in response
@@ -1497,12 +1760,26 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "reasoningSettingRow.hidden = reasoningSelector.options.length <= 1;" in response
     assert "serviceTierSettingRow.hidden = serviceTierSelector.options.length <= 1;" in response
     assert "function readSelectedModelSettings()" in response
+    assert "function readSelectedPermissionSettings()" in response
+    assert "function renderPermissionSettings()" in response
+    assert "const PERMISSION_SETTINGS_STORAGE_KEY" in response
+    assert "permissionOptions.hidden = false;" in response
     assert "saveModelSettingsIfChanged();" in response
+    assert "savePermissionSettingsIfChanged();" in response
     assert "if (settings.model) body.model = settings.model;" in response
     assert "if (settings.effort) body.effort = settings.effort;" in response
     assert "if (settings.service_tier) body.service_tier = settings.service_tier;" in response
     assert "if (imageAttachments.length) {" in response
     assert "body.images = imageAttachments.map(image => ({" in response
+    assert "const permissionSettings = readSelectedPermissionSettings();" in response
+    assert "body.permission_mode = permissionSettings.permission_mode;" in response
+    assert '{"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"}' in response
+    assert '{"value": "auto_review", "label": "自动审核", "description": "自动审查提权请求"}' in response
+    assert '{"value": "read_only", "label": "只读", "description": "编辑文件或运行命令需要批准"}' in response
+    assert '{"value": "full_access", "label": "完全访问权限", "description": "完全访问计算机（风险较高）"}' in response
+    assert '"value": "on_request"' not in response
+    assert '"value": "never"' not in response
+    assert "setting-option-desc" in response
     assert "function readImageAttachment(file)" in response
     assert "function renderAttachments()" in response
     assert "attachmentButton.onclick = () => imageInput.click();" in response
@@ -1730,6 +2007,51 @@ async def test_worker_live_page_accepts_query_token_and_contains_native_controls
     assert "native-mobile-shell" in response
     assert "renderAssistant" in response
     assert "renderCommand" in response
+
+
+@pytest.mark.asyncio
+async def test_worker_live_page_exposes_working_codex_permission_settings(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'id="permissionSettingsButton"' in response
+    assert 'id="permissionPopover"' in response
+    assert 'id="permissionSelector"' in response
+    assert 'id="permissionOptions"' in response
+    assert 'id="permissionSettingRow"' not in response
+    assert "const PERMISSION_SETTINGS_STORAGE_KEY" in response
+    assert "function readSelectedPermissionSettings()" in response
+    assert "function renderPermissionSettings()" in response
+    assert "permissionOptions.hidden = false;" in response
+    assert "savePermissionSettingsIfChanged();" in response
+    assert "const permissionSettings = readSelectedPermissionSettings();" in response
+    assert "body.permission_mode = permissionSettings.permission_mode;" in response
+    assert '{"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"}' in response
+    assert '{"value": "auto_review", "label": "自动审核", "description": "自动审查提权请求"}' in response
+    assert '{"value": "read_only", "label": "只读", "description": "编辑文件或运行命令需要批准"}' in response
+    assert '{"value": "full_access", "label": "完全访问权限", "description": "完全访问计算机（风险较高）"}' in response
+    assert '"value": "on_request"' not in response
+    assert '"value": "never"' not in response
+    assert "setting-option-desc" in response
 
 
 @pytest.mark.asyncio

@@ -107,6 +107,9 @@ class CodexNativeClient:
         *,
         model: str | None = None,
         service_tier: str | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox: str | None = None,
     ) -> dict[str, Any]:
         await self.initialize()
         params: dict[str, Any] = {}
@@ -116,6 +119,12 @@ class CodexNativeClient:
             params["model"] = model
         if service_tier is not None:
             params["serviceTier"] = service_tier
+        if approval_policy is not None:
+            params["approvalPolicy"] = approval_policy
+        if approvals_reviewer is not None:
+            params["approvalsReviewer"] = approvals_reviewer
+        if sandbox is not None:
+            params["sandbox"] = sandbox
         return await self.rpc.request("thread/start", params)
 
     async def read_session(
@@ -146,6 +155,9 @@ class CodexNativeClient:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> str:
         await self.initialize()
         await self.rpc.request("thread/resume", {"threadId": native_thread_id})
@@ -156,6 +168,9 @@ class CodexNativeClient:
             effort=effort,
             service_tier=service_tier,
             images=images,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            sandbox_policy=sandbox_policy,
         )
 
     async def start_turn(
@@ -167,6 +182,9 @@ class CodexNativeClient:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> str:
         await self.initialize()
         result = await self.rpc.request(
@@ -178,6 +196,9 @@ class CodexNativeClient:
                 effort=effort,
                 service_tier=service_tier,
                 images=images,
+                approval_policy=approval_policy,
+                approvals_reviewer=approvals_reviewer,
+                sandbox_policy=sandbox_policy,
             ),
         )
         return parse_turn_response(result)
@@ -291,11 +312,17 @@ class LazyNativeClient:
         *,
         model: str | None = None,
         service_tier: str | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox: str | None = None,
     ) -> dict[str, Any]:
         return await (await self._get()).start_thread(
             cwd,
             model=model,
             service_tier=service_tier,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            sandbox=sandbox,
         )
 
     async def read_session(
@@ -321,6 +348,9 @@ class LazyNativeClient:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> str:
         return await (await self._get()).continue_session(
             native_thread_id,
@@ -329,6 +359,9 @@ class LazyNativeClient:
             effort=effort,
             service_tier=service_tier,
             images=images,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            sandbox_policy=sandbox_policy,
         )
 
     async def start_turn(
@@ -340,6 +373,9 @@ class LazyNativeClient:
         effort: str | None = None,
         service_tier: str | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
+        sandbox_policy: dict[str, object] | None = None,
     ) -> str:
         return await (await self._get()).start_turn(
             native_thread_id,
@@ -348,6 +384,9 @@ class LazyNativeClient:
             effort=effort,
             service_tier=service_tier,
             images=images,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            sandbox_policy=sandbox_policy,
         )
 
     async def steer_turn(

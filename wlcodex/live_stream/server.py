@@ -40,6 +40,25 @@ _REQUEST_TIMEOUT_SECONDS = 5.0
 _MAX_HEADER_BYTES = 16 * 1024
 _MAX_BODY_BYTES = 8 * 1024 * 1024
 _MAX_NATIVE_IMAGE_ATTACHMENTS = 8
+_CODEX_PERMISSION_PRESETS: dict[str, dict[str, object]] = {
+    "default": {},
+    "read_only": {
+        "approval_policy": "on-request",
+        "sandbox": "read-only",
+        "sandbox_policy": {"type": "readOnly", "networkAccess": False},
+    },
+    "on_request": {"approval_policy": "on-request"},
+    "auto_review": {
+        "approval_policy": "on-request",
+        "approvals_reviewer": "auto_review",
+    },
+    "never": {"approval_policy": "never"},
+    "full_access": {
+        "approval_policy": "never",
+        "sandbox": "danger-full-access",
+        "sandbox_policy": {"type": "dangerFullAccess"},
+    },
+}
 _LOGIN_TICKET_TTL_SECONDS = 5 * 60
 _LOGIN_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 _COUNCIL_PROJECTS_ROOT = Path.home() / "projects"
@@ -683,6 +702,7 @@ class WorkerLiveStreamServer:
             prompt = str(body.get("prompt", ""))
             model = _optional_nonempty_string(body.get("model"))
             images = _safe_image_attachments(body.get("images"))
+            permission_kwargs = _codex_permission_kwargs_from_body(body)
             service_tier = _optional_nonempty_string(
                 body.get("service_tier") or body.get("serviceTier")
             )
@@ -694,12 +714,16 @@ class WorkerLiveStreamServer:
                     effort=_optional_nonempty_string(body.get("effort")),
                     service_tier=service_tier,
                     images=images,
+                    **permission_kwargs,
                 )
             else:
+                create_permission_kwargs = dict(permission_kwargs)
+                create_permission_kwargs.pop("sandbox_policy", None)
                 result = await target.create_session(
                     str(body.get("cwd", "")),
                     model=model,
                     service_tier=service_tier,
+                    **create_permission_kwargs,
                 )
             await self._send_json(writer, 200, _json_object(result))
             return
@@ -768,6 +792,8 @@ class WorkerLiveStreamServer:
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
                 return
+            permission_kwargs = _codex_permission_kwargs_from_body(body)
+            permission_kwargs.pop("sandbox", None)
             result = await target.continue_session(
                 thread_id,
                 str(body.get("prompt", "")),
@@ -777,6 +803,7 @@ class WorkerLiveStreamServer:
                     body.get("service_tier") or body.get("serviceTier")
                 ),
                 images=_safe_image_attachments(body.get("images")),
+                **permission_kwargs,
             )
             await self._send_json(writer, 200, _json_object(result))
             return
@@ -795,6 +822,8 @@ class WorkerLiveStreamServer:
             expected_turn_id = str(
                 body.get("expected_turn_id") or body.get("turn_id") or ""
             )
+            permission_kwargs = _codex_permission_kwargs_from_body(body)
+            permission_kwargs.pop("sandbox", None)
             result = await target.steer_session(
                 thread_id,
                 expected_turn_id,
@@ -805,6 +834,7 @@ class WorkerLiveStreamServer:
                     body.get("service_tier") or body.get("serviceTier")
                 ),
                 images=_safe_image_attachments(body.get("images")),
+                **permission_kwargs,
             )
             await self._send_json(writer, 200, _json_object(result))
             return
@@ -1564,6 +1594,12 @@ def _optional_nonempty_string(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _codex_permission_kwargs_from_body(body: dict[str, Any]) -> dict[str, object]:
+    mode = str(body.get("permission_mode") or body.get("permissionMode") or "default")
+    preset = _CODEX_PERMISSION_PRESETS.get(mode.strip(), {})
+    return dict(preset)
 
 
 def _filter_events_for_native_turn(
@@ -2515,7 +2551,11 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .model-selector, .setting-selector { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
     .setting-options { display: grid; gap: 6px; padding: 0 12px 12px; border-bottom: 1px solid var(--border-section); background: var(--bg-setting-options); }
     .setting-options[hidden] { display: none; }
+    .permission-popover .setting-options { padding: 12px; border-bottom: 0; }
     .setting-option { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-height: 38px; border-radius: 13px; padding: 7px 11px; background: transparent; color: var(--text-secondary); font-size: 15px; text-align: left; }
+    .setting-option-copy { display: grid; gap: 3px; min-width: 0; }
+    .setting-option-title { color: var(--btn-primary-bg); font-size: 15px; font-weight: var(--weight-bold); }
+    .setting-option-desc { color: var(--text-dim); font-size: 13px; line-height: 1.35; }
     .setting-option.selected { background: var(--bg-option-selected); color: #fff; }
     button.setting-option:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
     .setting-option-check { color: var(--btn-primary-bg); font-weight: var(--weight-black); }
@@ -2562,6 +2602,13 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     <div class="composer-tools">
       <div class="composer-settings">
         <button class="setting-pill" id="modelSettingsButton" type="button">加载模型</button>
+        <button class="setting-pill permissions" id="permissionSettingsButton" type="button">默认权限</button>
+        <div class="model-popover permission-popover closed" id="permissionPopover">
+          <select id="permissionSelector" class="setting-selector" aria-label="选择权限模式" hidden>
+            <option value="default">默认权限</option>
+          </select>
+          <div class="setting-options" id="permissionOptions" hidden></div>
+        </div>
         <div class="model-popover closed" id="modelPopover">
           <div class="setting-row" id="modelSettingRow" role="button" tabindex="0">
             <span class="setting-label">模型<span class="setting-value" id="modelSettingValue">加载模型</span></span>
@@ -2631,11 +2678,15 @@ __ICONS_JS__
     const projectNewChat = document.getElementById("projectNewChat");
     const projectNewChatMeta = document.getElementById("projectNewChatMeta");
     const modelSettingsButton = document.getElementById("modelSettingsButton");
+    const permissionSettingsButton = document.getElementById("permissionSettingsButton");
     const modelPopover = document.getElementById("modelPopover");
+    const permissionPopover = document.getElementById("permissionPopover");
     const modelSelector = document.getElementById("modelSelector");
+    const permissionSelector = document.getElementById("permissionSelector");
     const reasoningSelector = document.getElementById("reasoningSelector");
     const serviceTierSelector = document.getElementById("serviceTierSelector");
     const modelOptions = document.getElementById("modelOptions");
+    const permissionOptions = document.getElementById("permissionOptions");
     const reasoningOptions = document.getElementById("reasoningOptions");
     const serviceTierOptions = document.getElementById("serviceTierOptions");
     const modelSettingValue = document.getElementById("modelSettingValue");
@@ -2646,9 +2697,19 @@ __ICONS_JS__
     const serviceTierSettingRow = document.getElementById("serviceTierSettingRow");
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
     const MODEL_SETTINGS_STORAGE_VERSION = 2;
+    const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
+    const PERMISSION_SETTINGS_STORAGE_VERSION = 1;
+    const PERMISSION_PRESETS = [
+      {"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"},
+      {"value": "auto_review", "label": "自动审核", "description": "自动审查提权请求"},
+      {"value": "read_only", "label": "只读", "description": "编辑文件或运行命令需要批准"},
+      {"value": "full_access", "label": "完全访问权限", "description": "完全访问计算机（风险较高）"}
+    ];
     let modelCatalog = [];
     let savedModelSettings = loadSavedModelSettings();
+    let savedPermissionSettings = loadSavedPermissionSettings();
     let modelSettingsDirty = false;
+    let permissionSettingsDirty = false;
     let imageAttachments = [];
 
     async function api(path, options = {}) {
@@ -2749,6 +2810,24 @@ __ICONS_JS__
       modelSettingsDirty = false;
     }
 
+    function renderPermissionSettings() {
+      permissionSelector.innerHTML = "";
+      for (const preset of PERMISSION_PRESETS) {
+        const option = document.createElement("option");
+        option.value = preset.value;
+        option.textContent = preset.label;
+        option.dataset.description = preset.description || "";
+        permissionSelector.append(option);
+      }
+      if (optionValueExists(permissionSelector, savedPermissionSettings.permission_mode)) {
+        permissionSelector.value = savedPermissionSettings.permission_mode;
+      }
+      renderSettingOptions(permissionOptions, permissionSelector, updatePermissionSummary);
+      updatePermissionSummary();
+      savedPermissionSettings = readSelectedPermissionSettings();
+      permissionSettingsDirty = false;
+    }
+
     function renderReasoningAndSpeed(preferredSettings = {}) {
       const model = selectedModelCatalogEntry();
       const efforts = Array.isArray(model && model.supportedReasoningEfforts)
@@ -2831,7 +2910,21 @@ __ICONS_JS__
         button.type = "button";
         button.dataset.value = option.value;
         button.className = "setting-option" + (option.selected ? " selected" : "");
-        button.textContent = option.textContent || option.value;
+        const description = option.dataset.description || "";
+        if (description) {
+          const copy = document.createElement("span");
+          copy.className = "setting-option-copy";
+          const title = document.createElement("span");
+          title.className = "setting-option-title";
+          title.textContent = option.textContent || option.value;
+          const desc = document.createElement("span");
+          desc.className = "setting-option-desc";
+          desc.textContent = description;
+          copy.append(title, desc);
+          button.append(copy);
+        } else {
+          button.textContent = option.textContent || option.value;
+        }
         button.disabled = select.disabled;
         if (option.selected) {
           const check = document.createElement("span");
@@ -2842,10 +2935,17 @@ __ICONS_JS__
         button.onclick = () => {
           const previousValue = select.value;
           select.value = option.value;
-          if (select.value !== previousValue) markModelSettingsDirty();
+          if (select.value !== previousValue) {
+            if (select === permissionSelector) markPermissionSettingsDirty();
+            else markModelSettingsDirty();
+          }
           syncSettingOptionsSelection(container, select);
           container.hidden = true;
           if (onChoose) onChoose();
+          if (select === permissionSelector) {
+            savePermissionSettingsIfChanged();
+            permissionPopover.classList.add("closed");
+          }
         };
         container.append(button);
       });
@@ -2868,7 +2968,7 @@ __ICONS_JS__
     }
 
     function toggleSettingOptions(container) {
-      for (const node of [modelOptions, serviceTierOptions, reasoningOptions]) {
+      for (const node of [modelOptions, permissionOptions, serviceTierOptions, reasoningOptions]) {
         if (node !== container) node.hidden = true;
       }
       container.hidden = !container.hidden;
@@ -2995,6 +3095,57 @@ __ICONS_JS__
 
     function markModelSettingsDirty() {
       modelSettingsDirty = true;
+    }
+
+    function loadSavedPermissionSettings() {
+      try {
+        return normalizePermissionSettings(JSON.parse(localStorage.getItem(PERMISSION_SETTINGS_STORAGE_KEY) || "{}"));
+      } catch (_error) {
+        return normalizePermissionSettings({});
+      }
+    }
+
+    function readSelectedPermissionSettings() {
+      return normalizePermissionSettings({
+        permission_mode: permissionSelector.value,
+        version: PERMISSION_SETTINGS_STORAGE_VERSION
+      });
+    }
+
+    function normalizePermissionSettings(settings = {}) {
+      const mode = typeof settings.permission_mode === "string" ? settings.permission_mode : "default";
+      const known = PERMISSION_PRESETS.some(preset => preset.value === mode) ? mode : "default";
+      return {
+        permission_mode: known,
+        version: Number(settings.version || 0)
+      };
+    }
+
+    function permissionSettingsEqual(left, right) {
+      return left.permission_mode === right.permission_mode && left.version === right.version;
+    }
+
+    function savePermissionSettingsIfChanged() {
+      const nextSettings = readSelectedPermissionSettings();
+      const changed = permissionSettingsDirty || !permissionSettingsEqual(savedPermissionSettings, nextSettings);
+      savedPermissionSettings = nextSettings;
+      if (changed) {
+        try {
+          localStorage.setItem(PERMISSION_SETTINGS_STORAGE_KEY, JSON.stringify(savedPermissionSettings));
+        } catch (_error) {}
+      }
+      permissionSettingsDirty = false;
+    }
+
+    function markPermissionSettingsDirty() {
+      permissionSettingsDirty = true;
+    }
+
+    function updatePermissionSummary() {
+      const label = selectedOptionText(permissionSelector, "默认权限");
+      permissionSettingsButton.textContent = label;
+      permissionSettingsButton.classList.toggle("modified", permissionSelector.value !== "default");
+      syncSettingOptionsSelection(permissionOptions, permissionSelector);
     }
 
     function updateSettingSummary() {
@@ -3133,11 +3284,14 @@ __ICONS_JS__
 
     async function startNewChat(prompt) {
       saveModelSettingsIfChanged();
+      savePermissionSettingsIfChanged();
       const settings = readSelectedModelSettings();
+      const permissionSettings = readSelectedPermissionSettings();
       const body = {cwd: selectedProjectCwd, prompt};
       if (settings.model) body.model = settings.model;
       if (settings.effort) body.effort = settings.effort;
       if (settings.service_tier) body.service_tier = settings.service_tier;
+      body.permission_mode = permissionSettings.permission_mode;
       if (imageAttachments.length) {
         body.images = imageAttachments.map(image => ({
           url: image.url,
@@ -3203,10 +3357,22 @@ __ICONS_JS__
       const willClose = !modelPopover.classList.contains("closed");
       if (willClose) saveModelSettingsIfChanged();
       modelPopover.classList.toggle("closed", willClose);
+      if (!willClose) permissionPopover.classList.add("closed");
       if (willClose) {
         modelOptions.hidden = true;
         serviceTierOptions.hidden = true;
         reasoningOptions.hidden = true;
+      }
+    };
+    permissionSettingsButton.onclick = () => {
+      const willClose = !permissionPopover.classList.contains("closed");
+      if (willClose) savePermissionSettingsIfChanged();
+      permissionPopover.classList.toggle("closed", willClose);
+      if (!willClose) {
+        modelPopover.classList.add("closed");
+        permissionOptions.hidden = false;
+      } else {
+        permissionOptions.hidden = true;
       }
     };
     modelSelector.onchange = () => {
@@ -3223,6 +3389,11 @@ __ICONS_JS__
       renderSettingOptions(serviceTierOptions, serviceTierSelector, updateSettingSummary, {includeEmpty: true});
       updateSettingSummary();
       markModelSettingsDirty();
+    };
+    permissionSelector.onchange = () => {
+      renderSettingOptions(permissionOptions, permissionSelector, updatePermissionSummary);
+      updatePermissionSummary();
+      markPermissionSettingsDirty();
     };
     modelSettingRow.onclick = event => {
       if (event.target === modelSelector) return;
@@ -3365,6 +3536,7 @@ __ICONS_JS__
       if (hours < 48) return `${hours}小时`;
       return `${Math.round(hours / 24)}天`;
     }
+    renderPermissionSettings();
     loadStatus();
     loadModelCatalog();
     loadHomeData();
@@ -3538,6 +3710,10 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .setting-options { display: grid; gap: 6px; padding: 0 12px 12px; border-bottom: 1px solid var(--border-section); background: var(--bg-setting-options); }
     .setting-options[hidden] { display: none; }
     .setting-option { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-height: 38px; border-radius: 13px; padding: 7px 11px; background: transparent; color: var(--text-secondary); font-size: 15px; text-align: left; }
+    .permission-popover .setting-options { padding: 12px; border-bottom: 0; }
+    .setting-option-copy { display: grid; gap: 3px; min-width: 0; }
+    .setting-option-title { color: var(--btn-primary-bg); font-size: 15px; font-weight: var(--weight-bold); }
+    .setting-option-desc { color: var(--text-dim); font-size: 13px; line-height: 1.35; }
     .setting-option.selected { background: var(--bg-option-selected); color: #fff; }
     .setting-option-check { color: var(--btn-primary-bg); font-weight: var(--weight-black); }
     .attach-button { width: 40px; min-height: 38px; padding: 0; border-radius: 11px; background: var(--bg-interact); color: var(--btn-primary-bg); border: 1px solid var(--border-input); font-size: 24px; line-height: 1; }
@@ -3594,8 +3770,14 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       <div class="composer-tools">
         <div class="composer-settings">
           <button class="setting-pill" id="modelSettingsButton" type="button">加载模型</button>
-          <button class="setting-pill permissions" type="button">默认权限</button>
+          <button class="setting-pill permissions" id="permissionSettingsButton" type="button">默认权限</button>
           <button class="setting-pill handoff" id="handoffButton" type="button">接棒执行</button>
+          <div class="model-popover permission-popover closed" id="permissionPopover">
+            <select id="permissionSelector" class="setting-selector" aria-label="选择权限模式" hidden>
+              <option value="default">默认权限</option>
+            </select>
+            <div class="setting-options" id="permissionOptions" hidden></div>
+          </div>
           <div class="handoff-panel" id="handoffPanel" hidden>
             <div class="handoff-targets" id="handoffTargets">
               <button class="handoff-target" type="button" data-provider="codex">Codex</button>
@@ -3705,14 +3887,18 @@ __ICONS_JS__
     const steerButton = document.getElementById("steer");
     const interruptButton = document.getElementById("interrupt");
     const modelSettingsButton = document.getElementById("modelSettingsButton");
+    const permissionSettingsButton = document.getElementById("permissionSettingsButton");
     const modelPopover = document.getElementById("modelPopover");
+    const permissionPopover = document.getElementById("permissionPopover");
     const modelSettingValue = document.getElementById("modelSettingValue");
     const reasoningSettingValue = document.getElementById("reasoningSettingValue");
     const serviceTierSettingValue = document.getElementById("serviceTierSettingValue");
     const modelSelector = document.getElementById("modelSelector");
+    const permissionSelector = document.getElementById("permissionSelector");
     const reasoningSelector = document.getElementById("reasoningSelector");
     const serviceTierSelector = document.getElementById("serviceTierSelector");
     const modelOptions = document.getElementById("modelOptions");
+    const permissionOptions = document.getElementById("permissionOptions");
     const reasoningOptions = document.getElementById("reasoningOptions");
     const serviceTierOptions = document.getElementById("serviceTierOptions");
     const attachmentButton = document.getElementById("attachmentButton");
@@ -3741,6 +3927,14 @@ __ICONS_JS__
     const OLDER_EVENT_LIMIT = 80;
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
     const MODEL_SETTINGS_STORAGE_VERSION = 2;
+    const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
+    const PERMISSION_SETTINGS_STORAGE_VERSION = 1;
+    const PERMISSION_PRESETS = [
+      {"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"},
+      {"value": "auto_review", "label": "自动审核", "description": "自动审查提权请求"},
+      {"value": "read_only", "label": "只读", "description": "编辑文件或运行命令需要批准"},
+      {"value": "full_access", "label": "完全访问权限", "description": "完全访问计算机（风险较高）"}
+    ];
     const transcriptNodes = new Map();
     const statusNodes = new Map();
     const commandNodes = new Map();
@@ -3751,7 +3945,9 @@ __ICONS_JS__
     let modelCatalog = [];
     let providerCapabilities = {};
     let savedModelSettings = loadSavedModelSettings();
+    let savedPermissionSettings = loadSavedPermissionSettings();
     let modelSettingsDirty = false;
+    let permissionSettingsDirty = false;
     let handoffTargetProvider = "";
     let handoffPreviewPayload = null;
     let handoffBusy = false;
@@ -3837,6 +4033,23 @@ __ICONS_JS__
       savedModelSettings = readSelectedModelSettings();
       modelSettingsDirty = false;
     }
+    function renderPermissionSettings() {
+      permissionSelector.innerHTML = "";
+      for (const preset of PERMISSION_PRESETS) {
+        const option = document.createElement("option");
+        option.value = preset.value;
+        option.textContent = preset.label;
+        option.dataset.description = preset.description || "";
+        permissionSelector.append(option);
+      }
+      if (optionValueExists(permissionSelector, savedPermissionSettings.permission_mode)) {
+        permissionSelector.value = savedPermissionSettings.permission_mode;
+      }
+      renderSettingOptions(permissionOptions, permissionSelector, updatePermissionSummary);
+      updatePermissionSummary();
+      savedPermissionSettings = readSelectedPermissionSettings();
+      permissionSettingsDirty = false;
+    }
     function renderReasoningAndSpeed(preferredSettings = {}) {
       const model = selectedModelCatalogEntry();
       const efforts = Array.isArray(model && model.supportedReasoningEfforts)
@@ -3914,7 +4127,21 @@ __ICONS_JS__
         button.type = "button";
         button.dataset.value = option.value;
         button.className = "setting-option" + (option.selected ? " selected" : "");
-        button.textContent = option.textContent || option.value;
+        const description = option.dataset.description || "";
+        if (description) {
+          const copy = document.createElement("span");
+          copy.className = "setting-option-copy";
+          const title = document.createElement("span");
+          title.className = "setting-option-title";
+          title.textContent = option.textContent || option.value;
+          const desc = document.createElement("span");
+          desc.className = "setting-option-desc";
+          desc.textContent = description;
+          copy.append(title, desc);
+          button.append(copy);
+        } else {
+          button.textContent = option.textContent || option.value;
+        }
         button.disabled = select.disabled;
         if (option.selected) {
           const check = document.createElement("span");
@@ -3925,10 +4152,17 @@ __ICONS_JS__
         button.onclick = () => {
           const previousValue = select.value;
           select.value = option.value;
-          if (select.value !== previousValue) markModelSettingsDirty();
+          if (select.value !== previousValue) {
+            if (select === permissionSelector) markPermissionSettingsDirty();
+            else markModelSettingsDirty();
+          }
           syncSettingOptionsSelection(container, select);
           container.hidden = true;
           if (onChoose) onChoose();
+          if (select === permissionSelector) {
+            savePermissionSettingsIfChanged();
+            permissionPopover.classList.add("closed");
+          }
           updateComposerDisabled();
         };
         container.append(button);
@@ -3952,6 +4186,7 @@ __ICONS_JS__
     function syncSettingOptionsDisabled() {
       for (const [container, select] of [
         [modelOptions, modelSelector],
+        [permissionOptions, permissionSelector],
         [serviceTierOptions, serviceTierSelector],
         [reasoningOptions, reasoningSelector],
       ]) {
@@ -3961,7 +4196,7 @@ __ICONS_JS__
       }
     }
     function toggleSettingOptions(container) {
-      for (const node of [modelOptions, serviceTierOptions, reasoningOptions]) {
+      for (const node of [modelOptions, permissionOptions, serviceTierOptions, reasoningOptions]) {
         if (node !== container) node.hidden = true;
       }
       container.hidden = !container.hidden;
@@ -4075,6 +4310,51 @@ __ICONS_JS__
     function markModelSettingsDirty() {
       modelSettingsDirty = true;
     }
+    function loadSavedPermissionSettings() {
+      try {
+        return normalizePermissionSettings(JSON.parse(localStorage.getItem(PERMISSION_SETTINGS_STORAGE_KEY) || "{}"));
+      } catch (_error) {
+        return normalizePermissionSettings({});
+      }
+    }
+    function readSelectedPermissionSettings() {
+      return normalizePermissionSettings({
+        permission_mode: permissionSelector.value,
+        version: PERMISSION_SETTINGS_STORAGE_VERSION
+      });
+    }
+    function normalizePermissionSettings(settings = {}) {
+      const mode = typeof settings.permission_mode === "string" ? settings.permission_mode : "default";
+      const known = PERMISSION_PRESETS.some(preset => preset.value === mode) ? mode : "default";
+      return {
+        permission_mode: known,
+        version: Number(settings.version || 0)
+      };
+    }
+    function permissionSettingsEqual(left, right) {
+      return left.permission_mode === right.permission_mode && left.version === right.version;
+    }
+    function savePermissionSettingsIfChanged() {
+      if (!permissionSettingsDirty) return;
+      const nextSettings = readSelectedPermissionSettings();
+      const changed = !permissionSettingsEqual(savedPermissionSettings, nextSettings);
+      savedPermissionSettings = nextSettings;
+      if (changed) {
+        try {
+          localStorage.setItem(PERMISSION_SETTINGS_STORAGE_KEY, JSON.stringify(savedPermissionSettings));
+        } catch (_error) {}
+      }
+      permissionSettingsDirty = false;
+    }
+    function markPermissionSettingsDirty() {
+      permissionSettingsDirty = true;
+    }
+    function updatePermissionSummary() {
+      const label = selectedOptionText(permissionSelector, "默认权限");
+      permissionSettingsButton.textContent = label;
+      permissionSettingsButton.classList.toggle("modified", permissionSelector.value !== "default");
+      syncSettingOptionsSelection(permissionOptions, permissionSelector);
+    }
     async function resolveApproval(requestId, action, card) {
       if (!requestId) return;
       const alreadyResolved = resolvedApprovalEventFor(requestId);
@@ -4180,11 +4460,24 @@ __ICONS_JS__
       const willClose = !modelPopover.classList.contains("closed");
       if (willClose) saveModelSettingsIfChanged();
       modelPopover.classList.toggle("closed", willClose);
+      if (!willClose) permissionPopover.classList.add("closed");
       if (!willClose) handoffPanel.hidden = true;
       if (willClose) {
         modelOptions.hidden = true;
         serviceTierOptions.hidden = true;
         reasoningOptions.hidden = true;
+      }
+    };
+    permissionSettingsButton.onclick = () => {
+      const willClose = !permissionPopover.classList.contains("closed");
+      if (willClose) savePermissionSettingsIfChanged();
+      permissionPopover.classList.toggle("closed", willClose);
+      if (!willClose) {
+        modelPopover.classList.add("closed");
+        handoffPanel.hidden = true;
+        permissionOptions.hidden = false;
+      } else {
+        permissionOptions.hidden = true;
       }
     };
     modelSelector.onchange = () => {
@@ -4201,6 +4494,11 @@ __ICONS_JS__
       renderSettingOptions(serviceTierOptions, serviceTierSelector, updateSettingSummary, {includeEmpty: true});
       updateSettingSummary();
       markModelSettingsDirty();
+    };
+    permissionSelector.onchange = () => {
+      renderSettingOptions(permissionOptions, permissionSelector, updatePermissionSummary);
+      updatePermissionSummary();
+      markPermissionSettingsDirty();
     };
     modelSettingValue.closest(".setting-row").onclick = event => {
       if (event.target === modelSelector) return;
@@ -4254,10 +4552,13 @@ __ICONS_JS__
         return;
       }
       saveModelSettingsIfChanged();
+      savePermissionSettingsIfChanged();
+      const permissionSettings = readSelectedPermissionSettings();
       const body = {prompt};
       if (savedModelSettings.model) body.model = savedModelSettings.model;
       if (savedModelSettings.effort) body.effort = savedModelSettings.effort;
       if (savedModelSettings.service_tier) body.service_tier = savedModelSettings.service_tier;
+      body.permission_mode = permissionSettings.permission_mode;
       if (imageAttachments.length) {
         body.images = imageAttachments.map(image => ({
           url: image.url,
@@ -4369,7 +4670,9 @@ __ICONS_JS__
         selectHandoffTarget(preferredHandoffTarget());
       }
       modelPopover.classList.add("closed");
+      permissionPopover.classList.add("closed");
       modelOptions.hidden = true;
+      permissionOptions.hidden = true;
       serviceTierOptions.hidden = true;
       reasoningOptions.hidden = true;
       handoffPanel.hidden = !handoffPanel.hidden;
@@ -4561,6 +4864,8 @@ __ICONS_JS__
       attachmentButton.disabled = sendingPrompt;
       modelSelector.disabled = sendingPrompt || nativeTurnRunning;
       modelSettingsButton.disabled = false;
+      permissionSelector.disabled = sendingPrompt;
+      permissionSettingsButton.disabled = false;
       reasoningSelector.disabled = sendingPrompt || nativeTurnRunning || reasoningSelector.options.length <= 1;
       serviceTierSelector.disabled = sendingPrompt || nativeTurnRunning || serviceTierSelector.options.length <= 1;
       interruptButton.disabled = sendingPrompt || !canInterruptActiveTurn() || !nativeThreadId || !activeTurnId;
@@ -4714,6 +5019,7 @@ __ICONS_JS__
       }
     }
     updateComposerDisabled();
+    renderPermissionSettings();
     loadProviderCapabilities();
     loadModelCatalog();
     attachNative().then(() => {
