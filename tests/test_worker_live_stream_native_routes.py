@@ -1887,6 +1887,10 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert ".transcript-body .prompt-card-body { min-height: 0; overflow: auto;" in response
     assert "border: 0;" in response
     assert "white-space: pre-wrap;" in response
+    assert "function stripGeneratedPromptFence(text)" in response
+    assert "function normalizeGeneratedPromptText(text)" in response
+    assert "preface: stripGeneratedPromptFence(source.slice(0, promptStart)).trim()" in response
+    assert "const prompt = normalizeGeneratedPromptText(rawPrompt);" in response
     assert "function splitGeneratedPromptText(text)" in response
     assert "function renderGeneratedPromptTranscript(target, text)" in response
     assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text);" in response

@@ -3523,11 +3523,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .handoff-prompt-body { min-height: 0; overflow: auto; margin: 0; padding: 18px 26px 28px; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
     .handoff-prompt-body[hidden] { display: none; }
     .prompt-preface { font-size: 24px; line-height: 1.45; color: #f4f4f5; }
-    .prompt-card { width: 100%; height: min(48vh, 620px); min-height: 300px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid rgba(255,255,255,.08); border-radius: 30px; background: #303033; color: #f4f4f5; box-shadow: 0 18px 48px rgba(0,0,0,.38); }
-    .prompt-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 58px; padding: 20px 26px 8px; }
+    .prompt-card { width: 100%; height: min(48vh, 620px); min-height: 300px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 0; border-radius: 30px; background: #303030; color: #f4f4f5; box-shadow: none; }
+    .prompt-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 56px; padding: 24px 26px 6px; }
     .prompt-card-title { color: #f8fafc; font-size: 20px; font-weight: var(--weight-extrabold); line-height: 1.2; letter-spacing: 0; }
     .prompt-card-copy svg { width: 32px; height: 32px; }
-    .transcript-body .prompt-card-body { min-height: 0; overflow: auto; margin: 0; padding: 16px 26px 28px; border: 0; border-radius: 0; background: transparent; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font: 16px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
+    .transcript-body .prompt-card-body { min-height: 0; overflow: auto; margin: 0; padding: 28px 26px 28px; border: 0; border-radius: 0; background: transparent; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font: 16px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
     .handoff-actions { grid-template-columns: 1fr 1fr; }
     .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid var(--border-section); color: var(--btn-primary-bg); }
     .setting-row:last-child { border-bottom: 0; }
@@ -5351,12 +5351,28 @@ __ICONS_JS__
       const match = /(^|\\n)你在\\s+.+?\\s+工作。/m.exec(source);
       if (!match) return null;
       const promptStart = match.index + (match[1] ? 1 : 0);
-      const prompt = source.slice(promptStart).trim();
+      const rawPrompt = stripGeneratedPromptFence(source.slice(promptStart)).trim();
+      const prompt = normalizeGeneratedPromptText(rawPrompt);
       if (!isGeneratedPromptBody(prompt)) return null;
       return {
-        preface: source.slice(0, promptStart).trim(),
+        preface: stripGeneratedPromptFence(source.slice(0, promptStart)).trim(),
         prompt
       };
+    }
+    function stripGeneratedPromptFence(text) {
+      return String(text || "")
+        .replace(/(^|\\n)```[\\w-]*\\s*$/g, "$1")
+        .replace(/^\\s*```[\\w-]*\\s*\\n?/, "")
+        .replace(/\\n?\\s*```\\s*$/, "");
+    }
+    function normalizeGeneratedPromptText(text) {
+      const source = String(text || "").replace(/\\r\\n/g, "\\n").trim();
+      if (!source) return "";
+      return source
+        .split(/\\n{2,}/)
+        .map(paragraph => paragraph.replace(/\\s*\\n\\s*/g, " ").trim())
+        .filter(Boolean)
+        .join("\\n\\n");
     }
     function isGeneratedPromptBody(text) {
       const source = String(text || "");
