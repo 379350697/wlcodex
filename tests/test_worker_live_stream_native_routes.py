@@ -1881,21 +1881,31 @@ def test_live_page_handoff_prompt_preview_supports_copy_action() -> None:
 def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() -> None:
     response = _live_page(42, native_provider="antigravity")
 
-    assert ".prompt-card { width: 100%; height: min(48vh, 620px);" in response
+    assert ".prompt-card { width: auto; height: min(48vh, 620px);" in response
     assert ".transcript-item.prompt-message { justify-self: stretch;" in response
+    assert "margin-left: -6px; margin-right: -6px;" in response
     assert ".transcript-item.prompt-message .transcript-meta { display: none;" in response
+    assert "background: #303033;" in response
+    assert ".prompt-card-head { display: flex;" in response
+    assert "min-height: 0; padding: 28px 26px 0;" in response
+    assert ".prompt-card-title { color: #f8fafc; font-size: 19px;" in response
     assert ".transcript-body .prompt-card-body { min-height: 0; overflow: auto;" in response
+    assert "padding: 22px 26px 28px;" in response
+    assert "font: 14px/1.42 ui-monospace" in response
     assert "border: 0;" in response
     assert "white-space: pre-wrap;" in response
     assert "function stripGeneratedPromptFence(text)" in response
     assert "function normalizeGeneratedPromptText(text)" in response
+    assert "collapseGeneratedPromptHardWraps(source)" in response
     assert "preface: stripGeneratedPromptFence(source.slice(0, promptStart)).trim()" in response
     assert "const prompt = normalizeGeneratedPromptText(rawPrompt);" in response
+    assert "function collapseGeneratedPromptHardWraps(text)" in response
+    assert 'return collapsed.replace(/\\s+(背景：)/g, "\\n\\n$1")' in response
     assert "function splitGeneratedPromptText(text)" in response
     assert "function renderGeneratedPromptTranscript(target, text)" in response
     assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text);" in response
     assert "node.row.classList.toggle(\"prompt-message\", renderedPrompt);" in response
-    assert "你在\\s+.+" in response
+    assert "你在[\\s\\S]+?工作。" in response
     assert "背景：" in response
     assert "必须阅读" in response
     assert "重点就一句" in response
