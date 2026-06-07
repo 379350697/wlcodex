@@ -3433,6 +3433,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .transcript-item.user .transcript-body { padding: 10px 13px; border: 1px solid #333842; border-radius: 20px 20px 4px 20px; background: var(--bg-user-bubble); line-height: 1.5; }
     .transcript-item.local-pending .transcript-body { opacity: .86; }
     .transcript-item.assistant { justify-self: start; max-width: 100%; padding-left: 22px; border-left: 2px solid var(--border-default); }
+    .transcript-item.prompt-message { justify-self: stretch; max-width: 100%; padding-left: 0; border-left: 0; }
+    .transcript-item.prompt-message .transcript-meta { display: none; }
+    .transcript-item.prompt-message .transcript-body { display: grid; gap: 14px; }
     .transcript-item { animation: messageEnter 250ms var(--ease-default) forwards; }
     .transcript-item.user { animation-name: userMessageEnter; }
     .transcript-item.no-animate { animation: none; }
@@ -3519,12 +3522,12 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .handoff-preview.ok { border-color: rgba(255,255,255,.08); color: #f4f4f5; }
     .handoff-prompt-body { min-height: 0; overflow: auto; margin: 0; padding: 18px 26px 28px; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
     .handoff-prompt-body[hidden] { display: none; }
-    .prompt-preface { margin-bottom: 14px; }
-    .prompt-card { max-height: min(48vh, 620px); min-height: 260px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid rgba(255,255,255,.08); border-radius: 30px; background: #303033; color: #f4f4f5; box-shadow: 0 18px 48px rgba(0,0,0,.38); }
-    .prompt-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 62px; padding: 20px 26px 10px; }
-    .prompt-card-title { color: #f8fafc; font-size: 20px; font-weight: var(--weight-extrabold); line-height: 1.2; }
+    .prompt-preface { font-size: 24px; line-height: 1.45; color: #f4f4f5; }
+    .prompt-card { width: 100%; height: min(48vh, 620px); min-height: 300px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid rgba(255,255,255,.08); border-radius: 30px; background: #303033; color: #f4f4f5; box-shadow: 0 18px 48px rgba(0,0,0,.38); }
+    .prompt-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 58px; padding: 20px 26px 8px; }
+    .prompt-card-title { color: #f8fafc; font-size: 20px; font-weight: var(--weight-extrabold); line-height: 1.2; letter-spacing: 0; }
     .prompt-card-copy svg { width: 32px; height: 32px; }
-    .prompt-card-body { min-height: 0; overflow: auto; margin: 0; padding: 18px 26px 28px; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
+    .transcript-body .prompt-card-body { min-height: 0; overflow: auto; margin: 0; padding: 16px 26px 28px; border: 0; border-radius: 0; background: transparent; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font: 16px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
     .handoff-actions { grid-template-columns: 1fr 1fr; }
     .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid var(--border-section); color: var(--btn-primary-bg); }
     .setting-row:last-child { border-bottom: 0; }
@@ -5320,9 +5323,12 @@ __ICONS_JS__
         } else {
           node.text += String(incomingText);
         }
-        if (renderGeneratedPromptTranscript(node.body, node.text)) return;
+        const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text);
+        node.row.classList.toggle("prompt-message", renderedPrompt);
+        if (renderedPrompt) return;
         renderMarkdownLite(node.body, node.text);
       } else {
+        node.row.classList.remove("prompt-message");
         renderTranscriptImages(node.body, payload.images || []);
         appendText(node.body, incomingText);
       }

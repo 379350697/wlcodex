@@ -1881,11 +1881,16 @@ def test_live_page_handoff_prompt_preview_supports_copy_action() -> None:
 def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() -> None:
     response = _live_page(42, native_provider="antigravity")
 
-    assert ".prompt-card { max-height: min(48vh, 620px);" in response
-    assert ".prompt-card-body { min-height: 0; overflow: auto;" in response
+    assert ".prompt-card { width: 100%; height: min(48vh, 620px);" in response
+    assert ".transcript-item.prompt-message { justify-self: stretch;" in response
+    assert ".transcript-item.prompt-message .transcript-meta { display: none;" in response
+    assert ".transcript-body .prompt-card-body { min-height: 0; overflow: auto;" in response
+    assert "border: 0;" in response
+    assert "white-space: pre-wrap;" in response
     assert "function splitGeneratedPromptText(text)" in response
     assert "function renderGeneratedPromptTranscript(target, text)" in response
-    assert "renderGeneratedPromptTranscript(node.body, node.text)" in response
+    assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text);" in response
+    assert "node.row.classList.toggle(\"prompt-message\", renderedPrompt);" in response
     assert "你在\\s+.+" in response
     assert "背景：" in response
     assert "必须阅读" in response
