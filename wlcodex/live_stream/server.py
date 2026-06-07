@@ -5380,15 +5380,53 @@ __ICONS_JS__
       return collapseGeneratedPromptHardWraps(source);
     }
     function collapseGeneratedPromptHardWraps(text) {
-      const collapsed = String(text || "")
-        .replace(/\\r\\n/g, "\\n")
-        .replace(/[ \\t]*\\n+[ \\t]*/g, " ")
-        .replace(/\\s{2,}/g, " ")
-        .trim();
-      return collapsed.replace(/\\s+(背景：)/g, "\\n\\n$1\\n")
-        .replace(/\\s+(必须阅读的文档：)/g, "\\n\\n$1\\n")
-        .replace(/\\s+(必须阅读并对齐的 V1 源码：)/g, "\\n\\n$1\\n")
-        .replace(/\\s+(重点就一句：)/g, "\\n\\n$1\\n");
+      const lines = String(text || "").replace(/\\r\\n/g, "\\n").split("\\n");
+      const output = [];
+      let paragraph = [];
+      function flushParagraph() {
+        if (!paragraph.length) return;
+        output.push(paragraph.join(" ").replace(/\\s{2,}/g, " ").trim());
+        paragraph = [];
+      }
+      function appendBlankLine() {
+        flushParagraph();
+        if (output.length && output[output.length - 1] !== "") output.push("");
+      }
+      for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        if (!trimmed) {
+          appendBlankLine();
+          continue;
+        }
+        if (isGeneratedPromptSectionHeading(trimmed) || isGeneratedPromptListItem(rawLine)) {
+          flushParagraph();
+          if (isGeneratedPromptSectionHeading(trimmed)) {
+            appendBlankLine();
+            output.push(trimmed);
+          } else {
+            output.push(normalizeGeneratedPromptListLine(rawLine));
+          }
+          continue;
+        }
+        paragraph.push(trimmed);
+        if (isGeneratedPromptSentenceBoundary(trimmed)) flushParagraph();
+      }
+      flushParagraph();
+      return output.join("\\n").replace(/\\n{3,}/g, "\\n\\n").trim();
+    }
+    function isGeneratedPromptSectionHeading(line) {
+      return /^(背景|必须阅读的文档|必须阅读并对齐的 V1 源码|V2 当前重点位置|目标|不可变业务规则|实施边界|测试要求，必须 RED first|建议实施方案|验证命令至少运行|交付时必须说明|重点就一句)：$/.test(
+        String(line || "").trim()
+      );
+    }
+    function isGeneratedPromptListItem(line) {
+      return /^\\s*(?:[-*]\\s+|\\d+\\.\\s+)/.test(String(line || ""));
+    }
+    function normalizeGeneratedPromptListLine(line) {
+      return String(line || "").replace(/\\t/g, "  ").replace(/[ \\t]+$/g, "");
+    }
+    function isGeneratedPromptSentenceBoundary(line) {
+      return /[。！？.!?；;”")）]$/.test(String(line || "").trim());
     }
     function isGeneratedPromptBody(text) {
       const source = String(text || "");

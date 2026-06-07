@@ -1903,7 +1903,13 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert "preface: stripGeneratedPromptFence(source.slice(0, promptStart)).trim()" in response
     assert "const prompt = normalizeGeneratedPromptText(rawPrompt);" in response
     assert "function collapseGeneratedPromptHardWraps(text)" in response
-    assert 'return collapsed.replace(/\\s+(背景：)/g, "\\n\\n$1\\n")' in response
+    assert "function isGeneratedPromptSectionHeading(line)" in response
+    assert "function isGeneratedPromptListItem(line)" in response
+    assert "function normalizeGeneratedPromptListLine(line)" in response
+    assert "function isGeneratedPromptSentenceBoundary(line)" in response
+    assert "output.join(\"\\n\").replace(/\\n{3,}/g, \"\\n\\n\").trim()" in response
+    assert "paragraph.push(trimmed);" in response
+    assert "if (isGeneratedPromptSentenceBoundary(trimmed)) flushParagraph();" in response
     assert "function splitGeneratedPromptText(text)" in response
     assert "function renderGeneratedPromptTranscript(target, text)" in response
     assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text);" in response
