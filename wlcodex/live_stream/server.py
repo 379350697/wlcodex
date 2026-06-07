@@ -59,6 +59,7 @@ _ICON_SVG = {
     "send": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
     "stop": '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
     "check": '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>',
+    "copy": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
 }
 
 # Unicode → SVG key mapping for HTML template replacements
@@ -83,7 +84,8 @@ _ICONS_JS_LITERAL = (
     f"remove:{json.dumps(_ICON_SVG['remove'])},"
     f"send:{json.dumps(_ICON_SVG['send'])},"
     f"stop:{json.dumps(_ICON_SVG['stop'])},"
-    f"check:{json.dumps(_ICON_SVG['check'])}"
+    f"check:{json.dumps(_ICON_SVG['check'])},"
+    f"copy:{json.dumps(_ICON_SVG['copy'])}"
     "};"
 )
 
@@ -3496,7 +3498,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .setting-pill.handoff { flex: 0 0 auto; background: #1f2937; border: 1px solid var(--border-input); }
     .model-popover { position: absolute; left: 0; bottom: 48px; width: min(330px, calc(100vw - 32px)); border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); overflow: hidden; z-index: 6; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
     .model-popover.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
-    .handoff-panel { position: absolute; left: 0; bottom: 48px; width: min(370px, calc(100vw - 32px)); display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border-popover); border-radius: 18px; background: #181b22; box-shadow: 0 20px 54px rgba(0,0,0,.55); z-index: 7; }
+    .handoff-panel { position: fixed; left: 26px; right: 26px; bottom: 112px; width: auto; max-height: min(76vh, 760px); display: grid; gap: 10px; padding: 0; border: 0; background: transparent; box-shadow: none; z-index: 7; }
     .handoff-panel[hidden] { display: none; }
     .handoff-targets, .handoff-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
     .handoff-target, .handoff-action { min-height: 38px; border-radius: 12px; border: 1px solid var(--border-input); background: var(--bg-interact); color: var(--btn-primary-bg); padding: 7px 8px; font-size: 14px; }
@@ -3504,10 +3506,19 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .handoff-intent, .handoff-note { width: 100%; border: 1px solid var(--border-input); border-radius: 12px; background: var(--bg-attachment); color: var(--btn-primary-bg); font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .handoff-intent { min-height: 38px; padding: 0 10px; }
     .handoff-note { min-height: 58px; padding: 9px 10px; resize: vertical; }
-    .handoff-preview { max-height: 190px; overflow: auto; border: 1px solid var(--border-default); border-radius: 12px; background: #0f1117; padding: 10px; color: var(--text-secondary); font-size: 13px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .handoff-preview { max-height: min(48vh, 620px); min-height: 260px; display: grid; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; border: 1px solid rgba(255,255,255,.08); border-radius: 30px; background: #303033; color: #f4f4f5; box-shadow: 0 22px 64px rgba(0,0,0,.5); }
+    .handoff-preview[hidden] { display: none; }
+    .handoff-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 62px; padding: 20px 26px 10px; }
+    .handoff-preview-title { color: #f8fafc; font-size: 20px; font-weight: var(--weight-extrabold); line-height: 1.2; }
+    .handoff-copy { width: 44px; min-height: 44px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 14px; background: transparent; color: #d4d4d8; font-size: 30px; }
+    .handoff-copy:disabled { opacity: .38; }
+    .handoff-copy.copied { color: #bbf7d0; }
+    .handoff-copy svg { width: 32px; height: 32px; }
+    .handoff-preview-status { padding: 0 26px 10px; color: #d1d5db; font-size: 13px; line-height: 1.42; white-space: pre-wrap; overflow-wrap: anywhere; }
     .handoff-preview.error { border-color: #7f1d1d; color: var(--color-error-light); }
-    .handoff-preview.ok { border-color: #14532d; color: #bbf7d0; }
-    .handoff-preview pre { margin: 7px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #e5e7eb; }
+    .handoff-preview.ok { border-color: rgba(255,255,255,.08); color: #f4f4f5; }
+    .handoff-prompt-body { min-height: 0; overflow: auto; margin: 0; padding: 18px 26px 28px; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
+    .handoff-prompt-body[hidden] { display: none; }
     .handoff-actions { grid-template-columns: 1fr 1fr; }
     .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid var(--border-section); color: var(--btn-primary-bg); }
     .setting-row:last-child { border-bottom: 0; }
@@ -3591,7 +3602,14 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
               <option value="custom">自定义</option>
             </select>
             <textarea class="handoff-note" id="handoffNote" rows="2" placeholder="补充给下一个智能体"></textarea>
-            <div class="handoff-preview" id="handoffPreview" hidden></div>
+            <div class="handoff-preview" id="handoffPreview" hidden>
+              <div class="handoff-preview-head">
+                <span class="handoff-preview-title">Plain text</span>
+                <button class="handoff-copy" id="handoffCopyButton" type="button" aria-label="复制提示词" disabled></button>
+              </div>
+              <div class="handoff-preview-status" id="handoffPreviewStatus"></div>
+              <pre class="handoff-prompt-body" id="handoffPromptBody" hidden></pre>
+            </div>
             <div class="handoff-actions">
               <button class="handoff-action" id="handoffPreviewButton" type="button">预览</button>
               <button class="handoff-action primary" id="handoffExecuteButton" type="button" disabled>执行</button>
@@ -3702,6 +3720,9 @@ __ICONS_JS__
     const handoffIntent = document.getElementById("handoffIntent");
     const handoffNote = document.getElementById("handoffNote");
     const handoffPreviewEl = document.getElementById("handoffPreview");
+    const handoffPreviewStatus = document.getElementById("handoffPreviewStatus");
+    const handoffPromptBody = document.getElementById("handoffPromptBody");
+    const handoffCopyButton = document.getElementById("handoffCopyButton");
     const handoffPreviewButton = document.getElementById("handoffPreviewButton");
     const handoffExecuteButton = document.getElementById("handoffExecuteButton");
     const streamPathBase = "__STREAM_PATH__";
@@ -3725,6 +3746,8 @@ __ICONS_JS__
     let handoffTargetProvider = "";
     let handoffPreviewPayload = null;
     let handoffBusy = false;
+    let handoffCopyStateTimer = 0;
+    handoffCopyButton.innerHTML = ICONS.copy;
     historyFold.onclick = loadOlderEvents;
     async function api(path, options = {}) {
       const response = await fetch(path, {
@@ -4138,6 +4161,7 @@ __ICONS_JS__
     handoffButton.onclick = toggleHandoffPanel;
     handoffPreviewButton.onclick = previewHandoff;
     handoffExecuteButton.onclick = executeHandoff;
+    handoffCopyButton.onclick = copyHandoffPrompt;
     handoffIntent.onchange = resetHandoffPreview;
     handoffNote.oninput = resetHandoffPreview;
     for (const button of handoffTargetButtons) {
@@ -4357,8 +4381,12 @@ __ICONS_JS__
       handoffPreviewPayload = null;
       handoffExecuteButton.disabled = true;
       handoffPreviewEl.hidden = true;
-      handoffPreviewEl.textContent = "";
       handoffPreviewEl.className = "handoff-preview";
+      handoffPreviewStatus.textContent = "";
+      handoffPromptBody.innerHTML = "";
+      handoffPromptBody.hidden = true;
+      handoffCopyButton.disabled = true;
+      setHandoffCopyState("");
     }
     async function previewHandoff() {
       if (!nativeThreadId) {
@@ -4420,13 +4448,64 @@ __ICONS_JS__
         : "";
       handoffPreviewEl.hidden = false;
       handoffPreviewEl.className = "handoff-preview ok";
-      handoffPreviewEl.innerHTML = `${escapeHtml(preview.intent || "auto")}${escapeHtml(warnings)}<pre>${escapeHtml(preview.prompt || "")}</pre>`;
+      handoffPreviewStatus.textContent = `${preview.intent || "auto"}${warnings}`;
+      handoffPromptBody.hidden = false;
+      handoffPromptBody.innerHTML = escapeHtml(preview.prompt || "");
+      handoffCopyButton.disabled = !String(preview.prompt || "").trim();
+      setHandoffCopyState("");
       handoffExecuteButton.disabled = false;
     }
     function setHandoffStatus(text, tone) {
       handoffPreviewEl.hidden = !text;
-      handoffPreviewEl.textContent = text || "";
       handoffPreviewEl.className = "handoff-preview" + (tone ? " " + tone : "");
+      handoffPreviewStatus.textContent = text || "";
+      handoffPromptBody.innerHTML = "";
+      handoffPromptBody.hidden = true;
+      handoffCopyButton.disabled = true;
+      setHandoffCopyState("");
+    }
+    async function copyHandoffPrompt() {
+      const text = String((handoffPreviewPayload && handoffPreviewPayload.prompt) || handoffPromptBody.textContent || "");
+      if (!text.trim()) return;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          fallbackCopyText(text);
+        }
+        setHandoffCopyState("copied");
+      } catch (_error) {
+        try {
+          fallbackCopyText(text);
+          setHandoffCopyState("copied");
+        } catch (_fallbackError) {
+          setHandoffCopyState("failed");
+        }
+      }
+    }
+    function fallbackCopyText(text) {
+      const node = document.createElement("textarea");
+      node.value = text;
+      node.setAttribute("readonly", "");
+      node.style.position = "fixed";
+      node.style.left = "-9999px";
+      document.body.append(node);
+      node.select();
+      document.execCommand("copy");
+      node.remove();
+    }
+    function setHandoffCopyState(state) {
+      if (handoffCopyStateTimer) window.clearTimeout(handoffCopyStateTimer);
+      const copied = state === "copied";
+      const failed = state === "failed";
+      handoffCopyButton.classList.toggle("copied", copied);
+      handoffCopyButton.setAttribute(
+        "aria-label",
+        copied ? "已复制提示词" : failed ? "复制失败" : "复制提示词"
+      );
+      if (copied || failed) {
+        handoffCopyStateTimer = window.setTimeout(() => setHandoffCopyState(""), 1400);
+      }
     }
     function updateHandoffControls() {
       handoffButton.disabled = sendingPrompt || !nativeThreadId;

@@ -1856,6 +1856,28 @@ def test_live_page_defines_handoff_preview_escape_helper() -> None:
     assert "escapeHtml(preview.prompt || \"\")" in response
 
 
+def test_live_page_handoff_prompt_preview_matches_mobile_native_shape() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert 'id="handoffCopyButton"' in response
+    assert 'class="handoff-preview-head"' in response
+    assert 'class="handoff-preview-title">Plain text</span>' in response
+    assert 'class="handoff-prompt-body" id="handoffPromptBody"' in response
+    assert ".handoff-preview { max-height: min(48vh, 620px);" in response
+    assert ".handoff-prompt-body { min-height: 0; overflow: auto;" in response
+    assert "font: 18px/1.42" in response
+
+
+def test_live_page_handoff_prompt_preview_supports_copy_action() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert "const handoffCopyButton = document.getElementById(\"handoffCopyButton\");" in response
+    assert "handoffCopyButton.onclick = copyHandoffPrompt;" in response
+    assert "async function copyHandoffPrompt()" in response
+    assert "navigator.clipboard.writeText(text)" in response
+    assert "handoffPromptBody.innerHTML = escapeHtml(preview.prompt || \"\");" in response
+
+
 def test_live_page_waits_during_active_turn_when_provider_cannot_steer() -> None:
     response = _live_page(42, native_provider="antigravity")
 
