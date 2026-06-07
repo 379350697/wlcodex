@@ -73,11 +73,29 @@ class FakeProvider:
     async def start_session(self, cwd: str, prompt: str, **kwargs):
         self.calls.append(("start_session", cwd, prompt, kwargs))
         return NativeAgentControlResult(
-            provider="claude",
-            provider_engine="sdk-deepseek",
+            provider=self.provider,
+            provider_engine=self.provider_engine,
             native_session_id="session-2",
             agent_run_id=4,
             status="started",
+        )
+
+    async def continue_session(
+        self,
+        native_session_id: str,
+        prompt: str,
+        **kwargs: Any,
+    ):
+        self.calls.append(("continue_session", native_session_id, prompt, kwargs))
+        return NativeAgentControlResult(
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            native_session_id=native_session_id,
+            agent_run_id=5,
+            turn_id="turn-2",
+            active_turn_id="turn-2",
+            turn_running=True,
+            status="continued",
         )
 
 
@@ -340,6 +358,91 @@ async def test_native_agent_start_session_route(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_antigravity_start_session_route_forwards_permission_flags(
+    tmp_path: Path,
+) -> None:
+    body = json.dumps(
+        {
+            "cwd": "/repo",
+            "prompt": "fix it",
+            "permission_mode": "skip_permissions_sandbox",
+        }
+    )
+    provider = FakeNoSteerProvider()
+    provider.provider = "antigravity"
+    provider.provider_engine = "cli-local"
+    response, provider = await _request_native_agent(
+        tmp_path,
+        "POST /api/native/antigravity/sessions/start HTTP/1.1\r\n"
+        "Host: test\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        provider=provider,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["provider"] == "antigravity"
+    assert payload["provider_engine"] == "cli-local"
+    assert provider.calls == [
+        (
+            "start_session",
+            "/repo",
+            "fix it",
+            {
+                "model": None,
+                "effort": None,
+                "service_tier": None,
+                "images": None,
+                "dangerously_skip_permissions": True,
+                "sandbox": True,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_antigravity_continue_session_route_forwards_permission_flags(
+    tmp_path: Path,
+) -> None:
+    provider = FakeNoSteerProvider()
+    provider.provider = "antigravity"
+    provider.provider_engine = "cli-local"
+    body = json.dumps({"prompt": "continue", "permission_mode": "sandbox"})
+
+    response, provider = await _request_native_agent(
+        tmp_path,
+        "POST /api/native/antigravity/sessions/session-1/continue HTTP/1.1\r\n"
+        "Host: test\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        provider=provider,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["native_session_id"] == "session-1"
+    assert provider.calls == [
+        ("capabilities",),
+        (
+            "continue_session",
+            "session-1",
+            "continue",
+            {
+                "model": None,
+                "effort": None,
+                "service_tier": None,
+                "images": None,
+                "dangerously_skip_permissions": False,
+                "sandbox": True,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_workflow_handoff_preview_route(tmp_path: Path) -> None:
     body = json.dumps(
         {
@@ -494,6 +597,26 @@ async def test_native_claude_page_uses_claude_api_base(tmp_path: Path) -> None:
     assert "<title>Claude</title>" in response
     assert "<h1>Claude</h1>" in response
     assert "/api/native/codex/sessions" not in response
+
+
+@pytest.mark.asyncio
+async def test_native_antigravity_page_uses_antigravity_api_base(tmp_path: Path) -> None:
+    provider = FakeNoSteerProvider()
+    response, _provider = await _request_native_agent(
+        tmp_path,
+        "GET /native/antigravity HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        provider=provider,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'const PROVIDER = "antigravity";' in response
+    assert 'const PROVIDER_LABEL = "Antigravity";' in response
+    assert 'const API_BASE = "/api/native/antigravity";' in response
+    assert '"value": "default"' in response
+    assert '"value": "sandbox"' in response
+    assert '"value": "skip_permissions"' in response
+    assert '"value": "skip_permissions_sandbox"' in response
 
 
 @pytest.mark.asyncio

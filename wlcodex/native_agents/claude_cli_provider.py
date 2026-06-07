@@ -164,6 +164,7 @@ class ClaudeCliLocalProvider:
             prompt=prompt,
             resume_session_id="",
             session_id=native_session_id,
+            permission_mode=str(kwargs.get("permission_mode") or ""),
         )
         return _control_result(
             session,
@@ -226,6 +227,7 @@ class ClaudeCliLocalProvider:
             prompt=prompt,
             resume_session_id=_claude_session_id(session),
             session_id=_session_id_for_new_cli_run(session),
+            permission_mode=str(kwargs.get("permission_mode") or ""),
         )
         return _control_result(
             session,
@@ -268,11 +270,14 @@ class ClaudeCliLocalProvider:
         session_id: str = "",
         session: NativeAgentSession | None = None,
         native_turn_id: str = "",
+        permission_mode: str = "",
     ) -> _RunOutcome:
         latest_session_id = resume_session_id
         error = ""
         emitted_text = False
         extra = {}
+        if permission_mode:
+            extra["permission_mode"] = permission_mode
         if resume_session_id:
             extra["resume_session_id"] = resume_session_id
         elif session_id:
@@ -486,6 +491,7 @@ class ClaudeCliLocalProvider:
         prompt: str,
         resume_session_id: str,
         session_id: str = "",
+        permission_mode: str = "",
     ) -> None:
         emitter = self._emitter()
         if emitter is not None:
@@ -498,6 +504,7 @@ class ClaudeCliLocalProvider:
                 prompt=prompt,
                 resume_session_id=resume_session_id,
                 session_id=session_id,
+                permission_mode=permission_mode,
             )
         )
         self._background_tasks.add(task)
@@ -511,6 +518,7 @@ class ClaudeCliLocalProvider:
         prompt: str,
         resume_session_id: str,
         session_id: str = "",
+        permission_mode: str = "",
     ) -> None:
         done_event = asyncio.Event()
         heartbeat_task = self._heartbeat_task(
@@ -526,6 +534,7 @@ class ClaudeCliLocalProvider:
                 session_id=session_id,
                 session=session,
                 native_turn_id=native_turn_id,
+                permission_mode=permission_mode,
             )
         except Exception as exc:  # pragma: no cover - defensive task boundary
             outcome = _RunOutcome(

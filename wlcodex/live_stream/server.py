@@ -12,6 +12,12 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from uuid import uuid4
 
 from wlcodex.auto_digest_llm import DigestClient
+from wlcodex.claude_permissions import (
+    CLAUDE_PERMISSION_MODE_DESCRIPTIONS,
+    CLAUDE_PERMISSION_MODE_LABELS,
+    CLAUDE_PERMISSION_MODE_ORDER,
+    normalize_claude_permission_mode,
+)
 from wlcodex.council import (
     CouncilConfig,
     CouncilReviewPacket,
@@ -58,6 +64,61 @@ _CODEX_PERMISSION_PRESETS: dict[str, dict[str, object]] = {
         "sandbox": "danger-full-access",
         "sandbox_policy": {"type": "dangerFullAccess"},
     },
+}
+_CODEX_PERMISSION_PRESETS_UI = [
+    {"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"},
+    {
+        "value": "auto_review",
+        "label": "自动审核",
+        "description": "自动审查提权请求",
+    },
+    {"value": "read_only", "label": "只读", "description": "编辑文件或运行命令需要批准"},
+    {
+        "value": "full_access",
+        "label": "完全访问权限",
+        "description": "完全访问计算机（风险较高）",
+    },
+]
+_CLAUDE_PERMISSION_PRESETS = [
+    {
+        "value": mode,
+        "label": CLAUDE_PERMISSION_MODE_LABELS[mode],
+        "description": CLAUDE_PERMISSION_MODE_DESCRIPTIONS[mode],
+    }
+    for mode in CLAUDE_PERMISSION_MODE_ORDER
+]
+_ANTIGRAVITY_PERMISSION_PRESETS = [
+    {
+        "value": "default",
+        "label": "默认",
+        "description": "按默认权限提示执行命令。",
+        "dangerously_skip_permissions": False,
+        "sandbox": False,
+    },
+    {
+        "value": "sandbox",
+        "label": "沙盒",
+        "description": "在沙盒环境中运行，仍保留权限确认。",
+        "dangerously_skip_permissions": False,
+        "sandbox": True,
+    },
+    {
+        "value": "skip_permissions",
+        "label": "跳过权限",
+        "description": "跳过权限提示直接执行，风险较高。",
+        "dangerously_skip_permissions": True,
+        "sandbox": False,
+    },
+    {
+        "value": "skip_permissions_sandbox",
+        "label": "沙盒 + 跳过权限",
+        "description": "沙盒运行且跳过权限提示，适合高度受控环境。",
+        "dangerously_skip_permissions": True,
+        "sandbox": True,
+    },
+]
+_ANTIGRAVITY_PERMISSION_PRESET_MAP = {
+    preset["value"]: preset for preset in _ANTIGRAVITY_PERMISSION_PRESETS
 }
 _LOGIN_TICKET_TTL_SECONDS = 5 * 60
 _LOGIN_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
@@ -702,7 +763,7 @@ class WorkerLiveStreamServer:
             prompt = str(body.get("prompt", ""))
             model = _optional_nonempty_string(body.get("model"))
             images = _safe_image_attachments(body.get("images"))
-            permission_kwargs = _codex_permission_kwargs_from_body(body)
+            permission_kwargs = _native_permission_kwargs_from_body(provider_name, body)
             service_tier = _optional_nonempty_string(
                 body.get("service_tier") or body.get("serviceTier")
             )
@@ -792,8 +853,9 @@ class WorkerLiveStreamServer:
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
                 return
-            permission_kwargs = _codex_permission_kwargs_from_body(body)
-            permission_kwargs.pop("sandbox", None)
+            permission_kwargs = _native_permission_kwargs_from_body(provider_name, body)
+            if provider_name.strip().lower() != "antigravity":
+                permission_kwargs.pop("sandbox", None)
             result = await target.continue_session(
                 thread_id,
                 str(body.get("prompt", "")),
@@ -822,8 +884,9 @@ class WorkerLiveStreamServer:
             expected_turn_id = str(
                 body.get("expected_turn_id") or body.get("turn_id") or ""
             )
-            permission_kwargs = _codex_permission_kwargs_from_body(body)
-            permission_kwargs.pop("sandbox", None)
+            permission_kwargs = _native_permission_kwargs_from_body(provider_name, body)
+            if provider_name.strip().lower() != "antigravity":
+                permission_kwargs.pop("sandbox", None)
             result = await target.steer_session(
                 thread_id,
                 expected_turn_id,
@@ -1594,6 +1657,44 @@ def _optional_nonempty_string(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _native_permission_presets(provider: str) -> list[dict[str, object]]:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "claude":
+        return list(_CLAUDE_PERMISSION_PRESETS)
+    if normalized == "antigravity":
+        return [
+            {key: value for key, value in preset.items() if key not in {"dangerously_skip_permissions", "sandbox"}}
+            for preset in _ANTIGRAVITY_PERMISSION_PRESETS
+        ]
+    return list(_CODEX_PERMISSION_PRESETS_UI)
+
+
+def _native_permission_kwargs_from_body(
+    provider: str,
+    body: dict[str, Any],
+) -> dict[str, object]:
+    mode = body.get("permission_mode") if body is not None else None
+    if mode is None:
+        mode = body.get("permissionMode") if body is not None else None
+    if mode is None:
+        return {}
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider == "claude":
+        return {"permission_mode": normalize_claude_permission_mode(str(mode))}
+    if normalized_provider == "antigravity":
+        normalized_mode = str(mode).strip().lower()
+        preset = _ANTIGRAVITY_PERMISSION_PRESET_MAP.get(
+            normalized_mode,
+            _ANTIGRAVITY_PERMISSION_PRESET_MAP["default"],
+        )
+        return {
+            "dangerously_skip_permissions": bool(preset["dangerously_skip_permissions"]),
+            "sandbox": bool(preset["sandbox"]),
+        }
+    preset = _CODEX_PERMISSION_PRESETS.get(str(mode).strip(), {})
+    return dict(preset)
 
 
 def _codex_permission_kwargs_from_body(body: dict[str, Any]) -> dict[str, object]:
@@ -2700,11 +2801,7 @@ __ICONS_JS__
     const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
     const PERMISSION_SETTINGS_STORAGE_VERSION = 1;
     const PERMISSION_PRESETS = [
-      {"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"},
-      {"value": "auto_review", "label": "自动审核", "description": "自动审查提权请求"},
-      {"value": "read_only", "label": "只读", "description": "编辑文件或运行命令需要批准"},
-      {"value": "full_access", "label": "完全访问权限", "description": "完全访问计算机（风险较高）"}
-    ];
+    const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
     let modelCatalog = [];
     let savedModelSettings = loadSavedModelSettings();
     let savedPermissionSettings = loadSavedPermissionSettings();
@@ -3549,6 +3646,10 @@ __ICONS_JS__
         .replace("__PROVIDER_JSON__", json.dumps(provider_name, ensure_ascii=False))
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
+        .replace(
+            "__PERMISSION_PRESETS_JSON__",
+            json.dumps(_native_permission_presets(provider_name), ensure_ascii=False),
+        )
         .replace("__ICONS_JS__", _ICONS_JS_LITERAL)
     )
 
@@ -3930,11 +4031,7 @@ __ICONS_JS__
     const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
     const PERMISSION_SETTINGS_STORAGE_VERSION = 1;
     const PERMISSION_PRESETS = [
-      {"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"},
-      {"value": "auto_review", "label": "自动审核", "description": "自动审查提权请求"},
-      {"value": "read_only", "label": "只读", "description": "编辑文件或运行命令需要批准"},
-      {"value": "full_access", "label": "完全访问权限", "description": "完全访问计算机（风险较高）"}
-    ];
+    const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
     const transcriptNodes = new Map();
     const statusNodes = new Map();
     const commandNodes = new Map();
@@ -6166,6 +6263,10 @@ __ICONS_JS__
         .replace("__PROVIDER_JSON__", json.dumps(native_provider, ensure_ascii=False))
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
+        .replace(
+            "__PERMISSION_PRESETS_JSON__",
+            json.dumps(_native_permission_presets(native_provider), ensure_ascii=False),
+        )
         .replace("__ICONS_JS__", _ICONS_JS_LITERAL)
     )
 

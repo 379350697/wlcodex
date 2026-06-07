@@ -40,6 +40,8 @@ class FakeAntigravityCliRunner:
         conversation_id: str = "",
         model: str = "",
         extra_dirs: tuple[str, ...] = (),
+        dangerously_skip_permissions: bool = False,
+        sandbox: bool = False,
     ):
         self.calls.append(
             {
@@ -48,6 +50,8 @@ class FakeAntigravityCliRunner:
                 "conversation_id": conversation_id,
                 "model": model,
                 "extra_dirs": extra_dirs,
+                "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                "sandbox": bool(sandbox),
             }
         )
         if self.fail:
@@ -72,6 +76,8 @@ class BlockingAntigravityCliRunner(FakeAntigravityCliRunner):
         conversation_id: str = "",
         model: str = "",
         extra_dirs: tuple[str, ...] = (),
+        dangerously_skip_permissions: bool = False,
+        sandbox: bool = False,
     ):
         self.calls.append(
             {
@@ -80,6 +86,8 @@ class BlockingAntigravityCliRunner(FakeAntigravityCliRunner):
                 "conversation_id": conversation_id,
                 "model": model,
                 "extra_dirs": extra_dirs,
+                "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                "sandbox": bool(sandbox),
             }
         )
         await self.release.wait()
@@ -103,6 +111,8 @@ class SilentBlockingAntigravityCliRunner(FakeAntigravityCliRunner):
         conversation_id: str = "",
         model: str = "",
         extra_dirs: tuple[str, ...] = (),
+        dangerously_skip_permissions: bool = False,
+        sandbox: bool = False,
     ):
         self.calls.append(
             {
@@ -111,6 +121,8 @@ class SilentBlockingAntigravityCliRunner(FakeAntigravityCliRunner):
                 "conversation_id": conversation_id,
                 "model": model,
                 "extra_dirs": extra_dirs,
+                "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                "sandbox": bool(sandbox),
             }
         )
         await self.release.wait()
@@ -342,6 +354,37 @@ async def test_cli_provider_read_and_continue_use_saved_conversation_id(
 
 
 @pytest.mark.asyncio
+async def test_cli_provider_forwards_antigravity_permission_flags(
+    tmp_path: Path,
+) -> None:
+    runner = FakeAntigravityCliRunner()
+    provider, _store, _runtime_store, _runner = _provider(tmp_path, runner=runner)
+
+    result = await provider.start_session(
+        str(tmp_path),
+        "hello",
+        dangerously_skip_permissions=True,
+        sandbox=True,
+    )
+    await provider.wait_for_background_tasks()
+
+    assert result.status == "started"
+    assert runner.calls[0]["dangerously_skip_permissions"] is True
+    assert runner.calls[0]["sandbox"] is True
+
+    await provider.continue_session(
+        result.native_session_id,
+        "second",
+        dangerously_skip_permissions=False,
+        sandbox=True,
+    )
+    await provider.wait_for_background_tasks()
+
+    assert runner.calls[1]["dangerously_skip_permissions"] is False
+    assert runner.calls[1]["sandbox"] is True
+
+
+@pytest.mark.asyncio
 async def test_cli_provider_strips_replayed_assistant_prefix_on_continue(
     tmp_path: Path,
 ) -> None:
@@ -354,6 +397,8 @@ async def test_cli_provider_strips_replayed_assistant_prefix_on_continue(
             conversation_id: str = "",
             model: str = "",
             extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
         ):
             self.calls.append(
                 {
@@ -362,6 +407,8 @@ async def test_cli_provider_strips_replayed_assistant_prefix_on_continue(
                     "conversation_id": conversation_id,
                     "model": model,
                     "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
                 }
             )
             if conversation_id:
@@ -406,6 +453,8 @@ async def test_cli_provider_strips_replayed_assistant_prefix_across_chunks(
             conversation_id: str = "",
             model: str = "",
             extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
         ):
             self.calls.append(
                 {
@@ -414,6 +463,8 @@ async def test_cli_provider_strips_replayed_assistant_prefix_across_chunks(
                     "conversation_id": conversation_id,
                     "model": model,
                     "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
                 }
             )
             if conversation_id:
@@ -462,6 +513,8 @@ async def test_cli_provider_strips_replay_from_middle_of_assistant_history(
             conversation_id: str = "",
             model: str = "",
             extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
         ):
             self.calls.append(
                 {
@@ -470,6 +523,8 @@ async def test_cli_provider_strips_replay_from_middle_of_assistant_history(
                     "conversation_id": conversation_id,
                     "model": model,
                     "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
                 }
             )
             if conversation_id:
@@ -753,6 +808,8 @@ async def test_cli_provider_recovers_conversation_id_from_isolated_local_cwd(
             conversation_id: str = "",
             model: str = "",
             extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
         ):
             self.calls.append(
                 {
@@ -761,6 +818,8 @@ async def test_cli_provider_recovers_conversation_id_from_isolated_local_cwd(
                     "conversation_id": conversation_id,
                     "model": model,
                     "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
                 }
             )
             yield {"type": "assistant", "text": "hello"}
@@ -807,6 +866,8 @@ async def test_cli_provider_ignores_stale_latest_local_cwd(
             conversation_id: str = "",
             model: str = "",
             extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
         ):
             self.calls.append(
                 {
@@ -815,6 +876,8 @@ async def test_cli_provider_ignores_stale_latest_local_cwd(
                     "conversation_id": conversation_id,
                     "model": model,
                     "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
                 }
             )
             yield {"type": "assistant", "text": "hello"}
@@ -851,6 +914,8 @@ async def test_cli_provider_empty_output_failure_mentions_cli_setup(
             conversation_id: str = "",
             model: str = "",
             extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
         ):
             self.calls.append(
                 {
@@ -859,6 +924,8 @@ async def test_cli_provider_empty_output_failure_mentions_cli_setup(
                     "conversation_id": conversation_id,
                     "model": model,
                     "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
                 }
             )
             if False:
@@ -929,6 +996,8 @@ async def test_cli_provider_hides_local_duplicate_after_created_session_claims_p
             conversation_id: str = "",
             model: str = "",
             extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
         ):
             self.calls.append(
                 {
@@ -937,6 +1006,8 @@ async def test_cli_provider_hides_local_duplicate_after_created_session_claims_p
                     "conversation_id": conversation_id,
                     "model": model,
                     "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
                 }
             )
             await self.release.wait()

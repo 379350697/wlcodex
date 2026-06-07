@@ -73,6 +73,8 @@ class AntigravityCliRunner:
         conversation_id: str = "",
         model: str = "",
         extra_dirs: tuple[str, ...] = (),
+        dangerously_skip_permissions: bool = False,
+        sandbox: bool = False,
     ):
         if not self.available:
             raise RuntimeError(self.error)
@@ -82,6 +84,8 @@ class AntigravityCliRunner:
             conversation_id=conversation_id,
             model=model,
             extra_dirs=extra_dirs,
+            dangerously_skip_permissions=dangerously_skip_permissions,
+            sandbox=sandbox,
         )
         proc: asyncio.subprocess.Process | None = None
         try:
@@ -149,6 +153,8 @@ class AntigravityCliRunner:
         conversation_id: str,
         model: str,
         extra_dirs: tuple[str, ...],
+        dangerously_skip_permissions: bool = False,
+        sandbox: bool = False,
     ) -> tuple[str, ...]:
         args: list[str] = [
             "--print-timeout",
@@ -159,9 +165,9 @@ class AntigravityCliRunner:
         for directory in (cwd, *extra_dirs):
             if directory:
                 args.extend(["--add-dir", directory])
-        if self._config.dangerously_skip_permissions:
+        if dangerously_skip_permissions or self._config.dangerously_skip_permissions:
             args.append("--dangerously-skip-permissions")
-        if self._config.sandbox:
+        if sandbox or self._config.sandbox:
             args.append("--sandbox")
         selected_model = model or self._config.default_model
         if selected_model:
@@ -283,6 +289,10 @@ class AntigravityCliLocalProvider:
             prompt=prompt,
             conversation_id="",
             model=str(kwargs.get("model") or ""),
+            dangerously_skip_permissions=bool(
+                kwargs.get("dangerously_skip_permissions", False)
+            ),
+            sandbox=bool(kwargs.get("sandbox", False)),
         )
         return _control_result(
             session,
@@ -342,6 +352,10 @@ class AntigravityCliLocalProvider:
             prompt=prompt,
             conversation_id=_antigravity_conversation_id(session),
             model=str(kwargs.get("model") or ""),
+            dangerously_skip_permissions=bool(
+                kwargs.get("dangerously_skip_permissions", False)
+            ),
+            sandbox=bool(kwargs.get("sandbox", False)),
         )
         return _control_result(
             session,
@@ -383,6 +397,8 @@ class AntigravityCliLocalProvider:
         native_turn_id: str,
         conversation_id: str,
         model: str,
+        dangerously_skip_permissions: bool = False,
+        sandbox: bool = False,
     ) -> _RunOutcome:
         latest_conversation_id = conversation_id
         emitted_text = False
@@ -396,6 +412,8 @@ class AntigravityCliLocalProvider:
                 cwd=execution_cwd,
                 conversation_id=conversation_id,
                 model=model,
+                dangerously_skip_permissions=dangerously_skip_permissions,
+                sandbox=sandbox,
                 extra_dirs=_runner_extra_dirs(session, execution_cwd),
             ):
                 event_conversation_id = str(event.get("conversation_id") or "")
@@ -452,6 +470,8 @@ class AntigravityCliLocalProvider:
         prompt: str,
         conversation_id: str,
         model: str,
+        dangerously_skip_permissions: bool = False,
+        sandbox: bool = False,
     ) -> None:
         emitter = self._emitter()
         if emitter is not None:
@@ -464,6 +484,8 @@ class AntigravityCliLocalProvider:
                 prompt=prompt,
                 conversation_id=conversation_id,
                 model=model,
+                dangerously_skip_permissions=dangerously_skip_permissions,
+                sandbox=sandbox,
             )
         )
         self._background_tasks.add(task)
@@ -477,6 +499,8 @@ class AntigravityCliLocalProvider:
         prompt: str,
         conversation_id: str,
         model: str,
+        dangerously_skip_permissions: bool = False,
+        sandbox: bool = False,
     ) -> None:
         done_event = asyncio.Event()
         heartbeat_task = self._heartbeat_task(
@@ -491,6 +515,8 @@ class AntigravityCliLocalProvider:
                 native_turn_id=native_turn_id,
                 conversation_id=conversation_id,
                 model=model,
+                dangerously_skip_permissions=dangerously_skip_permissions,
+                sandbox=sandbox,
             )
         finally:
             done_event.set()

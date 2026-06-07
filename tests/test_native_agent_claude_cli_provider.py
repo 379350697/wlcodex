@@ -632,6 +632,30 @@ async def test_claude_cli_provider_continues_imported_local_session_with_resume(
 
 
 @pytest.mark.asyncio
+async def test_claude_cli_provider_forwards_permission_mode(
+    tmp_path: Path,
+) -> None:
+    provider, _store, engine, _runtime_store = _provider(tmp_path)
+
+    result = await provider.start_session(
+        str(tmp_path),
+        "hello",
+        permission_mode="never",
+    )
+    await provider.wait_for_background_tasks()
+    assert result.status == "started"
+    assert engine.requests[0].extra.get("permission_mode") == "never"
+
+    await provider.continue_session(
+        result.native_session_id,
+        "continue",
+        permission_mode="on_request",
+    )
+    await provider.wait_for_background_tasks()
+    assert engine.requests[1].extra.get("permission_mode") == "on_request"
+
+
+@pytest.mark.asyncio
 async def test_claude_cli_provider_syncs_jsonl_output_after_continue(
     tmp_path: Path,
 ) -> None:
