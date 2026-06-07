@@ -3523,11 +3523,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .handoff-prompt-body { min-height: 0; overflow: auto; margin: 0; padding: 18px 26px 28px; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
     .handoff-prompt-body[hidden] { display: none; }
     .prompt-preface { font-size: 24px; line-height: 1.45; color: #f4f4f5; }
-    .prompt-card { width: auto; height: min(48vh, 620px); min-height: 300px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 0; border-radius: 30px; background: #303030; color: #f4f4f5; box-shadow: none; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-    .prompt-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 0; padding: 20px 26px 0; }
+    .prompt-card { width: auto; height: min(48vh, 620px); min-height: 300px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 0; border-radius: 30px; background: #303030 !important; background-color: #303030 !important; color: #f4f4f5; box-shadow: none; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+    .prompt-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 0; padding: 20px 26px 0; background: #303030; }
     .prompt-card-title { color: #f8fafc; font-size: 16px; font-weight: var(--weight-extrabold); line-height: 1.2; letter-spacing: 0; }
     .prompt-card-copy svg { width: 32px; height: 32px; }
-    .transcript-body .prompt-card-body { min-height: 0; overflow: auto; margin: 0; padding: 16px 26px 28px; border: 0; border-radius: 0; background: transparent; white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; font: 12px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
+    .transcript-body .prompt-card-body { min-height: 0; overflow: auto; margin: 0; padding: 16px 26px 28px; border: 0; border-radius: 0; background: #303030; white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; font: 12px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
     .handoff-actions { grid-template-columns: 1fr 1fr; }
     .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid var(--border-section); color: var(--btn-primary-bg); }
     .setting-row:last-child { border-bottom: 0; }
@@ -5155,12 +5155,14 @@ __ICONS_JS__
       const nativeTurnId = String((group[0].payload || {}).native_turn_id || "");
       const failed = group.some(event => isFailedEvent(event));
       const pendingApproval = hasPendingApproval(group);
+      const generatedPrompt = groupHasGeneratedPrompt(group);
       const currentTurnId = activeTurnId || (nativeTurnRunning ? nativeTurnId : "");
       const shouldCollapse = (
         groupHasVisibleContent(group) &&
         nativeTurnId &&
         !failed &&
         !pendingApproval &&
+        !generatedPrompt &&
         nativeTurnId !== currentTurnId &&
         nativeTurnId !== latestTurnId
       );
@@ -5171,6 +5173,13 @@ __ICONS_JS__
     }
     function groupHasVisibleContent(group) {
       return group.some(event => !isInternalEvent(event));
+    }
+    function groupHasGeneratedPrompt(group) {
+      return group.some(event => {
+        if (!isAssistantMessageEvent(event)) return false;
+        const payload = event.payload || {};
+        return Boolean(splitGeneratedPromptText(payload.text || payload.delta || payload.summary || ""));
+      });
     }
     function hasPendingApproval(group) {
       const requested = new Set();

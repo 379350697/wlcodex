@@ -1885,12 +1885,14 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert ".transcript-item.prompt-message { justify-self: stretch;" in response
     assert "margin-left: 6px; margin-right: 6px;" in response
     assert ".transcript-item.prompt-message .transcript-meta { display: none;" in response
-    assert "background: #303030;" in response
+    assert "background: #303030 !important; background-color: #303030 !important;" in response
     assert ".prompt-card-head { display: flex;" in response
     assert "min-height: 0; padding: 20px 26px 0;" in response
+    assert "background: #303030;" in response
     assert ".prompt-card-title { color: #f8fafc; font-size: 16px;" in response
     assert ".transcript-body .prompt-card-body { min-height: 0; overflow: auto;" in response
     assert "padding: 16px 26px 28px;" in response
+    assert "border-radius: 0; background: #303030;" in response
     assert "font: 12px/1.42 ui-monospace" in response
     assert "-webkit-text-size-adjust: 100%;" in response
     assert "border: 0;" in response
@@ -1906,6 +1908,10 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert "function renderGeneratedPromptTranscript(target, text)" in response
     assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text);" in response
     assert "node.row.classList.toggle(\"prompt-message\", renderedPrompt);" in response
+    assert "const generatedPrompt = groupHasGeneratedPrompt(group);" in response
+    assert "!generatedPrompt &&" in response
+    assert "function groupHasGeneratedPrompt(group)" in response
+    assert "Boolean(splitGeneratedPromptText(payload.text || payload.delta || payload.summary || \"\"))" in response
     assert "你在[\\s\\S]+?工作。" in response
     assert "背景：" in response
     assert "必须阅读" in response
