@@ -3519,6 +3519,12 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .handoff-preview.ok { border-color: rgba(255,255,255,.08); color: #f4f4f5; }
     .handoff-prompt-body { min-height: 0; overflow: auto; margin: 0; padding: 18px 26px 28px; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
     .handoff-prompt-body[hidden] { display: none; }
+    .prompt-preface { margin-bottom: 14px; }
+    .prompt-card { max-height: min(48vh, 620px); min-height: 260px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid rgba(255,255,255,.08); border-radius: 30px; background: #303033; color: #f4f4f5; box-shadow: 0 18px 48px rgba(0,0,0,.38); }
+    .prompt-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 62px; padding: 20px 26px 10px; }
+    .prompt-card-title { color: #f8fafc; font-size: 20px; font-weight: var(--weight-extrabold); line-height: 1.2; }
+    .prompt-card-copy svg { width: 32px; height: 32px; }
+    .prompt-card-body { min-height: 0; overflow: auto; margin: 0; padding: 18px 26px 28px; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
     .handoff-actions { grid-template-columns: 1fr 1fr; }
     .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid var(--border-section); color: var(--btn-primary-bg); }
     .setting-row:last-child { border-bottom: 0; }
@@ -5314,10 +5320,94 @@ __ICONS_JS__
         } else {
           node.text += String(incomingText);
         }
+        if (renderGeneratedPromptTranscript(node.body, node.text)) return;
         renderMarkdownLite(node.body, node.text);
       } else {
         renderTranscriptImages(node.body, payload.images || []);
         appendText(node.body, incomingText);
+      }
+    }
+    function renderGeneratedPromptTranscript(target, text) {
+      const split = splitGeneratedPromptText(text);
+      if (!split) return false;
+      target.replaceChildren();
+      if (split.preface) {
+        const preface = document.createElement("div");
+        preface.className = "prompt-preface";
+        renderMarkdownLite(preface, split.preface);
+        target.append(preface);
+      }
+      target.append(createPlainPromptCard(split.prompt));
+      return true;
+    }
+    function splitGeneratedPromptText(text) {
+      const source = String(text || "").replace(/\\r\\n/g, "\\n");
+      const match = /(^|\\n)你在\\s+.+?\\s+工作。/m.exec(source);
+      if (!match) return null;
+      const promptStart = match.index + (match[1] ? 1 : 0);
+      const prompt = source.slice(promptStart).trim();
+      if (!isGeneratedPromptBody(prompt)) return null;
+      return {
+        preface: source.slice(0, promptStart).trim(),
+        prompt
+      };
+    }
+    function isGeneratedPromptBody(text) {
+      const source = String(text || "");
+      if (!source.startsWith("你在 ")) return false;
+      const markers = ["背景：", "必须阅读", "重点就一句"];
+      return markers.some(marker => source.includes(marker));
+    }
+    function createPlainPromptCard(text) {
+      const card = document.createElement("section");
+      card.className = "prompt-card";
+      const head = document.createElement("div");
+      head.className = "prompt-card-head";
+      const title = document.createElement("span");
+      title.className = "prompt-card-title";
+      title.textContent = "Plain text";
+      const button = document.createElement("button");
+      button.className = "handoff-copy prompt-card-copy";
+      button.type = "button";
+      button.setAttribute("aria-label", "复制提示词");
+      button.innerHTML = ICONS.copy;
+      button.onclick = () => copyPromptCardText(button, text);
+      head.append(title, button);
+      const body = document.createElement("pre");
+      body.className = "prompt-card-body";
+      body.textContent = text;
+      card.append(head, body);
+      return card;
+    }
+    async function copyPromptCardText(button, text) {
+      const value = String(text || "");
+      if (!value.trim()) return;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(value);
+        } else {
+          fallbackCopyText(value);
+        }
+        setPromptCardCopyState(button, "copied");
+      } catch (_error) {
+        try {
+          fallbackCopyText(value);
+          setPromptCardCopyState(button, "copied");
+        } catch (_fallbackError) {
+          setPromptCardCopyState(button, "failed");
+        }
+      }
+    }
+    function setPromptCardCopyState(button, state) {
+      const copied = state === "copied";
+      const failed = state === "failed";
+      button.classList.toggle("copied", copied);
+      button.setAttribute(
+        "aria-label",
+        copied ? "已复制提示词" : failed ? "复制失败" : "复制提示词"
+      );
+      if (copied || failed) {
+        window.setTimeout(() => setPromptCardCopyState(button, ""), 1400);
       }
     }
     function renderTranscriptImages(target, images) {

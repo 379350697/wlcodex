@@ -1878,6 +1878,30 @@ def test_live_page_handoff_prompt_preview_supports_copy_action() -> None:
     assert "handoffPromptBody.innerHTML = escapeHtml(preview.prompt || \"\");" in response
 
 
+def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert ".prompt-card { max-height: min(48vh, 620px);" in response
+    assert ".prompt-card-body { min-height: 0; overflow: auto;" in response
+    assert "function splitGeneratedPromptText(text)" in response
+    assert "function renderGeneratedPromptTranscript(target, text)" in response
+    assert "renderGeneratedPromptTranscript(node.body, node.text)" in response
+    assert "你在\\s+.+" in response
+    assert "背景：" in response
+    assert "必须阅读" in response
+    assert "重点就一句" in response
+
+
+def test_live_page_generated_prompt_cards_support_copy_per_message() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert "function createPlainPromptCard(text)" in response
+    assert "button.className = \"handoff-copy prompt-card-copy\";" in response
+    assert "button.onclick = () => copyPromptCardText(button, text);" in response
+    assert "async function copyPromptCardText(button, text)" in response
+    assert "setPromptCardCopyState(button, \"copied\")" in response
+
+
 def test_live_page_waits_during_active_turn_when_provider_cannot_steer() -> None:
     response = _live_page(42, native_provider="antigravity")
 
