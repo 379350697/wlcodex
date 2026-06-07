@@ -5266,7 +5266,10 @@ __ICONS_JS__
       const previousTarget = renderTarget;
       renderTarget = options.target || renderTarget || events;
       try {
-      if (event.kind === "user_message") renderTranscript(event, "user", "你", options);
+      if (event.kind === "user_message") {
+        if (!options.historical) clearMatchingLocalUserEcho(event);
+        renderTranscript(event, "user", "你", options);
+      }
       else if (event.kind === "text_delta" || event.kind === "message_completed") renderAssistant(event, options);
       else if (event.kind === "reasoning_delta") renderStatusEvent(event, "思考中", "busy");
       else if (isCommandEvent(event)) renderToolCall(event);
@@ -5285,6 +5288,24 @@ __ICONS_JS__
     }
     function renderAssistant(event, opts = {}) {
       renderTranscript(event, "assistant", PROVIDER_LABEL, opts);
+    }
+    function clearMatchingLocalUserEcho(event) {
+      const payload = event.payload || {};
+      const incomingText = String(payload.text || payload.delta || payload.summary || "").trim();
+      const incomingImages = Array.isArray(payload.images) ? payload.images.length : 0;
+      for (const [key, node] of Array.from(transcriptNodes.entries())) {
+        if (!node || !node.row || !node.row.classList.contains("local-pending")) continue;
+        if (!localUserEchoMatchesEvent(node, incomingText, incomingImages)) continue;
+        node.row.remove();
+        transcriptNodes.delete(key);
+      }
+    }
+    function localUserEchoMatchesEvent(node, incomingText, incomingImages) {
+      const body = node.body;
+      if (!body) return false;
+      const text = String(body.textContent || "").trim();
+      const images = body.querySelectorAll ? body.querySelectorAll(".transcript-image").length : 0;
+      return text === incomingText && images === incomingImages;
     }
     function renderCommand(event) {
       renderToolCall(event);

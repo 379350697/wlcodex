@@ -1793,6 +1793,11 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "function readImageAttachment" in response
     assert "function renderAttachments" in response
     assert "function renderLocalUserEcho" in response
+    assert "function clearMatchingLocalUserEcho(event)" in response
+    assert "function localUserEchoMatchesEvent(node, incomingText, incomingImages)" in response
+    assert "if (!options.historical) clearMatchingLocalUserEcho(event);" in response
+    assert 'node.row.classList.contains("local-pending")' in response
+    assert "transcriptNodes.delete(key);" in response
     assert "renderTranscriptImages(node.body, payload.images || [])" in response
     assert "node.append(document.createTextNode(String(text)))" in response
     assert "openInterruptionChoice()" in response
