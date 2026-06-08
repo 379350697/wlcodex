@@ -1738,7 +1738,10 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
 
     assert "HTTP/1.1 200 OK" in response
     assert 'id="modelSettingsButton"' in response
-    assert 'id="permissionSettingsButton"' in response
+    assert (
+        '<button class="setting-pill permissions" id="permissionSettingsButton" '
+        'type="button">自动审核</button>'
+    ) in response
     assert 'id="modelPopover"' in response
     assert 'id="permissionPopover"' in response
     assert 'id="permissionSelector"' in response
@@ -1763,6 +1766,8 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "function readSelectedPermissionSettings()" in response
     assert "function renderPermissionSettings()" in response
     assert "const PERMISSION_SETTINGS_STORAGE_KEY" in response
+    assert 'const DEFAULT_PERMISSION_MODE = "auto_review";' in response
+    assert "const PERMISSION_SETTINGS_STORAGE_VERSION = 2;" in response
     assert "permissionOptions.hidden = false;" in response
     assert "saveModelSettingsIfChanged();" in response
     assert "savePermissionSettingsIfChanged();" in response
@@ -2033,12 +2038,17 @@ async def test_worker_live_page_exposes_working_codex_permission_settings(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert 'id="permissionSettingsButton"' in response
+    assert (
+        '<button class="setting-pill permissions" id="permissionSettingsButton" '
+        'type="button">自动审核</button>'
+    ) in response
     assert 'id="permissionPopover"' in response
     assert 'id="permissionSelector"' in response
     assert 'id="permissionOptions"' in response
     assert 'id="permissionSettingRow"' not in response
     assert "const PERMISSION_SETTINGS_STORAGE_KEY" in response
+    assert 'const DEFAULT_PERMISSION_MODE = "auto_review";' in response
+    assert "const PERMISSION_SETTINGS_STORAGE_VERSION = 2;" in response
     assert "function readSelectedPermissionSettings()" in response
     assert "function renderPermissionSettings()" in response
     assert "permissionOptions.hidden = false;" in response

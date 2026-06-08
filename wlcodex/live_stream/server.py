@@ -129,17 +129,29 @@ _STATIC_CONTENT_TYPES = {
     ".js": "application/javascript; charset=utf-8",
 }
 
-# Inline SVG icons — 24×24 viewBox, currentColor, round caps
+# Inline SVG icons — 24×24 viewBox, currentColor, Lucide-style (stroke-width 2)
+_ICON_ATTRS = 'width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
 _ICON_SVG = {
-    "back": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
-    "menu": '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>',
-    "chevron": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>',
-    "attach": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
-    "remove": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>',
-    "send": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
+    # Navigation
+    "back": f'<svg {_ICON_ATTRS}><path d="M15 18l-6-6 6-6"/></svg>',
+    "chevron": f'<svg {_ICON_ATTRS}><path d="M9 18l6-6-6-6"/></svg>',
+    # Actions
+    "menu": '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>',
+    "attach": f'<svg {_ICON_ATTRS}><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
+    "remove": f'<svg {_ICON_ATTRS}><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>',
+    "send": f'<svg {_ICON_ATTRS}><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
     "stop": '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
     "check": '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>',
-    "copy": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    "copy": f'<svg {_ICON_ATTRS}><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4c0-1.1.9-2 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    # Extended icon set
+    "settings": f'<svg {_ICON_ATTRS}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+    "folder": f'<svg {_ICON_ATTRS}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+    "terminal": f'<svg {_ICON_ATTRS}><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+    "zap": f'<svg {_ICON_ATTRS}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+    "shield": f'<svg {_ICON_ATTRS}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+    "eye": f'<svg {_ICON_ATTRS}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+    "refresh": f'<svg {_ICON_ATTRS}><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>',
+    "clock": f'<svg {_ICON_ATTRS}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
 }
 
 # Unicode → SVG key mapping for HTML template replacements
@@ -157,16 +169,8 @@ _UNICODE_ICON_MAP = {
 # ICONS object injected into <script> blocks for dynamic JS icon use
 _ICONS_JS_LITERAL = (
     "const ICONS={"
-    f"back:{json.dumps(_ICON_SVG['back'])},"
-    f"menu:{json.dumps(_ICON_SVG['menu'])},"
-    f"chevron:{json.dumps(_ICON_SVG['chevron'])},"
-    f"attach:{json.dumps(_ICON_SVG['attach'])},"
-    f"remove:{json.dumps(_ICON_SVG['remove'])},"
-    f"send:{json.dumps(_ICON_SVG['send'])},"
-    f"stop:{json.dumps(_ICON_SVG['stop'])},"
-    f"check:{json.dumps(_ICON_SVG['check'])},"
-    f"copy:{json.dumps(_ICON_SVG['copy'])}"
-    "};"
+    + ",".join(f"{key}:{json.dumps(svg)}" for key, svg in _ICON_SVG.items())
+    + "};"
 )
 
 
@@ -2004,9 +2008,11 @@ def _native_provider_index_html(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Native Agents</title>
   <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/animations.css">
+  <link rel="stylesheet" href="/static/effects.css">
   <link rel="stylesheet" href="/static/native_index.css">
 </head>
-<body>
+<body class="aurora-bg noise-overlay">
   <main>
     <div class="native-index-topbar">
       <button class="circle native-back" id="back" aria-label="back" aria-disabled="true" disabled>‹</button>
@@ -2028,9 +2034,11 @@ def _council_review_page() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>议会审核</title>
   <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/animations.css">
+  <link rel="stylesheet" href="/static/effects.css">
   <style>
     body { background: var(--bg-canvas); }
-    header { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: center; min-height: 72px; padding: 10px 18px; background: rgba(5,5,6,.96); border-bottom: 1px solid var(--border-header); }
+    header { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: center; min-height: 72px; padding: 10px 18px; background: rgba(5,5,8,.82); backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); border-bottom: 1px solid var(--border-header); }
     .circle { width: 46px; height: 46px; font-size: 28px; }
     h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
     .config-link { min-height: 42px; padding: 0 14px; border-radius: 21px; border: 1px solid #34363d; color: var(--text-primary); display: inline-grid; place-items: center; text-decoration: none; font-weight: var(--weight-bold); }
@@ -2042,11 +2050,18 @@ def _council_review_page() -> str:
     input, textarea, select { border: 1px solid var(--border-input-alt); border-radius: 8px; background: #1b1d24; }
     textarea { min-height: 124px; resize: vertical; line-height: 1.48; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .run { min-height: 48px; border: 0; border-radius: 8px; background: var(--text-primary); color: var(--bg-canvas); font-weight: var(--weight-black); font-size: 16px; }
+    .run { min-height: 48px; border: 0; border-radius: 8px; background: linear-gradient(135deg, #f4f4f5 0%, #e0e7ff 50%, #f4f4f5 100%); background-size: 200% 100%; color: var(--bg-canvas); font-weight: var(--weight-black); font-size: 16px; box-shadow: 0 4px 20px rgba(244, 244, 245, 0.1); transition: background-position 400ms ease, box-shadow 300ms ease; }
+    .run:not(:disabled):hover { background-position: 100% 0; box-shadow: 0 4px 28px rgba(244, 244, 245, 0.18); }
     .run:disabled { opacity: .55; cursor: progress; }
     .muted { color: var(--text-muted); font-size: 13px; line-height: 1.45; }
     .seat-list, .results { display: grid; gap: 10px; }
-    .seat, .result { border: 1px solid var(--border-card); border-radius: 8px; padding: 12px; background: var(--bg-elevated); }
+    .seat, .result { position: relative; border: 1px solid var(--border-card); border-radius: 8px; padding: 12px 12px 12px 18px; background: var(--bg-elevated); animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }
+    .seat::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 2px; background: var(--seat-accent, var(--color-link)); }
+    .seat:nth-child(1) { --seat-accent: #ef4444; }
+    .seat:nth-child(2) { --seat-accent: #3b82f6; }
+    .seat:nth-child(3) { --seat-accent: #f59e0b; }
+    .seat:nth-child(4) { --seat-accent: #a855f7; }
+    .seat:nth-child(5) { --seat-accent: #22c55e; }
     .seat-head, .result-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     .seat-title, .result-title { font-weight: var(--weight-black); }
     .badge { border-radius: 999px; padding: 4px 8px; background: #22252e; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
@@ -2061,7 +2076,7 @@ def _council_review_page() -> str:
     }
   </style>
 </head>
-<body>
+<body class="noise-overlay">
   <header>
     <a class="circle" href="/native" aria-label="back">‹</a>
     <h1>议会审核</h1>
@@ -2301,9 +2316,11 @@ def _council_seats_page() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>议会席位配置</title>
   <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/animations.css">
+  <link rel="stylesheet" href="/static/effects.css">
   <style>
     body { background: var(--bg-canvas); }
-    header { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: center; min-height: 72px; padding: 10px 18px; background: rgba(5,5,6,.96); border-bottom: 1px solid var(--border-header); }
+    header { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: center; min-height: 72px; padding: 10px 18px; background: rgba(5,5,8,.82); backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); border-bottom: 1px solid var(--border-header); }
     .circle { width: 46px; height: 46px; font-size: 28px; }
     h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
     .review-link, button.save { min-height: 42px; padding: 0 14px; border-radius: 21px; border: 1px solid #34363d; color: var(--text-primary); background: #202126; display: inline-grid; place-items: center; text-decoration: none; font-weight: var(--weight-bold); }
@@ -2447,6 +2464,8 @@ def _native_token_entry_page(return_to: str = "/native/codex") -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WLCodex</title>
   <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/animations.css">
+  <link rel="stylesheet" href="/static/effects.css">
   <style>
     body { display: grid; place-items: center; padding: 26px; }
     main { width: min(420px, 100%); display: grid; gap: 18px; }
@@ -2521,16 +2540,20 @@ def _native_login_ticket_page(ticket: str, provider_name: str = "codex") -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Codex</title>
   <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/animations.css">
+  <link rel="stylesheet" href="/static/effects.css">
   <style>
-    body {{ display: grid; place-items: center; padding: 26px; }}
-    main {{ width: min(420px, 100%); display: grid; gap: 18px; }}
-    h1 {{ margin: 0; font-size: 28px; letter-spacing: 0; }}
+    body {{ display: grid; place-items: center; padding: 26px; min-height: 100vh; position: relative; }}
+    main {{ width: min(420px, 100%); display: grid; gap: 20px; padding: 32px 28px; border-radius: 20px; background: rgba(17, 18, 23, 0.65); border: 1px solid rgba(255, 255, 255, 0.08); backdrop-filter: blur(16px); box-shadow: var(--shadow-lg), var(--shadow-glow); z-index: 1; animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }}
+    h1 {{ margin: 0; font-size: 32px; font-weight: var(--weight-black); background: var(--gradient-accent); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }}
     p {{ margin: 0; color: var(--text-placeholder); line-height: 1.5; }}
     form {{ display: grid; gap: 12px; }}
-    button {{ height: 52px; border: 0; border-radius: 14px; background: var(--btn-primary-bg); color: var(--btn-primary-color); font-size: 16px; font-weight: var(--weight-extrabold); }}
+    button {{ height: 52px; border: 0; border-radius: 14px; background: linear-gradient(135deg, #f4f4f5 0%, #e0e7ff 50%, #f4f4f5 100%); background-size: 200% 100%; color: var(--bg-canvas); font-size: 16px; font-weight: var(--weight-black); box-shadow: 0 4px 20px rgba(244, 244, 245, 0.1); transition: background-position 400ms ease, box-shadow 300ms ease, transform 150ms ease; }}
+    button:not(:disabled):hover {{ background-position: 100% 0; box-shadow: 0 4px 28px rgba(244, 244, 245, 0.18); transform: translateY(-1px); }}
+    button:active {{ transform: translateY(0); }}
   </style>
 </head>
-<body>
+<body class="aurora-bg noise-overlay">
   <main>
     <h1>{display_name}</h1>
     <p>点击进入手机远程控制页。此链接只能使用一次。</p>
@@ -2554,9 +2577,11 @@ def _native_codex_page(provider_name: str = "codex") -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>__PROVIDER_LABEL__</title>
   <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/animations.css">
+  <link rel="stylesheet" href="/static/effects.css">
   <link rel="stylesheet" href="/static/components.css">
   <style>
-    header { position: sticky; top: 0; z-index: 2; padding: 18px 20px 10px; background: #000; }
+    header { position: sticky; top: 0; z-index: 2; padding: 18px 20px 10px; background: rgba(5,5,8,0.82); backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); border-bottom: 1px solid rgba(255,255,255,0.08); }
     .topbar { position: relative; display: grid; grid-template-columns: 54px 1fr 54px; align-items: center; min-height: 54px; }
     h1 { margin: 0; text-align: center; font-size: 22px; font-weight: var(--weight-extrabold); letter-spacing: 0; }
     .circle { border-color: var(--border-default); background: #1f2024; }
@@ -2569,7 +2594,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .laptop { width: 20px; height: 14px; border: 2px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
     .laptop:after { content: ""; position: absolute; left: -4px; right: -4px; bottom: -6px; height: 2px; background: currentColor; border-radius: 2px; }
     main { overflow-x: hidden; padding: 8px 22px calc(124px + env(safe-area-inset-bottom)); }
-    .nav-row, .project, .recent { position: relative; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 62px; overflow: hidden; color: var(--text-primary); background: transparent; border: 0; border-radius: 12px; width: 100%; padding: 0; text-align: left; }
+    .nav-row, .project, .recent { position: relative; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 62px; overflow: hidden; color: var(--text-primary); background: transparent; border: 0; border-radius: 12px; width: 100%; padding: 0; text-align: left; animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }
     .nav-row[hidden], .project-new-chat[hidden] { display: none; }
     .nav-row > span:nth-child(2), .project > span:nth-child(2) { min-width: 0; }
     .icon-folder, .icon-chat { width: 30px; height: 24px; border: 3px solid var(--text-primary); border-radius: 4px; position: relative; }
@@ -2635,7 +2660,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .time { max-width: 66px; overflow: hidden; color: var(--text-meta); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
     .meta { margin-top: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-meta); font-size: 12px; }
     .empty { color: var(--text-meta); padding: 16px 0; }
-    .controls { position: fixed; left: 0; right: 0; bottom: 0; display: grid; gap: 9px; padding: 12px 26px 18px; background: linear-gradient(to top, #000 82%, rgba(0,0,0,0)); }
+    .controls { position: fixed; left: 0; right: 0; bottom: 0; display: grid; gap: 9px; padding: 12px 26px 18px; background: linear-gradient(to top, rgba(0,0,0,.98) 55%, rgba(0,0,0,.85) 78%, rgba(0,0,0,0)); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
     .composer-tools { display: flex; gap: 8px; align-items: center; min-width: 0; }
     .composer-settings { position: relative; flex: 1; display: flex; gap: 8px; min-width: 0; }
     .setting-pill { min-height: 38px; max-width: 100%; border-radius: 19px; padding: 0 14px; overflow: hidden; background: var(--bg-pill); color: var(--btn-primary-bg); border: 1px solid transparent; font-size: 14px; font-weight: var(--weight-extrabold); text-overflow: ellipsis; white-space: nowrap; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
@@ -2673,7 +2698,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     button.chat { height: 56px; min-width: 118px; border-radius: 28px; border: 0; background: #fff; color: #000; font-size: 17px; font-weight: var(--weight-extrabold); }
   </style>
 </head>
-<body>
+<body class="aurora-bg noise-overlay">
   <header>
     <div class="topbar">
       <button class="circle" id="back" aria-label="back">‹</button>
@@ -2703,7 +2728,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     <div class="composer-tools">
       <div class="composer-settings">
         <button class="setting-pill" id="modelSettingsButton" type="button">加载模型</button>
-        <button class="setting-pill permissions" id="permissionSettingsButton" type="button">默认权限</button>
+        <button class="setting-pill permissions" id="permissionSettingsButton" type="button">自动审核</button>
         <div class="model-popover permission-popover closed" id="permissionPopover">
           <select id="permissionSelector" class="setting-selector" aria-label="选择权限模式" hidden>
             <option value="default">默认权限</option>
@@ -2799,7 +2824,8 @@ __ICONS_JS__
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
     const MODEL_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
-    const PERMISSION_SETTINGS_STORAGE_VERSION = 1;
+    const DEFAULT_PERMISSION_MODE = "auto_review";
+    const PERMISSION_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
     let modelCatalog = [];
     let savedModelSettings = loadSavedModelSettings();
@@ -3209,11 +3235,15 @@ __ICONS_JS__
     }
 
     function normalizePermissionSettings(settings = {}) {
-      const mode = typeof settings.permission_mode === "string" ? settings.permission_mode : "default";
-      const known = PERMISSION_PRESETS.some(preset => preset.value === mode) ? mode : "default";
+      const storedVersion = Number(settings.version || 0);
+      const mode = typeof settings.permission_mode === "string" ? settings.permission_mode : DEFAULT_PERMISSION_MODE;
+      const known = PERMISSION_PRESETS.some(preset => preset.value === mode) ? mode : DEFAULT_PERMISSION_MODE;
+      const migrated = storedVersion < PERMISSION_SETTINGS_STORAGE_VERSION && known === "default"
+        ? DEFAULT_PERMISSION_MODE
+        : known;
       return {
-        permission_mode: known,
-        version: Number(settings.version || 0)
+        permission_mode: migrated,
+        version: storedVersion
       };
     }
 
@@ -3666,17 +3696,19 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>__SAFE_TITLE__</title>
   <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/animations.css">
+  <link rel="stylesheet" href="/static/effects.css">
   <link rel="stylesheet" href="/static/components.css">
   <style>
     .native-mobile-shell, .codex-run-shell { min-height: 100vh; background: #000; }
-    header { position: sticky; top: 0; z-index: 3; display: grid; grid-template-columns: 54px 1fr 54px; align-items: center; gap: 8px; min-height: 78px; padding: 10px 20px 8px; background: rgba(0,0,0,.96); border-bottom: 1px solid var(--border-header); backdrop-filter: blur(16px); }
+    header { position: sticky; top: 0; z-index: 3; display: grid; grid-template-columns: 54px 1fr 54px; align-items: center; gap: 8px; min-height: 78px; padding: 10px 20px 8px; background: rgba(5,5,8,.82); border-bottom: 1px solid var(--border-header); backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); }
     .circle { border-color: #34363d; }
     .screen-title { min-width: 0; text-align: center; }
     h1 { margin: 0; font-size: 22px; font-weight: var(--weight-extrabold); letter-spacing: 0; }
     .subtitle { margin-top: 5px; color: var(--text-muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; background: var(--color-warning); vertical-align: 1px; }
-    .connected .status-dot { background: var(--color-success); }
-    .reconnecting .status-dot { background: var(--color-error); }
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; background: var(--color-warning); vertical-align: 1px; transition: background 300ms ease; }
+    .connected .status-dot { background: var(--color-success); animation: breathe 2s ease-in-out infinite; }
+    .reconnecting .status-dot { background: var(--color-error); animation: breathe 1s ease-in-out infinite; }
     main { padding: 12px 20px 150px; }
     .codex-status-flow { position: sticky; top: 78px; z-index: 2; display: grid; grid-template-columns: 12px 1fr auto; gap: 10px; align-items: center; min-height: 42px; margin: 0 -20px 8px; padding: 10px 20px; background: rgba(0,0,0,.94); border-bottom: 1px solid #17181c; color: var(--text-dim); font-size: 14px; }
     .run-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--color-success); box-shadow: 0 0 16px rgba(34,197,94,.7); transition: background 300ms ease, box-shadow 300ms ease; }
@@ -3698,7 +3730,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .transcript-body a { color: var(--color-link); text-decoration: none; border-bottom: 1px solid rgba(147, 197, 253, .45); transition: border-color 150ms ease; }
     .transcript-body a:hover { border-bottom-color: rgba(147, 197, 253, .7); }
     .transcript-body code { padding: 1px 5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06); background: var(--bg-code); color: var(--text-code); font: .88em var(--font-mono); }
-    .transcript-body pre { margin: 0 0 13px; overflow: auto; padding: 14px 16px; border: 1px solid var(--border-code); border-radius: 8px; background: #0c0e14; white-space: pre; scrollbar-width: thin; scrollbar-color: #383c46 transparent; }
+    .transcript-body pre { margin: 0 0 13px; overflow: auto; padding: 14px 16px; border: 1px solid var(--border-code); border-radius: 8px; background: linear-gradient(145deg, #0c0e14, #101420); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); white-space: pre; scrollbar-width: thin; scrollbar-color: #383c46 transparent; }
     .transcript-body pre code { padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }
     .transcript-item.user { justify-self: end; justify-items: end; max-width: min(82%, 520px); }
     .transcript-item.user .transcript-meta { display: none; }
@@ -3745,16 +3777,19 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .turn-fold-body { display: grid; grid-template-rows: 0fr; overflow: hidden; opacity: 0; transition: grid-template-rows 200ms ease, opacity 200ms ease 50ms; }
     .turn-fold-body-inner { min-height: 0; overflow: hidden; }
     .turn-fold:not(.collapsed) .turn-fold-body { grid-template-rows: 1fr; opacity: 1; padding: 12px 0 18px; }
-    .codex-tool-call, .file-change-card, .approval-card { border: 1px solid var(--border-default); background: #0f1014; border-radius: 10px; overflow: hidden; }
+    .codex-tool-call, .file-change-card, .approval-card { position: relative; border: 1px solid var(--border-default); background: #0f1014; border-radius: 10px; overflow: hidden; animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }
     .codex-tool-call.failed { border-color: #7f1d1d; }
     .tool-head, .file-head, .approval-head { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 11px 12px; border-bottom: 1px solid var(--border-header); }
     .tool-title, .file-title, .approval-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--btn-primary-bg); font-size: 14px; font-weight: var(--weight-bold); }
     .tool-state, .file-state { color: var(--text-muted); font-size: 12px; }
     .tool-output, .file-body { margin: 0; max-height: 260px; overflow: auto; padding: 11px 12px; color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }
     .approval-card { border-color: #854d0e; background: #171107; }
+    .approval-card::after { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 3px; border-radius: 2px; background: var(--color-warning); }
     .approval-card.resolving { border-color: #a16207; }
     .approval-card.resolved { border-color: #166534; background: #07130b; }
+    .approval-card.resolved::after { background: var(--color-success); }
     .approval-card.failed { border-color: #7f1d1d; background: #17090a; }
+    .approval-card.failed::after { background: var(--color-error); }
     .approval-body { padding: 0 12px 12px; color: #fde68a; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.5; }
     .approval-state { padding: 0 12px 10px; color: #d6d3d1; font-size: 13px; }
     .approval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0 12px 12px; }
@@ -3763,7 +3798,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .approval-action.danger { background: #7f1d1d; color: #fff1f2; border-color: var(--color-error); }
     .approval-action.selected { opacity: 1; box-shadow: inset 0 0 0 2px rgba(255,255,255,.38); }
     .approval-action.muted { background: var(--bg-pill); color: #8e929b; border-color: #34363d; opacity: .62; box-shadow: none; }
-    .codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 8px; padding: 10px 16px 16px; background: linear-gradient(to top, #000 86%, rgba(0,0,0,0)); border-top: 1px solid #272930; }
+    .codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 8px; padding: 10px 16px 16px; background: linear-gradient(to top, rgba(0,0,0,.98) 55%, rgba(0,0,0,.85) 78%, rgba(0,0,0,0)); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-top: 1px solid #272930; }
     .composer-tools { display: flex; gap: 8px; align-items: center; min-width: 0; }
     .composer-settings { position: relative; flex: 1; display: flex; gap: 8px; min-width: 0; }
     .setting-pill { min-height: 38px; border-radius: 19px; padding: 0 14px; background: var(--bg-pill); color: var(--btn-primary-bg); border: 1px solid transparent; font-size: 14px; font-weight: var(--weight-extrabold); white-space: nowrap; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
@@ -3870,7 +3905,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       <div class="composer-tools">
         <div class="composer-settings">
           <button class="setting-pill" id="modelSettingsButton" type="button">加载模型</button>
-          <button class="setting-pill permissions" id="permissionSettingsButton" type="button">默认权限</button>
+          <button class="setting-pill permissions" id="permissionSettingsButton" type="button">自动审核</button>
           <button class="setting-pill handoff" id="handoffButton" type="button">接棒执行</button>
           <div class="model-popover permission-popover closed" id="permissionPopover">
             <select id="permissionSelector" class="setting-selector" aria-label="选择权限模式" hidden>
@@ -4028,7 +4063,8 @@ __ICONS_JS__
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
     const MODEL_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
-    const PERMISSION_SETTINGS_STORAGE_VERSION = 1;
+    const DEFAULT_PERMISSION_MODE = "auto_review";
+    const PERMISSION_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
     const transcriptNodes = new Map();
     const statusNodes = new Map();
@@ -4419,11 +4455,15 @@ __ICONS_JS__
       });
     }
     function normalizePermissionSettings(settings = {}) {
-      const mode = typeof settings.permission_mode === "string" ? settings.permission_mode : "default";
-      const known = PERMISSION_PRESETS.some(preset => preset.value === mode) ? mode : "default";
+      const storedVersion = Number(settings.version || 0);
+      const mode = typeof settings.permission_mode === "string" ? settings.permission_mode : DEFAULT_PERMISSION_MODE;
+      const known = PERMISSION_PRESETS.some(preset => preset.value === mode) ? mode : DEFAULT_PERMISSION_MODE;
+      const migrated = storedVersion < PERMISSION_SETTINGS_STORAGE_VERSION && known === "default"
+        ? DEFAULT_PERMISSION_MODE
+        : known;
       return {
-        permission_mode: known,
-        version: Number(settings.version || 0)
+        permission_mode: migrated,
+        version: storedVersion
       };
     }
     function permissionSettingsEqual(left, right) {
@@ -6279,16 +6319,18 @@ def _legacy_live_page(agent_run_id: int) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{safe_title}</title>
   <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/animations.css">
+  <link rel="stylesheet" href="/static/effects.css">
   <style>
-    body {{ background: var(--btn-primary-color); }}
-    header {{ position: sticky; top: 0; padding: 12px 16px; background: #191b20; border-bottom: 1px solid var(--border-default); }}
-    main {{ padding: 12px 12px 132px; }}
-    .event {{ white-space: pre-wrap; border-bottom: 1px solid var(--border-default); padding: 10px 4px; }}
+    body {{ background: var(--btn-primary-color); position: relative; }}
+    header {{ position: sticky; top: 0; z-index: 2; padding: 12px 16px; background: rgba(25, 27, 32, 0.82); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-bottom: 1px solid var(--border-default); }}
+    main {{ padding: 12px 12px 132px; position: relative; z-index: 1; }}
+    .event {{ white-space: pre-wrap; border-bottom: 1px solid var(--border-default); padding: 10px 4px; animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }}
     .meta {{ color: #a1a1aa; font-size: 12px; margin-bottom: 4px; }}
     .approval_requested {{ color: #facc15; }}
     .failed {{ color: var(--color-error-light); }}
     .completed {{ color: var(--color-success); }}
-    .controls {{ position: fixed; left: 0; right: 0; bottom: 0; display: grid; gap: 8px; padding: 10px; background: var(--btn-primary-color); border-top: 1px solid var(--border-default); }}
+    .controls {{ position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 8px; padding: 10px; background: linear-gradient(to top, rgba(0,0,0,.98) 55%, rgba(0,0,0,.85) 78%, rgba(0,0,0,0)); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-top: 1px solid var(--border-default); }}
     .row {{ display: flex; gap: 8px; min-width: 0; }}
     input {{ flex: 1; min-width: 0; border-radius: 8px; border: 1px solid var(--border-input); background: #17191f; color: var(--btn-primary-bg); padding: 11px; font-size: 15px; }}
     button {{ min-height: 40px; }}
@@ -6297,7 +6339,7 @@ def _legacy_live_page(agent_run_id: int) -> str:
     .approval-actions {{ display: flex; gap: 8px; margin-top: 8px; }}
   </style>
 </head>
-<body>
+<body class="aurora-bg noise-overlay">
   <header>
     <strong>Worker Live Stream</strong>
     <span id="state">connecting</span>
