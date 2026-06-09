@@ -124,6 +124,7 @@ class FakeNativeController:
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, Any] | None = None,
+        collaboration_mode: dict[str, Any] | None = None,
     ) -> FakeControlResult:
         if (
             model is None
@@ -133,10 +134,16 @@ class FakeNativeController:
             and approval_policy is None
             and approvals_reviewer is None
             and sandbox_policy is None
+            and collaboration_mode is None
         ):
             self.calls.append(("continue_session", native_thread_id, prompt))
         else:
-            if approval_policy is None and approvals_reviewer is None and sandbox_policy is None:
+            if (
+                approval_policy is None
+                and approvals_reviewer is None
+                and sandbox_policy is None
+                and collaboration_mode is None
+            ):
                 self.calls.append(
                     (
                         "continue_session",
@@ -146,6 +153,21 @@ class FakeNativeController:
                         effort,
                         service_tier,
                         images,
+                    )
+                )
+            elif collaboration_mode is None:
+                self.calls.append(
+                    (
+                        "continue_session",
+                        native_thread_id,
+                        prompt,
+                        model,
+                        effort,
+                        service_tier,
+                        images,
+                        approval_policy,
+                        approvals_reviewer,
+                        sandbox_policy,
                     )
                 )
             else:
@@ -161,6 +183,7 @@ class FakeNativeController:
                         approval_policy,
                         approvals_reviewer,
                         sandbox_policy,
+                        collaboration_mode,
                     )
                 )
         return FakeControlResult(native_thread_id, 42, "turn-2")
@@ -178,15 +201,33 @@ class FakeNativeController:
         approvals_reviewer: str | None = None,
         sandbox: str | None = None,
         sandbox_policy: dict[str, Any] | None = None,
+        collaboration_mode: dict[str, Any] | None = None,
     ) -> FakeControlResult:
         if (
             approval_policy is None
             and approvals_reviewer is None
             and sandbox is None
             and sandbox_policy is None
+            and collaboration_mode is None
         ):
             self.calls.append(
                 ("start_session", cwd, prompt, model, effort, service_tier, images)
+            )
+        elif collaboration_mode is None:
+            self.calls.append(
+                (
+                    "start_session",
+                    cwd,
+                    prompt,
+                    model,
+                    effort,
+                    service_tier,
+                    images,
+                    approval_policy,
+                    approvals_reviewer,
+                    sandbox,
+                    sandbox_policy,
+                )
             )
         else:
             self.calls.append(
@@ -202,6 +243,7 @@ class FakeNativeController:
                     approvals_reviewer,
                     sandbox,
                     sandbox_policy,
+                    collaboration_mode,
                 )
             )
         return FakeControlResult("thread-new", 43, "turn-new")
@@ -497,6 +539,8 @@ async def test_native_provider_page_back_button_returns_to_native_index(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
+    assert "Cache-Control: no-store, max-age=0" in response
+    assert "Pragma: no-cache" in response
     assert 'const PROVIDER = "antigravity";' in response
     assert "function tokenizedPath(path)" in response
     assert 'document.getElementById("back").onclick = () => {' in response
@@ -765,6 +809,62 @@ async def test_native_start_route_translates_codex_permission_mode(
             None,
             "read-only",
             {"type": "readOnly", "networkAccess": False},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_start_route_passes_codex_collaboration_mode(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    body = json.dumps(
+        {
+            "cwd": "/Users/wl/projects/wlcodex",
+            "prompt": "make a plan",
+            "collaboration_mode": {"mode": "plan"},
+        }
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/start HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert controller.calls == [
+        (
+            "start_session",
+            "/Users/wl/projects/wlcodex",
+            "make a plan",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            {"mode": "plan"},
         )
     ]
 
@@ -1085,6 +1185,59 @@ async def test_native_continue_route_translates_codex_permission_mode(
             "never",
             None,
             {"type": "dangerFullAccess"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_continue_route_passes_codex_collaboration_mode(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    body = json.dumps(
+        {
+            "prompt": "continue with a plan",
+            "collaboration_mode": {"mode": "plan"},
+        }
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/thread-1/continue HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert controller.calls == [
+        (
+            "continue_session",
+            "thread-1",
+            "continue with a plan",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            {"mode": "plan"},
         )
     ]
 
@@ -1751,6 +1904,13 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert 'id="reasoningSelector"' in response
     assert 'id="serviceTierSelector"' in response
     assert 'id="attachmentButton"' in response
+    assert 'id="composerActionMenu"' in response
+    assert 'id="menuUploadPhoto"' in response
+    assert 'id="menuPlanMode"' in response
+    assert 'id="pluginList"' in response
+    assert "上传照片" in response
+    assert "计划模式" in response
+    assert "插件" in response
     assert 'id="imageInput"' in response
     assert 'id="attachmentStrip"' in response
     assert "async function loadModelCatalog()" in response
@@ -1776,6 +1936,11 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "if (settings.service_tier) body.service_tier = settings.service_tier;" in response
     assert "if (imageAttachments.length) {" in response
     assert "body.images = imageAttachments.map(image => ({" in response
+    assert "const COLLABORATION_MODE_STORAGE_KEY" in response
+    assert "function readSelectedCollaborationMode()" in response
+    assert "body.collaboration_mode = collaborationMode;" in response
+    assert 'return {"mode": "plan"};' in response
+    assert 'planModeCheck.innerHTML = enabled ? ICONS.check : "";' in response
     assert "const permissionSettings = readSelectedPermissionSettings();" in response
     assert "body.permission_mode = permissionSettings.permission_mode;" in response
     assert '{"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"}' in response
@@ -1787,7 +1952,9 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "setting-option-desc" in response
     assert "function readImageAttachment(file)" in response
     assert "function renderAttachments()" in response
-    assert "attachmentButton.onclick = () => imageInput.click();" in response
+    assert "attachmentButton.onclick = toggleComposerActionMenu;" in response
+    assert "menuUploadPhoto.onclick = () => {" in response
+    assert "imageInput.click();" in response
     assert "function sessionModelSettingsLabel(session)" in response
     assert "function sessionMetaText(session)" in response
     assert "const metadata = (session && session.metadata) || {};" in response
@@ -2001,14 +2168,17 @@ async def test_worker_live_page_accepts_query_token_and_contains_native_controls
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
+    assert "Cache-Control: no-store, max-age=0" in response
+    assert "Pragma: no-cache" in response
     assert 'const streamPathBase = "/api/workers/42/stream";' in response
     assert 'const PROVIDER = "codex";' in response
     assert 'const API_BASE = "/api/native/codex";' in response
     assert "`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/${action}`" in response
-    assert "location.href = `/native/${encodeURIComponent(PROVIDER)}` + query;" in response
+    assert 'params.set("t", String(Date.now()));' in response
+    assert "location.href = `/native/${encodeURIComponent(PROVIDER)}?${params.toString()}`;" in response
     assert "`${API_BASE}/approvals/${encodeURIComponent(requestId)}/resolve`" in response
     assert "attachNative" in response
-    assert "syncNative" not in response
+    assert "syncNativeTranscript" in response
     assert "native-mobile-shell" in response
     assert "renderAssistant" in response
     assert "renderCommand" in response
@@ -2101,6 +2271,13 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert 'id="modelSelector"' in response
     assert 'id="imageInput"' in response
     assert 'id="attachmentButton"' in response
+    assert 'id="composerActionMenu"' in response
+    assert 'id="menuUploadPhoto"' in response
+    assert 'id="menuPlanMode"' in response
+    assert 'id="pluginList"' in response
+    assert "上传照片" in response
+    assert "计划模式" in response
+    assert "插件" in response
     assert 'id="attachmentStrip"' in response
     assert 'class="interruption-choice" id="interruptionChoice" hidden' in response
     assert "function submitPrompt" in response
@@ -2123,6 +2300,9 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "interruptButton.hidden = !canInterruptActiveTurn();" in response
     assert 'class="dock-actions" hidden' in response
     assert "function readImageAttachment" in response
+    assert "function readSelectedCollaborationMode()" in response
+    assert "body.collaboration_mode = collaborationMode;" in response
+    assert 'planModeCheck.innerHTML = enabled ? ICONS.check : "";' in response
     assert "function renderAttachments" in response
     assert "function renderLocalUserEcho" in response
     assert "function clearMatchingLocalUserEcho(event)" in response
@@ -2501,9 +2681,13 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "const CURRENT_TURN_EVENT_LIMIT = 5000;" in response
     assert "RECENT_EVENT_LIMIT" in response
     assert 'eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true})' in response
+    assert "function syncNativeTranscript" in response
+    assert '`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`' in response
+    assert "attachNative().then(syncNativeTranscript).then(() => {" in response
     assert "hasLiveDisplayEvents" in response
     assert "model.usage.updated" in response
     assert "function loadRecentEvents" in response
+    assert "hasUnresolvedApprovalRequests(loadedEvents)\n        ) && nativeTurnId" not in response
     assert "function loadOlderEvents" in response
     assert "function pollEvents" in response
     assert "setInterval(pollEvents, 1000)" in response

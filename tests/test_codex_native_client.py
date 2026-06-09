@@ -176,7 +176,7 @@ async def test_native_client_continue_steer_and_interrupt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_client_continue_sends_model_and_images_without_collaboration_mode() -> None:
+async def test_native_client_continue_sends_model_images_and_collaboration_mode() -> None:
     def response_for(msg: dict[str, Any]) -> dict[str, Any] | None:
         match msg["method"]:
             case "initialize":
@@ -191,6 +191,7 @@ async def test_native_client_continue_sends_model_and_images_without_collaborati
                         {"type": "image", "url": "data:image/png;base64,abc"},
                     ],
                     "model": "gpt-5.5",
+                    "collaborationMode": {"mode": "plan"},
                 }
                 return {"turn": {"id": "turn-2"}}
         raise AssertionError(f"unexpected method: {msg['method']}")
@@ -207,6 +208,7 @@ async def test_native_client_continue_sends_model_and_images_without_collaborati
         "continue",
         model="gpt-5.5",
         images=[{"url": "data:image/png;base64,abc"}],
+        collaboration_mode={"mode": "plan"},
     )
 
     assert turn_id == "turn-2"

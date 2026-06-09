@@ -88,6 +88,7 @@ class FakeNativeClient:
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
     ) -> str:
         if (
             model is None
@@ -97,10 +98,16 @@ class FakeNativeClient:
             and approval_policy is None
             and approvals_reviewer is None
             and sandbox_policy is None
+            and collaboration_mode is None
         ):
             self.calls.append(("continue_session", thread, prompt))
         else:
-            if approval_policy is None and approvals_reviewer is None and sandbox_policy is None:
+            if (
+                approval_policy is None
+                and approvals_reviewer is None
+                and sandbox_policy is None
+                and collaboration_mode is None
+            ):
                 self.calls.append(
                     (
                         "continue_session",
@@ -110,6 +117,21 @@ class FakeNativeClient:
                         effort,
                         service_tier,
                         images,
+                    )
+                )
+            elif collaboration_mode is None:
+                self.calls.append(
+                    (
+                        "continue_session",
+                        thread,
+                        prompt,
+                        model,
+                        effort,
+                        service_tier,
+                        images,
+                        approval_policy,
+                        approvals_reviewer,
+                        sandbox_policy,
                     )
                 )
             else:
@@ -125,6 +147,7 @@ class FakeNativeClient:
                         approval_policy,
                         approvals_reviewer,
                         sandbox_policy,
+                        collaboration_mode,
                     )
                 )
         detail = self.details.setdefault(thread, {"thread": {"id": thread}})
@@ -146,6 +169,7 @@ class FakeNativeClient:
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
     ) -> str:
         if (
             model is None
@@ -155,12 +179,33 @@ class FakeNativeClient:
             and approval_policy is None
             and approvals_reviewer is None
             and sandbox_policy is None
+            and collaboration_mode is None
         ):
             self.calls.append(("start_turn", thread, prompt))
         else:
-            if approval_policy is None and approvals_reviewer is None and sandbox_policy is None:
+            if (
+                approval_policy is None
+                and approvals_reviewer is None
+                and sandbox_policy is None
+                and collaboration_mode is None
+            ):
                 self.calls.append(
                     ("start_turn", thread, prompt, model, effort, service_tier, images)
+                )
+            elif collaboration_mode is None:
+                self.calls.append(
+                    (
+                        "start_turn",
+                        thread,
+                        prompt,
+                        model,
+                        effort,
+                        service_tier,
+                        images,
+                        approval_policy,
+                        approvals_reviewer,
+                        sandbox_policy,
+                    )
                 )
             else:
                 self.calls.append(
@@ -175,6 +220,7 @@ class FakeNativeClient:
                         approval_policy,
                         approvals_reviewer,
                         sandbox_policy,
+                        collaboration_mode,
                     )
                 )
         detail = self.details.setdefault(thread, {"thread": {"id": thread}})

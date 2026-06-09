@@ -768,6 +768,10 @@ class WorkerLiveStreamServer:
             model = _optional_nonempty_string(body.get("model"))
             images = _safe_image_attachments(body.get("images"))
             permission_kwargs = _native_permission_kwargs_from_body(provider_name, body)
+            collaboration_kwargs = _codex_collaboration_kwargs_from_body(
+                provider_name,
+                body,
+            )
             service_tier = _optional_nonempty_string(
                 body.get("service_tier") or body.get("serviceTier")
             )
@@ -780,6 +784,7 @@ class WorkerLiveStreamServer:
                     service_tier=service_tier,
                     images=images,
                     **permission_kwargs,
+                    **collaboration_kwargs,
                 )
             else:
                 create_permission_kwargs = dict(permission_kwargs)
@@ -858,6 +863,10 @@ class WorkerLiveStreamServer:
             if body is None:
                 return
             permission_kwargs = _native_permission_kwargs_from_body(provider_name, body)
+            collaboration_kwargs = _codex_collaboration_kwargs_from_body(
+                provider_name,
+                body,
+            )
             if provider_name.strip().lower() != "antigravity":
                 permission_kwargs.pop("sandbox", None)
             result = await target.continue_session(
@@ -870,6 +879,7 @@ class WorkerLiveStreamServer:
                 ),
                 images=_safe_image_attachments(body.get("images")),
                 **permission_kwargs,
+                **collaboration_kwargs,
             )
             await self._send_json(writer, 200, _json_object(result))
             return
@@ -1429,6 +1439,10 @@ class WorkerLiveStreamServer:
             status,
             "text/html; charset=utf-8",
             body.encode("utf-8"),
+            extra_headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
         )
 
     async def _send_static_asset(
@@ -1705,6 +1719,60 @@ def _codex_permission_kwargs_from_body(body: dict[str, Any]) -> dict[str, object
     mode = str(body.get("permission_mode") or body.get("permissionMode") or "default")
     preset = _CODEX_PERMISSION_PRESETS.get(mode.strip(), {})
     return dict(preset)
+
+
+def _codex_collaboration_kwargs_from_body(
+    provider: str,
+    body: dict[str, Any],
+) -> dict[str, object]:
+    if str(provider or "").strip().lower() != "codex":
+        return {}
+    raw = body.get("collaboration_mode")
+    if raw is None:
+        raw = body.get("collaborationMode")
+    if not isinstance(raw, dict):
+        return {}
+    mode = str(raw.get("mode") or "").strip().lower()
+    if mode not in {"default", "plan"}:
+        return {}
+    clean: dict[str, object] = {"mode": mode}
+    settings = raw.get("settings")
+    if isinstance(settings, dict):
+        clean["settings"] = dict(settings)
+    return {"collaboration_mode": clean}
+
+
+def _codex_plugin_menu_items() -> list[dict[str, str]]:
+    cache_root = Path.home() / ".codex" / "plugins" / "cache"
+    if not cache_root.exists():
+        return []
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for manifest in sorted(cache_root.glob("*/*/*/.codex-plugin/plugin.json")):
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        interface = data.get("interface")
+        if not isinstance(interface, dict):
+            interface = {}
+        name = interface.get("displayName") or data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        key = name.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        description = interface.get("shortDescription") or data.get("description") or ""
+        brand_color = interface.get("brandColor") or ""
+        items.append(
+            {
+                "name": name.strip(),
+                "description": str(description).strip(),
+                "brand_color": str(brand_color).strip(),
+            }
+        )
+    return items[:12]
 
 
 def _filter_events_for_native_turn(
@@ -2691,6 +2759,17 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .setting-option-check { color: var(--btn-primary-bg); font-weight: var(--weight-black); }
     .attach-button { width: 56px; height: 56px; padding: 0; border-radius: 28px; border: 1px solid var(--border-popover); background: var(--bg-composer-input); color: var(--text-primary); font-size: 26px; line-height: 1; }
     button.attach-button:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
+    .composer-action-menu { position: absolute; left: 26px; right: 26px; bottom: 92px; max-height: min(58vh, 520px); overflow-y: auto; border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 14px; z-index: 8; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
+    .composer-action-menu.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
+    .composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 12px; align-items: center; width: 100%; min-height: 58px; padding: 8px 10px; border: 0; border-radius: 14px; background: transparent; color: var(--btn-primary-bg); text-align: left; }
+    button.composer-menu-item:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
+    .composer-menu-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 20px; font-weight: var(--weight-black); }
+    .composer-menu-title { min-width: 0; color: var(--btn-primary-bg); font-size: 17px; font-weight: var(--weight-extrabold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-desc { margin-top: 3px; min-width: 0; color: var(--text-dim); font-size: 13px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-check { color: var(--btn-primary-bg); font-size: 18px; font-weight: var(--weight-black); }
+    .composer-menu-section { margin: 12px 2px 8px; padding-top: 12px; border-top: 1px solid var(--border-section); color: var(--text-dim); font-size: 14px; font-weight: var(--weight-medium); }
+    .plugin-list { display: grid; gap: 4px; }
+    .plugin-dot { width: 30px; height: 30px; border-radius: 9px; background: var(--bg-pill); color: var(--btn-primary-bg); display: grid; place-items: center; font-size: 13px; font-weight: var(--weight-black); }
     .attachment-strip { display: flex; gap: 8px; min-height: 48px; overflow-x: auto; padding-bottom: 1px; }
     .attachment-strip[hidden] { display: none; }
     .attachment-chip { position: relative; flex: 0 0 auto; display: grid; grid-template-columns: 42px minmax(76px, 1fr) 26px; align-items: center; gap: 7px; max-width: 220px; min-height: 46px; border: 1px solid var(--border-default); border-radius: 12px; background: var(--bg-attachment); padding: 4px; color: var(--btn-primary-bg); }
@@ -2771,6 +2850,26 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       </div>
     </div>
     <div class="attachment-strip" id="attachmentStrip" hidden></div>
+    <div class="composer-action-menu closed" id="composerActionMenu" role="menu" aria-label="输入操作">
+      <button class="composer-menu-item" id="menuUploadPhoto" type="button" role="menuitem">
+        <span class="composer-menu-icon">▧</span>
+        <span>
+          <span class="composer-menu-title">上传照片</span>
+          <span class="composer-menu-desc">添加图片到下一条消息</span>
+        </span>
+        <span></span>
+      </button>
+      <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem" aria-pressed="false">
+        <span class="composer-menu-icon">☷</span>
+        <span>
+          <span class="composer-menu-title">计划模式</span>
+          <span class="composer-menu-desc">下一轮先规划再执行</span>
+        </span>
+        <span class="composer-menu-check" id="planModeCheck"></span>
+      </button>
+      <div class="composer-menu-section">插件</div>
+      <div class="plugin-list" id="pluginList"></div>
+    </div>
     <div class="start-row">
       <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
       <input id="imageInput" type="file" accept="image/*" multiple hidden>
@@ -2828,15 +2927,23 @@ __ICONS_JS__
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
     const MODEL_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
+    const COLLABORATION_MODE_STORAGE_KEY = "wlcodexNativeCollaborationMode";
     const DEFAULT_PERMISSION_MODE = "auto_review";
     const PERMISSION_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
+    const PLUGIN_MENU_ITEMS = __PLUGIN_MENU_ITEMS_JSON__;
     let modelCatalog = [];
     let savedModelSettings = loadSavedModelSettings();
     let savedPermissionSettings = loadSavedPermissionSettings();
+    let selectedCollaborationMode = loadSavedCollaborationMode();
     let modelSettingsDirty = false;
     let permissionSettingsDirty = false;
     let imageAttachments = [];
+    const composerActionMenu = document.getElementById("composerActionMenu");
+    const menuUploadPhoto = document.getElementById("menuUploadPhoto");
+    const menuPlanMode = document.getElementById("menuPlanMode");
+    const pluginList = document.getElementById("pluginList");
+    const planModeCheck = document.getElementById("planModeCheck");
 
     async function api(path, options = {}) {
       const res = await fetch(path, {
@@ -3271,6 +3378,80 @@ __ICONS_JS__
       permissionSettingsDirty = true;
     }
 
+    function loadSavedCollaborationMode() {
+      try {
+        const stored = String(localStorage.getItem(COLLABORATION_MODE_STORAGE_KEY) || "default").toLowerCase();
+        return stored === "plan" ? "plan" : "default";
+      } catch (_error) {
+        return "default";
+      }
+    }
+
+    function saveSelectedCollaborationMode() {
+      try { localStorage.setItem(COLLABORATION_MODE_STORAGE_KEY, selectedCollaborationMode); } catch (_error) {}
+    }
+
+    function readSelectedCollaborationMode() {
+      if (selectedCollaborationMode === "plan") return {"mode": "plan"};
+      return null;
+    }
+
+    function updateCollaborationMenu() {
+      const enabled = selectedCollaborationMode === "plan";
+      menuPlanMode.classList.toggle("selected", enabled);
+      menuPlanMode.setAttribute("aria-pressed", enabled ? "true" : "false");
+      planModeCheck.innerHTML = enabled ? ICONS.check : "";
+    }
+
+    function renderPluginList() {
+      pluginList.innerHTML = "";
+      const items = Array.isArray(PLUGIN_MENU_ITEMS) ? PLUGIN_MENU_ITEMS : [];
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "composer-menu-item";
+        empty.innerHTML = `<span class="plugin-dot">+</span><span><span class="composer-menu-title">未检测到插件</span><span class="composer-menu-desc">安装后会显示在这里</span></span><span></span>`;
+        pluginList.append(empty);
+        return;
+      }
+      for (const item of items) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "composer-menu-item";
+        row.disabled = true;
+        const dot = document.createElement("span");
+        dot.className = "plugin-dot";
+        if (item.brand_color) dot.style.background = item.brand_color;
+        dot.textContent = String(item.name || "?").trim().slice(0, 1).toUpperCase() || "?";
+        const copy = document.createElement("span");
+        const title = document.createElement("span");
+        title.className = "composer-menu-title";
+        title.textContent = item.name || "Plugin";
+        const desc = document.createElement("span");
+        desc.className = "composer-menu-desc";
+        desc.textContent = item.description || "本机插件";
+        copy.append(title, desc);
+        row.append(dot, copy, document.createElement("span"));
+        pluginList.append(row);
+      }
+    }
+
+    function closeComposerActionMenu() {
+      composerActionMenu.classList.add("closed");
+    }
+
+    function toggleComposerActionMenu() {
+      const willClose = !composerActionMenu.classList.contains("closed");
+      composerActionMenu.classList.toggle("closed", willClose);
+      if (!willClose) {
+        modelPopover.classList.add("closed");
+        permissionPopover.classList.add("closed");
+        modelOptions.hidden = true;
+        serviceTierOptions.hidden = true;
+        reasoningOptions.hidden = true;
+        permissionOptions.hidden = true;
+      }
+    }
+
     function updatePermissionSummary() {
       const label = selectedOptionText(permissionSelector, "默认权限");
       permissionSettingsButton.textContent = label;
@@ -3422,6 +3603,10 @@ __ICONS_JS__
       if (settings.effort) body.effort = settings.effort;
       if (settings.service_tier) body.service_tier = settings.service_tier;
       body.permission_mode = permissionSettings.permission_mode;
+      const collaborationMode = readSelectedCollaborationMode();
+      if (collaborationMode) {
+        body.collaboration_mode = collaborationMode;
+      }
       if (imageAttachments.length) {
         body.images = imageAttachments.map(image => ({
           url: image.url,
@@ -3470,7 +3655,16 @@ __ICONS_JS__
     };
     document.getElementById("chat").onclick = () => selectProject("");
     projectNewChat.onclick = handleProjectNewChat;
-    attachmentButton.onclick = () => imageInput.click();
+    attachmentButton.onclick = toggleComposerActionMenu;
+    menuUploadPhoto.onclick = () => {
+      closeComposerActionMenu();
+      imageInput.click();
+    };
+    menuPlanMode.onclick = () => {
+      selectedCollaborationMode = selectedCollaborationMode === "plan" ? "default" : "plan";
+      saveSelectedCollaborationMode();
+      updateCollaborationMenu();
+    };
     imageInput.onchange = async () => {
       const files = Array.from(imageInput.files || []);
       imageInput.value = "";
@@ -3488,6 +3682,7 @@ __ICONS_JS__
       if (willClose) saveModelSettingsIfChanged();
       modelPopover.classList.toggle("closed", willClose);
       if (!willClose) permissionPopover.classList.add("closed");
+      if (!willClose) closeComposerActionMenu();
       if (willClose) {
         modelOptions.hidden = true;
         serviceTierOptions.hidden = true;
@@ -3500,6 +3695,7 @@ __ICONS_JS__
       permissionPopover.classList.toggle("closed", willClose);
       if (!willClose) {
         modelPopover.classList.add("closed");
+        closeComposerActionMenu();
         permissionOptions.hidden = false;
       } else {
         permissionOptions.hidden = true;
@@ -3667,6 +3863,8 @@ __ICONS_JS__
       return `${Math.round(hours / 24)}天`;
     }
     renderPermissionSettings();
+    renderPluginList();
+    updateCollaborationMenu();
     loadStatus();
     loadModelCatalog();
     loadHomeData();
@@ -3682,6 +3880,10 @@ __ICONS_JS__
         .replace(
             "__PERMISSION_PRESETS_JSON__",
             json.dumps(_native_permission_presets(provider_name), ensure_ascii=False),
+        )
+        .replace(
+            "__PLUGIN_MENU_ITEMS_JSON__",
+            json.dumps(_codex_plugin_menu_items(), ensure_ascii=False),
         )
         .replace("__ICONS_JS__", _ICONS_JS_LITERAL)
     )
@@ -3856,6 +4058,18 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .setting-option.selected { background: var(--bg-option-selected); color: #fff; }
     .setting-option-check { color: var(--btn-primary-bg); font-weight: var(--weight-black); }
     .attach-button { width: 40px; min-height: 38px; padding: 0; border-radius: 11px; background: var(--bg-interact); color: var(--btn-primary-bg); border: 1px solid var(--border-input); font-size: 24px; line-height: 1; }
+    .composer-action-menu { position: absolute; left: 16px; right: 16px; bottom: 104px; max-height: min(58vh, 520px); overflow-y: auto; border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 14px; z-index: 8; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
+    .composer-action-menu.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
+    .composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 12px; align-items: center; width: 100%; min-height: 58px; padding: 8px 10px; border: 0; border-radius: 14px; background: transparent; color: var(--btn-primary-bg); text-align: left; }
+    button.composer-menu-item:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
+    .composer-menu-item:disabled { opacity: .82; }
+    .composer-menu-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 20px; font-weight: var(--weight-black); }
+    .composer-menu-title { display: block; min-width: 0; color: var(--btn-primary-bg); font-size: 17px; font-weight: var(--weight-extrabold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-desc { display: block; margin-top: 3px; min-width: 0; color: var(--text-dim); font-size: 13px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-check { color: var(--btn-primary-bg); font-size: 18px; font-weight: var(--weight-black); }
+    .composer-menu-section { margin: 12px 2px 8px; padding-top: 12px; border-top: 1px solid var(--border-section); color: var(--text-dim); font-size: 14px; font-weight: var(--weight-medium); }
+    .plugin-list { display: grid; gap: 4px; }
+    .plugin-dot { width: 30px; height: 30px; border-radius: 9px; background: var(--bg-pill); color: var(--btn-primary-bg); display: grid; place-items: center; font-size: 13px; font-weight: var(--weight-black); }
     .send-status { min-width: 66px; color: var(--text-muted); font-size: 12px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color 300ms ease, opacity 300ms ease; }
     .send-status.error { color: var(--color-error-light); }
     .send-status.ok { color: var(--color-success); }
@@ -3975,6 +4189,26 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
             <div class="setting-options" id="reasoningOptions" hidden></div>
           </div>
         </div>
+        <div class="composer-action-menu closed" id="composerActionMenu" role="menu" aria-label="输入操作">
+          <button class="composer-menu-item" id="menuUploadPhoto" type="button" role="menuitem">
+            <span class="composer-menu-icon">▧</span>
+            <span>
+              <span class="composer-menu-title">上传照片</span>
+              <span class="composer-menu-desc">添加图片到下一条消息</span>
+            </span>
+            <span></span>
+          </button>
+          <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem" aria-pressed="false">
+            <span class="composer-menu-icon">☷</span>
+            <span>
+              <span class="composer-menu-title">计划模式</span>
+              <span class="composer-menu-desc">下一轮先规划再执行</span>
+            </span>
+            <span class="composer-menu-check" id="planModeCheck"></span>
+          </button>
+          <div class="composer-menu-section">插件</div>
+          <div class="plugin-list" id="pluginList"></div>
+        </div>
         <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
         <input id="imageInput" type="file" accept="image/*" multiple hidden>
         <span class="send-status" id="sendStatus"></span>
@@ -4047,6 +4281,11 @@ __ICONS_JS__
     const steerChoice = document.getElementById("steerChoice");
     const queueChoice = document.getElementById("queueChoice");
     const sendStatus = document.getElementById("sendStatus");
+    const composerActionMenu = document.getElementById("composerActionMenu");
+    const menuUploadPhoto = document.getElementById("menuUploadPhoto");
+    const menuPlanMode = document.getElementById("menuPlanMode");
+    const pluginList = document.getElementById("pluginList");
+    const planModeCheck = document.getElementById("planModeCheck");
     const handoffButton = document.getElementById("handoffButton");
     const handoffPanel = document.getElementById("handoffPanel");
     const handoffTargets = document.getElementById("handoffTargets");
@@ -4067,9 +4306,11 @@ __ICONS_JS__
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
     const MODEL_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
+    const COLLABORATION_MODE_STORAGE_KEY = "wlcodexNativeCollaborationMode";
     const DEFAULT_PERMISSION_MODE = "auto_review";
     const PERMISSION_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
+    const PLUGIN_MENU_ITEMS = __PLUGIN_MENU_ITEMS_JSON__;
     const transcriptNodes = new Map();
     const statusNodes = new Map();
     const commandNodes = new Map();
@@ -4081,6 +4322,7 @@ __ICONS_JS__
     let providerCapabilities = {};
     let savedModelSettings = loadSavedModelSettings();
     let savedPermissionSettings = loadSavedPermissionSettings();
+    let selectedCollaborationMode = loadSavedCollaborationMode();
     let modelSettingsDirty = false;
     let permissionSettingsDirty = false;
     let handoffTargetProvider = "";
@@ -4488,6 +4730,74 @@ __ICONS_JS__
     function markPermissionSettingsDirty() {
       permissionSettingsDirty = true;
     }
+    function loadSavedCollaborationMode() {
+      try {
+        const stored = String(localStorage.getItem(COLLABORATION_MODE_STORAGE_KEY) || "default").toLowerCase();
+        return stored === "plan" ? "plan" : "default";
+      } catch (_error) {
+        return "default";
+      }
+    }
+    function saveSelectedCollaborationMode() {
+      try { localStorage.setItem(COLLABORATION_MODE_STORAGE_KEY, selectedCollaborationMode); } catch (_error) {}
+    }
+    function readSelectedCollaborationMode() {
+      if (selectedCollaborationMode === "plan") return {"mode": "plan"};
+      return null;
+    }
+    function updateCollaborationMenu() {
+      const enabled = selectedCollaborationMode === "plan";
+      menuPlanMode.classList.toggle("selected", enabled);
+      menuPlanMode.setAttribute("aria-pressed", enabled ? "true" : "false");
+      planModeCheck.innerHTML = enabled ? ICONS.check : "";
+    }
+    function renderPluginList() {
+      pluginList.innerHTML = "";
+      const items = Array.isArray(PLUGIN_MENU_ITEMS) ? PLUGIN_MENU_ITEMS : [];
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "composer-menu-item";
+        empty.innerHTML = `<span class="plugin-dot">+</span><span><span class="composer-menu-title">未检测到插件</span><span class="composer-menu-desc">安装后会显示在这里</span></span><span></span>`;
+        pluginList.append(empty);
+        return;
+      }
+      for (const item of items) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "composer-menu-item";
+        row.disabled = true;
+        const dot = document.createElement("span");
+        dot.className = "plugin-dot";
+        if (item.brand_color) dot.style.background = item.brand_color;
+        dot.textContent = String(item.name || "?").trim().slice(0, 1).toUpperCase() || "?";
+        const copy = document.createElement("span");
+        const title = document.createElement("span");
+        title.className = "composer-menu-title";
+        title.textContent = item.name || "Plugin";
+        const desc = document.createElement("span");
+        desc.className = "composer-menu-desc";
+        desc.textContent = item.description || "本机插件";
+        copy.append(title, desc);
+        row.append(dot, copy, document.createElement("span"));
+        pluginList.append(row);
+      }
+    }
+    function closeComposerActionMenu() {
+      composerActionMenu.classList.add("closed");
+    }
+    function toggleComposerActionMenu() {
+      const willClose = !composerActionMenu.classList.contains("closed");
+      composerActionMenu.classList.toggle("closed", willClose);
+      if (!willClose) {
+        modelPopover.classList.add("closed");
+        permissionPopover.classList.add("closed");
+        handoffPanel.hidden = true;
+        modelOptions.hidden = true;
+        serviceTierOptions.hidden = true;
+        reasoningOptions.hidden = true;
+        permissionOptions.hidden = true;
+      }
+    }
     function updatePermissionSummary() {
       const label = selectedOptionText(permissionSelector, "默认权限");
       permissionSettingsButton.textContent = label;
@@ -4601,6 +4911,7 @@ __ICONS_JS__
       modelPopover.classList.toggle("closed", willClose);
       if (!willClose) permissionPopover.classList.add("closed");
       if (!willClose) handoffPanel.hidden = true;
+      if (!willClose) closeComposerActionMenu();
       if (willClose) {
         modelOptions.hidden = true;
         serviceTierOptions.hidden = true;
@@ -4614,6 +4925,7 @@ __ICONS_JS__
       if (!willClose) {
         modelPopover.classList.add("closed");
         handoffPanel.hidden = true;
+        closeComposerActionMenu();
         permissionOptions.hidden = false;
       } else {
         permissionOptions.hidden = true;
@@ -4651,7 +4963,16 @@ __ICONS_JS__
       if (event.target === reasoningSelector) return;
       toggleSettingOptions(reasoningOptions);
     };
-    attachmentButton.onclick = () => imageInput.click();
+    attachmentButton.onclick = toggleComposerActionMenu;
+    menuUploadPhoto.onclick = () => {
+      closeComposerActionMenu();
+      imageInput.click();
+    };
+    menuPlanMode.onclick = () => {
+      selectedCollaborationMode = selectedCollaborationMode === "plan" ? "default" : "plan";
+      saveSelectedCollaborationMode();
+      updateCollaborationMenu();
+    };
     imageInput.onchange = async () => {
       const files = Array.from(imageInput.files || []);
       imageInput.value = "";
@@ -4673,8 +4994,10 @@ __ICONS_JS__
     });
     promptInput.addEventListener("input", updateComposerDisabled);
     document.getElementById("back").onclick = () => {
-      const query = token ? "?token=" + encodeURIComponent(token) : "";
-      location.href = `/native/${encodeURIComponent(PROVIDER)}` + query;
+      const params = new URLSearchParams();
+      if (token) params.set("token", token);
+      params.set("t", String(Date.now()));
+      location.href = `/native/${encodeURIComponent(PROVIDER)}?${params.toString()}`;
     };
     async function submitPrompt(action = primaryComposerAction()) {
       if (action === "interrupt") {
@@ -4698,6 +5021,10 @@ __ICONS_JS__
       if (savedModelSettings.effort) body.effort = savedModelSettings.effort;
       if (savedModelSettings.service_tier) body.service_tier = savedModelSettings.service_tier;
       body.permission_mode = permissionSettings.permission_mode;
+      const collaborationMode = readSelectedCollaborationMode();
+      if (collaborationMode) {
+        body.collaboration_mode = collaborationMode;
+      }
       if (imageAttachments.length) {
         body.images = imageAttachments.map(image => ({
           url: image.url,
@@ -4814,6 +5141,7 @@ __ICONS_JS__
       permissionOptions.hidden = true;
       serviceTierOptions.hidden = true;
       reasoningOptions.hidden = true;
+      closeComposerActionMenu();
       handoffPanel.hidden = !handoffPanel.hidden;
       updateHandoffControls();
     }
@@ -5157,11 +5485,28 @@ __ICONS_JS__
         renderStatus("attach_failed", error.message || String(error));
       }
     }
+    async function syncNativeTranscript() {
+      if (!nativeThreadId) return;
+      try {
+        const result = await api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`, {
+          method: "POST",
+          body: "{}"
+        });
+        if (result && result.turn_id) nativeTurnId = result.turn_id;
+        activeTurnId = result.active_turn_id || activeTurnId || "";
+        nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
+        updateComposerDisabled();
+      } catch (error) {
+        renderStatus("native_sync_failed", error.message || String(error));
+      }
+    }
+    renderPluginList();
+    updateCollaborationMenu();
     updateComposerDisabled();
     renderPermissionSettings();
     loadProviderCapabilities();
     loadModelCatalog();
-    attachNative().then(() => {
+    attachNative().then(syncNativeTranscript).then(() => {
       return loadRecentEvents();
     }).catch(() => {
       return loadRecentEvents();
@@ -5173,11 +5518,9 @@ __ICONS_JS__
       if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
       loadedEvents = snapshot.events || [];
       if (
-        (
-          !loadedEvents.length ||
-          !hasLiveDisplayEvents(loadedEvents) ||
-          hasUnresolvedApprovalRequests(loadedEvents)
-        ) && nativeTurnId
+        !loadedEvents.length ||
+        !hasLiveDisplayEvents(loadedEvents) ||
+        hasUnresolvedApprovalRequests(loadedEvents)
       ) {
         snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));
         if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
@@ -6308,6 +6651,10 @@ __ICONS_JS__
         .replace(
             "__PERMISSION_PRESETS_JSON__",
             json.dumps(_native_permission_presets(native_provider), ensure_ascii=False),
+        )
+        .replace(
+            "__PLUGIN_MENU_ITEMS_JSON__",
+            json.dumps(_codex_plugin_menu_items(), ensure_ascii=False),
         )
         .replace("__ICONS_JS__", _ICONS_JS_LITERAL)
     )

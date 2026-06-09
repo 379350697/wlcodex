@@ -77,6 +77,7 @@ class _NativeClient(Protocol):
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
     ) -> str: ...
 
     async def start_turn(
@@ -91,6 +92,7 @@ class _NativeClient(Protocol):
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
     ) -> str: ...
 
     async def steer_turn(
@@ -166,6 +168,7 @@ class CodexNativeController:
         approvals_reviewer: str | None = None,
         sandbox: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
     ) -> NativeCodexControlResult:
         detail = await self._client.start_thread(
             cwd.strip(),
@@ -187,6 +190,7 @@ class CodexNativeController:
             approval_policy=approval_policy,
             approvals_reviewer=approvals_reviewer,
             sandbox_policy=sandbox_policy,
+            collaboration_mode=collaboration_mode,
             resume_first=False,
         )
 
@@ -279,6 +283,7 @@ class CodexNativeController:
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
     ) -> NativeCodexControlResult:
         native_thread_id = native_thread_id.strip()
         if not native_thread_id:
@@ -306,6 +311,7 @@ class CodexNativeController:
                     approval_policy=approval_policy,
                     approvals_reviewer=approvals_reviewer,
                     sandbox_policy=sandbox_policy,
+                    collaboration_mode=collaboration_mode,
                 )
             session = self._session_store.update_session(
                 session.id,
@@ -334,6 +340,7 @@ class CodexNativeController:
             approval_policy=approval_policy,
             approvals_reviewer=approvals_reviewer,
             sandbox_policy=sandbox_policy,
+            collaboration_mode=collaboration_mode,
         )
 
     async def _start_new_turn(
@@ -348,6 +355,7 @@ class CodexNativeController:
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
         resume_first: bool = True,
     ) -> NativeCodexControlResult:
         session = self._ensure_session(native_thread_id)
@@ -361,6 +369,7 @@ class CodexNativeController:
             approval_policy=approval_policy,
             approvals_reviewer=approvals_reviewer,
             sandbox_policy=sandbox_policy,
+            collaboration_mode=collaboration_mode,
             resume_first=resume_first,
         )
         session = self._session_store.update_session(
@@ -398,6 +407,7 @@ class CodexNativeController:
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
         resume_first: bool = True,
     ) -> str:
         for attempt in range(len(_ROLLOUT_NOT_READY_RETRY_DELAYS) + 1):
@@ -413,6 +423,7 @@ class CodexNativeController:
                         approval_policy=approval_policy,
                         approvals_reviewer=approvals_reviewer,
                         sandbox_policy=sandbox_policy,
+                        collaboration_mode=collaboration_mode,
                     )
                 return await self._client.start_turn(
                     native_thread_id,
@@ -424,6 +435,7 @@ class CodexNativeController:
                     approval_policy=approval_policy,
                     approvals_reviewer=approvals_reviewer,
                     sandbox_policy=sandbox_policy,
+                    collaboration_mode=collaboration_mode,
                 )
             except JsonRpcError as exc:
                 if (

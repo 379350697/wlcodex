@@ -158,6 +158,7 @@ class CodexNativeClient:
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
     ) -> str:
         await self.initialize()
         await self.rpc.request("thread/resume", {"threadId": native_thread_id})
@@ -171,6 +172,7 @@ class CodexNativeClient:
             approval_policy=approval_policy,
             approvals_reviewer=approvals_reviewer,
             sandbox_policy=sandbox_policy,
+            collaboration_mode=collaboration_mode,
         )
 
     async def start_turn(
@@ -185,6 +187,7 @@ class CodexNativeClient:
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
     ) -> str:
         await self.initialize()
         result = await self.rpc.request(
@@ -199,6 +202,7 @@ class CodexNativeClient:
                 approval_policy=approval_policy,
                 approvals_reviewer=approvals_reviewer,
                 sandbox_policy=sandbox_policy,
+                collaboration_mode=collaboration_mode,
             ),
         )
         return parse_turn_response(result)
@@ -351,6 +355,7 @@ class LazyNativeClient:
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
     ) -> str:
         return await (await self._get()).continue_session(
             native_thread_id,
@@ -362,6 +367,7 @@ class LazyNativeClient:
             approval_policy=approval_policy,
             approvals_reviewer=approvals_reviewer,
             sandbox_policy=sandbox_policy,
+            collaboration_mode=collaboration_mode,
         )
 
     async def start_turn(
@@ -376,6 +382,7 @@ class LazyNativeClient:
         approval_policy: str | None = None,
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
+        collaboration_mode: dict[str, object] | None = None,
     ) -> str:
         return await (await self._get()).start_turn(
             native_thread_id,
@@ -387,6 +394,7 @@ class LazyNativeClient:
             approval_policy=approval_policy,
             approvals_reviewer=approvals_reviewer,
             sandbox_policy=sandbox_policy,
+            collaboration_mode=collaboration_mode,
         )
 
     async def steer_turn(
