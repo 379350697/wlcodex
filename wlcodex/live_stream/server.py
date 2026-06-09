@@ -583,6 +583,8 @@ class WorkerLiveStreamServer:
                     writer,
                     200,
                     _live_page(agent_id, native_provider=native_provider),
+                    cache_control="private, max-age=45",
+                    pragma=None,
                 )
                 return
 
@@ -1433,16 +1435,19 @@ class WorkerLiveStreamServer:
         writer: asyncio.StreamWriter,
         status: int,
         body: str,
+        *,
+        cache_control: str = "no-store, max-age=0",
+        pragma: str | None = "no-cache",
     ) -> None:
+        headers = {"Cache-Control": cache_control}
+        if pragma is not None:
+            headers["Pragma"] = pragma
         await _send_response(
             writer,
             status,
             "text/html; charset=utf-8",
             body.encode("utf-8"),
-            extra_headers={
-                "Cache-Control": "no-store, max-age=0",
-                "Pragma": "no-cache",
-            },
+            extra_headers=headers,
         )
 
     async def _send_static_asset(
@@ -2723,7 +2728,9 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .recent-copy { min-width: 0; overflow: hidden; }
     .recent-title { display: -webkit-box; max-height: 2.56em; white-space: normal; line-height: 1.28; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
     .recent.active .label { color: #fff; }
+    .recent.loading { background: rgba(147, 197, 253, 0.12); }
     .recent .time { transition: color var(--duration-fast) ease; }
+    .recent.loading .time { color: var(--color-link); }
     .recent:hover .time { color: var(--text-secondary); }
     .more-sessions { border: 0; border-top: 1px solid var(--border-subtle); margin-top: 8px; padding-top: 8px; }
     .more-sessions summary { min-height: 44px; list-style: none; cursor: pointer; color: var(--text-dim); font-size: 15px; }
@@ -2895,6 +2902,8 @@ __ICONS_JS__
     let projectRoot = "";
     let projectCatalog = [];
     const SESSION_PREVIEW_LIMIT = 10;
+    const LIVE_PREFETCH_LIMIT = 4;
+    const prefetchedLiveUrls = new Set();
     const devicesEl = document.getElementById("devices");
     const sessionsEl = document.getElementById("sessions");
     const projectsEl = document.getElementById("projects");
@@ -3541,6 +3550,7 @@ __ICONS_JS__
         sessionsEl.innerHTML = `<div class="empty">没有最近聊天</div>`;
         return;
       }
+      scheduleLivePrefetch(filtered.slice(0, LIVE_PREFETCH_LIMIT));
       renderSessionList(filtered.slice(0, SESSION_PREVIEW_LIMIT), sessionsEl);
       if (filtered.length <= SESSION_PREVIEW_LIMIT) return;
       const details = document.createElement("details");
@@ -3559,11 +3569,44 @@ __ICONS_JS__
         const btn = document.createElement("button");
         btn.className = "recent" + (selected && selected.native_thread_id === session.native_thread_id ? " active" : "");
         btn.innerHTML = `<span class="recent-copy"><span class="label recent-title">${escapeHtml(session.title || session.native_thread_id)}</span><span class="meta">${escapeHtml(sessionMetaText(session))}</span></span><span class="time">${escapeHtml(relativeTime(sessionActivityAt(session)))}</span>`;
+        btn.onpointerenter = () => prefetchLive(session);
+        btn.onpointerdown = () => prefetchLive(session);
         btn.onclick = () => {
           selected = session;
+          btn.classList.add("loading");
+          const timeEl = btn.querySelector(".time");
+          if (timeEl) timeEl.textContent = "打开中";
           openLive(session);
         };
         target.appendChild(btn);
+      }
+    }
+    function liveUrlForSession(session) {
+      if (!session || !session.agent_run_id || !session.native_thread_id) return "";
+      const params = new URLSearchParams();
+      if (token) params.set("token", token);
+      params.set("native_provider", PROVIDER);
+      params.set("native_thread_id", session.native_thread_id);
+      return `/workers/${session.agent_run_id}/live?${params.toString()}`;
+    }
+    function prefetchLive(session) {
+      const url = liveUrlForSession(session);
+      if (!url || prefetchedLiveUrls.has(url)) return;
+      prefetchedLiveUrls.add(url);
+      const link = document.createElement("link");
+      link.rel = "prefetch";
+      link.as = "document";
+      link.href = url;
+      document.head.appendChild(link);
+    }
+    function scheduleLivePrefetch(source) {
+      const sessionsToPrefetch = source.filter(session => session && session.agent_run_id && session.native_thread_id);
+      if (!sessionsToPrefetch.length) return;
+      const run = () => sessionsToPrefetch.forEach(prefetchLive);
+      if ("requestIdleCallback" in window) {
+        window.requestIdleCallback(run, {timeout: 1200});
+      } else {
+        window.setTimeout(run, 250);
       }
     }
     function sessionMetaText(session) {
@@ -3640,11 +3683,9 @@ __ICONS_JS__
 
     async function openLive(session = selected) {
       if (!session) return;
-      const params = new URLSearchParams();
-      if (token) params.set("token", token);
-      params.set("native_provider", PROVIDER);
-      params.set("native_thread_id", session.native_thread_id);
-      location.href = `/workers/${session.agent_run_id}/live?${params.toString()}`;
+      const url = liveUrlForSession(session);
+      if (!url) return;
+      location.href = url;
     }
     document.getElementById("send").onclick = async () => {
       if (!composerHasDraft()) {

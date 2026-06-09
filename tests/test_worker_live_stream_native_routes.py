@@ -1623,6 +1623,41 @@ async def test_native_codex_page_contains_worker_and_session_selector(
     assert "api(`${API_BASE}/sessions`)" in response
     assert "device-chip" in response
     assert "await api(`/api/native/codex/sessions/${encodeURIComponent(selected.native_thread_id)}`).catch" not in response
+    assert "const LIVE_PREFETCH_LIMIT = 4;" in response
+    assert "function liveUrlForSession(session)" in response
+    assert "scheduleLivePrefetch(filtered.slice(0, LIVE_PREFETCH_LIMIT));" in response
+    assert "btn.classList.add(\"loading\");" in response
+
+
+@pytest.mark.asyncio
+async def test_live_page_shell_allows_short_private_browser_cache(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /workers/42/live?token=secret&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "Cache-Control: private, max-age=45" in response
+    assert "<title>Codex</title>" in response
+    assert "codex-run-shell" in response
 
 
 @pytest.mark.asyncio
@@ -2168,8 +2203,8 @@ async def test_worker_live_page_accepts_query_token_and_contains_native_controls
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert "Cache-Control: no-store, max-age=0" in response
-    assert "Pragma: no-cache" in response
+    assert "Cache-Control: private, max-age=45" in response
+    assert "Pragma: no-cache" not in response
     assert 'const streamPathBase = "/api/workers/42/stream";' in response
     assert 'const PROVIDER = "codex";' in response
     assert 'const API_BASE = "/api/native/codex";' in response
