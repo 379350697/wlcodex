@@ -380,6 +380,23 @@ async def _read_response(host: str, port: int, request: str) -> str:
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
+async def _read_initial_response(
+    host: str,
+    port: int,
+    request: str,
+    marker: bytes,
+) -> str:
+    reader, writer = await asyncio.open_connection(host, port)
+    writer.write(request.encode("utf-8"))
+    await writer.drain()
+    try:
+        chunk = await asyncio.wait_for(reader.readuntil(marker), timeout=1.0)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+    return chunk.decode("utf-8", errors="replace")
+
+
 def _json_body(response: str) -> dict[str, Any]:
     return json.loads(response.split("\r\n\r\n", 1)[1])
 
@@ -512,6 +529,33 @@ async def test_native_provider_index_links_static_stylesheet(tmp_path: Path) -> 
     assert '<link rel="stylesheet" href="/static/native_index.css">' in response
     assert "Antigravity" in response
     assert '<button class="circle native-back" id="back" aria-label="back" aria-disabled="true" disabled>' in response
+
+
+@pytest.mark.asyncio
+async def test_static_assets_are_publicly_cacheable(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        access_token=None,
+        allow_unauthenticated_loopback=True,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /static/native_index.css HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "Content-Type: text/css; charset=utf-8" in response
+    assert "Cache-Control: public, max-age=300, stale-while-revalidate=60" in response
 
 
 @pytest.mark.asyncio
@@ -1630,7 +1674,7 @@ async def test_native_codex_page_contains_worker_and_session_selector(
 
 
 @pytest.mark.asyncio
-async def test_live_page_shell_allows_short_private_browser_cache(
+async def test_live_page_shell_is_not_cacheable(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -1655,9 +1699,53 @@ async def test_live_page_shell_allows_short_private_browser_cache(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert "Cache-Control: private, max-age=45" in response
+    assert "Cache-Control: no-store, max-age=0" in response
+    assert "Pragma: no-cache" in response
     assert "<title>Codex</title>" in response
     assert "codex-run-shell" in response
+
+
+@pytest.mark.asyncio
+async def test_sse_stream_is_not_cacheable_and_not_buffered(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    hub = WorkerLiveStreamHub(store)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=hub,
+    )
+
+    class FakeWriter:
+        def __init__(self) -> None:
+            self.body = bytearray()
+            self.ready = asyncio.Event()
+
+        def write(self, data: bytes) -> None:
+            self.body.extend(data)
+            if b": connected\n\n" in self.body:
+                self.ready.set()
+
+        async def drain(self) -> None:
+            return None
+
+        def is_closing(self) -> bool:
+            return False
+
+    writer = FakeWriter()
+    task = asyncio.create_task(server._send_sse(writer, 42, 0))
+    try:
+        await asyncio.wait_for(writer.ready.wait(), timeout=1.0)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    response = writer.body.decode("utf-8", errors="replace")
+    assert "HTTP/1.1 200 OK" in response
+    assert "Content-Type: text/event-stream; charset=utf-8" in response
+    assert "Cache-Control: no-cache" in response
+    assert "X-Accel-Buffering: no" in response
+    assert ": connected\n\n" in response
 
 
 @pytest.mark.asyncio
@@ -2203,8 +2291,8 @@ async def test_worker_live_page_accepts_query_token_and_contains_native_controls
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert "Cache-Control: private, max-age=45" in response
-    assert "Pragma: no-cache" not in response
+    assert "Cache-Control: no-store, max-age=0" in response
+    assert "Pragma: no-cache" in response
     assert 'const streamPathBase = "/api/workers/42/stream";' in response
     assert 'const PROVIDER = "codex";' in response
     assert 'const API_BASE = "/api/native/codex";' in response

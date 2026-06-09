@@ -583,8 +583,6 @@ class WorkerLiveStreamServer:
                     writer,
                     200,
                     _live_page(agent_id, native_provider=native_provider),
-                    cache_control="private, max-age=45",
-                    pragma=None,
                 )
                 return
 
@@ -1435,19 +1433,16 @@ class WorkerLiveStreamServer:
         writer: asyncio.StreamWriter,
         status: int,
         body: str,
-        *,
-        cache_control: str = "no-store, max-age=0",
-        pragma: str | None = "no-cache",
     ) -> None:
-        headers = {"Cache-Control": cache_control}
-        if pragma is not None:
-            headers["Pragma"] = pragma
         await _send_response(
             writer,
             status,
             "text/html; charset=utf-8",
             body.encode("utf-8"),
-            extra_headers=headers,
+            extra_headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
         )
 
     async def _send_static_asset(
@@ -1478,7 +1473,9 @@ class WorkerLiveStreamServer:
             200,
             content_type,
             asset_path.read_bytes(),
-            extra_headers={"Cache-Control": "no-cache"},
+            extra_headers={
+                "Cache-Control": "public, max-age=300, stale-while-revalidate=60"
+            },
         )
 
     async def _send_redirect(
