@@ -2136,6 +2136,8 @@ async def test_native_provider_home_polling_skips_unchanged_list_rerender(
     assert "const signature = homeDataSignature();" in response
     assert "if (signature === renderedHomeDataSignature) return;" in response
     assert "await loadSessions(false);" in response
+    assert "updated_at: String(session.updated_at || \"\")," not in response
+    assert "activity_at: String(session.activity_at || \"\")," not in response
 
 
 @pytest.mark.asyncio

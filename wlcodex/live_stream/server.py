@@ -3042,9 +3042,10 @@ __ICONS_JS__
           title: String(session.title || ""),
           cwd: String(session.cwd || ""),
           status: String(session.status || ""),
-          activity_at: String(session.activity_at || ""),
-          updated_at: String(session.updated_at || ""),
-          metadata: session.metadata || {},
+          activity_label: relativeTime(sessionActivityAt(session)),
+          model: String(((session.metadata || {}).model) || ""),
+          effort: String(((session.metadata || {}).effort) || ""),
+          service_tier: String(((session.metadata || {}).service_tier) || ""),
         })),
       });
     }
