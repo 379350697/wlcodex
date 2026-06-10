@@ -2931,7 +2931,7 @@ async def test_worker_live_page_uses_official_model_catalog_settings(
     assert "function reasoningEffortLabel" in response
     assert 'if (key === "high") return "高";' in response
     assert 'if (["xhigh", "extra_high"].includes(key)) return "极高";' in response
-    assert 'if (["max", "maximum"].includes(key)) return "Max";' in response
+    assert 'if (["max", "maximum"].includes(key)) return "最大";' in response
     assert "function preferredServiceTierDefault" in response
     assert "function updateSettingVisibility" in response
     assert "reasoningSettingRow.hidden = reasoningSelector.options.length <= 1;" in response
