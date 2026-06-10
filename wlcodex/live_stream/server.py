@@ -143,6 +143,8 @@ _ICON_SVG = {
     "stop": '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
     "check": '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>',
     "copy": f'<svg {_ICON_ATTRS}><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4c0-1.1.9-2 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    "download": f'<svg {_ICON_ATTRS}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>',
+    "plan": f'<svg {_ICON_ATTRS}><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/><path d="M7 9h4"/><path d="M7 15h2"/></svg>',
     # Extended icon set
     "settings": f'<svg {_ICON_ATTRS}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
     "folder": f'<svg {_ICON_ATTRS}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
@@ -2742,6 +2744,11 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .setting-pill { min-height: 38px; max-width: 100%; border-radius: 19px; padding: 0 14px; overflow: hidden; background: var(--bg-pill); color: var(--btn-primary-bg); border: 1px solid transparent; font-size: 14px; font-weight: var(--weight-extrabold); text-overflow: ellipsis; white-space: nowrap; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
     .setting-pill.modified { border-color: rgba(147, 197, 253, 0.35); background: var(--bg-pill-modified); }
     button.setting-pill:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-pill-hover); filter: none; }
+    .mode-chip-row { display: flex; gap: 8px; align-items: center; min-height: 0; }
+    .mode-chip { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; max-width: 100%; padding: 0 13px; border: 0; border-radius: 19px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 14px; font-weight: var(--weight-extrabold); }
+    .mode-chip[hidden] { display: none; }
+    .mode-chip-cancel { display: inline-grid; place-items: center; width: 18px; min-height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--btn-primary-bg); font-size: 16px; line-height: 1; }
+    button.mode-chip-cancel:not(.secondary):not(.warn):not(:disabled):hover { background: rgba(255,255,255,.1); filter: none; }
     .model-popover { position: absolute; left: 0; bottom: 48px; width: min(330px, calc(100vw - 52px)); border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); overflow: hidden; z-index: 6; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
     .model-popover.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
     .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid var(--border-section); color: var(--btn-primary-bg); }
@@ -2782,7 +2789,8 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .attachment-remove { width: 26px; min-height: 26px; padding: 0; border-radius: 50%; background: var(--bg-remove-btn); color: var(--btn-primary-bg); font-size: 15px; }
     .start-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; }
     input { min-width: 0; height: 56px; border-radius: 28px; border: 1px solid var(--border-popover); background: var(--bg-composer-input); color: var(--text-primary); padding: 0 20px; font-size: 17px; }
-    button.chat { height: 56px; min-width: 118px; border-radius: 28px; border: 0; background: #fff; color: #000; font-size: 17px; font-weight: var(--weight-extrabold); }
+    button.chat { height: 56px; min-width: 118px; border-radius: 28px; border: 0; background: #fff; color: #000; font-size: 17px; font-weight: var(--weight-extrabold); transition: background var(--duration-fast) ease, color var(--duration-fast) ease, opacity var(--duration-fast) ease; }
+    button.chat:disabled { background: var(--bg-pill); color: var(--text-dim); opacity: 1; cursor: default; }
   </style>
 </head>
 <body class="aurora-bg noise-overlay">
@@ -2854,6 +2862,12 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       </div>
     </div>
     <div class="attachment-strip" id="attachmentStrip" hidden></div>
+    <div class="mode-chip-row">
+      <div class="mode-chip plan-mode-chip" id="planModeChip" hidden>
+        <span>☷ 计划</span>
+        <button class="mode-chip-cancel" id="planModeChipCancel" type="button" aria-label="取消计划模式">×</button>
+      </div>
+    </div>
     <div class="composer-action-menu closed" id="composerActionMenu" role="menu" aria-label="输入操作">
       <button class="composer-menu-item" id="menuUploadPhoto" type="button" role="menuitem">
         <span class="composer-menu-icon">▧</span>
@@ -2905,6 +2919,7 @@ __ICONS_JS__
     const sessionsEl = document.getElementById("sessions");
     const projectsEl = document.getElementById("projects");
     const promptEl = document.getElementById("prompt");
+    const sendButton = document.getElementById("send");
     const controlsEl = document.querySelector(".controls");
     const attachmentButton = document.getElementById("attachmentButton");
     const imageInput = document.getElementById("imageInput");
@@ -2950,6 +2965,9 @@ __ICONS_JS__
     const menuPlanMode = document.getElementById("menuPlanMode");
     const pluginList = document.getElementById("pluginList");
     const planModeCheck = document.getElementById("planModeCheck");
+    const planModeChip = document.getElementById("planModeChip");
+    const planModeChipCancel = document.getElementById("planModeChipCancel");
+    let startingChat = false;
 
     async function api(path, options = {}) {
       const res = await fetch(path, {
@@ -3402,11 +3420,19 @@ __ICONS_JS__
       return null;
     }
 
+    function setSelectedCollaborationMode(mode) {
+      selectedCollaborationMode = mode === "plan" ? "plan" : "default";
+      saveSelectedCollaborationMode();
+      updateCollaborationMenu();
+      updateStartControls();
+    }
+
     function updateCollaborationMenu() {
       const enabled = selectedCollaborationMode === "plan";
       menuPlanMode.classList.toggle("selected", enabled);
       menuPlanMode.setAttribute("aria-pressed", enabled ? "true" : "false");
       planModeCheck.innerHTML = enabled ? ICONS.check : "";
+      planModeChip.hidden = !enabled;
     }
 
     function renderPluginList() {
@@ -3634,6 +3660,8 @@ __ICONS_JS__
     }
 
     async function startNewChat(prompt) {
+      startingChat = true;
+      updateStartControls();
       saveModelSettingsIfChanged();
       savePermissionSettingsIfChanged();
       const settings = readSelectedModelSettings();
@@ -3654,14 +3682,19 @@ __ICONS_JS__
           mime_type: image.mime_type
         }));
       }
-      const result = await api(`${API_BASE}/sessions/start`, {
-        method: "POST",
-        body: JSON.stringify(body)
-      });
-      promptEl.value = "";
-      imageAttachments = [];
-      renderAttachments();
-      openLive(result);
+      try {
+        const result = await api(`${API_BASE}/sessions/start`, {
+          method: "POST",
+          body: JSON.stringify(body)
+        });
+        promptEl.value = "";
+        imageAttachments = [];
+        renderAttachments();
+        openLive(result);
+      } finally {
+        startingChat = false;
+        updateStartControls();
+      }
     }
 
     async function handleProjectNewChat() {
@@ -3678,13 +3711,17 @@ __ICONS_JS__
       return Boolean(promptEl.value.trim() || imageAttachments.length);
     }
 
+    function updateStartControls() {
+      sendButton.disabled = startingChat || !composerHasDraft();
+    }
+
     async function openLive(session = selected) {
       if (!session) return;
       const url = liveUrlForSession(session);
       if (!url) return;
       location.href = url;
     }
-    document.getElementById("send").onclick = async () => {
+    sendButton.onclick = async () => {
       if (!composerHasDraft()) {
         promptEl.focus();
         return;
@@ -3699,10 +3736,10 @@ __ICONS_JS__
       imageInput.click();
     };
     menuPlanMode.onclick = () => {
-      selectedCollaborationMode = selectedCollaborationMode === "plan" ? "default" : "plan";
-      saveSelectedCollaborationMode();
-      updateCollaborationMenu();
+      setSelectedCollaborationMode(selectedCollaborationMode === "plan" ? "default" : "plan");
+      closeComposerActionMenu();
     };
+    planModeChipCancel.onclick = () => setSelectedCollaborationMode("default");
     imageInput.onchange = async () => {
       const files = Array.from(imageInput.files || []);
       imageInput.value = "";
@@ -3714,6 +3751,7 @@ __ICONS_JS__
         }
       }
       renderAttachments();
+      updateStartControls();
     };
     modelSettingsButton.onclick = () => {
       const willClose = !modelPopover.classList.contains("closed");
@@ -3774,7 +3812,10 @@ __ICONS_JS__
     document.getElementById("back").onclick = () => {
       location.href = tokenizedPath("/native");
     };
-    promptEl.addEventListener("input", renderSessions);
+    promptEl.addEventListener("input", () => {
+      renderSessions();
+      updateStartControls();
+    });
     function sessionProjectKey(session) {
       return String((session && session.cwd) || "");
     }
@@ -3878,6 +3919,7 @@ __ICONS_JS__
         remove.onclick = () => {
           imageAttachments.splice(index, 1);
           renderAttachments();
+          updateStartControls();
         };
         chip.append(preview, name, remove);
         attachmentStrip.append(chip);
@@ -3903,6 +3945,7 @@ __ICONS_JS__
     renderPermissionSettings();
     renderPluginList();
     updateCollaborationMenu();
+    updateStartControls();
     loadStatus();
     loadModelCatalog();
     loadHomeData();
@@ -3998,6 +4041,44 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .status-event.failed:before { background: var(--color-error); }
     .status-title { display: block; color: var(--text-secondary); font-weight: var(--weight-bold); }
     .status-detail { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .plan-item { justify-self: stretch; margin: 2px 6px 20px; }
+    .plan-card { position: relative; display: grid; gap: 26px; height: 432px; min-height: 432px; padding: 26px 26px 30px; border: 1px solid #333333; border-radius: 22px; background: #242424; color: #f8fafc; box-shadow: none; overflow: hidden; cursor: pointer; }
+    .plan-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 34px; color: #d4d4d8; }
+    .plan-card-label { display: inline-flex; align-items: center; gap: 12px; min-width: 0; color: #d4d4d8; font-size: 21px; line-height: 1.2; }
+    .plan-card-label svg { width: 28px; height: 28px; flex: 0 0 auto; }
+    .plan-card-actions { display: inline-flex; gap: 12px; align-items: center; flex: 0 0 auto; }
+    .plan-card-action { width: 34px; min-height: 34px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 10px; background: transparent; color: #f4f4f5; }
+    .plan-card-action svg { width: 31px; height: 31px; }
+    .plan-card-title { margin: 0; color: #ffffff; font-size: 33px; line-height: 1.16; font-weight: var(--weight-black); letter-spacing: 0; overflow-wrap: anywhere; }
+    .plan-card-summary-title { margin: 0; color: #f5f5f5; font-size: 25px; line-height: 1.22; font-weight: var(--weight-black); letter-spacing: 0; }
+    .plan-card-summary { display: grid; gap: 12px; color: #f4f4f5; font-size: 20px; line-height: 1.58; }
+    .plan-card-summary p { margin: 0; }
+    .plan-card:not(.expanded)::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 72px; background: linear-gradient(to bottom, rgba(36,36,36,0), #242424 86%); pointer-events: none; }
+    .plan-card-execute { min-height: 44px; align-self: end; justify-self: start; padding: 0 18px; border-radius: 22px; border: 1px solid rgba(255,255,255,.14); background: #f4f4f5; color: #111; font-size: 16px; font-weight: var(--weight-extrabold); z-index: 1; }
+    .plan-card-execute:disabled { opacity: .48; }
+    .plan-page-backdrop { position: fixed; inset: 0; z-index: 12; overflow-y: auto; overflow-x: hidden; max-width: 100vw; background: #000; color: #fff; }
+    .plan-page-backdrop[hidden] { display: none; }
+    .plan-page-shell { box-sizing: border-box; width: 100%; max-width: 100vw; min-height: 100vh; min-width: 0; display: grid; grid-template-rows: auto 1fr; overflow-x: hidden; background: #000; }
+    .plan-page-top { position: sticky; top: 0; z-index: 1; box-sizing: border-box; width: 100%; max-width: 100vw; min-width: 0; display: grid; grid-template-columns: 64px minmax(0, 1fr) 104px; align-items: center; min-height: 92px; padding: 12px 20px 8px; background: rgba(0,0,0,.96); }
+    .plan-page-close { width: 54px; min-height: 54px; border-radius: 50%; border: 1px solid #2d2d2f; background: #242426; color: #f5f5f5; font-size: 39px; line-height: 1; }
+    .plan-page-heading-label { min-width: 0; text-align: center; color: #fff; font-size: 22px; line-height: 1.2; font-weight: var(--weight-black); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .plan-page-actions { display: flex; justify-content: flex-end; gap: 12px; }
+    .plan-page-icon { width: 38px; min-height: 38px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: #fff; }
+    .plan-page-icon svg { width: 31px; height: 31px; }
+    .plan-page-content { box-sizing: border-box; width: 100%; max-width: 100vw; min-width: 0; display: grid; gap: 34px; align-content: start; padding: 34px 26px 96px; overflow-x: hidden; }
+    .plan-page-content > * { min-width: 0; max-width: 100%; }
+    .plan-page-title { margin: 0; color: #fff; font-size: 41px; line-height: 1.16; font-weight: var(--weight-black); letter-spacing: 0; overflow-wrap: anywhere; }
+    .plan-page-section-title { margin: 0; color: #fff; font-size: 31px; line-height: 1.22; font-weight: var(--weight-black); letter-spacing: 0; }
+    .plan-page-title, .plan-page-summary, .plan-page-body { overflow-wrap: anywhere; word-break: break-word; }
+    .plan-page-summary, .plan-page-body { color: #f4f4f5; font-size: 25px; line-height: 1.56; letter-spacing: 0; }
+    .plan-page-summary p, .plan-page-body p { margin: 0 0 22px; }
+    .plan-page-body h3 { margin: 34px 0 14px; color: #fff; font-size: 29px; line-height: 1.2; }
+    .plan-page-body ul, .plan-page-body ol { margin: 0 0 22px 1.25em; padding: 0; display: grid; gap: 10px; }
+    .plan-page-body li { min-width: 0; }
+    .plan-page-body pre { max-width: 100%; overflow-x: auto; }
+    .plan-page-body code, .plan-page-summary code { white-space: normal; overflow-wrap: anywhere; word-break: break-word; padding: 1px 5px; border-radius: 5px; background: #111; color: #f4f4f5; font: .88em var(--font-mono); }
+    .plan-page-execute { min-height: 54px; border-radius: 27px; border: 0; background: #f4f4f5; color: #111; font-size: 18px; font-weight: var(--weight-black); }
+    .plan-page-execute:disabled { opacity: .48; }
     .composer-activity { display: flex; gap: 5px; align-items: center; height: 20px; margin: 8px 0 14px 2px; opacity: 0; transition: opacity 200ms ease; }
     .composer-activity.active { opacity: 1; }
     .composer-activity-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); animation: typingBounce 1.4s ease-in-out infinite; }
@@ -4050,6 +4131,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .setting-pill:not(:disabled):hover { background: var(--bg-pill-hover); }
     .setting-pill.permissions { flex: 0 0 auto; }
     .setting-pill.handoff { flex: 0 0 auto; background: #1f2937; border: 1px solid var(--border-input); }
+    .mode-chip-row { display: flex; gap: 8px; align-items: center; min-height: 0; }
+    .mode-chip { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; max-width: 100%; padding: 0 13px; border: 0; border-radius: 19px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 14px; font-weight: var(--weight-extrabold); }
+    .mode-chip[hidden] { display: none; }
+    .mode-chip-cancel { display: inline-grid; place-items: center; width: 18px; min-height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--btn-primary-bg); font-size: 16px; line-height: 1; }
+    button.mode-chip-cancel:not(.secondary):not(.warn):not(:disabled):hover { background: rgba(255,255,255,.1); filter: none; }
     .model-popover { position: absolute; left: 0; bottom: 48px; width: min(330px, calc(100vw - 32px)); border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); overflow: hidden; z-index: 6; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
     .model-popover.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
     .handoff-panel { position: fixed; left: 26px; right: 26px; bottom: 112px; width: auto; max-height: min(76vh, 760px); display: grid; gap: 10px; padding: 0; border: 0; background: transparent; box-shadow: none; z-index: 7; }
@@ -4074,11 +4160,13 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .handoff-prompt-body { min-height: 0; overflow: auto; margin: 0; padding: 18px 26px 28px; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
     .handoff-prompt-body[hidden] { display: none; }
     .prompt-preface { font-size: 24px; line-height: 1.45; color: #f4f4f5; }
-    .prompt-card { width: auto; height: min(48vh, 620px); min-height: 300px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 0; border-radius: 30px; background: #303030 !important; background-color: #303030 !important; color: #f4f4f5; box-shadow: none; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+    .prompt-card { position: relative; width: auto; height: min(48vh, 620px); min-height: 300px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 0; border-radius: 30px; background: #303030 !important; background-color: #303030 !important; color: #f4f4f5; box-shadow: none; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+    .prompt-card.collapsed { height: 250px; min-height: 250px; cursor: pointer; }
+    .prompt-card.collapsed::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 78px; background: linear-gradient(to bottom, rgba(48,48,48,0), #303030 78%); pointer-events: none; }
     .prompt-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 0; padding: 20px 26px 0; background: #303030; }
-    .prompt-card-title { color: #f8fafc; font-size: 16px; font-weight: var(--weight-extrabold); line-height: 1.2; letter-spacing: 0; }
+    .prompt-card-title { color: #f8fafc; font-size: 25px; font-weight: 400; line-height: 1.45; letter-spacing: 0; }
     .prompt-card-copy svg { width: 32px; height: 32px; }
-    .transcript-body .prompt-card-body { min-height: 0; overflow: auto; margin: 0; padding: 16px 26px 28px; border: 0; border-radius: 0; background: #303030; white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; font: 12px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f4f5; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
+    .transcript-body .prompt-card-body { min-height: 0; overflow: auto; margin: 0; padding: 16px 26px 28px; border: 0; border-radius: 0; background: #303030; white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; font: 22px/1.34 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #f4f4f5; letter-spacing: 0; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; }
     .handoff-actions { grid-template-columns: 1fr 1fr; }
     .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid var(--border-section); color: var(--btn-primary-bg); }
     .setting-row:last-child { border-bottom: 0; }
@@ -4252,6 +4340,12 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         <span class="send-status" id="sendStatus"></span>
       </div>
       <div class="attachment-strip" id="attachmentStrip" hidden></div>
+      <div class="mode-chip-row">
+        <div class="mode-chip plan-mode-chip" id="planModeChip" hidden>
+          <span>☷ 计划</span>
+          <button class="mode-chip-cancel" id="planModeChipCancel" type="button" aria-label="取消计划模式">×</button>
+        </div>
+      </div>
       <div class="interruption-choice" id="interruptionChoice" hidden>
         <button class="choice-action primary" id="steerChoice" type="button">引导</button>
         <button class="choice-action" id="queueChoice" type="button">排队</button>
@@ -4265,6 +4359,25 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         <button class="warn" id="interrupt">中断</button>
       </div>
     </section>
+  </div>
+  <div class="plan-page-backdrop" id="planPage" role="dialog" aria-modal="true" aria-label="计划" hidden>
+    <div class="plan-page-shell">
+      <div class="plan-page-top">
+        <button class="plan-page-close" id="planPageClose" type="button" aria-label="关闭">×</button>
+        <div class="plan-page-heading-label">计划</div>
+        <div class="plan-page-actions">
+          <button class="plan-page-icon" id="planPageDownload" type="button" aria-label="下载计划"></button>
+          <button class="plan-page-icon" id="planPageCopy" type="button" aria-label="复制计划"></button>
+        </div>
+      </div>
+      <section class="plan-page-content" id="planPageContent">
+        <h2 class="plan-page-title" id="planPageTitle"></h2>
+        <h3 class="plan-page-section-title">Summary</h3>
+        <div class="plan-page-summary" id="planPageSummary"></div>
+        <div class="plan-page-body" id="planPageBody"></div>
+        <button class="plan-page-execute" id="planPageExecute" type="button">执行计划</button>
+      </section>
+    </div>
   </div>
   <script>
     const state = document.getElementById("state");
@@ -4324,6 +4437,8 @@ __ICONS_JS__
     const menuPlanMode = document.getElementById("menuPlanMode");
     const pluginList = document.getElementById("pluginList");
     const planModeCheck = document.getElementById("planModeCheck");
+    const planModeChip = document.getElementById("planModeChip");
+    const planModeChipCancel = document.getElementById("planModeChipCancel");
     const handoffButton = document.getElementById("handoffButton");
     const handoffPanel = document.getElementById("handoffPanel");
     const handoffTargets = document.getElementById("handoffTargets");
@@ -4336,6 +4451,14 @@ __ICONS_JS__
     const handoffCopyButton = document.getElementById("handoffCopyButton");
     const handoffPreviewButton = document.getElementById("handoffPreviewButton");
     const handoffExecuteButton = document.getElementById("handoffExecuteButton");
+    const planPage = document.getElementById("planPage");
+    const planPageClose = document.getElementById("planPageClose");
+    const planPageDownload = document.getElementById("planPageDownload");
+    const planPageCopy = document.getElementById("planPageCopy");
+    const planPageTitle = document.getElementById("planPageTitle");
+    const planPageSummary = document.getElementById("planPageSummary");
+    const planPageBody = document.getElementById("planPageBody");
+    const planPageExecute = document.getElementById("planPageExecute");
     const streamPathBase = "__STREAM_PATH__";
     const agentRunId = __AGENT_RUN_ID__;
     const CURRENT_TURN_EVENT_LIMIT = 5000;
@@ -4367,7 +4490,10 @@ __ICONS_JS__
     let handoffPreviewPayload = null;
     let handoffBusy = false;
     let handoffCopyStateTimer = 0;
+    let activePlan = null;
     handoffCopyButton.innerHTML = ICONS.copy;
+    planPageDownload.innerHTML = ICONS.download;
+    planPageCopy.innerHTML = ICONS.copy;
     historyFold.onclick = loadOlderEvents;
     async function api(path, options = {}) {
       const response = await fetch(path, {
@@ -4783,11 +4909,19 @@ __ICONS_JS__
       if (selectedCollaborationMode === "plan") return {"mode": "plan"};
       return null;
     }
+    function setSelectedCollaborationMode(mode) {
+      selectedCollaborationMode = mode === "plan" ? "plan" : "default";
+      saveSelectedCollaborationMode();
+      updateCollaborationMenu();
+      updateComposerDisabled();
+      updateHandoffControls();
+    }
     function updateCollaborationMenu() {
       const enabled = selectedCollaborationMode === "plan";
       menuPlanMode.classList.toggle("selected", enabled);
       menuPlanMode.setAttribute("aria-pressed", enabled ? "true" : "false");
       planModeCheck.innerHTML = enabled ? ICONS.check : "";
+      planModeChip.hidden = !enabled;
     }
     function renderPluginList() {
       pluginList.innerHTML = "";
@@ -4938,6 +5072,16 @@ __ICONS_JS__
     handoffPreviewButton.onclick = previewHandoff;
     handoffExecuteButton.onclick = executeHandoff;
     handoffCopyButton.onclick = copyHandoffPrompt;
+    planPageClose.onclick = closePlanPage;
+    planPageDownload.onclick = () => {
+      if (!activePlan) return;
+      downloadPlanText(activePlan.title, activePlan.body);
+    };
+    planPageCopy.onclick = () => {
+      if (!activePlan) return;
+      copyPromptCardText(planPageCopy, activePlan.body);
+    };
+    planPageExecute.onclick = executeActivePlan;
     handoffIntent.onchange = resetHandoffPreview;
     handoffNote.oninput = resetHandoffPreview;
     for (const button of handoffTargetButtons) {
@@ -5007,10 +5151,10 @@ __ICONS_JS__
       imageInput.click();
     };
     menuPlanMode.onclick = () => {
-      selectedCollaborationMode = selectedCollaborationMode === "plan" ? "default" : "plan";
-      saveSelectedCollaborationMode();
-      updateCollaborationMenu();
+      setSelectedCollaborationMode(selectedCollaborationMode === "plan" ? "default" : "plan");
+      closeComposerActionMenu();
     };
+    planModeChipCancel.onclick = () => setSelectedCollaborationMode("default");
     imageInput.onchange = async () => {
       const files = Array.from(imageInput.files || []);
       imageInput.value = "";
@@ -5051,18 +5195,7 @@ __ICONS_JS__
         setSendStatus("请输入内容或照片", "error");
         return;
       }
-      saveModelSettingsIfChanged();
-      savePermissionSettingsIfChanged();
-      const permissionSettings = readSelectedPermissionSettings();
-      const body = {prompt};
-      if (savedModelSettings.model) body.model = savedModelSettings.model;
-      if (savedModelSettings.effort) body.effort = savedModelSettings.effort;
-      if (savedModelSettings.service_tier) body.service_tier = savedModelSettings.service_tier;
-      body.permission_mode = permissionSettings.permission_mode;
-      const collaborationMode = readSelectedCollaborationMode();
-      if (collaborationMode) {
-        body.collaboration_mode = collaborationMode;
-      }
+      const body = buildNativePromptBody(prompt, {includeCollaborationMode: true});
       if (imageAttachments.length) {
         body.images = imageAttachments.map(image => ({
           url: image.url,
@@ -5097,6 +5230,23 @@ __ICONS_JS__
         continueButton.classList.remove("loading");
         updateComposerDisabled();
       }
+    }
+    function buildNativePromptBody(prompt, options = {}) {
+      saveModelSettingsIfChanged();
+      savePermissionSettingsIfChanged();
+      const permissionSettings = readSelectedPermissionSettings();
+      const body = {prompt};
+      if (savedModelSettings.model) body.model = savedModelSettings.model;
+      if (savedModelSettings.effort) body.effort = savedModelSettings.effort;
+      if (savedModelSettings.service_tier) body.service_tier = savedModelSettings.service_tier;
+      body.permission_mode = permissionSettings.permission_mode;
+      if (options.includeCollaborationMode) {
+        const collaborationMode = readSelectedCollaborationMode();
+        if (collaborationMode) {
+          body.collaboration_mode = collaborationMode;
+        }
+      }
+      return body;
     }
     async function interruptNativeTurn() {
       if (!activeTurnId) return;
@@ -5204,6 +5354,92 @@ __ICONS_JS__
       handoffPromptBody.hidden = true;
       handoffCopyButton.disabled = true;
       setHandoffCopyState("");
+    }
+    function setActivePlanFromEvent(event, planText, titleText, summaryText) {
+      const payload = (event && event.payload) || {};
+      activePlan = {
+        threadId: String(payload.threadId || payload.native_thread_id || nativeThreadId || ""),
+        turnId: String(payload.turnId || payload.native_turn_id || ""),
+        title: String(titleText || "计划"),
+        summary: String(summaryText || ""),
+        body: String(planText || ""),
+        status: String(payload.status || "")
+      };
+      updatePlanActionState();
+      return activePlan;
+    }
+    function openPlanPage(plan = activePlan) {
+      if (!plan || !String(plan.body || "").trim()) return;
+      activePlan = plan;
+      renderPlanPage(plan);
+      planPage.hidden = false;
+      document.body.style.overflow = "hidden";
+      updatePlanActionState();
+    }
+    function renderPlanPage(plan) {
+      planPageTitle.textContent = plan.title || "计划";
+      planPageSummary.replaceChildren();
+      if (plan.summary) renderMarkdownLite(planPageSummary, plan.summary);
+      planPageBody.replaceChildren();
+      renderMarkdownLite(planPageBody, planDetailTextFromText(plan.body, plan.summary));
+    }
+    function planDetailTextFromText(text, summaryText) {
+      let source = String(text || "").trim();
+      source = source.replace(/^#\\s+[^\\n]+\\n+/, "").trimStart();
+      source = source.replace(/^##\\s+Summary\\s*\\n+/i, "").trimStart();
+      const summary = String(summaryText || "").trim();
+      if (summary && source.startsWith(summary)) {
+        source = source.slice(summary.length).trimStart();
+      }
+      return source || String(text || "").trim();
+    }
+    function closePlanPage() {
+      planPage.hidden = true;
+      document.body.style.overflow = "";
+    }
+    function updatePlanActionState() {
+      const disabled = !activePlan || !nativeThreadId || sendingPrompt || nativeTurnRunning;
+      planPageExecute.disabled = disabled;
+      document.querySelectorAll(".plan-card-execute").forEach(button => {
+        button.disabled = disabled;
+      });
+    }
+    function planExecutionPrompt(planText) {
+      return "PLEASE IMPLEMENT THIS PLAN:\\n\\n" + String(planText || "").trim();
+    }
+    async function executeActivePlan() {
+      if (!activePlan || !String(activePlan.body || "").trim()) {
+        setSendStatus("没有可执行计划", "error");
+        return;
+      }
+      if (nativeTurnRunning) {
+        setSendStatus("等待当前轮结束", "error");
+        return;
+      }
+      const prompt = planExecutionPrompt(activePlan.body);
+      const body = buildNativePromptBody(prompt, {includeCollaborationMode: false});
+      renderLocalUserEcho(prompt, []);
+      closePlanPage();
+      sendingPrompt = true;
+      updateComposerDisabled();
+      setSendStatus("执行计划", "");
+      continueButton.classList.add("loading");
+      try {
+        const result = await nativeControl("continue", body);
+        if (result && result.turn_id) nativeTurnId = result.turn_id;
+        activeTurnId = result.active_turn_id || (result.turn_running ? result.turn_id || "" : "");
+        nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
+        setSendStatus("已发送", "ok");
+        await pollEvents();
+      } catch (error) {
+        await pollEvents();
+        renderStatus("execute_plan_failed", error.message || String(error));
+        setSendStatus(error.message || "执行计划失败", "error");
+      } finally {
+        sendingPrompt = false;
+        continueButton.classList.remove("loading");
+        updateComposerDisabled();
+      }
     }
     async function previewHandoff() {
       if (!nativeThreadId) {
@@ -5325,12 +5561,16 @@ __ICONS_JS__
       }
     }
     function updateHandoffControls() {
-      handoffButton.disabled = sendingPrompt || !nativeThreadId;
+      const hideHandoffForPlan = PROVIDER === "codex" && (selectedCollaborationMode === "plan" || Boolean(activePlan));
+      handoffButton.hidden = hideHandoffForPlan;
+      if (hideHandoffForPlan) handoffPanel.hidden = true;
+      handoffButton.disabled = hideHandoffForPlan || sendingPrompt || !nativeThreadId;
       handoffPreviewButton.disabled = handoffBusy || !nativeThreadId || !handoffTargetProvider;
       handoffExecuteButton.disabled = handoffBusy || !handoffPreviewPayload;
       for (const button of handoffTargetButtons) button.disabled = handoffBusy;
       handoffIntent.disabled = handoffBusy;
       handoffNote.disabled = handoffBusy;
+      updatePlanActionState();
     }
     function currentWorkspaceCwd() {
       const queryCwd = params.get("cwd") || "";
@@ -5602,9 +5842,13 @@ __ICONS_JS__
           event.type === "model.usage.updated" ||
           isNativeExecutionDetail(event) ||
           isNativeReasoningDetail(event) ||
-          isNativeActivityDetail(event)
+          (isNativeActivityDetail(event) && !isNativePlanEvent(event))
         )
       );
+    }
+    function isNativePlanEvent(event) {
+      const payload = (event && event.payload) || {};
+      return isNativeFeedbackMode(event) && event && event.kind === "activity" && payload.action === "plan_updated";
     }
     function isNativeFeedbackMode(event) {
       const payload = (event && event.payload) || {};
@@ -5880,6 +6124,7 @@ __ICONS_JS__
       if (event.kind === "user_message") return 10;
       if (event.kind === "reasoning_delta") return 20;
       if (isCommandEvent(event)) return 30;
+      if (isNativePlanEvent(event)) return 35;
       if (event.kind === "text_delta" || event.kind === "message_completed") return 40;
       if (event.kind === "approval_requested" || event.kind === "approval_resolved") return 50;
       return 60;
@@ -6055,6 +6300,7 @@ __ICONS_JS__
       if (event.kind === "message_completed") return `assistant:${completedAssistantMessageKey(event)}`;
       if (itemId) return `${event.kind}:${itemId}`;
       if (event.kind === "user_message") return `user:${turnId}:user`;
+      if (isNativePlanEvent(event)) return `plan:${turnId}:plan`;
       if (event.kind === "text_delta") return `assistant:${turnId}:assistant`;
       if (event.kind === "reasoning_delta") return `reasoning:${turnId}:reasoning`;
       if (
@@ -6096,6 +6342,7 @@ __ICONS_JS__
         if (!options.historical) clearMatchingLocalUserEcho(event);
         renderTranscript(event, "user", "你", options);
       }
+      else if (isNativePlanEvent(event)) renderPlanEvent(event);
       else if (event.kind === "text_delta" || event.kind === "message_completed") renderAssistant(event, options);
       else if (event.kind === "reasoning_delta") renderStatusEvent(event, "思考中", "busy");
       else if (isCommandEvent(event)) renderToolCall(event);
@@ -6135,6 +6382,160 @@ __ICONS_JS__
     }
     function renderCommand(event) {
       renderToolCall(event);
+    }
+    function renderPlanEvent(event) {
+      const payload = event.payload || {};
+      const planText = planTextFromPayload(payload);
+      if (!planText.trim()) {
+        renderStatusEvent(event, "计划已更新", "busy");
+        return;
+      }
+      const titleText = planTitleFromText(planText, payload.title || "");
+      const summaryText = planSummaryFromText(planText);
+      setActivePlanFromEvent(event, planText, titleText, summaryText);
+      const row = document.createElement("div");
+      row.className = "plan-item";
+      row.append(createPlanCardElement(planText, titleText));
+      renderTarget.append(row);
+      updateRunState("计划已更新", "busy");
+    }
+    function createPlanCardElement(planText, titleFallback) {
+      const titleText = planTitleFromText(planText, titleFallback || "");
+      const summaryText = planSummaryFromText(planText);
+      const plan = activePlan && activePlan.body === planText ? activePlan : {
+        title: titleText,
+        summary: summaryText,
+        body: planText,
+        threadId: nativeThreadId,
+        turnId: "",
+        status: ""
+      };
+      const card = document.createElement("section");
+      card.className = "plan-card";
+      card.setAttribute("role", "button");
+      card.setAttribute("tabindex", "0");
+      card.onclick = () => openPlanPage(plan);
+      card.onkeydown = event => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openPlanPage(plan);
+        }
+      };
+
+      const head = document.createElement("div");
+      head.className = "plan-card-head";
+      const label = document.createElement("span");
+      label.className = "plan-card-label";
+      label.innerHTML = `${ICONS.plan}<span>计划</span>`;
+      const actions = document.createElement("span");
+      actions.className = "plan-card-actions";
+      const download = document.createElement("button");
+      download.type = "button";
+      download.className = "plan-card-action";
+      download.setAttribute("aria-label", "下载计划");
+      download.innerHTML = ICONS.download;
+      download.onclick = click => {
+        click.stopPropagation();
+        downloadPlanText(titleText, planText);
+      };
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "plan-card-action";
+      copy.setAttribute("aria-label", "复制计划");
+      copy.innerHTML = ICONS.copy;
+      copy.onclick = click => {
+        click.stopPropagation();
+        copyPromptCardText(copy, planText);
+      };
+      actions.append(download, copy);
+      head.append(label, actions);
+
+      const title = document.createElement("h2");
+      title.className = "plan-card-title";
+      title.textContent = titleText;
+      const summaryTitle = document.createElement("h3");
+      summaryTitle.className = "plan-card-summary-title";
+      summaryTitle.textContent = "Summary";
+      const summary = document.createElement("div");
+      summary.className = "plan-card-summary";
+      if (summaryText) renderMarkdownLite(summary, summaryText);
+      const execute = document.createElement("button");
+      execute.type = "button";
+      execute.className = "plan-card-execute";
+      execute.textContent = "执行计划";
+      execute.onclick = click => {
+        click.stopPropagation();
+        activePlan = plan;
+        executeActivePlan();
+      };
+      card.append(head, title, summaryTitle, summary, execute);
+      updatePlanActionState();
+      return card;
+    }
+    function planTextFromPayload(payload) {
+      const source = payload.plan !== undefined ? payload.plan : payload.summary;
+      return normalizePlanPayloadValue(source || payload.text || payload.delta || "");
+    }
+    function normalizePlanPayloadValue(value) {
+      if (typeof value === "string") return value.trim();
+      if (Array.isArray(value)) {
+        return value.map(item => normalizePlanPayloadValue(item)).filter(Boolean).join("\\n");
+      }
+      if (value && typeof value === "object") {
+        const chunks = [];
+        if (value.title) chunks.push("# " + String(value.title).trim());
+        if (value.summary) chunks.push("## Summary\\n" + normalizePlanPayloadValue(value.summary));
+        const steps = value.steps || value.items;
+        if (Array.isArray(steps) && steps.length) {
+          chunks.push("## Steps\\n" + steps.map(step => "- " + planStepText(step)).join("\\n"));
+        }
+        if (chunks.length) return chunks.join("\\n\\n").trim();
+        return Object.entries(value)
+          .filter(([, entryValue]) => typeof entryValue === "string" || typeof entryValue === "number")
+          .map(([key, entryValue]) => `${key}: ${entryValue}`)
+          .join("\\n")
+          .trim();
+      }
+      return "";
+    }
+    function planStepText(step) {
+      if (typeof step === "string") return step.trim();
+      if (!step || typeof step !== "object") return String(step || "").trim();
+      const text = step.text || step.title || step.description || step.step || "";
+      const status = step.status ? `[${step.status}] ` : "";
+      return status + String(text || JSON.stringify(step)).trim();
+    }
+    function planTitleFromText(text, fallback) {
+      if (String(fallback || "").trim()) return String(fallback).trim();
+      const normalized = String(text || "").replace(/\\r\\n/g, "\\n");
+      const heading = normalized.match(/^#\\s+(.+)$/m);
+      if (heading) return heading[1].trim();
+      const first = normalized.split("\\n").map(line => line.trim()).find(Boolean) || "计划";
+      return first.replace(/^#+\\s*/, "").slice(0, 120);
+    }
+    function planSummaryFromText(text) {
+      const normalized = String(text || "").replace(/\\r\\n/g, "\\n");
+      const summary = normalized.match(/^##\\s+Summary\\s*\\n([\\s\\S]*?)(?=\\n##\\s+|$)/im);
+      const source = summary ? summary[1] : normalized.replace(/^#\\s+.+$/m, "");
+      return trimPlanSummary(source);
+    }
+    function trimPlanSummary(text) {
+      const compact = String(text || "").trim();
+      if (compact.length <= 360) return compact;
+      return compact.slice(0, 357).trimEnd() + "...";
+    }
+    function downloadPlanText(title, text) {
+      const blob = new Blob([String(text || "")], {type: "text/markdown;charset=utf-8"});
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = safeDownloadName(title || "plan") + ".md";
+      document.body.append(link);
+      link.click();
+      URL.revokeObjectURL(link.href);
+      link.remove();
+    }
+    function safeDownloadName(value) {
+      return String(value || "plan").trim().replace(/[\\\\/:*?"<>|]+/g, "-").slice(0, 80) || "plan";
     }
     function handleHiddenNativeFeedback(event) {
       const payload = event.payload || {};
@@ -6179,17 +6580,21 @@ __ICONS_JS__
         } else {
           node.text += String(incomingText);
         }
-        const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text);
+        const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text, event);
         node.row.classList.toggle("prompt-message", renderedPrompt);
         if (renderedPrompt) return;
         renderMarkdownLite(node.body, node.text);
       } else {
+        node.text = String(incomingText);
+        const renderedPrompt = renderGeneratedPromptTranscript(node.body, incomingText, event);
+        node.row.classList.toggle("prompt-message", renderedPrompt);
+        if (renderedPrompt) return;
         node.row.classList.remove("prompt-message");
         renderTranscriptImages(node.body, payload.images || []);
         appendText(node.body, incomingText);
       }
     }
-    function renderGeneratedPromptTranscript(target, text) {
+    function renderGeneratedPromptTranscript(target, text, event) {
       const split = splitGeneratedPromptText(text);
       if (!split) return false;
       target.replaceChildren();
@@ -6199,12 +6604,32 @@ __ICONS_JS__
         renderMarkdownLite(preface, split.preface);
         target.append(preface);
       }
+      if (isPlanExecutionPrompt(split.prompt) && !hasNativePlanEventForTurn(event)) {
+        const planText = planTextFromExecutionPrompt(split.prompt);
+        if (planText) {
+          const plan = document.createElement("div");
+          plan.className = "plan-item prompt-plan-fallback";
+          plan.append(createPlanCardElement(planText, ""));
+          target.append(plan);
+        }
+      }
       target.append(createPlainPromptCard(split.prompt));
       return true;
     }
+    function hasNativePlanEventForTurn(event) {
+      const payload = (event && event.payload) || {};
+      const turnId = String(payload.native_turn_id || payload.turnId || "");
+      if (!turnId) return false;
+      return loadedEvents.some(candidate => isNativePlanEvent(candidate) && eventFoldTurnId(candidate) === turnId);
+    }
+    function planTextFromExecutionPrompt(text) {
+      const source = String(text || "").trim();
+      if (!isPlanExecutionPrompt(source)) return "";
+      return source.replace(/^PLEASE IMPLEMENT THIS PLAN:\\s*/i, "").trim();
+    }
     function splitGeneratedPromptText(text) {
       const source = String(text || "").replace(/\\r\\n/g, "\\n");
-      const match = /(^|\\n)你在[\\s\\S]+?工作。/m.exec(source);
+      const match = generatedPromptStartMatch(source);
       if (!match) return null;
       const promptStart = match.index + (match[1] ? 1 : 0);
       const rawPrompt = stripGeneratedPromptFence(source.slice(promptStart)).trim();
@@ -6214,6 +6639,9 @@ __ICONS_JS__
         preface: stripGeneratedPromptFence(source.slice(0, promptStart)).trim(),
         prompt
       };
+    }
+    function generatedPromptStartMatch(source) {
+      return /(^|\\n)(?:你在[\\s\\S]+?工作。|PLEASE IMPLEMENT THIS PLAN:)/m.exec(source);
     }
     function stripGeneratedPromptFence(text) {
       return String(text || "")
@@ -6277,6 +6705,7 @@ __ICONS_JS__
     }
     function isGeneratedPromptBody(text) {
       const source = String(text || "");
+      if (/^PLEASE IMPLEMENT THIS PLAN:/i.test(source)) return true;
       if (!source.startsWith("你在 ")) return false;
       const markers = ["背景：", "必须阅读", "重点就一句"];
       return markers.some(marker => source.includes(marker));
@@ -6284,23 +6713,42 @@ __ICONS_JS__
     function createPlainPromptCard(text) {
       const card = document.createElement("section");
       card.className = "prompt-card";
+      if (isPlanExecutionPrompt(text)) card.classList.add("collapsed");
+      card.onclick = () => {
+        if (isPlanExecutionPrompt(text)) card.classList.toggle("collapsed");
+      };
       const head = document.createElement("div");
       head.className = "prompt-card-head";
       const title = document.createElement("span");
       title.className = "prompt-card-title";
-      title.textContent = "Plain text";
+      title.textContent = promptCardTitle(text);
       const button = document.createElement("button");
       button.className = "handoff-copy prompt-card-copy";
       button.type = "button";
       button.setAttribute("aria-label", "复制提示词");
       button.innerHTML = ICONS.copy;
-      button.onclick = () => copyPromptCardText(button, text);
+      button.onclick = event => {
+        event.stopPropagation();
+        copyPromptCardText(button, text);
+      };
       head.append(title, button);
       const body = document.createElement("pre");
       body.className = "prompt-card-body";
-      body.textContent = text;
+      body.textContent = promptCardBodyText(text);
       card.append(head, body);
       return card;
+    }
+    function isPlanExecutionPrompt(text) {
+      return /^PLEASE IMPLEMENT THIS PLAN:/i.test(String(text || "").trim());
+    }
+    function promptCardTitle(text) {
+      if (isPlanExecutionPrompt(text)) return "PLEASE IMPLEMENT THIS PLAN:";
+      return "Plain text";
+    }
+    function promptCardBodyText(text) {
+      const source = String(text || "").trim();
+      if (!isPlanExecutionPrompt(source)) return source;
+      return source.replace(/^PLEASE IMPLEMENT THIS PLAN:\\s*/i, "").trim();
     }
     async function copyPromptCardText(button, text) {
       const value = String(text || "");

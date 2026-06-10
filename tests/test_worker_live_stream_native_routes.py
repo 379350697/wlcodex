@@ -2064,6 +2064,11 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "body.collaboration_mode = collaborationMode;" in response
     assert 'return {"mode": "plan"};' in response
     assert 'planModeCheck.innerHTML = enabled ? ICONS.check : "";' in response
+    assert 'class="mode-chip plan-mode-chip" id="planModeChip" hidden' in response
+    assert 'id="planModeChipCancel"' in response
+    assert "function setSelectedCollaborationMode(mode)" in response
+    assert "planModeChip.hidden = !enabled;" in response
+    assert "planModeChipCancel.onclick = () => setSelectedCollaborationMode(\"default\");" in response
     assert "const permissionSettings = readSelectedPermissionSettings();" in response
     assert "body.permission_mode = permissionSettings.permission_mode;" in response
     assert '{"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"}' in response
@@ -2078,6 +2083,14 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "attachmentButton.onclick = toggleComposerActionMenu;" in response
     assert "menuUploadPhoto.onclick = () => {" in response
     assert "imageInput.click();" in response
+    assert "const sendButton = document.getElementById(\"send\");" in response
+    assert "let startingChat = false;" in response
+    assert "function updateStartControls()" in response
+    assert "sendButton.disabled = startingChat || !composerHasDraft();" in response
+    assert "promptEl.addEventListener(\"input\", () => {" in response
+    assert "updateStartControls();" in response
+    assert "button.chat:disabled" in response
+    assert "updateHandoffControls();" not in response
     assert "function sessionModelSettingsLabel(session)" in response
     assert "function sessionMetaText(session)" in response
     assert "const metadata = (session && session.metadata) || {};" in response
@@ -2426,6 +2439,11 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "function readSelectedCollaborationMode()" in response
     assert "body.collaboration_mode = collaborationMode;" in response
     assert 'planModeCheck.innerHTML = enabled ? ICONS.check : "";' in response
+    assert 'class="mode-chip plan-mode-chip" id="planModeChip" hidden' in response
+    assert 'id="planModeChipCancel"' in response
+    assert "function setSelectedCollaborationMode(mode)" in response
+    assert "planModeChip.hidden = !enabled;" in response
+    assert "planModeChipCancel.onclick = () => setSelectedCollaborationMode(\"default\");" in response
     assert "function renderAttachments" in response
     assert "function renderLocalUserEcho" in response
     assert "function clearMatchingLocalUserEcho(event)" in response
@@ -2521,7 +2539,9 @@ def test_live_page_handoff_prompt_preview_supports_copy_action() -> None:
 def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() -> None:
     response = _live_page(42, native_provider="antigravity")
 
-    assert ".prompt-card { width: auto; height: min(48vh, 620px);" in response
+    assert ".prompt-card { position: relative; width: auto; height: min(48vh, 620px);" in response
+    assert ".prompt-card.collapsed { height: 250px; min-height: 250px; cursor: pointer;" in response
+    assert ".prompt-card.collapsed::after { content: \"\";" in response
     assert ".transcript-item.prompt-message { justify-self: stretch;" in response
     assert "margin-left: 6px; margin-right: 6px;" in response
     assert ".transcript-item.prompt-message .transcript-meta { display: none;" in response
@@ -2529,11 +2549,11 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert ".prompt-card-head { display: flex;" in response
     assert "min-height: 0; padding: 20px 26px 0;" in response
     assert "background: #303030;" in response
-    assert ".prompt-card-title { color: #f8fafc; font-size: 16px;" in response
+    assert ".prompt-card-title { color: #f8fafc; font-size: 25px; font-weight: 400;" in response
     assert ".transcript-body .prompt-card-body { min-height: 0; overflow: auto;" in response
     assert "padding: 16px 26px 28px;" in response
     assert "border-radius: 0; background: #303030;" in response
-    assert "font: 12px/1.42 ui-monospace" in response
+    assert 'font: 22px/1.34 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;' in response
     assert "-webkit-text-size-adjust: 100%;" in response
     assert "border: 0;" in response
     assert "white-space: pre-wrap;" in response
@@ -2551,8 +2571,14 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert "paragraph.push(trimmed);" in response
     assert "if (isGeneratedPromptSentenceBoundary(trimmed)) flushParagraph();" in response
     assert "function splitGeneratedPromptText(text)" in response
-    assert "function renderGeneratedPromptTranscript(target, text)" in response
-    assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text);" in response
+    assert "function generatedPromptStartMatch(source)" in response
+    assert "PLEASE IMPLEMENT THIS PLAN:" in response
+    assert "function renderGeneratedPromptTranscript(target, text, event)" in response
+    assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text, event);" in response
+    assert "function hasNativePlanEventForTurn(event)" in response
+    assert "function planTextFromExecutionPrompt(text)" in response
+    assert "plan.className = \"plan-item prompt-plan-fallback\";" in response
+    assert "plan.append(createPlanCardElement(planText, \"\"));" in response
     assert "node.row.classList.toggle(\"prompt-message\", renderedPrompt);" in response
     assert "const generatedPrompt = groupHasGeneratedPrompt(group);" in response
     assert "!generatedPrompt &&" in response
@@ -2564,12 +2590,69 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert "重点就一句" in response
 
 
+def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert ".plan-card { position: relative; display: grid;" in response
+    assert ".plan-card-title { margin: 0; color: #ffffff; font-size: 33px;" in response
+    assert ".plan-card:not(.expanded)::after" in response
+    assert ".plan-page-backdrop { position: fixed; inset: 0; z-index: 12; overflow-y: auto; overflow-x: hidden;" in response
+    assert ".plan-page-shell { box-sizing: border-box; width: 100%; max-width: 100vw; min-height: 100vh;" in response
+    assert ".plan-page-top { position: sticky; top: 0; z-index: 1; box-sizing: border-box;" in response
+    assert ".plan-page-content { box-sizing: border-box; width: 100%; max-width: 100vw; min-width: 0;" in response
+    assert ".plan-page-content > * { min-width: 0; max-width: 100%; }" in response
+    assert ".plan-page-title, .plan-page-summary, .plan-page-body { overflow-wrap: anywhere; word-break: break-word; }" in response
+    assert ".plan-page-body code, .plan-page-summary code { white-space: normal; overflow-wrap: anywhere; word-break: break-word;" in response
+    assert 'id="planPage"' in response
+    assert 'class="plan-page-backdrop" id="planPage"' in response
+    assert 'id="planPageClose"' in response
+    assert 'id="planPageExecute"' in response
+    assert "let activePlan = null;" in response
+    assert "function isNativePlanEvent(event)" in response
+    assert 'payload.action === "plan_updated"' in response
+    assert "else if (isNativePlanEvent(event)) renderPlanEvent(event);" in response
+    assert "function renderPlanEvent(event)" in response
+    assert "setActivePlanFromEvent(event, planText, titleText, summaryText);" in response
+    assert "label.innerHTML = `${ICONS.plan}<span>计划</span>`;" in response
+    assert "download.innerHTML = ICONS.download;" in response
+    assert 'copy.setAttribute("aria-label", "复制计划");' in response
+    assert 'execute.textContent = "执行计划";' in response
+    assert "execute.onclick = click => {" in response
+    assert "executeActivePlan();" in response
+    assert "openPlanPage(plan);" in response
+    assert "function openPlanPage(plan = activePlan)" in response
+    assert "function renderPlanPage(plan)" in response
+    assert "function closePlanPage()" in response
+    assert "function createPlanCardElement(planText, titleFallback)" in response
+    assert "function planTextFromPayload(payload)" in response
+    assert "function planTitleFromText(text, fallback)" in response
+    assert "function planSummaryFromText(text)" in response
+    assert "function downloadPlanText(title, text)" in response
+    assert "function executeActivePlan()" in response
+    assert "planExecutionPrompt(activePlan.body)" in response
+    assert "planDetailTextFromText(plan.body, plan.summary)" in response
+    assert 'const hideHandoffForPlan = PROVIDER === "codex" && (selectedCollaborationMode === "plan" || Boolean(activePlan));' in response
+    assert "handoffButton.hidden = hideHandoffForPlan;" in response
+    assert "buildNativePromptBody(prompt, {includeCollaborationMode: false})" in response
+    assert "buildNativePromptBody(prompt, {includeCollaborationMode: true})" in response
+    assert 'body: JSON.stringify(body)' in response
+    assert "if (isNativePlanEvent(event)) return 35;" in response
+
+
 def test_live_page_generated_prompt_cards_support_copy_per_message() -> None:
     response = _live_page(42, native_provider="antigravity")
 
     assert "function createPlainPromptCard(text)" in response
+    assert "function isPlanExecutionPrompt(text)" in response
+    assert "card.classList.add(\"collapsed\")" in response
+    assert "card.classList.toggle(\"collapsed\")" in response
+    assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text, event);" in response
+    assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, incomingText, event);" in response
+    assert "title.textContent = promptCardTitle(text);" in response
+    assert "body.textContent = promptCardBodyText(text);" in response
     assert "button.className = \"handoff-copy prompt-card-copy\";" in response
-    assert "button.onclick = () => copyPromptCardText(button, text);" in response
+    assert "event.stopPropagation();" in response
+    assert "copyPromptCardText(button, text);" in response
     assert "async function copyPromptCardText(button, text)" in response
     assert "setPromptCardCopyState(button, \"copied\")" in response
 

@@ -342,9 +342,17 @@ def _map_file_change_patch_updated(
 def _map_plan_updated(
     src: CodexRuntimeSource, payload: dict
 ) -> list[RuntimeEvent]:
+    plan_payload = {
+        "action": "plan_updated",
+        "threadId": payload.get("threadId", ""),
+        "turnId": payload.get("turnId", ""),
+    }
+    for key in ("plan", "summary", "title", "status"):
+        if key in payload:
+            plan_payload[key] = payload.get(key)
     return [src._make(
         EventType.AGENT_RUN_ACTIVITY,
-        {"action": "plan_updated", "threadId": payload.get("threadId")},
+        plan_payload,
     )]
 
 
