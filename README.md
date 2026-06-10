@@ -206,12 +206,22 @@ bash scripts/pytest-profile 50
 # Run lint
 .venv/bin/python -m ruff check .
 
+# Run Playwright without using npx or network package resolution
+scripts/playwright --version
+scripts/playwright-node -e "console.log(require.resolve('playwright'))"
+
 # Start bot (requires codex CLI on PATH)
 .venv/bin/wlcodex --config config/wlcodex.toml
 
 # Or with fake backend for testing
 .venv/bin/wlcodex --config config/wlcodex.toml --fake-backend
 ```
+
+The Playwright helpers first use `WLCODEX_PLAYWRIGHT_NODE_MODULES` when set,
+then `./node_modules`, then the shared Codex tool install at
+`~/.codex/tools/playwright/node_modules`. This keeps local browser automation
+available in restricted-network sessions where `npx playwright` would otherwise
+try to download from npm.
 
 ## Telegram Commands
 

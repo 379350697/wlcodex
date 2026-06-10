@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd)"
+
+candidate_node_modules=()
+if [[ -n "${WLCODEX_PLAYWRIGHT_NODE_MODULES:-}" ]]; then
+  candidate_node_modules+=("${WLCODEX_PLAYWRIGHT_NODE_MODULES}")
+fi
+candidate_node_modules+=(
+  "${repo_root}/node_modules"
+  "${HOME}/.codex/tools/playwright/node_modules"
+)
+
+playwright_node_modules=""
+for node_modules in "${candidate_node_modules[@]}"; do
+  if [[ -f "${node_modules}/playwright/package.json" ]]; then
+    playwright_node_modules="${node_modules}"
+    break
+  fi
+done
+
+if [[ -z "${playwright_node_modules}" ]]; then
+  {
+    printf 'Playwright is not available.\n'
+    printf 'Install it in this repo, or set WLCODEX_PLAYWRIGHT_NODE_MODULES to a node_modules directory containing playwright.\n'
+  } >&2
+  exit 127
+fi
+
+export NODE_PATH="${playwright_node_modules}${NODE_PATH:+:${NODE_PATH}}"
+exec node "$@"
