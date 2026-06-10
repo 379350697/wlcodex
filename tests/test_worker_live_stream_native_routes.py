@@ -2074,7 +2074,8 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "planModeChip.hidden = !enabled;" in response
     assert "planModeChipCancel.onclick = () => setSelectedCollaborationMode(\"default\");" in response
     assert "const permissionSettings = readSelectedPermissionSettings();" in response
-    assert "body.permission_mode = permissionSettings.permission_mode;" in response
+    assert "let permissionMode = permissionSettings.permission_mode;" in response
+    assert "body.permission_mode = permissionMode;" in response
     assert '{"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"}' in response
     assert '{"value": "auto_review", "label": "自动审核", "description": "自动审查提权请求"}' in response
     assert '{"value": "read_only", "label": "只读", "description": "编辑文件或运行命令需要批准"}' in response
@@ -2141,7 +2142,7 @@ async def test_native_provider_home_polling_skips_unchanged_list_rerender(
 
 
 @pytest.mark.asyncio
-async def test_non_codex_native_provider_plus_menu_only_exposes_upload_photo(
+async def test_claude_native_provider_plus_menu_exposes_plan_but_hides_plugins(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -2156,29 +2157,67 @@ async def test_non_codex_native_provider_plus_menu_only_exposes_upload_photo(
     )
     await server.start()
     try:
-        responses = []
-        for provider in ("claude", "antigravity"):
-            responses.append(
-                await _read_response(
-                    server.host,
-                    server.port,
-                    f"GET /native/{provider} HTTP/1.1\r\n"
-                    "Host: test\r\nAuthorization: Bearer secret\r\n"
-                    "Connection: close\r\n\r\n",
-                )
-            )
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/claude HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
     finally:
         await server.stop()
 
-    for response in responses:
-        assert "HTTP/1.1 200 OK" in response
-        assert 'id="menuUploadPhoto"' in response
-        assert "上传照片" in response
-        assert 'id="menuPlanMode" type="button" role="menuitem" hidden' in response
-        assert 'id="pluginMenuSection" hidden' in response
-        assert 'id="pluginList" hidden' in response
-        assert "const SUPPORTS_EXTENDED_COMPOSER_ACTIONS = false;" in response
-        assert "if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return null;" in response
+    assert "HTTP/1.1 200 OK" in response
+    assert 'id="menuUploadPhoto"' in response
+    assert "上传照片" in response
+    assert 'id="menuPlanMode" type="button" role="menuitem" aria-pressed="false"' in response
+    assert 'id="pluginMenuSection" hidden' in response
+    assert 'id="pluginList" hidden' in response
+    assert "const SUPPORTS_PLAN_MODE = true;" in response
+    assert "const SUPPORTS_PLUGIN_MENU = false;" in response
+    assert "const USES_CLAUDE_PLAN_PERMISSION_MODE = true;" in response
+    assert 'if (!SUPPORTS_PLAN_MODE) return "default";' in response
+    assert "if (USES_CLAUDE_PLAN_PERMISSION_MODE) return null;" in response
+    assert 'if (USES_CLAUDE_PLAN_PERMISSION_MODE && selectedCollaborationMode === "plan") {' in response
+    assert 'permissionMode = "plan";' in response
+
+
+@pytest.mark.asyncio
+async def test_antigravity_native_provider_plus_menu_only_exposes_upload_photo(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry(
+            [FakeClaudeProvider(), FakeAntigravityProvider()]
+        ),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/antigravity HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'id="menuUploadPhoto"' in response
+    assert "上传照片" in response
+    assert 'id="menuPlanMode" type="button" role="menuitem" hidden aria-pressed="false"' in response
+    assert 'id="pluginMenuSection" hidden' in response
+    assert 'id="pluginList" hidden' in response
+    assert "const SUPPORTS_PLAN_MODE = false;" in response
+    assert "const SUPPORTS_PLUGIN_MENU = false;" in response
+    assert "const USES_CLAUDE_PLAN_PERMISSION_MODE = false;" in response
+    assert 'if (!SUPPORTS_PLAN_MODE) return "default";' in response
 
 
 @pytest.mark.asyncio
@@ -2442,7 +2481,8 @@ async def test_worker_live_page_exposes_working_codex_permission_settings(
     assert "permissionOptions.hidden = false;" in response
     assert "savePermissionSettingsIfChanged();" in response
     assert "const permissionSettings = readSelectedPermissionSettings();" in response
-    assert "body.permission_mode = permissionSettings.permission_mode;" in response
+    assert "let permissionMode = permissionSettings.permission_mode;" in response
+    assert "body.permission_mode = permissionMode;" in response
     assert '{"value": "default", "label": "默认权限", "description": "在沙盒中运行命令"}' in response
     assert '{"value": "auto_review", "label": "自动审核", "description": "自动审查提权请求"}' in response
     assert '{"value": "read_only", "label": "只读", "description": "编辑文件或运行命令需要批准"}' in response
@@ -2541,17 +2581,34 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert ".bubble" not in response
 
 
-def test_non_codex_worker_live_page_plus_menu_only_exposes_upload_photo() -> None:
-    for provider in ("claude", "antigravity"):
-        response = _live_page(42, native_provider=provider)
+def test_claude_worker_live_page_plus_menu_exposes_plan_but_hides_plugins() -> None:
+    response = _live_page(42, native_provider="claude")
 
-        assert 'id="menuUploadPhoto"' in response
-        assert "上传照片" in response
-        assert 'id="menuPlanMode" type="button" role="menuitem" hidden' in response
-        assert 'id="pluginMenuSection" hidden' in response
-        assert 'id="pluginList" hidden' in response
-        assert "const SUPPORTS_EXTENDED_COMPOSER_ACTIONS = false;" in response
-        assert "if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return null;" in response
+    assert 'id="menuUploadPhoto"' in response
+    assert "上传照片" in response
+    assert 'id="menuPlanMode" type="button" role="menuitem" aria-pressed="false"' in response
+    assert 'id="pluginMenuSection" hidden' in response
+    assert 'id="pluginList" hidden' in response
+    assert "const SUPPORTS_PLAN_MODE = true;" in response
+    assert "const SUPPORTS_PLUGIN_MENU = false;" in response
+    assert "const USES_CLAUDE_PLAN_PERMISSION_MODE = true;" in response
+    assert "if (USES_CLAUDE_PLAN_PERMISSION_MODE) return null;" in response
+    assert 'if (USES_CLAUDE_PLAN_PERMISSION_MODE && selectedCollaborationMode === "plan") {' in response
+    assert 'permissionMode = "plan";' in response
+
+
+def test_antigravity_worker_live_page_plus_menu_only_exposes_upload_photo() -> None:
+    response = _live_page(42, native_provider="antigravity")
+
+    assert 'id="menuUploadPhoto"' in response
+    assert "上传照片" in response
+    assert 'id="menuPlanMode" type="button" role="menuitem" hidden aria-pressed="false"' in response
+    assert 'id="pluginMenuSection" hidden' in response
+    assert 'id="pluginList" hidden' in response
+    assert "const SUPPORTS_PLAN_MODE = false;" in response
+    assert "const SUPPORTS_PLUGIN_MENU = false;" in response
+    assert "const USES_CLAUDE_PLAN_PERMISSION_MODE = false;" in response
+    assert 'if (!SUPPORTS_PLAN_MODE) return "default";' in response
 
 
 def test_live_page_gates_active_turn_controls_with_provider_capabilities() -> None:

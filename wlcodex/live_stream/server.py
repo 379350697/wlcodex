@@ -2646,10 +2646,11 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     provider_name = provider_name.strip() or "codex"
     provider_label = _native_provider_display_name(provider_name)
     api_base = f"/api/native/{quote(provider_name, safe='')}"
-    supports_extended_composer_actions = provider_name == "codex"
-    extended_composer_action_hidden = (
-        "" if supports_extended_composer_actions else " hidden"
-    )
+    supports_plan_mode = provider_name in {"codex", "claude"}
+    supports_plugin_menu = provider_name == "codex"
+    uses_claude_plan_permission_mode = provider_name == "claude"
+    plan_mode_action_hidden = "" if supports_plan_mode else " hidden"
+    plugin_menu_hidden = "" if supports_plugin_menu else " hidden"
     template = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -2881,7 +2882,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
         </span>
         <span></span>
       </button>
-      <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem"__EXTENDED_COMPOSER_ACTION_HIDDEN__ aria-pressed="false">
+      <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem"__PLAN_MODE_ACTION_HIDDEN__ aria-pressed="false">
         <span class="composer-menu-icon">☷</span>
         <span>
           <span class="composer-menu-title">计划模式</span>
@@ -2889,8 +2890,8 @@ def _native_codex_page(provider_name: str = "codex") -> str:
         </span>
         <span class="composer-menu-check" id="planModeCheck"></span>
       </button>
-      <div class="composer-menu-section" id="pluginMenuSection"__EXTENDED_COMPOSER_ACTION_HIDDEN__>插件</div>
-      <div class="plugin-list" id="pluginList"__EXTENDED_COMPOSER_ACTION_HIDDEN__></div>
+      <div class="composer-menu-section" id="pluginMenuSection"__PLUGIN_MENU_HIDDEN__>插件</div>
+      <div class="plugin-list" id="pluginList"__PLUGIN_MENU_HIDDEN__></div>
     </div>
     <div class="start-row">
       <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
@@ -2904,7 +2905,9 @@ def _native_codex_page(provider_name: str = "codex") -> str:
 __ICONS_JS__
     const PROVIDER_LABEL = __PROVIDER_LABEL_JSON__;
     const API_BASE = __API_BASE_JSON__;
-    const SUPPORTS_EXTENDED_COMPOSER_ACTIONS = __SUPPORTS_EXTENDED_COMPOSER_ACTIONS_JSON__;
+    const SUPPORTS_PLAN_MODE = __SUPPORTS_PLAN_MODE_JSON__;
+    const SUPPORTS_PLUGIN_MENU = __SUPPORTS_PLUGIN_MENU_JSON__;
+    const USES_CLAUDE_PLAN_PERMISSION_MODE = __USES_CLAUDE_PLAN_PERMISSION_MODE_JSON__;
     const PROJECTS_URL = "/api/council/projects";
     const token = new URLSearchParams(location.search).get("token") || "";
     if (token) {
@@ -3439,7 +3442,7 @@ __ICONS_JS__
     }
 
     function loadSavedCollaborationMode() {
-      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return "default";
+      if (!SUPPORTS_PLAN_MODE) return "default";
       try {
         const stored = String(localStorage.getItem(COLLABORATION_MODE_STORAGE_KEY) || "default").toLowerCase();
         return stored === "plan" ? "plan" : "default";
@@ -3453,27 +3456,29 @@ __ICONS_JS__
     }
 
     function readSelectedCollaborationMode() {
-      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return null;
+      if (!SUPPORTS_PLAN_MODE) return null;
+      if (USES_CLAUDE_PLAN_PERMISSION_MODE) return null;
       if (selectedCollaborationMode === "plan") return {"mode": "plan"};
       return null;
     }
 
     function setSelectedCollaborationMode(mode) {
-      selectedCollaborationMode = SUPPORTS_EXTENDED_COMPOSER_ACTIONS && mode === "plan" ? "plan" : "default";
+      selectedCollaborationMode = SUPPORTS_PLAN_MODE && mode === "plan" ? "plan" : "default";
       saveSelectedCollaborationMode();
       updateCollaborationMenu();
       updateStartControls();
     }
 
     function updateCollaborationMenu() {
-      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) {
+      pluginMenuSection.hidden = !SUPPORTS_PLUGIN_MENU;
+      pluginList.hidden = !SUPPORTS_PLUGIN_MENU;
+      if (!SUPPORTS_PLAN_MODE) {
         menuPlanMode.hidden = true;
-        pluginMenuSection.hidden = true;
-        pluginList.hidden = true;
         planModeCheck.innerHTML = "";
         planModeChip.hidden = true;
         return;
       }
+      menuPlanMode.hidden = false;
       const enabled = selectedCollaborationMode === "plan";
       menuPlanMode.classList.toggle("selected", enabled);
       menuPlanMode.setAttribute("aria-pressed", enabled ? "true" : "false");
@@ -3482,7 +3487,7 @@ __ICONS_JS__
     }
 
     function renderPluginList() {
-      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return;
+      if (!SUPPORTS_PLUGIN_MENU) return;
       pluginList.innerHTML = "";
       const items = Array.isArray(PLUGIN_MENU_ITEMS) ? PLUGIN_MENU_ITEMS : [];
       if (!items.length) {
@@ -3717,7 +3722,11 @@ __ICONS_JS__
       if (settings.model) body.model = settings.model;
       if (settings.effort) body.effort = settings.effort;
       if (settings.service_tier) body.service_tier = settings.service_tier;
-      body.permission_mode = permissionSettings.permission_mode;
+      let permissionMode = permissionSettings.permission_mode;
+      if (USES_CLAUDE_PLAN_PERMISSION_MODE && selectedCollaborationMode === "plan") {
+        permissionMode = "plan";
+      }
+      body.permission_mode = permissionMode;
       const collaborationMode = readSelectedCollaborationMode();
       if (collaborationMode) {
         body.collaboration_mode = collaborationMode;
@@ -3774,7 +3783,7 @@ __ICONS_JS__
       imageInput.click();
     };
     menuPlanMode.onclick = () => {
-      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return;
+      if (!SUPPORTS_PLAN_MODE) return;
       setSelectedCollaborationMode(selectedCollaborationMode === "plan" ? "default" : "plan");
       closeComposerActionMenu();
     };
@@ -3998,12 +4007,24 @@ __ICONS_JS__
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
         .replace(
-            "__SUPPORTS_EXTENDED_COMPOSER_ACTIONS_JSON__",
-            json.dumps(supports_extended_composer_actions),
+            "__SUPPORTS_PLAN_MODE_JSON__",
+            json.dumps(supports_plan_mode),
         )
         .replace(
-            "__EXTENDED_COMPOSER_ACTION_HIDDEN__",
-            extended_composer_action_hidden,
+            "__SUPPORTS_PLUGIN_MENU_JSON__",
+            json.dumps(supports_plugin_menu),
+        )
+        .replace(
+            "__USES_CLAUDE_PLAN_PERMISSION_MODE_JSON__",
+            json.dumps(uses_claude_plan_permission_mode),
+        )
+        .replace(
+            "__PLAN_MODE_ACTION_HIDDEN__",
+            plan_mode_action_hidden,
+        )
+        .replace(
+            "__PLUGIN_MENU_HIDDEN__",
+            plugin_menu_hidden,
         )
         .replace(
             "__PERMISSION_PRESETS_JSON__",
@@ -4013,7 +4034,7 @@ __ICONS_JS__
             "__PLUGIN_MENU_ITEMS_JSON__",
             json.dumps(
                 _codex_plugin_menu_items()
-                if supports_extended_composer_actions
+                if supports_plugin_menu
                 else [],
                 ensure_ascii=False,
             ),
@@ -4028,10 +4049,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     provider_label = _native_provider_display_name(native_provider)
     api_base = f"/api/native/{quote(native_provider, safe='')}"
     safe_title = escape(provider_label)
-    supports_extended_composer_actions = native_provider == "codex"
-    extended_composer_action_hidden = (
-        "" if supports_extended_composer_actions else " hidden"
-    )
+    supports_plan_mode = native_provider in {"codex", "claude"}
+    supports_plugin_menu = native_provider == "codex"
+    uses_claude_plan_permission_mode = native_provider == "claude"
+    plan_mode_action_hidden = "" if supports_plan_mode else " hidden"
+    plugin_menu_hidden = "" if supports_plugin_menu else " hidden"
     template = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -4380,7 +4402,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
             </span>
             <span></span>
           </button>
-          <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem"__EXTENDED_COMPOSER_ACTION_HIDDEN__ aria-pressed="false">
+          <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem"__PLAN_MODE_ACTION_HIDDEN__ aria-pressed="false">
             <span class="composer-menu-icon">☷</span>
             <span>
               <span class="composer-menu-title">计划模式</span>
@@ -4388,8 +4410,8 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
             </span>
             <span class="composer-menu-check" id="planModeCheck"></span>
           </button>
-          <div class="composer-menu-section" id="pluginMenuSection"__EXTENDED_COMPOSER_ACTION_HIDDEN__>插件</div>
-          <div class="plugin-list" id="pluginList"__EXTENDED_COMPOSER_ACTION_HIDDEN__></div>
+          <div class="composer-menu-section" id="pluginMenuSection"__PLUGIN_MENU_HIDDEN__>插件</div>
+          <div class="plugin-list" id="pluginList"__PLUGIN_MENU_HIDDEN__></div>
         </div>
         <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
         <input id="imageInput" type="file" accept="image/*" multiple hidden>
@@ -4451,7 +4473,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
 __ICONS_JS__
     const PROVIDER_LABEL = __PROVIDER_LABEL_JSON__;
     const API_BASE = __API_BASE_JSON__;
-    const SUPPORTS_EXTENDED_COMPOSER_ACTIONS = __SUPPORTS_EXTENDED_COMPOSER_ACTIONS_JSON__;
+    const SUPPORTS_PLAN_MODE = __SUPPORTS_PLAN_MODE_JSON__;
+    const SUPPORTS_PLUGIN_MENU = __SUPPORTS_PLUGIN_MENU_JSON__;
+    const USES_CLAUDE_PLAN_PERMISSION_MODE = __USES_CLAUDE_PLAN_PERMISSION_MODE_JSON__;
     let nativeThreadId = params.get("native_thread_id") || "";
     let nativeTurnId = "";
     let activeTurnId = "";
@@ -4953,7 +4977,7 @@ __ICONS_JS__
       permissionSettingsDirty = true;
     }
     function loadSavedCollaborationMode() {
-      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return "default";
+      if (!SUPPORTS_PLAN_MODE) return "default";
       try {
         const stored = String(localStorage.getItem(COLLABORATION_MODE_STORAGE_KEY) || "default").toLowerCase();
         return stored === "plan" ? "plan" : "default";
@@ -4965,26 +4989,28 @@ __ICONS_JS__
       try { localStorage.setItem(COLLABORATION_MODE_STORAGE_KEY, selectedCollaborationMode); } catch (_error) {}
     }
     function readSelectedCollaborationMode() {
-      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return null;
+      if (!SUPPORTS_PLAN_MODE) return null;
+      if (USES_CLAUDE_PLAN_PERMISSION_MODE) return null;
       if (selectedCollaborationMode === "plan") return {"mode": "plan"};
       return null;
     }
     function setSelectedCollaborationMode(mode) {
-      selectedCollaborationMode = SUPPORTS_EXTENDED_COMPOSER_ACTIONS && mode === "plan" ? "plan" : "default";
+      selectedCollaborationMode = SUPPORTS_PLAN_MODE && mode === "plan" ? "plan" : "default";
       saveSelectedCollaborationMode();
       updateCollaborationMenu();
       updateComposerDisabled();
       updateHandoffControls();
     }
     function updateCollaborationMenu() {
-      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) {
+      pluginMenuSection.hidden = !SUPPORTS_PLUGIN_MENU;
+      pluginList.hidden = !SUPPORTS_PLUGIN_MENU;
+      if (!SUPPORTS_PLAN_MODE) {
         menuPlanMode.hidden = true;
-        pluginMenuSection.hidden = true;
-        pluginList.hidden = true;
         planModeCheck.innerHTML = "";
         planModeChip.hidden = true;
         return;
       }
+      menuPlanMode.hidden = false;
       const enabled = selectedCollaborationMode === "plan";
       menuPlanMode.classList.toggle("selected", enabled);
       menuPlanMode.setAttribute("aria-pressed", enabled ? "true" : "false");
@@ -4992,7 +5018,7 @@ __ICONS_JS__
       planModeChip.hidden = !enabled;
     }
     function renderPluginList() {
-      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return;
+      if (!SUPPORTS_PLUGIN_MENU) return;
       pluginList.innerHTML = "";
       const items = Array.isArray(PLUGIN_MENU_ITEMS) ? PLUGIN_MENU_ITEMS : [];
       if (!items.length) {
@@ -5220,7 +5246,7 @@ __ICONS_JS__
       imageInput.click();
     };
     menuPlanMode.onclick = () => {
-      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return;
+      if (!SUPPORTS_PLAN_MODE) return;
       setSelectedCollaborationMode(selectedCollaborationMode === "plan" ? "default" : "plan");
       closeComposerActionMenu();
     };
@@ -5309,7 +5335,11 @@ __ICONS_JS__
       if (savedModelSettings.model) body.model = savedModelSettings.model;
       if (savedModelSettings.effort) body.effort = savedModelSettings.effort;
       if (savedModelSettings.service_tier) body.service_tier = savedModelSettings.service_tier;
-      body.permission_mode = permissionSettings.permission_mode;
+      let permissionMode = permissionSettings.permission_mode;
+      if (USES_CLAUDE_PLAN_PERMISSION_MODE && selectedCollaborationMode === "plan") {
+        permissionMode = "plan";
+      }
+      body.permission_mode = permissionMode;
       if (options.includeCollaborationMode) {
         const collaborationMode = readSelectedCollaborationMode();
         if (collaborationMode) {
@@ -7205,12 +7235,24 @@ __ICONS_JS__
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
         .replace(
-            "__SUPPORTS_EXTENDED_COMPOSER_ACTIONS_JSON__",
-            json.dumps(supports_extended_composer_actions),
+            "__SUPPORTS_PLAN_MODE_JSON__",
+            json.dumps(supports_plan_mode),
         )
         .replace(
-            "__EXTENDED_COMPOSER_ACTION_HIDDEN__",
-            extended_composer_action_hidden,
+            "__SUPPORTS_PLUGIN_MENU_JSON__",
+            json.dumps(supports_plugin_menu),
+        )
+        .replace(
+            "__USES_CLAUDE_PLAN_PERMISSION_MODE_JSON__",
+            json.dumps(uses_claude_plan_permission_mode),
+        )
+        .replace(
+            "__PLAN_MODE_ACTION_HIDDEN__",
+            plan_mode_action_hidden,
+        )
+        .replace(
+            "__PLUGIN_MENU_HIDDEN__",
+            plugin_menu_hidden,
         )
         .replace(
             "__PERMISSION_PRESETS_JSON__",
@@ -7220,7 +7262,7 @@ __ICONS_JS__
             "__PLUGIN_MENU_ITEMS_JSON__",
             json.dumps(
                 _codex_plugin_menu_items()
-                if supports_extended_composer_actions
+                if supports_plugin_menu
                 else [],
                 ensure_ascii=False,
             ),
