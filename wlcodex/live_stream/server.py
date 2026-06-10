@@ -2646,6 +2646,10 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     provider_name = provider_name.strip() or "codex"
     provider_label = _native_provider_display_name(provider_name)
     api_base = f"/api/native/{quote(provider_name, safe='')}"
+    supports_extended_composer_actions = provider_name == "codex"
+    extended_composer_action_hidden = (
+        "" if supports_extended_composer_actions else " hidden"
+    )
     template = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -2877,7 +2881,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
         </span>
         <span></span>
       </button>
-      <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem" aria-pressed="false">
+      <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem"__EXTENDED_COMPOSER_ACTION_HIDDEN__ aria-pressed="false">
         <span class="composer-menu-icon">☷</span>
         <span>
           <span class="composer-menu-title">计划模式</span>
@@ -2885,8 +2889,8 @@ def _native_codex_page(provider_name: str = "codex") -> str:
         </span>
         <span class="composer-menu-check" id="planModeCheck"></span>
       </button>
-      <div class="composer-menu-section">插件</div>
-      <div class="plugin-list" id="pluginList"></div>
+      <div class="composer-menu-section" id="pluginMenuSection"__EXTENDED_COMPOSER_ACTION_HIDDEN__>插件</div>
+      <div class="plugin-list" id="pluginList"__EXTENDED_COMPOSER_ACTION_HIDDEN__></div>
     </div>
     <div class="start-row">
       <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
@@ -2900,6 +2904,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
 __ICONS_JS__
     const PROVIDER_LABEL = __PROVIDER_LABEL_JSON__;
     const API_BASE = __API_BASE_JSON__;
+    const SUPPORTS_EXTENDED_COMPOSER_ACTIONS = __SUPPORTS_EXTENDED_COMPOSER_ACTIONS_JSON__;
     const PROJECTS_URL = "/api/council/projects";
     const token = new URLSearchParams(location.search).get("token") || "";
     if (token) {
@@ -2912,6 +2917,7 @@ __ICONS_JS__
     let sessions = [];
     let projectRoot = "";
     let projectCatalog = [];
+    let renderedHomeDataSignature = "";
     const SESSION_PREVIEW_LIMIT = 10;
     const LIVE_PREFETCH_LIMIT = 4;
     const prefetchedLiveUrls = new Set();
@@ -2963,6 +2969,7 @@ __ICONS_JS__
     const composerActionMenu = document.getElementById("composerActionMenu");
     const menuUploadPhoto = document.getElementById("menuUploadPhoto");
     const menuPlanMode = document.getElementById("menuPlanMode");
+    const pluginMenuSection = document.getElementById("pluginMenuSection");
     const pluginList = document.getElementById("pluginList");
     const planModeCheck = document.getElementById("planModeCheck");
     const planModeChip = document.getElementById("planModeChip");
@@ -2996,13 +3003,16 @@ __ICONS_JS__
       }
     }
 
-    async function loadSessions() {
+    async function loadSessions(render = true) {
       try {
         const data = await api(`${API_BASE}/sessions`);
         sessions = data.sessions || [];
         if (selected && !sessions.some(session => session.native_thread_id === selected.native_thread_id)) selected = null;
-        renderProjects();
-        renderSessions();
+        if (render) {
+          renderedHomeDataSignature = homeDataSignature();
+          renderProjects();
+          renderSessions();
+        }
       } catch (error) {
         sessionsEl.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
       }
@@ -3019,9 +3029,34 @@ __ICONS_JS__
       }
     }
 
+    function homeDataSignature() {
+      return JSON.stringify({
+        projectRoot,
+        projectCatalog: projectCatalog.map(project => ({
+          cwd: String(project.cwd || ""),
+          name: String(project.name || ""),
+        })),
+        sessions: sessions.map(session => ({
+          native_thread_id: String(session.native_thread_id || ""),
+          agent_run_id: session.agent_run_id || 0,
+          title: String(session.title || ""),
+          cwd: String(session.cwd || ""),
+          status: String(session.status || ""),
+          activity_at: String(session.activity_at || ""),
+          updated_at: String(session.updated_at || ""),
+          metadata: session.metadata || {},
+        })),
+      });
+    }
+
     async function loadHomeData() {
       await loadProjects();
-      await loadSessions();
+      await loadSessions(false);
+      const signature = homeDataSignature();
+      if (signature === renderedHomeDataSignature) return;
+      renderedHomeDataSignature = signature;
+      renderProjects();
+      renderSessions();
     }
 
     async function loadModelCatalog() {
@@ -3403,6 +3438,7 @@ __ICONS_JS__
     }
 
     function loadSavedCollaborationMode() {
+      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return "default";
       try {
         const stored = String(localStorage.getItem(COLLABORATION_MODE_STORAGE_KEY) || "default").toLowerCase();
         return stored === "plan" ? "plan" : "default";
@@ -3416,18 +3452,27 @@ __ICONS_JS__
     }
 
     function readSelectedCollaborationMode() {
+      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return null;
       if (selectedCollaborationMode === "plan") return {"mode": "plan"};
       return null;
     }
 
     function setSelectedCollaborationMode(mode) {
-      selectedCollaborationMode = mode === "plan" ? "plan" : "default";
+      selectedCollaborationMode = SUPPORTS_EXTENDED_COMPOSER_ACTIONS && mode === "plan" ? "plan" : "default";
       saveSelectedCollaborationMode();
       updateCollaborationMenu();
       updateStartControls();
     }
 
     function updateCollaborationMenu() {
+      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) {
+        menuPlanMode.hidden = true;
+        pluginMenuSection.hidden = true;
+        pluginList.hidden = true;
+        planModeCheck.innerHTML = "";
+        planModeChip.hidden = true;
+        return;
+      }
       const enabled = selectedCollaborationMode === "plan";
       menuPlanMode.classList.toggle("selected", enabled);
       menuPlanMode.setAttribute("aria-pressed", enabled ? "true" : "false");
@@ -3436,6 +3481,7 @@ __ICONS_JS__
     }
 
     function renderPluginList() {
+      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return;
       pluginList.innerHTML = "";
       const items = Array.isArray(PLUGIN_MENU_ITEMS) ? PLUGIN_MENU_ITEMS : [];
       if (!items.length) {
@@ -3727,6 +3773,7 @@ __ICONS_JS__
       imageInput.click();
     };
     menuPlanMode.onclick = () => {
+      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return;
       setSelectedCollaborationMode(selectedCollaborationMode === "plan" ? "default" : "plan");
       closeComposerActionMenu();
     };
@@ -3950,12 +3997,25 @@ __ICONS_JS__
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
         .replace(
+            "__SUPPORTS_EXTENDED_COMPOSER_ACTIONS_JSON__",
+            json.dumps(supports_extended_composer_actions),
+        )
+        .replace(
+            "__EXTENDED_COMPOSER_ACTION_HIDDEN__",
+            extended_composer_action_hidden,
+        )
+        .replace(
             "__PERMISSION_PRESETS_JSON__",
             json.dumps(_native_permission_presets(provider_name), ensure_ascii=False),
         )
         .replace(
             "__PLUGIN_MENU_ITEMS_JSON__",
-            json.dumps(_codex_plugin_menu_items(), ensure_ascii=False),
+            json.dumps(
+                _codex_plugin_menu_items()
+                if supports_extended_composer_actions
+                else [],
+                ensure_ascii=False,
+            ),
         )
         .replace("__ICONS_JS__", _ICONS_JS_LITERAL)
     )
@@ -3967,6 +4027,10 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     provider_label = _native_provider_display_name(native_provider)
     api_base = f"/api/native/{quote(native_provider, safe='')}"
     safe_title = escape(provider_label)
+    supports_extended_composer_actions = native_provider == "codex"
+    extended_composer_action_hidden = (
+        "" if supports_extended_composer_actions else " hidden"
+    )
     template = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -4315,7 +4379,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
             </span>
             <span></span>
           </button>
-          <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem" aria-pressed="false">
+          <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem"__EXTENDED_COMPOSER_ACTION_HIDDEN__ aria-pressed="false">
             <span class="composer-menu-icon">☷</span>
             <span>
               <span class="composer-menu-title">计划模式</span>
@@ -4323,8 +4387,8 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
             </span>
             <span class="composer-menu-check" id="planModeCheck"></span>
           </button>
-          <div class="composer-menu-section">插件</div>
-          <div class="plugin-list" id="pluginList"></div>
+          <div class="composer-menu-section" id="pluginMenuSection"__EXTENDED_COMPOSER_ACTION_HIDDEN__>插件</div>
+          <div class="plugin-list" id="pluginList"__EXTENDED_COMPOSER_ACTION_HIDDEN__></div>
         </div>
         <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
         <input id="imageInput" type="file" accept="image/*" multiple hidden>
@@ -4386,6 +4450,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
 __ICONS_JS__
     const PROVIDER_LABEL = __PROVIDER_LABEL_JSON__;
     const API_BASE = __API_BASE_JSON__;
+    const SUPPORTS_EXTENDED_COMPOSER_ACTIONS = __SUPPORTS_EXTENDED_COMPOSER_ACTIONS_JSON__;
     let nativeThreadId = params.get("native_thread_id") || "";
     let nativeTurnId = "";
     let activeTurnId = "";
@@ -4426,6 +4491,7 @@ __ICONS_JS__
     const composerActionMenu = document.getElementById("composerActionMenu");
     const menuUploadPhoto = document.getElementById("menuUploadPhoto");
     const menuPlanMode = document.getElementById("menuPlanMode");
+    const pluginMenuSection = document.getElementById("pluginMenuSection");
     const pluginList = document.getElementById("pluginList");
     const planModeCheck = document.getElementById("planModeCheck");
     const planModeChip = document.getElementById("planModeChip");
@@ -4886,6 +4952,7 @@ __ICONS_JS__
       permissionSettingsDirty = true;
     }
     function loadSavedCollaborationMode() {
+      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return "default";
       try {
         const stored = String(localStorage.getItem(COLLABORATION_MODE_STORAGE_KEY) || "default").toLowerCase();
         return stored === "plan" ? "plan" : "default";
@@ -4897,17 +4964,26 @@ __ICONS_JS__
       try { localStorage.setItem(COLLABORATION_MODE_STORAGE_KEY, selectedCollaborationMode); } catch (_error) {}
     }
     function readSelectedCollaborationMode() {
+      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return null;
       if (selectedCollaborationMode === "plan") return {"mode": "plan"};
       return null;
     }
     function setSelectedCollaborationMode(mode) {
-      selectedCollaborationMode = mode === "plan" ? "plan" : "default";
+      selectedCollaborationMode = SUPPORTS_EXTENDED_COMPOSER_ACTIONS && mode === "plan" ? "plan" : "default";
       saveSelectedCollaborationMode();
       updateCollaborationMenu();
       updateComposerDisabled();
       updateHandoffControls();
     }
     function updateCollaborationMenu() {
+      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) {
+        menuPlanMode.hidden = true;
+        pluginMenuSection.hidden = true;
+        pluginList.hidden = true;
+        planModeCheck.innerHTML = "";
+        planModeChip.hidden = true;
+        return;
+      }
       const enabled = selectedCollaborationMode === "plan";
       menuPlanMode.classList.toggle("selected", enabled);
       menuPlanMode.setAttribute("aria-pressed", enabled ? "true" : "false");
@@ -4915,6 +4991,7 @@ __ICONS_JS__
       planModeChip.hidden = !enabled;
     }
     function renderPluginList() {
+      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return;
       pluginList.innerHTML = "";
       const items = Array.isArray(PLUGIN_MENU_ITEMS) ? PLUGIN_MENU_ITEMS : [];
       if (!items.length) {
@@ -5142,6 +5219,7 @@ __ICONS_JS__
       imageInput.click();
     };
     menuPlanMode.onclick = () => {
+      if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return;
       setSelectedCollaborationMode(selectedCollaborationMode === "plan" ? "default" : "plan");
       closeComposerActionMenu();
     };
@@ -7126,12 +7204,25 @@ __ICONS_JS__
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
         .replace(
+            "__SUPPORTS_EXTENDED_COMPOSER_ACTIONS_JSON__",
+            json.dumps(supports_extended_composer_actions),
+        )
+        .replace(
+            "__EXTENDED_COMPOSER_ACTION_HIDDEN__",
+            extended_composer_action_hidden,
+        )
+        .replace(
             "__PERMISSION_PRESETS_JSON__",
             json.dumps(_native_permission_presets(native_provider), ensure_ascii=False),
         )
         .replace(
             "__PLUGIN_MENU_ITEMS_JSON__",
-            json.dumps(_codex_plugin_menu_items(), ensure_ascii=False),
+            json.dumps(
+                _codex_plugin_menu_items()
+                if supports_extended_composer_actions
+                else [],
+                ensure_ascii=False,
+            ),
         )
         .replace("__ICONS_JS__", _ICONS_JS_LITERAL)
     )

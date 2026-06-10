@@ -359,6 +359,11 @@ class FakeAntigravityProvider:
     provider_engine = "cli-local"
 
 
+class FakeClaudeProvider:
+    provider = "claude"
+    provider_engine = "cli-local"
+
+
 def _store(tmp_path: Path) -> RuntimeEventStore:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
@@ -2102,6 +2107,79 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
 
 
 @pytest.mark.asyncio
+async def test_native_provider_home_polling_skips_unchanged_list_rerender(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'let renderedHomeDataSignature = "";' in response
+    assert "function homeDataSignature()" in response
+    assert "const signature = homeDataSignature();" in response
+    assert "if (signature === renderedHomeDataSignature) return;" in response
+    assert "await loadSessions(false);" in response
+
+
+@pytest.mark.asyncio
+async def test_non_codex_native_provider_plus_menu_only_exposes_upload_photo(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry(
+            [FakeClaudeProvider(), FakeAntigravityProvider()]
+        ),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        responses = []
+        for provider in ("claude", "antigravity"):
+            responses.append(
+                await _read_response(
+                    server.host,
+                    server.port,
+                    f"GET /native/{provider} HTTP/1.1\r\n"
+                    "Host: test\r\nAuthorization: Bearer secret\r\n"
+                    "Connection: close\r\n\r\n",
+                )
+            )
+    finally:
+        await server.stop()
+
+    for response in responses:
+        assert "HTTP/1.1 200 OK" in response
+        assert 'id="menuUploadPhoto"' in response
+        assert "上传照片" in response
+        assert 'id="menuPlanMode" type="button" role="menuitem" hidden' in response
+        assert 'id="pluginMenuSection" hidden' in response
+        assert 'id="pluginList" hidden' in response
+        assert "const SUPPORTS_EXTENDED_COMPOSER_ACTIONS = false;" in response
+        assert "if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return null;" in response
+
+
+@pytest.mark.asyncio
 async def test_native_codex_page_filters_session_workspace_projects_to_projects_root(
     tmp_path: Path,
 ) -> None:
@@ -2459,6 +2537,19 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert 'submitPrompt("steer")' in response
     assert 'submitPrompt("continue")' in response
     assert ".bubble" not in response
+
+
+def test_non_codex_worker_live_page_plus_menu_only_exposes_upload_photo() -> None:
+    for provider in ("claude", "antigravity"):
+        response = _live_page(42, native_provider=provider)
+
+        assert 'id="menuUploadPhoto"' in response
+        assert "上传照片" in response
+        assert 'id="menuPlanMode" type="button" role="menuitem" hidden' in response
+        assert 'id="pluginMenuSection" hidden' in response
+        assert 'id="pluginList" hidden' in response
+        assert "const SUPPORTS_EXTENDED_COMPOSER_ACTIONS = false;" in response
+        assert "if (!SUPPORTS_EXTENDED_COMPOSER_ACTIONS) return null;" in response
 
 
 def test_live_page_gates_active_turn_controls_with_provider_capabilities() -> None:
