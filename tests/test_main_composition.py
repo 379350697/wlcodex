@@ -814,6 +814,7 @@ def test_create_live_stream_components_wires_single_claude_cli_engine(
     assert components is not None
     provider = components.native_registry.get("claude")
     assert provider.provider_engine == "cli-local"
+    assert provider._runtime_store is runtime_store
     assert provider._engine._config.effort == "xhigh"
     assert components.native_registry.maybe_get("codex") is None
     assert components.server._native_registry is components.native_registry

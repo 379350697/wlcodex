@@ -331,6 +331,7 @@ def _create_live_stream_components(
                                 )
                             ),
                             session_store=native_agent_session_store,
+                            runtime_store=runtime_store,
                             default_cwd=str(
                                 config.workspace_by_alias(
                                     config.conversation.default_workspace
