@@ -3699,12 +3699,7 @@ __ICONS_JS__
 
     async function handleProjectNewChat() {
       if (!selectedProjectCwd) return;
-      if (composerHasDraft()) {
-        await startNewChat(promptEl.value.trim());
-        return;
-      }
-      updateContextHint();
-      promptEl.focus();
+      await startNewChat(promptEl.value.trim());
     }
 
     function composerHasDraft() {
@@ -3712,7 +3707,7 @@ __ICONS_JS__
     }
 
     function updateStartControls() {
-      sendButton.disabled = startingChat || !composerHasDraft();
+      sendButton.disabled = startingChat;
     }
 
     async function openLive(session = selected) {
@@ -3722,10 +3717,6 @@ __ICONS_JS__
       location.href = url;
     }
     sendButton.onclick = async () => {
-      if (!composerHasDraft()) {
-        promptEl.focus();
-        return;
-      }
       await startNewChat(promptEl.value.trim());
     };
     document.getElementById("chat").onclick = () => selectProject("");

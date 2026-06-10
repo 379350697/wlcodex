@@ -1957,7 +1957,7 @@ async def test_native_codex_page_keeps_workspace_selection_dark_and_layout_stabl
 
 
 @pytest.mark.asyncio
-async def test_native_codex_project_new_chat_starts_when_draft_exists(
+async def test_native_codex_project_new_chat_starts_even_without_draft(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -1982,7 +1982,6 @@ async def test_native_codex_project_new_chat_starts_when_draft_exists(
 
     assert "HTTP/1.1 200 OK" in response
     assert "async function handleProjectNewChat()" in response
-    assert "if (composerHasDraft()) {" in response
     assert "await startNewChat(promptEl.value.trim());" in response
     assert "projectNewChat.onclick = handleProjectNewChat;" in response
     assert 'await startNewChat("");' not in response
@@ -2086,7 +2085,10 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "const sendButton = document.getElementById(\"send\");" in response
     assert "let startingChat = false;" in response
     assert "function updateStartControls()" in response
-    assert "sendButton.disabled = startingChat || !composerHasDraft();" in response
+    assert "sendButton.disabled = startingChat;" in response
+    assert "async function handleProjectNewChat()" in response
+    assert "await startNewChat(promptEl.value.trim());" in response
+    assert "promptEl.focus();" not in response
     assert "promptEl.addEventListener(\"input\", () => {" in response
     assert "updateStartControls();" in response
     assert "button.chat:disabled" in response
