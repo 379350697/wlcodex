@@ -2782,6 +2782,16 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert "function downloadPlanText(title, text)" in response
     assert "function executeActivePlan()" in response
     assert "planExecutionPrompt(activePlan.body)" in response
+    assert "function clearSelectedPlanModeForExecution()" in response
+    assert response.index("clearSelectedPlanModeForExecution();") < response.index(
+        "const body = buildNativePromptBody(prompt, {includeCollaborationMode: false});"
+    )
+    assert 'if (selectedCollaborationMode !== "plan") return;' in response
+    assert 'setSelectedCollaborationMode("default");' in response
+    assert (
+        'if (isNativeExecutionDetail(event)) clearSelectedPlanModeForExecution();'
+        in response
+    )
     assert "planDetailTextFromText(plan.body, plan.summary)" in response
     assert 'const hideHandoffForPlan = PROVIDER === "codex" && (selectedCollaborationMode === "plan" || Boolean(activePlan));' in response
     assert "handoffButton.hidden = hideHandoffForPlan;" in response

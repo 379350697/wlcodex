@@ -5001,6 +5001,10 @@ __ICONS_JS__
       updateComposerDisabled();
       updateHandoffControls();
     }
+    function clearSelectedPlanModeForExecution() {
+      if (selectedCollaborationMode !== "plan") return;
+      setSelectedCollaborationMode("default");
+    }
     function updateCollaborationMenu() {
       pluginMenuSection.hidden = !SUPPORTS_PLUGIN_MENU;
       pluginList.hidden = !SUPPORTS_PLUGIN_MENU;
@@ -5517,6 +5521,7 @@ __ICONS_JS__
         return;
       }
       const prompt = planExecutionPrompt(activePlan.body);
+      clearSelectedPlanModeForExecution();
       const body = buildNativePromptBody(prompt, {includeCollaborationMode: false});
       renderLocalUserEcho(prompt, []);
       closePlanPage();
@@ -6641,6 +6646,7 @@ __ICONS_JS__
       const payload = event.payload || {};
       if (payload.native_thread_id) nativeThreadId = payload.native_thread_id;
       applyNativeTurnState(event);
+      if (isNativeExecutionDetail(event)) clearSelectedPlanModeForExecution();
       updateComposerDisabled();
       if (isNativeExecutionDetail(event)) {
         updateRunState(
