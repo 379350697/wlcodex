@@ -117,6 +117,28 @@ permission_mode = "acceptEdits"
     assert config.native_agents.claude.cli_local.permission_mode == "acceptEdits"
 
 
+def test_native_agents_claude_cli_local_defaults_to_deepseek_model(
+    tmp_path: Path,
+) -> None:
+    config = load_config(
+        _write_config(
+            tmp_path,
+            """
+[native_agents]
+enabled = true
+default_provider = "claude"
+
+[native_agents.claude]
+enabled = true
+engine = "cli-local"
+""",
+        )
+    )
+
+    assert config.native_agents.claude.cli_local.model == "deepseek-v4-pro"
+    assert config.native_agents.claude.cli_local.effort == "max"
+
+
 def test_native_agents_parse_antigravity_cli_local(tmp_path: Path) -> None:
     config = load_config(
         _write_config(

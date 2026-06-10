@@ -363,6 +363,25 @@ class FakeClaudeProvider:
     provider = "claude"
     provider_engine = "cli-local"
 
+    async def list_models(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "deepseek-v4-pro",
+                "model": "deepseek-v4-pro",
+                "displayName": "deepseek-v4-pro",
+                "defaultReasoningEffort": "max",
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "轻量"},
+                    {"reasoningEffort": "medium", "description": "正常"},
+                    {"reasoningEffort": "high", "description": "深度"},
+                    {"reasoningEffort": "xhigh", "description": "极深"},
+                    {"reasoningEffort": "max", "description": "最大"},
+                ],
+                "serviceTiers": [],
+                "isDefault": True,
+            }
+        ]
+
 
 def _store(tmp_path: Path) -> RuntimeEventStore:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
@@ -2912,8 +2931,11 @@ async def test_worker_live_page_uses_official_model_catalog_settings(
     assert "function reasoningEffortLabel" in response
     assert 'if (key === "high") return "高";' in response
     assert 'if (["xhigh", "extra_high"].includes(key)) return "极高";' in response
-    assert 'if (["max", "maximum"].includes(key)) return "最大";' in response
+    assert 'if (["max", "maximum"].includes(key)) return "Max";' in response
     assert "function preferredServiceTierDefault" in response
+    assert "function updateSettingVisibility" in response
+    assert "reasoningSettingRow.hidden = reasoningSelector.options.length <= 1;" in response
+    assert "serviceTierSettingRow.hidden = serviceTierSelector.options.length <= 1;" in response
     assert 'normalOption.value = "";' in response
     assert 'renderSettingOptions(serviceTierOptions, serviceTierSelector, updateSettingSummary, {includeEmpty: true});' in response
     assert "const MODEL_SETTINGS_STORAGE_KEY" in response
@@ -2933,6 +2955,46 @@ async def test_worker_live_page_uses_official_model_catalog_settings(
     assert "function syncSettingOptionsDisabled" in response
     assert "reasoningSelector.disabled = sendingPrompt || nativeTurnRunning" in response
     assert "serviceTierSelector.disabled = sendingPrompt || nativeTurnRunning" in response
+    assert 'service_tier: serviceTierSettingRow.hidden ? "" : serviceTierSelector.value,' in response
+    assert 'if (!reasoningSettingRow.hidden) summaryParts.push(effortText);' in response
+    assert 'if (!serviceTierSettingRow.hidden) summaryParts.push(tierText);' in response
+    assert 'modelSettingsButton.textContent = summaryParts.join(" ");' in response
+
+
+@pytest.mark.asyncio
+async def test_claude_model_catalog_returns_deepseek_reasoning_without_speed(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([FakeClaudeProvider()]),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/claude/models HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = response.split("\r\n\r\n", 1)[1]
+    payload = json.loads(body)
+    assert payload["models"][0]["model"] == "deepseek-v4-pro"
+    assert payload["models"][0]["defaultReasoningEffort"] == "max"
+    assert [
+        item["reasoningEffort"]
+        for item in payload["models"][0]["supportedReasoningEfforts"]
+    ] == ["low", "medium", "high", "xhigh", "max"]
+    assert payload["models"][0]["serviceTiers"] == []
 
 
 @pytest.mark.asyncio

@@ -3335,7 +3335,7 @@ __ICONS_JS__
       if (["medium", "default", "normal", ""].includes(key)) return "正常";
       if (key === "high") return "高";
       if (["xhigh", "extra_high"].includes(key)) return "极高";
-      if (["max", "maximum"].includes(key)) return "最大";
+      if (["max", "maximum"].includes(key)) return "Max";
       return String(value || "推理");
     }
 
@@ -3551,17 +3551,17 @@ __ICONS_JS__
       reasoningSettingValue.textContent = effortText;
       serviceTierSettingValue.textContent = tierText;
       const summaryParts = [modelText];
-      if (reasoningSelector.options.length > 1) summaryParts.push(effortText);
-      if (serviceTierSelector.options.length > 1) summaryParts.push(tierText);
-      modelSettingsButton.textContent = summaryParts.join(" · ");
+      if (!reasoningSettingRow.hidden) summaryParts.push(effortText);
+      if (!serviceTierSettingRow.hidden) summaryParts.push(tierText);
+      modelSettingsButton.textContent = summaryParts.join(" ");
       syncSettingOptionsSelection(modelOptions, modelSelector);
       syncSettingOptionsSelection(reasoningOptions, reasoningSelector);
       syncSettingOptionsSelection(serviceTierOptions, serviceTierSelector);
       const defaultModel = modelCatalog.find(model => model.isDefault) || modelCatalog[0] || null;
       const currentModel = selectedModelCatalogEntry();
       const modelChanged = currentModel && defaultModel && (currentModel.model || currentModel.id || "") !== (defaultModel.model || defaultModel.id || "");
-      const effortChanged = currentModel && reasoningSelector.options.length > 1 && reasoningSelector.value && reasoningSelector.value !== preferredReasoningEffortDefault(currentModel, Array.isArray(currentModel.supportedReasoningEfforts) ? currentModel.supportedReasoningEfforts : []);
-      const tierChanged = serviceTierSelector.options.length > 1 && serviceTierSelector.value && serviceTierSelector.value !== (String(currentModel ? currentModel.defaultServiceTier || "" : "").toLowerCase());
+      const effortChanged = currentModel && !reasoningSettingRow.hidden && reasoningSelector.value && reasoningSelector.value !== preferredReasoningEffortDefault(currentModel, Array.isArray(currentModel.supportedReasoningEfforts) ? currentModel.supportedReasoningEfforts : []);
+      const tierChanged = !serviceTierSettingRow.hidden && serviceTierSelector.value && serviceTierSelector.value !== (String(currentModel ? currentModel.defaultServiceTier || "" : "").toLowerCase());
       modelSettingsButton.classList.toggle("modified", modelChanged || effortChanged || tierChanged);
     }
 
@@ -4498,6 +4498,9 @@ __ICONS_JS__
     const modelSettingValue = document.getElementById("modelSettingValue");
     const reasoningSettingValue = document.getElementById("reasoningSettingValue");
     const serviceTierSettingValue = document.getElementById("serviceTierSettingValue");
+    const modelSettingRow = modelSettingValue.closest(".setting-row");
+    const reasoningSettingRow = reasoningSettingValue.closest(".setting-row");
+    const serviceTierSettingRow = serviceTierSettingValue.closest(".setting-row");
     const modelSelector = document.getElementById("modelSelector");
     const permissionSelector = document.getElementById("permissionSelector");
     const reasoningSelector = document.getElementById("reasoningSelector");
@@ -4628,6 +4631,7 @@ __ICONS_JS__
         modelOptions.innerHTML = "";
         reasoningOptions.innerHTML = "";
         serviceTierOptions.innerHTML = "";
+        updateSettingVisibility();
         updateSettingSummary();
       }
       updateComposerDisabled();
@@ -4700,6 +4704,7 @@ __ICONS_JS__
       }
       renderSettingOptions(reasoningOptions, reasoningSelector, updateSettingSummary);
       renderSettingOptions(serviceTierOptions, serviceTierSelector, updateSettingSummary, {includeEmpty: true});
+      updateSettingVisibility();
       updateSettingSummary();
     }
     function selectedModelCatalogEntry() {
@@ -4824,6 +4829,12 @@ __ICONS_JS__
       }
       container.hidden = !container.hidden;
     }
+    function updateSettingVisibility() {
+      reasoningSettingRow.hidden = reasoningSelector.options.length <= 1;
+      serviceTierSettingRow.hidden = serviceTierSelector.options.length <= 1;
+      if (reasoningSettingRow.hidden) reasoningOptions.hidden = true;
+      if (serviceTierSettingRow.hidden) serviceTierOptions.hidden = true;
+    }
     function preferredServiceTierDefault(model, tiers) {
       const defaultValue = String((model && model.defaultServiceTier) || "").toLowerCase();
       if (!defaultValue || ["fast", "priority"].includes(defaultValue)) return "";
@@ -4880,7 +4891,7 @@ __ICONS_JS__
       if (["medium", "default", "normal", ""].includes(key)) return "正常";
       if (key === "high") return "高";
       if (["xhigh", "extra_high"].includes(key)) return "极高";
-      if (["max", "maximum"].includes(key)) return "最大";
+      if (["max", "maximum"].includes(key)) return "Max";
       return String(value || "推理");
     }
     function loadSavedModelSettings() {
@@ -4893,8 +4904,8 @@ __ICONS_JS__
     function readSelectedModelSettings() {
       return normalizeModelSettings({
         model: modelSelector.value,
-        effort: reasoningSelector.value,
-        service_tier: serviceTierSelector.value,
+        effort: reasoningSettingRow.hidden ? "" : reasoningSelector.value,
+        service_tier: serviceTierSettingRow.hidden ? "" : serviceTierSelector.value,
         version: MODEL_SETTINGS_STORAGE_VERSION
       });
     }
@@ -5232,15 +5243,15 @@ __ICONS_JS__
       updatePermissionSummary();
       markPermissionSettingsDirty();
     };
-    modelSettingValue.closest(".setting-row").onclick = event => {
+    modelSettingRow.onclick = event => {
       if (event.target === modelSelector) return;
       toggleSettingOptions(modelOptions);
     };
-    serviceTierSettingValue.closest(".setting-row").onclick = event => {
+    serviceTierSettingRow.onclick = event => {
       if (event.target === serviceTierSelector) return;
       toggleSettingOptions(serviceTierOptions);
     };
-    reasoningSettingValue.closest(".setting-row").onclick = event => {
+    reasoningSettingRow.onclick = event => {
       if (event.target === reasoningSelector) return;
       toggleSettingOptions(reasoningOptions);
     };
@@ -5730,15 +5741,18 @@ __ICONS_JS__
       modelSettingValue.textContent = modelText;
       reasoningSettingValue.textContent = effortText;
       serviceTierSettingValue.textContent = tierText;
-      modelSettingsButton.textContent = `${modelText} ${effortText}`.trim();
+      const summaryParts = [modelText];
+      if (!reasoningSettingRow.hidden) summaryParts.push(effortText);
+      if (!serviceTierSettingRow.hidden) summaryParts.push(tierText);
+      modelSettingsButton.textContent = summaryParts.join(" ");
       syncSettingOptionsSelection(modelOptions, modelSelector);
       syncSettingOptionsSelection(reasoningOptions, reasoningSelector);
       syncSettingOptionsSelection(serviceTierOptions, serviceTierSelector);
       const defaultModel = modelCatalog.find(model => model.isDefault) || modelCatalog[0] || null;
       const currentModel = selectedModelCatalogEntry();
       const modelChanged = currentModel && defaultModel && (currentModel.model || currentModel.id || "") !== (defaultModel.model || defaultModel.id || "");
-      const effortChanged = currentModel && modelSelector.value && reasoningSelector.value && reasoningSelector.value !== preferredReasoningEffortDefault(currentModel, Array.isArray(currentModel.supportedReasoningEfforts) ? currentModel.supportedReasoningEfforts : []);
-      const tierChanged = serviceTierSelector.value && serviceTierSelector.value !== (String(currentModel ? currentModel.defaultServiceTier || "" : "").toLowerCase());
+      const effortChanged = currentModel && modelSelector.value && !reasoningSettingRow.hidden && reasoningSelector.value && reasoningSelector.value !== preferredReasoningEffortDefault(currentModel, Array.isArray(currentModel.supportedReasoningEfforts) ? currentModel.supportedReasoningEfforts : []);
+      const tierChanged = !serviceTierSettingRow.hidden && serviceTierSelector.value && serviceTierSelector.value !== (String(currentModel ? currentModel.defaultServiceTier || "" : "").toLowerCase());
       modelSettingsButton.classList.toggle("modified", modelChanged || effortChanged || tierChanged);
     }
     function selectedOptionText(select, fallback) {

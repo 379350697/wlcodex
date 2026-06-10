@@ -252,7 +252,7 @@ class NativeAgentsCodexConfig:
 @dataclass(frozen=True)
 class NativeAgentsClaudeCliLocalConfig:
     binary: str = "auto"
-    model: str = ""
+    model: str = "deepseek-v4-pro"
     effort: str = "max"
     permission_mode: str = "acceptEdits"
 
@@ -714,7 +714,8 @@ def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
             engine=engine,
             cli_local=NativeAgentsClaudeCliLocalConfig(
                 binary=str(cli_raw.get("binary", "auto")),
-                model=str(cli_raw.get("model", "")),
+                model=str(cli_raw.get("model", "deepseek-v4-pro")).strip()
+                or "deepseek-v4-pro",
                 effort=str(cli_raw.get("effort", "max")),
                 permission_mode=cli_permission_mode,
             ),

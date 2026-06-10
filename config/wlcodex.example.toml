@@ -192,7 +192,7 @@ engine = "cli-local"
 
 [native_agents.claude.cli_local]
 binary = "auto"
-model = ""
+model = "deepseek-v4-pro"
 permission_mode = "acceptEdits"
 
 [native_agents.claude.sdk_deepseek]
