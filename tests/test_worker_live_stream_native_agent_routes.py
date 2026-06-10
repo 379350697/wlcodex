@@ -128,6 +128,12 @@ class FakeNoSteerProvider(FakeProvider):
         raise NotImplementedError("Antigravity CLI provider does not support steering")
 
 
+class FakeMissingSessionProvider(FakeProvider):
+    async def read_session(self, native_session_id: str):
+        self.calls.append(("read_session", native_session_id))
+        raise KeyError(native_session_id)
+
+
 class FakeWorkflowService:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
@@ -324,6 +330,21 @@ async def test_native_agent_sessions_route(tmp_path: Path) -> None:
     assert payload["sessions"][0]["native_session_id"] == "session-1"
     assert payload["sessions"][0]["provider_engine"] == "sdk-deepseek"
     assert provider.calls == [("list_sessions", 50)]
+
+
+@pytest.mark.asyncio
+async def test_native_agent_read_missing_session_returns_404(tmp_path: Path) -> None:
+    provider = FakeMissingSessionProvider()
+    response, provider = await _request_native_agent(
+        tmp_path,
+        "GET /api/native/claude/sessions/thread-test HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        provider=provider,
+    )
+
+    assert "HTTP/1.1 404 Not Found" in response
+    assert _json_body(response) == {"error": "native session not found"}
+    assert provider.calls == [("read_session", "thread-test")]
 
 
 @pytest.mark.asyncio

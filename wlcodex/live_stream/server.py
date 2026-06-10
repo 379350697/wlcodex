@@ -841,15 +841,27 @@ class WorkerLiveStreamServer:
         action = parts[1] if len(parts) > 1 else ""
 
         if method == "GET" and action == "" and len(parts) == 1:
-            session = await target.read_session(thread_id)
+            try:
+                session = await target.read_session(thread_id)
+            except KeyError:
+                await self._send_json(writer, 404, {"error": "native session not found"})
+                return
             await self._send_json(writer, 200, _json_object(session))
             return
         if method == "POST" and action == "attach" and len(parts) == 2:
-            session = await target.attach_session(thread_id)
+            try:
+                session = await target.attach_session(thread_id)
+            except KeyError:
+                await self._send_json(writer, 404, {"error": "native session not found"})
+                return
             await self._send_json(writer, 200, _json_object(session))
             return
         if method == "POST" and action == "sync" and len(parts) == 2:
-            session = await target.sync_session(thread_id)
+            try:
+                session = await target.sync_session(thread_id)
+            except KeyError:
+                await self._send_json(writer, 404, {"error": "native session not found"})
+                return
             await self._send_json(writer, 200, _json_object(session))
             return
         if method == "POST" and action == "continue" and len(parts) == 2:
@@ -871,18 +883,22 @@ class WorkerLiveStreamServer:
             )
             if provider_name.strip().lower() != "antigravity":
                 permission_kwargs.pop("sandbox", None)
-            result = await target.continue_session(
-                thread_id,
-                str(body.get("prompt", "")),
-                model=_optional_nonempty_string(body.get("model")),
-                effort=_optional_nonempty_string(body.get("effort")),
-                service_tier=_optional_nonempty_string(
-                    body.get("service_tier") or body.get("serviceTier")
-                ),
-                images=_safe_image_attachments(body.get("images")),
-                **permission_kwargs,
-                **collaboration_kwargs,
-            )
+            try:
+                result = await target.continue_session(
+                    thread_id,
+                    str(body.get("prompt", "")),
+                    model=_optional_nonempty_string(body.get("model")),
+                    effort=_optional_nonempty_string(body.get("effort")),
+                    service_tier=_optional_nonempty_string(
+                        body.get("service_tier") or body.get("serviceTier")
+                    ),
+                    images=_safe_image_attachments(body.get("images")),
+                    **permission_kwargs,
+                    **collaboration_kwargs,
+                )
+            except KeyError:
+                await self._send_json(writer, 404, {"error": "native session not found"})
+                return
             await self._send_json(writer, 200, _json_object(result))
             return
         if method == "POST" and action == "steer" and len(parts) == 2:
@@ -903,18 +919,22 @@ class WorkerLiveStreamServer:
             permission_kwargs = _native_permission_kwargs_from_body(provider_name, body)
             if provider_name.strip().lower() != "antigravity":
                 permission_kwargs.pop("sandbox", None)
-            result = await target.steer_session(
-                thread_id,
-                expected_turn_id,
-                str(body.get("prompt", "")),
-                model=_optional_nonempty_string(body.get("model")),
-                effort=_optional_nonempty_string(body.get("effort")),
-                service_tier=_optional_nonempty_string(
-                    body.get("service_tier") or body.get("serviceTier")
-                ),
-                images=_safe_image_attachments(body.get("images")),
-                **permission_kwargs,
-            )
+            try:
+                result = await target.steer_session(
+                    thread_id,
+                    expected_turn_id,
+                    str(body.get("prompt", "")),
+                    model=_optional_nonempty_string(body.get("model")),
+                    effort=_optional_nonempty_string(body.get("effort")),
+                    service_tier=_optional_nonempty_string(
+                        body.get("service_tier") or body.get("serviceTier")
+                    ),
+                    images=_safe_image_attachments(body.get("images")),
+                    **permission_kwargs,
+                )
+            except KeyError:
+                await self._send_json(writer, 404, {"error": "native session not found"})
+                return
             await self._send_json(writer, 200, _json_object(result))
             return
         if method == "POST" and action == "interrupt" and len(parts) == 2:
@@ -929,10 +949,14 @@ class WorkerLiveStreamServer:
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
                 return
-            result = await target.interrupt_session(
-                thread_id,
-                str(body.get("turn_id", "")),
-            )
+            try:
+                result = await target.interrupt_session(
+                    thread_id,
+                    str(body.get("turn_id", "")),
+                )
+            except KeyError:
+                await self._send_json(writer, 404, {"error": "native session not found"})
+                return
             await self._send_json(writer, 200, _json_object(result))
             return
         await self._send_json(writer, 404, {"error": "not found"})
@@ -4580,6 +4604,13 @@ __ICONS_JS__
     planPageDownload.innerHTML = ICONS.download;
     planPageCopy.innerHTML = ICONS.copy;
     historyFold.onclick = loadOlderEvents;
+    function nativeErrorMessage(message) {
+      const text = String(message || "");
+      if (text === "native session not found" || text === "KeyError") {
+        return `${PROVIDER_LABEL} 会话不存在或已被清理`;
+      }
+      return text;
+    }
     async function api(path, options = {}) {
       const response = await fetch(path, {
         ...options,
@@ -4587,7 +4618,7 @@ __ICONS_JS__
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
-        throw new Error(body.error || response.statusText);
+        throw new Error(nativeErrorMessage(body.error || response.statusText));
       }
       return response.json().catch(() => ({}));
     }

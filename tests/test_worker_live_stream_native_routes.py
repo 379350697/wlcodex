@@ -2560,6 +2560,8 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "function submitPrompt" in response
     assert "continueButton.onclick = () => submitPrompt();" in response
     assert 'throw new Error(`${PROVIDER_LABEL} 会话未连接`);' in response
+    assert "function nativeErrorMessage(message)" in response
+    assert 'return `${PROVIDER_LABEL} 会话不存在或已被清理`;' in response
     assert "let providerCapabilities = {};" in response
     assert "async function loadProviderCapabilities()" in response
     assert "await api(`${API_BASE}/capabilities`)" in response
