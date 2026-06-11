@@ -3544,11 +3544,13 @@ async def test_worker_live_page_does_not_bind_historical_turns_as_current_contro
     assert "function applyNativeTurnState(event, options = {})" in response
     assert "let activeTurnId = \"\";" in response
     assert (
-        "if (!options.historical && !mirroredTranscript && payload.native_turn_id) "
-        "nativeTurnId = payload.native_turn_id;" in response
+        "if (!mirroredTranscript && payload.native_turn_id) nativeTurnId = payload.native_turn_id;"
+        in response
     )
     assert "const mirroredTranscript = isMirroredTranscriptEvent(event);" in response
-    assert "if (options.historical || mirroredTranscript) return;" in response
+    assert "if (options.historical) return;" in response
+    assert "} else if (mirroredTranscript) {\n        return;\n      } else if (" in response
+    assert "if (options.historical || mirroredTranscript) return;" not in response
     assert "body.expected_turn_id = activeTurnId;" in response
     assert "activeTurnId = result.active_turn_id || \"\";" in response
 
@@ -3579,11 +3581,26 @@ async def test_worker_live_page_clears_running_composer_state_on_terminal_turn_e
     assert "HTTP/1.1 200 OK" in response
     assert "function isTerminalTurnEvent(event)" in response
     assert "isTerminalTurnEvent(event)" in response
+    assert 'if (event.kind === "message_completed" && payload.native_turn_id) return true;' in response
     assert '["completed", "done", "succeeded", "success"]' in response
     assert '["failed", "error", "cancelled", "canceled", "interrupted", "aborted"]' in response
     assert "nativeTurnRunning = false;" in response
     assert 'continueButton.innerHTML = mode === "interrupt" ? ICONS.stop : ICONS.send;' in response
     assert "(!nativeTurnRunning && !composerHasDraft())" in response
+    assert 'activeTurnId = result.turn_running ? (result.active_turn_id || result.turn_id || activeTurnId || "") : "";' in response
+
+
+def test_worker_live_page_recovers_after_post_fetch_drop_without_resubmitting() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function isFetchNetworkError(error)" in response
+    assert "function nativeTurnAdvancedSince(snapshot)" in response
+    assert "async function recoverNativeControlAfterFetchFailure(error, snapshot)" in response
+    assert "await delay(700);" in response
+    assert "await syncNativeTranscript();" in response
+    assert "if (await recoverNativeControlAfterFetchFailure(error, controlSnapshot))" in response
+    assert "clearComposerDraft();" in response
+    assert "_retried" not in response
 
 
 @pytest.mark.asyncio

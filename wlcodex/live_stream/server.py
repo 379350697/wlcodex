@@ -5289,6 +5289,41 @@ __ICONS_JS__
       }
       return text;
     }
+    function isFetchNetworkError(error) {
+      const text = String((error && error.message) || error || "");
+      return Boolean(error && error.name === "TypeError") || /failed to fetch|network/i.test(text);
+    }
+    function delay(ms) {
+      return new Promise(resolve => window.setTimeout(resolve, ms));
+    }
+    function snapshotNativeTurnControl() {
+      return {
+        nativeTurnId,
+        activeTurnId,
+        nativeTurnRunning
+      };
+    }
+    function nativeTurnAdvancedSince(snapshot) {
+      const before = snapshot || {};
+      return Boolean(
+        (nativeTurnId && nativeTurnId !== before.nativeTurnId) ||
+        (activeTurnId && activeTurnId !== before.activeTurnId) ||
+        (nativeTurnRunning && !before.nativeTurnRunning)
+      );
+    }
+    async function recoverNativeControlAfterFetchFailure(error, snapshot) {
+      if (!isFetchNetworkError(error)) return false;
+      await delay(700);
+      await syncNativeTranscript();
+      await pollEvents();
+      return nativeTurnAdvancedSince(snapshot);
+    }
+    function clearComposerDraft() {
+      promptInput.value = "";
+      imageAttachments = [];
+      renderAttachments();
+      resetComposerPlugins();
+    }
     async function api(path, options = {}) {
       const response = await fetch(path, {
         ...options,
@@ -6302,19 +6337,22 @@ __ICONS_JS__
       updateComposerDisabled();
       setSendStatus(action === "steer" ? "修正中" : "发送中", "");
       continueButton.classList.add("loading");
+      const controlSnapshot = snapshotNativeTurnControl();
       try {
         const result = await nativeControl(action, body);
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.active_turn_id || (result.turn_running ? result.turn_id || "" : "");
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
         updateNativeHeaderContext();
-        promptInput.value = "";
-        imageAttachments = [];
-        renderAttachments();
-        resetComposerPlugins();
+        clearComposerDraft();
         setSendStatus("已发送", "ok");
         await pollEvents();
       } catch (error) {
+        if (await recoverNativeControlAfterFetchFailure(error, controlSnapshot)) {
+          clearComposerDraft();
+          setSendStatus("已发送", "ok");
+          return;
+        }
         await pollEvents();
         renderStatus(action + "_failed", error.message || String(error));
         setSendStatus(error.message || "发送失败", "error");
@@ -6378,11 +6416,13 @@ __ICONS_JS__
     function applyNativeTurnState(event, options = {}) {
       const payload = event.payload || {};
       const mirroredTranscript = isMirroredTranscriptEvent(event);
-      if (!options.historical && !mirroredTranscript && payload.native_turn_id) nativeTurnId = payload.native_turn_id;
-      if (options.historical || mirroredTranscript) return;
+      if (options.historical) return;
+      if (!mirroredTranscript && payload.native_turn_id) nativeTurnId = payload.native_turn_id;
       if (isTerminalTurnEvent(event)) {
         if (!payload.native_turn_id || payload.native_turn_id === activeTurnId || payload.native_turn_id === nativeTurnId) activeTurnId = "";
         nativeTurnRunning = false;
+      } else if (mirroredTranscript) {
+        return;
       } else if (
         event.kind === "text_delta" ||
         event.kind === "reasoning_delta" ||
@@ -6406,6 +6446,7 @@ __ICONS_JS__
       const payload = (event && event.payload) || {};
       const status = String(payload.status || "").trim().toLowerCase();
       const action = String(payload.action || "").trim().toLowerCase();
+      if (event.kind === "message_completed" && payload.native_turn_id) return true;
       if (event.kind === "completed" || event.kind === "failed") return true;
       if (action === "turn_completed" || action === "turn_failed") return true;
       return isCompletedStatus(status) || isFailedStatus(status);
@@ -6877,7 +6918,7 @@ __ICONS_JS__
           body: "{}"
         });
         if (result && result.turn_id) nativeTurnId = result.turn_id;
-        activeTurnId = result.active_turn_id || activeTurnId || "";
+        activeTurnId = result.turn_running ? (result.active_turn_id || result.turn_id || activeTurnId || "") : "";
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
         updateComposerDisabled();
         updateNativeHeaderContext();
