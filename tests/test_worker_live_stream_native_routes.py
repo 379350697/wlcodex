@@ -1705,10 +1705,12 @@ def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
     response = _native_codex_page("codex")
 
     assert "background: #000;" in response
-    assert ".topbar { position: relative; display: grid; grid-template-columns: 70px 1fr 70px;" in response
-    assert ".circle { width: 70px; min-height: 70px;" in response
-    assert ".device-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 11px; max-width: 82vw; min-height: 55px;" in response
-    assert ".recent { grid-template-columns: minmax(0, 1fr) 46px;" in response
+    assert ".topbar { position: relative; display: grid; grid-template-columns: 54px 1fr 54px;" in response
+    assert ".circle { width: 54px; min-height: 54px;" in response
+    assert "h1 { margin: 0; text-align: center; font-size: 22px;" in response
+    assert ".device-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 9px; max-width: 82vw; min-height: 44px;" in response
+    assert ".label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 19px;" in response
+    assert ".recent { grid-template-columns: minmax(0, 1fr) 34px;" in response
     assert ".recent-status.running::before" in response
     assert "border-right-color: var(--native-remote-blue);" in response
     assert ".recent-status.finished::before" in response
@@ -1754,19 +1756,31 @@ async def test_live_page_shell_is_not_cacheable(
 def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() -> None:
     response = _live_page(42, native_provider="codex")
 
-    assert ".session-float { position: fixed; top: calc(44px + env(safe-area-inset-top));" in response
+    assert ".session-float { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
+    assert ".header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
     assert ".header-run-indicator.running .header-run-spinner" in response
     assert "border-right-color: var(--native-remote-blue);" in response
     assert ".header-run-indicator.finished .header-run-dot" in response
     assert "background: var(--native-remote-red);" in response
-    assert ".primary-action { flex: 0 0 56px; width: 56px; min-height: 56px; border-radius: 28px;" in response
+    assert ".primary-action { flex: 0 0 52px; width: 52px; min-height: 52px; border-radius: 26px;" in response
     assert ".primary-action.stop { background: #f4f4f5; color: #050505;" in response
     assert 'id="sessionFloat"' in response
     assert 'id="headerRunIndicator"' in response
     assert "function updateHeaderRunIndicator(tone)" in response
     assert 'headerRunIndicator.className = "header-run-indicator " + visual;' in response
     assert "updateHeaderRunIndicator(tone || \"neutral\");" in response
+
+
+def test_worker_live_page_rejects_invalid_native_thread_id_before_attach() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function isValidNativeThreadId(value)" in response
+    assert "let invalidNativeThreadId = Boolean(nativeThreadId && !isValidNativeThreadId(nativeThreadId));" in response
+    assert 'nativeThreadId = "";' in response
+    assert 'renderStatus("native_session_invalid", "会话链接无效，请从最近会话重新打开");' in response
+    assert "if (invalidNativeThreadId) return;" in response
+    assert "if (!nativeThreadId || invalidNativeThreadId) return;" in response
 
 
 @pytest.mark.asyncio
