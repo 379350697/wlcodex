@@ -889,6 +889,13 @@ class WorkerLiveStreamServer:
             )
             if provider_name.strip().lower() != "antigravity":
                 permission_kwargs.pop("sandbox", None)
+            force_new_turn = (
+                body.get("force_new_turn") is True
+                or body.get("forceNewTurn") is True
+            )
+            continue_kwargs: dict[str, Any] = {}
+            if force_new_turn:
+                continue_kwargs["force_new_turn"] = True
             try:
                 result = await target.continue_session(
                     thread_id,
@@ -901,6 +908,7 @@ class WorkerLiveStreamServer:
                     images=_safe_image_attachments(body.get("images")),
                     **permission_kwargs,
                     **collaboration_kwargs,
+                    **continue_kwargs,
                 )
             except KeyError:
                 await self._send_json(writer, 404, {"error": "native session not found"})
@@ -6286,8 +6294,9 @@ __ICONS_JS__
         }));
       }
       if (action === "steer") body.expected_turn_id = activeTurnId;
+      if (action === "continue" && nativeTurnRunning) body.force_new_turn = true;
       const echoAttachments = imageAttachments.map(image => ({...image}));
-      renderLocalUserEcho(prompt, echoAttachments);
+      if (action !== "steer") renderLocalUserEcho(prompt, echoAttachments);
       sendingPrompt = true;
       closeInterruptionChoice();
       updateComposerDisabled();

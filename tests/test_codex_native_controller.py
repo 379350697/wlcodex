@@ -650,6 +650,42 @@ async def test_controller_continue_refreshes_and_steers_current_official_active_
 
 
 @pytest.mark.asyncio
+async def test_controller_continue_can_force_new_turn_when_current_turn_is_active(
+    tmp_path: Path,
+) -> None:
+    controller, client, _session_store, _runtime_store = _controller(tmp_path)
+    client.details["thread-active"] = {
+        "thread": {
+            "id": "thread-active",
+            "title": "Active task",
+            "cwd": "/workspace/active",
+            "sourceKind": "ide",
+            "status": {"type": "active", "activeFlags": ["waitingOnApproval"]},
+            "turns": [
+                {
+                    "id": "turn-active",
+                    "status": "inProgress",
+                    "items": [],
+                }
+            ],
+        }
+    }
+
+    result = await controller.continue_session(
+        "thread-active",
+        "show this on native clients",
+        force_new_turn=True,
+    )
+
+    assert result.turn_id == "turn-2"
+    assert result.active_turn_id == "turn-2"
+    assert client.calls == [
+        ("attach_session", "thread-active"),
+        ("continue_session", "thread-active", "show this on native clients"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_controller_continue_uses_newest_active_turn_when_resume_order_is_stale(
     tmp_path: Path,
 ) -> None:
@@ -775,6 +811,37 @@ async def test_controller_steer_ignores_stale_expected_turn_after_refresh(
         ("attach_session", "thread-active"),
         ("steer_turn", "thread-active", "turn-live-now", "adjust current turn"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_controller_steer_does_not_project_visible_user_message(
+    tmp_path: Path,
+) -> None:
+    controller, client, session_store, runtime_store = _controller(tmp_path)
+    client.details["thread-active"] = {
+        "thread": {
+            "id": "thread-active",
+            "title": "Active task",
+            "cwd": "/workspace/active",
+            "sourceKind": "ide",
+            "status": "active",
+            "turns": [
+                {"id": "turn-current", "status": "running", "items": []},
+            ],
+        }
+    }
+
+    result = await controller.steer_session(
+        "thread-active",
+        "turn-current",
+        "adjust current turn",
+    )
+
+    assert result.turn_id == "turn-current"
+    session = session_store.get_by_thread_id("thread-active")
+    assert session is not None
+    events = runtime_store.list_by_agent_run(session.agent_run_id)
+    assert [event.event_type for event in events] == []
 
 
 @pytest.mark.asyncio

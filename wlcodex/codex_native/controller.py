@@ -284,6 +284,7 @@ class CodexNativeController:
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, object] | None = None,
         collaboration_mode: dict[str, object] | None = None,
+        force_new_turn: bool = False,
     ) -> NativeCodexControlResult:
         native_thread_id = native_thread_id.strip()
         if not native_thread_id:
@@ -291,7 +292,7 @@ class CodexNativeController:
         turn_state = await self._refresh_turn_state(native_thread_id)
         session = turn_state.session
         active_turn_id = turn_state.active_turn_id
-        if active_turn_id:
+        if active_turn_id and not force_new_turn:
             try:
                 active_turn_id = await self._steer_active_turn(
                     native_thread_id,
@@ -317,11 +318,6 @@ class CodexNativeController:
                 session.id,
                 status="running",
                 last_turn_id=active_turn_id,
-            )
-            self._project_sent_prompt(
-                native_thread_id=native_thread_id,
-                native_turn_id=active_turn_id,
-                prompt=prompt,
             )
             return NativeCodexControlResult(
                 native_thread_id=native_thread_id,
@@ -512,11 +508,6 @@ class CodexNativeController:
             session.id,
             status="running",
             last_turn_id=turn_id,
-        )
-        self._project_sent_prompt(
-            native_thread_id=native_thread_id,
-            native_turn_id=turn_id,
-            prompt=prompt,
         )
         return NativeCodexControlResult(
             native_thread_id=native_thread_id,

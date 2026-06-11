@@ -143,8 +143,13 @@ class FakeNativeController:
         approvals_reviewer: str | None = None,
         sandbox_policy: dict[str, Any] | None = None,
         collaboration_mode: dict[str, Any] | None = None,
+        force_new_turn: bool = False,
     ) -> FakeControlResult:
-        if (
+        if force_new_turn:
+            self.calls.append(
+                ("continue_session", native_thread_id, prompt, force_new_turn)
+            )
+        elif (
             model is None
             and effort is None
             and service_tier is None
@@ -1133,6 +1138,41 @@ async def test_native_continue_posts_json_body_and_returns_control_result(
         "status": "ok",
     }
     assert controller.calls == [("continue_session", "thread-1", "keep going")]
+
+
+@pytest.mark.asyncio
+async def test_native_continue_route_passes_force_new_turn_flag(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    body = json.dumps({"prompt": "keep going", "force_new_turn": True})
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/thread-1/continue HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert _json_body(response)["turn_id"] == "turn-2"
+    assert controller.calls == [("continue_session", "thread-1", "keep going", True)]
 
 
 @pytest.mark.asyncio
@@ -2757,6 +2797,8 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "planModeChipCancel.onclick = () => setSelectedCollaborationMode(\"default\");" in response
     assert "function renderAttachments" in response
     assert "function renderLocalUserEcho" in response
+    assert 'if (action === "continue" && nativeTurnRunning) body.force_new_turn = true;' in response
+    assert 'if (action !== "steer") renderLocalUserEcho(prompt, echoAttachments);' in response
     assert "function clearMatchingLocalUserEcho(event)" in response
     assert "function localUserEchoMatchesEvent(node, incomingText, incomingImages)" in response
     assert "if (!options.historical) clearMatchingLocalUserEcho(event);" in response
