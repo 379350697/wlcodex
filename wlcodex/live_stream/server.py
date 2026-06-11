@@ -2686,27 +2686,36 @@ def _native_codex_page(provider_name: str = "codex") -> str:
   <link rel="stylesheet" href="/static/effects.css">
   <link rel="stylesheet" href="/static/components.css">
   <style>
-    header { position: sticky; top: 0; z-index: 2; padding: 18px 20px 10px; background: rgba(5,5,8,0.82); backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); border-bottom: 1px solid rgba(255,255,255,0.08); }
-    .topbar { position: relative; display: grid; grid-template-columns: 54px 1fr 54px; align-items: center; min-height: 54px; }
-    h1 { margin: 0; text-align: center; font-size: 22px; font-weight: var(--weight-extrabold); letter-spacing: 0; }
-    .circle { border-color: var(--border-default); background: #1f2024; }
-    .menu { font-size: 24px; }
-    .devices { display: flex; gap: 10px; overflow-x: auto; padding: 14px 0 4px; scrollbar-width: none; }
-    .device-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 9px; max-width: 82vw; min-height: 44px; border-radius: 24px; padding: 0 18px; border: 0; background: #fff; color: #111; font-size: 16px; font-weight: var(--weight-extrabold); }
+    :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; }
+    body { background: #000; }
+    body { scrollbar-width: none; }
+    body::-webkit-scrollbar { display: none; }
+    .aurora-bg { background: #000 !important; }
+    .noise-overlay::before { display: none !important; }
+    header { position: sticky; top: 0; z-index: 2; padding: 16px 20px 9px; background: #000; border-bottom: 0; }
+    .topbar { position: relative; display: grid; grid-template-columns: 70px 1fr 70px; align-items: center; min-height: 72px; }
+    h1 { margin: 0; text-align: center; font-size: 28px; font-weight: var(--weight-black); letter-spacing: 0; }
+    .circle { width: 70px; min-height: 70px; border-radius: 50%; border-color: #343434; background: #202022; color: #f5f5f5; font-size: 46px; }
+    .menu { font-size: 35px; }
+    .devices { display: flex; gap: 12px; overflow-x: auto; padding: 14px 6px 4px; scrollbar-width: none; }
+    .device-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 11px; max-width: 82vw; min-height: 55px; border-radius: 28px; padding: 0 20px; border: 0; background: #fff; color: #111; font-size: 20px; font-weight: var(--weight-black); }
     .device-chip.off { background: var(--bg-chip-off); color: #d8d8dc; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-success); }
     .off .dot { background: #8c8f98; }
     .laptop { width: 20px; height: 14px; border: 2px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
     .laptop:after { content: ""; position: absolute; left: -4px; right: -4px; bottom: -6px; height: 2px; background: currentColor; border-radius: 2px; }
-    main { overflow-x: hidden; padding: 8px 22px calc(124px + env(safe-area-inset-bottom)); }
-    .nav-row, .project, .recent { position: relative; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 62px; overflow: hidden; color: var(--text-primary); background: transparent; border: 0; border-radius: 12px; width: 100%; padding: 0; text-align: left; animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }
+    main { overflow-x: hidden; padding: 6px 26px calc(124px + env(safe-area-inset-bottom)); }
+    .nav-row, .project, .recent { position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 76px; overflow: hidden; color: var(--text-primary); background: transparent; border: 0; border-radius: 12px; width: 100%; padding: 0; text-align: left; animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }
     .nav-row[hidden], .project-new-chat[hidden] { display: none; }
     .nav-row > span:nth-child(2), .project > span:nth-child(2) { min-width: 0; }
-    .icon-folder, .icon-chat { width: 30px; height: 24px; border: 3px solid var(--text-primary); border-radius: 4px; position: relative; }
+    .icon-folder, .icon-chat { width: 34px; height: 27px; border: 3px solid var(--text-primary); border-radius: 5px; position: relative; }
     .icon-folder:before { content: ""; position: absolute; left: 2px; top: -9px; width: 15px; height: 8px; border: 3px solid var(--text-primary); border-bottom: 0; border-radius: 4px 4px 0 0; background: #000; }
     .icon-chat { width: 28px; height: 28px; border-radius: 50%; }
     .icon-chat:after { content: ""; position: absolute; right: 2px; bottom: 1px; width: 7px; height: 7px; border-right: 3px solid var(--text-primary); border-bottom: 3px solid var(--text-primary); transform: rotate(28deg); background: #000; }
     .nav-row.active .label, .project.active .label { color: #fff; }
+    .project .label { color: #f5f5f5; }
+    .project .icon-folder { border-color: #f5f5f5; }
+    .project .icon-folder:before { border-color: #f5f5f5; }
     .nav-row.active .icon-chat, .project.active .icon-folder { border-color: #fff; }
     .project.active .icon-folder:before { border-color: #fff; }
     button.nav-row::before,
@@ -2726,13 +2735,17 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       background: rgba(255, 255, 255, 0.04);
       filter: none;
     }
+    button.nav-row:disabled,
+    button.project:disabled {
+      opacity: 1;
+    }
     button.nav-row.active,
     button.project.active {
-      background: rgba(147, 197, 253, 0.12);
+      background: transparent;
     }
     button.nav-row.active::before,
     button.project.active::before {
-      background: var(--color-link);
+      background: transparent;
     }
     button.nav-row.active:not(.secondary):not(.warn):not(:disabled):hover,
     button.project.active:not(.secondary):not(.warn):not(:disabled):hover {
@@ -2750,16 +2763,20 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       background: rgba(147, 197, 253, 0.16);
       transform: none;
     }
-    .label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; font-weight: var(--weight-semibold); }
-    .section-title { margin: 26px 0 12px; color: var(--text-dim); font-size: 15px; }
-    .recent { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; min-height: 64px; padding: 6px 0; }
+    .label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 24px; font-weight: var(--weight-medium); }
+    .section-title { margin: 32px 0 12px; color: #f3f3f3; font-size: 20px; font-weight: var(--weight-medium); }
+    .recent { grid-template-columns: minmax(0, 1fr) 46px; gap: 10px; align-items: start; min-height: 72px; padding: 8px 0; }
     .recent-copy { min-width: 0; overflow: hidden; }
     .recent-title { display: -webkit-box; max-height: 2.56em; white-space: normal; line-height: 1.28; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
     .recent.active .label { color: #fff; }
     .recent.loading { background: rgba(147, 197, 253, 0.12); }
-    .recent .time { transition: color var(--duration-fast) ease; }
-    .recent.loading .time { color: var(--color-link); }
-    .recent:hover .time { color: var(--text-secondary); }
+    .recent-status { position: relative; display: grid; place-items: center; width: 46px; min-height: 34px; color: #b8b8bd; font-size: 17px; line-height: 1; }
+    .recent-status.running::before { content: ""; width: 24px; height: 24px; border: 3px solid transparent; border-top-color: var(--native-remote-blue); border-right-color: var(--native-remote-blue); border-radius: 50%; animation: nativeRemoteSpin .85s linear infinite; }
+    .recent-status.finished::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--native-remote-red); box-shadow: 0 0 10px rgba(255,59,79,.35); }
+    .recent-status.running .status-time, .recent-status.finished .status-time { display: none; }
+    .recent.loading .recent-status::before { content: ""; width: 24px; height: 24px; border: 3px solid transparent; border-top-color: var(--native-remote-blue); border-right-color: var(--native-remote-blue); border-radius: 50%; animation: nativeRemoteSpin .85s linear infinite; }
+    .recent.loading .recent-status .status-time { display: none; }
+    @keyframes nativeRemoteSpin { to { transform: rotate(360deg); } }
     .more-sessions { border: 0; border-top: 1px solid var(--border-subtle); margin-top: 8px; padding-top: 8px; }
     .more-sessions summary { min-height: 44px; list-style: none; cursor: pointer; color: var(--text-dim); font-size: 15px; }
     .more-sessions summary::-webkit-details-marker { display: none; }
@@ -3667,18 +3684,25 @@ __ICONS_JS__
       for (const session of source) {
         const btn = document.createElement("button");
         btn.className = "recent" + (selected && selected.native_thread_id === session.native_thread_id ? " active" : "");
-        btn.innerHTML = `<span class="recent-copy"><span class="label recent-title">${escapeHtml(session.title || session.native_thread_id)}</span><span class="meta">${escapeHtml(sessionMetaText(session))}</span></span><span class="time">${escapeHtml(relativeTime(sessionActivityAt(session)))}</span>`;
+        const activityLabel = relativeTime(sessionActivityAt(session));
+        btn.innerHTML = `<span class="recent-copy"><span class="label recent-title">${escapeHtml(session.title || session.native_thread_id)}</span><span class="meta">${escapeHtml(sessionMetaText(session))}</span></span><span class="recent-status ${sessionVisualStateClass(session)}"><span class="status-time">${escapeHtml(activityLabel)}</span></span>`;
         btn.onpointerenter = () => prefetchLive(session);
         btn.onpointerdown = () => prefetchLive(session);
         btn.onclick = () => {
           selected = session;
           btn.classList.add("loading");
-          const timeEl = btn.querySelector(".time");
+          const timeEl = btn.querySelector(".status-time");
           if (timeEl) timeEl.textContent = "打开中";
           openLive(session);
         };
         target.appendChild(btn);
       }
+    }
+    function sessionVisualStateClass(session) {
+      const status = String((session && session.status) || "").trim().toLowerCase();
+      if (status === "running" || status === "in_progress" || status === "queued") return "running";
+      if (status === "completed" || status === "done" || status === "succeeded" || status === "success") return "finished";
+      return "idle";
     }
     function liveUrlForSession(session) {
       if (!session || !session.agent_run_id || !session.native_thread_id) return "";
@@ -4089,10 +4113,32 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
   <link rel="stylesheet" href="/static/effects.css">
   <link rel="stylesheet" href="/static/components.css">
   <style>
+    :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; }
+    body { background: #000; }
+    body { scrollbar-width: none; }
+    body::-webkit-scrollbar { display: none; }
+    .aurora-bg { background: #000 !important; }
+    .noise-overlay::before { display: none !important; }
     .native-mobile-shell, .codex-run-shell { min-height: 100vh; background: #000; }
-    header { position: sticky; top: 0; z-index: 3; display: grid; grid-template-columns: 54px 1fr 54px; align-items: center; gap: 8px; min-height: 78px; padding: 10px 20px 8px; background: rgba(5,5,8,.82); border-bottom: 1px solid var(--border-header); backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); }
-    .circle { border-color: #34363d; }
-    .screen-title { min-width: 0; text-align: center; }
+    header { position: sticky; top: 0; z-index: 3; display: grid; grid-template-columns: 70px 1fr 70px; align-items: center; gap: 8px; min-height: 92px; padding: 10px 20px 8px; background: #000; border-bottom: 0; }
+    .circle { width: 70px; min-height: 70px; border-radius: 50%; border-color: #343434; background: #202022; color: #f5f5f5; font-size: 46px; }
+    .session-float { position: fixed; top: calc(44px + env(safe-area-inset-top)); left: 106px; right: 132px; z-index: 5; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; min-height: 62px; padding: 0 18px; border: 1px solid #343434; border-radius: 31px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
+    .session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; line-height: 1.15; font-weight: var(--weight-black); }
+    .session-float-meta { display: flex; gap: 8px; align-items: center; min-width: 0; margin-top: 4px; color: #d0d0d4; font-size: 12px; line-height: 1; overflow: hidden; white-space: nowrap; }
+    .session-float-meta .laptop { width: 15px; height: 10px; border: 1.8px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
+    .session-float-meta .laptop:after { content: ""; position: absolute; left: -3px; right: -3px; bottom: -5px; height: 2px; background: currentColor; border-radius: 2px; }
+    .header-run-indicator { position: fixed; top: calc(44px + env(safe-area-inset-top)); right: 20px; z-index: 6; display: grid; grid-template-columns: 30px 1px 18px; gap: 10px; align-items: center; justify-content: center; width: 103px; min-height: 70px; border: 1px solid #343434; border-radius: 35px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
+    .header-run-status { display: grid; place-items: center; width: 34px; min-height: 34px; }
+    .header-run-spinner { width: 25px; height: 25px; border: 3px solid #5a5b60; border-right-color: transparent; border-radius: 50%; opacity: .7; }
+    .header-run-divider { width: 1px; height: 24px; background: #3a3a3d; }
+    .header-run-menu { font-size: 30px; line-height: 1; transform: translateY(-1px); }
+    .header-run-dot { display: none; width: 10px; height: 10px; border-radius: 50%; background: var(--native-remote-red); box-shadow: 0 0 10px rgba(255,59,79,.35); }
+    .header-run-indicator.running .header-run-spinner { border-color: transparent; border-top-color: var(--native-remote-blue); border-right-color: var(--native-remote-blue); opacity: 1; animation: nativeRemoteSpin .85s linear infinite; }
+    .header-run-indicator.finished .header-run-spinner { display: none; }
+    .header-run-indicator.finished .header-run-dot { display: block; }
+    @keyframes nativeRemoteSpin { to { transform: rotate(360deg); } }
+    .screen-title { min-width: 0; text-align: center; visibility: hidden; }
+    header > button:last-child { visibility: hidden; pointer-events: none; }
     h1 { margin: 0; font-size: 22px; font-weight: var(--weight-extrabold); letter-spacing: 0; }
     .subtitle { margin-top: 5px; color: var(--text-muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; background: var(--color-warning); vertical-align: 1px; transition: background 300ms ease; }
@@ -4315,8 +4361,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .dock-actions { display: flex; gap: 10px; min-width: 0; }
     .dock-actions[hidden] { display: none; }
     input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 0 14px; font-size: 15px; }
-    .primary-action { flex: 0 0 56px; width: 56px; min-height: 56px; border-radius: 15px; padding: 0; display: grid; place-items: center; font-size: 28px; line-height: 1; }
-    .primary-action.stop { font-size: 24px; }
+    .primary-action { flex: 0 0 56px; width: 56px; min-height: 56px; border-radius: 28px; padding: 0; display: grid; place-items: center; background: #f4f4f5; color: #050505; font-size: 28px; line-height: 1; }
+    .primary-action:disabled { background: #f4f4f5; color: #050505; opacity: .48; }
+    .primary-action.stop { background: #f4f4f5; color: #050505; font-size: 24px; }
     @media (min-width: 820px) {
       main { max-width: 780px; margin: 0 auto; }
       .codex-input-dock { left: 50%; transform: translateX(-50%); width: min(780px, 100%); }
@@ -4333,6 +4380,15 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       </div>
       <button class="circle" aria-label="菜单">⋮</button>
     </header>
+    <div class="session-float" id="sessionFloat" aria-label="当前会话">
+      <span class="session-float-title" id="sessionFloatTitle">__PROVIDER_LABEL_TEXT__</span>
+      <span class="session-float-meta"><span class="laptop"></span><span id="sessionFloatMeta">wlcodex</span></span>
+    </div>
+    <div class="header-run-indicator neutral" id="headerRunIndicator" aria-hidden="true">
+      <span class="header-run-status"><span class="header-run-spinner"></span><span class="header-run-dot"></span></span>
+      <span class="header-run-divider"></span>
+      <span class="header-run-menu">⋮</span>
+    </div>
     <main>
       <section class="codex-status-flow run-state" id="runStatus">
         <span class="run-pulse"></span>
@@ -4489,6 +4545,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     const empty = document.getElementById("empty");
     const runStatus = document.getElementById("runStatus");
     const runStateLabel = document.getElementById("runStateLabel");
+    const headerRunIndicator = document.getElementById("headerRunIndicator");
+    const sessionFloatTitle = document.getElementById("sessionFloatTitle");
+    const sessionFloatMeta = document.getElementById("sessionFloatMeta");
     const historyFold = document.getElementById("historyFold");
     const composerActivity = document.getElementById("composerActivity");
     const params = new URLSearchParams(location.search);
@@ -7086,6 +7145,11 @@ __ICONS_JS__
       if (!text) return;
       runStateLabel.textContent = text;
       runStatus.className = "codex-status-flow run-state " + (tone || "neutral");
+      updateHeaderRunIndicator(tone || "neutral");
+    }
+    function updateHeaderRunIndicator(tone) {
+      const visual = tone === "busy" ? "running" : tone === "failed" || tone === "done" ? "finished" : "neutral";
+      headerRunIndicator.className = "header-run-indicator " + visual;
     }
     function transcriptKey(event, role) {
       const payload = event.payload || {};

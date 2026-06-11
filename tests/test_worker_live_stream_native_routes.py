@@ -11,7 +11,11 @@ import pytest
 from wlcodex.db import Ledger
 from wlcodex.jsonrpc import JsonRpcError
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
-from wlcodex.live_stream.server import WorkerLiveStreamServer, _live_page
+from wlcodex.live_stream.server import (
+    WorkerLiveStreamServer,
+    _live_page,
+    _native_codex_page,
+)
 from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import RuntimeEvent
@@ -1697,6 +1701,24 @@ async def test_native_codex_page_contains_worker_and_session_selector(
     assert "btn.classList.add(\"loading\");" in response
 
 
+def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
+    response = _native_codex_page("codex")
+
+    assert "background: #000;" in response
+    assert ".topbar { position: relative; display: grid; grid-template-columns: 70px 1fr 70px;" in response
+    assert ".circle { width: 70px; min-height: 70px;" in response
+    assert ".device-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 11px; max-width: 82vw; min-height: 55px;" in response
+    assert ".recent { grid-template-columns: minmax(0, 1fr) 46px;" in response
+    assert ".recent-status.running::before" in response
+    assert "border-right-color: var(--native-remote-blue);" in response
+    assert ".recent-status.finished::before" in response
+    assert "background: var(--native-remote-red);" in response
+    assert "function sessionVisualStateClass(session)" in response
+    assert "status === \"running\" || status === \"in_progress\" || status === \"queued\"" in response
+    assert "status === \"completed\" || status === \"done\" || status === \"succeeded\" || status === \"success\"" in response
+    assert 'class="recent-status ${sessionVisualStateClass(session)}"' in response
+
+
 @pytest.mark.asyncio
 async def test_live_page_shell_is_not_cacheable(
     tmp_path: Path,
@@ -1727,6 +1749,24 @@ async def test_live_page_shell_is_not_cacheable(
     assert "Pragma: no-cache" in response
     assert "<title>Codex</title>" in response
     assert "codex-run-shell" in response
+
+
+def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert ".session-float { position: fixed; top: calc(44px + env(safe-area-inset-top));" in response
+    assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
+    assert ".header-run-indicator.running .header-run-spinner" in response
+    assert "border-right-color: var(--native-remote-blue);" in response
+    assert ".header-run-indicator.finished .header-run-dot" in response
+    assert "background: var(--native-remote-red);" in response
+    assert ".primary-action { flex: 0 0 56px; width: 56px; min-height: 56px; border-radius: 28px;" in response
+    assert ".primary-action.stop { background: #f4f4f5; color: #050505;" in response
+    assert 'id="sessionFloat"' in response
+    assert 'id="headerRunIndicator"' in response
+    assert "function updateHeaderRunIndicator(tone)" in response
+    assert 'headerRunIndicator.className = "header-run-indicator " + visual;' in response
+    assert "updateHeaderRunIndicator(tone || \"neutral\");" in response
 
 
 @pytest.mark.asyncio
