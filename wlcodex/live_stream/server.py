@@ -4247,13 +4247,20 @@ __ICONS_JS__
     }
 
     async function startNewChat(prompt) {
+      if (startingChat) return;
+      const promptText = String(prompt || "");
       startingChat = true;
       updateStartControls();
       saveModelSettingsIfChanged();
       savePermissionSettingsIfChanged();
       const settings = readSelectedModelSettings();
       const permissionSettings = readSelectedPermissionSettings();
-      const body = {cwd: selectedProjectCwd, prompt};
+      const attachmentsForSend = imageAttachments.map(image => ({...image}));
+      const composerSnapshot = {
+        prompt: promptText,
+        imageAttachments: attachmentsForSend
+      };
+      const body = {cwd: selectedProjectCwd, prompt: promptText};
       if (settings.model) body.model = settings.model;
       if (settings.effort) body.effort = settings.effort;
       if (settings.service_tier) body.service_tier = settings.service_tier;
@@ -4266,23 +4273,29 @@ __ICONS_JS__
       if (collaborationMode) {
         body.collaboration_mode = collaborationMode;
       }
-      if (imageAttachments.length) {
-        body.images = imageAttachments.map(image => ({
+      if (attachmentsForSend.length) {
+        body.images = attachmentsForSend.map(image => ({
           url: image.url,
           filename: image.filename,
           mime_type: image.mime_type
         }));
       }
+      promptEl.value = "";
+      imageAttachments = [];
+      renderAttachments();
+      resetComposerPlugins();
       try {
         const result = await api(`${API_BASE}/sessions/start`, {
           method: "POST",
           body: JSON.stringify(body)
         });
-        promptEl.value = "";
-        imageAttachments = [];
+        openLive(result);
+      } catch (error) {
+        promptEl.value = composerSnapshot.prompt;
+        imageAttachments = composerSnapshot.imageAttachments.map(image => ({...image}));
         renderAttachments();
         resetComposerPlugins();
-        openLive(result);
+        throw error;
       } finally {
         startingChat = false;
         updateStartControls();
@@ -4673,12 +4686,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .session-float-meta { display: flex; gap: 7px; align-items: center; min-width: 0; margin-top: 4px; color: #d0d0d4; font-size: 11px; line-height: 1; overflow: hidden; white-space: nowrap; }
     .session-float-meta .laptop { width: 13px; height: 9px; border: 1.6px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
     .session-float-meta .laptop:after { content: ""; position: absolute; left: -3px; right: -3px; bottom: -5px; height: 2px; background: currentColor; border-radius: 2px; }
-    .header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top)); right: 20px; z-index: 6; display: grid; grid-template-columns: 34px 1px 24px; gap: 10px; align-items: center; justify-content: center; width: 116px; min-height: 58px; border: 1px solid #343434; border-radius: 30px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
+    .header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top)); right: 20px; z-index: 6; display: grid; grid-template-columns: 34px 34px; gap: 10px; align-items: center; justify-content: center; width: 96px; min-height: 58px; border: 1px solid #343434; border-radius: 30px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
     .header-run-button { width: 34px; min-height: 34px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; -webkit-tap-highlight-color: transparent; }
     button.header-run-button:not(.secondary):not(.warn):not(:disabled):hover { background: transparent; filter: none; }
     .header-run-status { display: grid; place-items: center; width: 34px; min-height: 34px; }
     .header-run-spinner { width: 28px; height: 28px; border: 3px solid #5a5b60; border-right-color: transparent; border-radius: 50%; opacity: .72; }
-    .header-run-divider { width: 1px; height: 28px; background: #4c4c50; }
     .header-run-menu { display: grid; place-items: center; width: 24px; height: 34px; line-height: 1; color: #f4f4f5; font-size: 30px; font-weight: var(--weight-extrabold); transform: translateY(-1px); }
     .header-run-menu svg { width: 24px; height: 24px; }
     .header-run-dot { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--native-remote-red); box-shadow: 0 0 10px rgba(255,59,79,.35); }
@@ -4965,20 +4977,19 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     <header id="header">
       <button class="circle" id="back" aria-label="返回">‹</button>
       <div class="screen-title">
-        <h1>__PROVIDER_LABEL_TEXT__</h1>
+        <h1></h1>
         <div class="subtitle"><span class="status-dot"></span><span id="state">connecting</span></div>
       </div>
       <button class="circle" aria-label="菜单">⋮</button>
     </header>
     <div class="session-float" id="sessionFloat" aria-label="当前会话">
-      <span class="session-float-title" id="sessionFloatTitle">__PROVIDER_LABEL_TEXT__</span>
+      <span class="session-float-title" id="sessionFloatTitle"></span>
       <span class="session-float-meta"><span class="laptop"></span><span id="sessionFloatMeta">wlcodex</span></span>
     </div>
     <div class="header-run-indicator neutral" id="headerRunIndicator">
       <button class="header-run-button header-context-button" id="headerContextButton" type="button" aria-label="状态">
         <span class="header-run-status" aria-hidden="true"><span class="header-run-spinner"></span><span class="header-run-dot"></span></span>
       </button>
-      <span class="header-run-divider"></span>
       <button class="header-run-button header-session-menu-button" id="headerSessionMenuButton" type="button" aria-label="会话操作">
         <span class="header-run-menu" aria-hidden="true">⋮</span>
       </button>
@@ -5004,7 +5015,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       </div>
     </section>
     <section class="native-header-popover session-action-menu" id="sessionActionMenu" role="menu" aria-label="会话操作" hidden>
-      <h2 class="session-action-title" id="sessionActionTitle">__PROVIDER_LABEL_TEXT__</h2>
+      <h2 class="session-action-title" id="sessionActionTitle" hidden></h2>
       <button class="session-action-item" id="pinSessionButton" type="button" role="menuitem">
         <span class="session-action-icon"></span><span>置顶</span>
       </button>
@@ -5021,11 +5032,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     <main>
       <section class="codex-status-flow run-state" id="runStatus">
         <span class="run-pulse"></span>
-        <span id="runStateLabel">连接 __PROVIDER_LABEL_TEXT__ 会话</span>
+        <span id="runStateLabel">连接会话</span>
         <span class="event-cursor" id="cursor"></span>
       </section>
       <button class="history-fold" id="historyFold" hidden>更早的消息</button>
-      <section class="codex-transcript" id="events"><div class="empty" id="empty">输入消息开始 __PROVIDER_LABEL_TEXT__ 会话</div></section>
+      <section class="codex-transcript" id="events"><div class="empty" id="empty">输入消息开始新会话</div></section>
       <div class="composer-activity" id="composerActivity" aria-hidden="true">
         <span class="composer-activity-dot"></span>
         <span class="composer-activity-dot"></span>
@@ -5140,7 +5151,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         <button class="choice-action" id="queueChoice" type="button">排队</button>
       </div>
       <div class="dock-row">
-        <input id="prompt" placeholder="继续 __PROVIDER_LABEL_TEXT__ 会话">
+        <input id="prompt" placeholder="继续会话">
         <button class="primary-action" id="continue" aria-label="发送">↑</button>
       </div>
       <div class="dock-actions" hidden>
@@ -5310,6 +5321,7 @@ __ICONS_JS__
     const MAX_IMAGE_DATA_URL_CHARS = 2500000;
     const IMAGE_RESIZE_MAX_SIDE = 1280;
     const IMAGE_RESIZE_MIN_SIDE = 640;
+    let pendingUserEcho = null;
     let selectedPlugins = [];
     let currentSessionInfo = {};
     let sendingPrompt = false;
@@ -5341,7 +5353,7 @@ __ICONS_JS__
     function nativeErrorMessage(message) {
       const text = String(message || "");
       if (text === "native session not found" || text === "KeyError") {
-        return `${PROVIDER_LABEL} 会话不存在或已被清理`;
+        return "会话不存在或已被清理";
       }
       return text;
     }
@@ -5380,6 +5392,17 @@ __ICONS_JS__
       renderAttachments();
       resetComposerPlugins();
     }
+    function clearComposerDraftToSnapshot(snapshot) {
+      if (!snapshot) {
+        clearComposerDraft();
+        return;
+      }
+      promptInput.value = String(snapshot.prompt || "");
+      imageAttachments = (snapshot.imageAttachments || []).map(image => ({...image}));
+      renderAttachments();
+      resetComposerPlugins();
+      updateComposerDisabled();
+    }
     async function api(path, options = {}) {
       const response = await fetch(path, {
         ...options,
@@ -5406,7 +5429,7 @@ __ICONS_JS__
       return providerCapabilities.can_interrupt !== false;
     }
     async function nativeControl(action, body) {
-      if (!nativeThreadId) throw new Error(`${PROVIDER_LABEL} 会话未连接`);
+      if (!nativeThreadId) throw new Error("会话未连接");
       return api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/${action}`, {
         method: "POST",
         body: JSON.stringify(body)
@@ -5450,8 +5473,8 @@ __ICONS_JS__
         thread.title ||
         thread.name ||
         thread.preview ||
-        PROVIDER_LABEL
-      ).trim() || PROVIDER_LABEL;
+        "会话"
+      ).trim() || "会话";
     }
     function nativeSessionProjectLabel(directory = nativeSessionDirectory()) {
       if (directory) return lastPathComponent(directory);
@@ -6520,6 +6543,7 @@ __ICONS_JS__
       location.href = `/native/${encodeURIComponent(PROVIDER)}?${params.toString()}`;
     };
     async function submitPrompt(action = primaryComposerAction()) {
+      if (sendingPrompt) return;
       if (action === "interrupt") {
         await interruptNativeTurn();
         return;
@@ -6533,9 +6557,14 @@ __ICONS_JS__
         setSendStatus("请输入内容或照片", "error");
         return;
       }
+      const attachmentsSnapshot = imageAttachments.map(image => ({...image}));
       const body = buildNativePromptBody(prompt, {includeCollaborationMode: true});
-      if (imageAttachments.length) {
-        body.images = imageAttachments.map(image => ({
+      const composerSnapshot = {
+        prompt,
+        imageAttachments: attachmentsSnapshot
+      };
+      if (attachmentsSnapshot.length) {
+        body.images = attachmentsSnapshot.map(image => ({
           url: image.url,
           filename: image.filename,
           mime_type: image.mime_type
@@ -6543,10 +6572,14 @@ __ICONS_JS__
       }
       if (action === "steer") body.expected_turn_id = activeTurnId;
       if (action === "continue" && nativeTurnRunning) body.force_new_turn = true;
-      const echoAttachments = imageAttachments.map(image => ({...image}));
-      if (action !== "steer") renderLocalUserEcho(prompt, echoAttachments);
       sendingPrompt = true;
+      pendingUserEcho = {
+        text: normalizeTranscriptText(prompt),
+        images: attachmentsSnapshot.length
+      };
       closeInterruptionChoice();
+      if (action !== "steer") renderLocalUserEcho(prompt, attachmentsSnapshot);
+      clearComposerDraft();
       updateComposerDisabled();
       setSendStatus(action === "steer" ? "修正中" : "发送中", "");
       continueButton.classList.add("loading");
@@ -6557,20 +6590,23 @@ __ICONS_JS__
         activeTurnId = result.active_turn_id || (result.turn_running ? result.turn_id || "" : "");
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
         updateNativeHeaderContext();
-        clearComposerDraft();
+        pendingUserEcho = null;
         setSendStatus("已发送", "ok");
         await pollEvents();
       } catch (error) {
         if (await recoverNativeControlAfterFetchFailure(error, controlSnapshot)) {
+          pendingUserEcho = null;
           clearComposerDraft();
           setSendStatus("已发送", "ok");
           return;
         }
+        clearComposerDraftToSnapshot(composerSnapshot);
         await pollEvents();
         renderStatus(action + "_failed", error.message || String(error));
         setSendStatus(error.message || "发送失败", "error");
       } finally {
         sendingPrompt = false;
+        pendingUserEcho = null;
         continueButton.classList.remove("loading");
         updateComposerDisabled();
       }
@@ -6798,7 +6834,7 @@ __ICONS_JS__
     }
     async function previewHandoff() {
       if (!nativeThreadId) {
-        setHandoffStatus(`${PROVIDER_LABEL} 会话未连接`, "error");
+        setHandoffStatus("会话未连接", "error");
         return;
       }
       if (!handoffTargetProvider) selectHandoffTarget(preferredHandoffTarget());
@@ -7759,21 +7795,40 @@ __ICONS_JS__
     }
     function clearMatchingLocalUserEcho(event) {
       const payload = event.payload || {};
-      const incomingText = String(payload.text || payload.delta || payload.summary || "").trim();
+      const incomingText = normalizeTranscriptText(
+        String(payload.text || payload.delta || payload.summary || payload.content || payload.prompt || "").trim()
+      );
       const incomingImages = Array.isArray(payload.images) ? payload.images.length : 0;
+      let matched = false;
       for (const [key, node] of Array.from(transcriptNodes.entries())) {
         if (!node || !node.row || !node.row.classList.contains("local-pending")) continue;
         if (!localUserEchoMatchesEvent(node, incomingText, incomingImages)) continue;
         node.row.remove();
         transcriptNodes.delete(key);
+        matched = true;
+      }
+      if (!matched && incomingText && pendingUserEcho) {
+        for (const [key, node] of Array.from(transcriptNodes.entries())) {
+          if (!node || !node.row || !node.row.classList.contains("local-pending")) continue;
+          node.row.remove();
+          transcriptNodes.delete(key);
+          break;
+        }
       }
     }
     function localUserEchoMatchesEvent(node, incomingText, incomingImages) {
       const body = node.body;
       if (!body) return false;
-      const text = String(body.textContent || "").trim();
+      const text = normalizeTranscriptText(String(body.textContent || ""));
       const images = body.querySelectorAll ? body.querySelectorAll(".transcript-image").length : 0;
-      return text === incomingText && images === incomingImages;
+      if (!text && !incomingText) {
+        return images === incomingImages;
+      }
+      if (images !== incomingImages) return false;
+      return text === incomingText || text.startsWith(incomingText) || incomingText.startsWith(text);
+    }
+    function normalizeTranscriptText(value) {
+      return String(value || "").replace(/\s+/g, " ").trim();
     }
     function renderCommand(event) {
       renderToolCall(event);
@@ -8581,8 +8636,8 @@ __ICONS_JS__
     }
     function nativeExecutionStatus(event) {
       if (event.kind === "command_failed") return "执行失败";
-      if (event.kind === "command_completed") return `${PROVIDER_LABEL} 正在整理回复`;
-      return `${PROVIDER_LABEL} 正在处理`;
+      if (event.kind === "command_completed") return "正在整理回复";
+      return "正在处理";
     }
     function statusTone(event) {
       if (event.kind === "completed") return "done";
@@ -8606,7 +8661,7 @@ __ICONS_JS__
     function statusTitle(event, fallback) {
       const payload = event.payload || {};
       const status = String(payload.status || "").trim().toLowerCase();
-      if (event.kind === "lifecycle" && status === "running") return `${PROVIDER_LABEL} 正在回复`;
+      if (event.kind === "lifecycle" && status === "running") return "正在回复";
       if (event.kind === "reasoning_delta") return "Thinking";
       if (event.kind === "completed") return "完成";
       if (event.kind === "failed") return "失败";
