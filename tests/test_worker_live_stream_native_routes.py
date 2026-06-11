@@ -15,6 +15,7 @@ from wlcodex.live_stream.server import (
     WorkerLiveStreamServer,
     _live_page,
     _native_codex_page,
+    _plugin_icon_data_url,
 )
 from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.runtime_event_store import RuntimeEventStore
@@ -26,6 +27,19 @@ _FAKE_SESSION_METADATA = {
     "effort": "high",
     "service_tier": "fast",
 }
+
+
+def test_plugin_icon_data_url_resolves_paths_from_plugin_root(tmp_path: Path) -> None:
+    plugin_root = tmp_path / "browser"
+    manifest = plugin_root / ".codex-plugin" / "plugin.json"
+    icon = plugin_root / "assets" / "composer-icon.png"
+    manifest.parent.mkdir(parents=True)
+    icon.parent.mkdir(parents=True)
+    icon.write_bytes(b"fake-png")
+
+    result = _plugin_icon_data_url(manifest, "./assets/composer-icon.png")
+
+    assert result == "data:image/png;base64,ZmFrZS1wbmc="
 
 
 @dataclass(frozen=True)
@@ -2172,6 +2186,8 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert 'id="menuUploadPhoto"' in response
     assert 'id="menuPlanMode"' in response
     assert 'id="pluginList"' in response
+    assert 'id="selectedPluginStrip"' in response
+    assert 'id="pluginAutocomplete"' in response
     assert "上传照片" in response
     assert "计划模式" in response
     assert "插件" in response
@@ -2200,6 +2216,13 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "if (settings.service_tier) body.service_tier = settings.service_tier;" in response
     assert "if (imageAttachments.length) {" in response
     assert "body.images = imageAttachments.map(image => ({" in response
+    assert "function selectComposerPlugin(item)" in response
+    assert "function pluginAutocompleteMatches(query)" in response
+    assert "function promptHasPluginMention(value, mention)" in response
+    assert "function updatePluginAutocomplete()" in response
+    assert "row.onclick = () => selectComposerPlugin(item);" in response
+    assert "replacePromptPluginQuery(item);" in response
+    assert "renderSelectedPlugins();" in response
     assert "const COLLABORATION_MODE_STORAGE_KEY" in response
     assert "function readSelectedCollaborationMode()" in response
     assert "body.collaboration_mode = collaborationMode;" in response
@@ -2671,6 +2694,8 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert 'id="menuUploadPhoto"' in response
     assert 'id="menuPlanMode"' in response
     assert 'id="pluginList"' in response
+    assert 'id="selectedPluginStrip"' in response
+    assert 'id="pluginAutocomplete"' in response
     assert "上传照片" in response
     assert "计划模式" in response
     assert "插件" in response
@@ -2698,6 +2723,13 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "interruptButton.hidden = !canInterruptActiveTurn();" in response
     assert 'class="dock-actions" hidden' in response
     assert "function readImageAttachment" in response
+    assert "function selectComposerPlugin(item)" in response
+    assert "function pluginAutocompleteMatches(query)" in response
+    assert "function promptHasPluginMention(value, mention)" in response
+    assert "function updatePluginAutocomplete()" in response
+    assert "row.onclick = () => selectComposerPlugin(item);" in response
+    assert "replacePromptPluginQuery(item);" in response
+    assert "renderSelectedPlugins();" in response
     assert "function readSelectedCollaborationMode()" in response
     assert "body.collaboration_mode = collaborationMode;" in response
     assert 'planModeCheck.innerHTML = enabled ? ICONS.check : "";' in response

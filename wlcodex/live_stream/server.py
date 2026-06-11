@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import json
 import secrets
@@ -46,6 +47,7 @@ _REQUEST_TIMEOUT_SECONDS = 5.0
 _MAX_HEADER_BYTES = 16 * 1024
 _MAX_BODY_BYTES = 8 * 1024 * 1024
 _MAX_NATIVE_IMAGE_ATTACHMENTS = 8
+_MAX_PLUGIN_ICON_BYTES = 128 * 1024
 _CODEX_PERMISSION_PRESETS: dict[str, dict[str, object]] = {
     "default": {},
     "read_only": {
@@ -1770,6 +1772,34 @@ def _codex_collaboration_kwargs_from_body(
     return {"collaboration_mode": clean}
 
 
+def _plugin_icon_data_url(manifest: Path, icon_path: object) -> str:
+    if not isinstance(icon_path, str) or not icon_path.strip():
+        return ""
+    raw_path = icon_path.strip()
+    plugin_root = manifest.parent.parent
+    candidates = [
+        (plugin_root / raw_path).resolve(),
+        (manifest.parent / raw_path).resolve(),
+    ]
+    path = next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
+    try:
+        if not path.is_file() or path.stat().st_size > _MAX_PLUGIN_ICON_BYTES:
+            return ""
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    suffix = path.suffix.lower()
+    mime = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".svg": "image/svg+xml",
+    }.get(suffix, "application/octet-stream")
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
 def _codex_plugin_menu_items() -> list[dict[str, str]]:
     cache_root = Path.home() / ".codex" / "plugins" / "cache"
     if not cache_root.exists():
@@ -1793,11 +1823,16 @@ def _codex_plugin_menu_items() -> list[dict[str, str]]:
         seen.add(key)
         description = interface.get("shortDescription") or data.get("description") or ""
         brand_color = interface.get("brandColor") or ""
+        icon = _plugin_icon_data_url(
+            manifest,
+            interface.get("composerIcon") or interface.get("logo") or interface.get("icon"),
+        )
         items.append(
             {
                 "name": name.strip(),
                 "description": str(description).strip(),
                 "brand_color": str(brand_color).strip(),
+                "icon": icon,
             }
         )
     return items[:12]
@@ -2883,7 +2918,19 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .composer-menu-check { color: var(--btn-primary-bg); font-size: 18px; font-weight: var(--weight-black); }
     .composer-menu-section { margin: 12px 2px 8px; padding-top: 12px; border-top: 1px solid var(--border-section); color: var(--text-dim); font-size: 14px; font-weight: var(--weight-medium); }
     .plugin-list { display: grid; gap: 4px; }
-    .plugin-dot { width: 30px; height: 30px; border-radius: 9px; background: var(--bg-pill); color: var(--btn-primary-bg); display: grid; place-items: center; font-size: 13px; font-weight: var(--weight-black); }
+    .plugin-dot { width: 30px; height: 30px; border-radius: 9px; background: var(--bg-pill); color: var(--btn-primary-bg); display: grid; place-items: center; font-size: 13px; font-weight: var(--weight-black); overflow: hidden; }
+    .plugin-dot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .selected-plugin-strip { display: flex; gap: 8px; min-height: 38px; align-items: center; overflow-x: auto; }
+    .selected-plugin-strip[hidden] { display: none; }
+    .selected-plugin-chip { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; max-width: 180px; padding: 0 12px; border: 0; border-radius: 19px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 14px; font-weight: var(--weight-extrabold); }
+    .selected-plugin-chip .plugin-dot { width: 20px; height: 20px; border-radius: 6px; font-size: 9px; }
+    .selected-plugin-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .plugin-autocomplete { position: absolute; left: 26px; right: 26px; bottom: 92px; display: grid; gap: 6px; padding: 8px; border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); z-index: 9; }
+    .plugin-autocomplete[hidden] { display: none; }
+    .plugin-suggestion { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 12px; align-items: center; min-height: 64px; padding: 10px 12px; border: 0; border-radius: 16px; background: transparent; color: var(--btn-primary-bg); text-align: left; }
+    button.plugin-suggestion:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
+    .plugin-suggestion-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--btn-primary-bg); font-size: 17px; font-weight: var(--weight-extrabold); }
+    .plugin-suggestion-desc { margin-top: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 13px; line-height: 1.35; }
     .attachment-strip { display: flex; gap: 8px; min-height: 48px; overflow-x: auto; padding-bottom: 1px; }
     .attachment-strip[hidden] { display: none; }
     .attachment-chip { position: relative; flex: 0 0 auto; display: grid; grid-template-columns: 42px minmax(76px, 1fr) 26px; align-items: center; gap: 7px; max-width: 220px; min-height: 46px; border: 1px solid var(--border-default); border-radius: 12px; background: var(--bg-attachment); padding: 4px; color: var(--btn-primary-bg); }
@@ -3014,6 +3061,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       </div>
     </div>
     <div class="attachment-strip" id="attachmentStrip" hidden></div>
+    <div class="selected-plugin-strip" id="selectedPluginStrip" hidden></div>
     <div class="mode-chip-row">
       <div class="mode-chip plan-mode-chip" id="planModeChip" hidden>
         <span>☷ 计划</span>
@@ -3040,6 +3088,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       <div class="composer-menu-section" id="pluginMenuSection"__PLUGIN_MENU_HIDDEN__>插件</div>
       <div class="plugin-list" id="pluginList"__PLUGIN_MENU_HIDDEN__></div>
     </div>
+    <div class="plugin-autocomplete" id="pluginAutocomplete" hidden></div>
     <div class="start-row">
       <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片"></button>
       <input id="imageInput" type="file" accept="image/*" multiple hidden>
@@ -3134,11 +3183,14 @@ __ICONS_JS__
     let modelSettingsDirty = false;
     let permissionSettingsDirty = false;
     let imageAttachments = [];
+    let selectedPlugins = [];
     const composerActionMenu = document.getElementById("composerActionMenu");
     const menuUploadPhoto = document.getElementById("menuUploadPhoto");
     const menuPlanMode = document.getElementById("menuPlanMode");
     const pluginMenuSection = document.getElementById("pluginMenuSection");
     const pluginList = document.getElementById("pluginList");
+    const selectedPluginStrip = document.getElementById("selectedPluginStrip");
+    const pluginAutocomplete = document.getElementById("pluginAutocomplete");
     const planModeCheck = document.getElementById("planModeCheck");
     const planModeChip = document.getElementById("planModeChip");
     const planModeChipCancel = document.getElementById("planModeChipCancel");
@@ -3653,10 +3705,148 @@ __ICONS_JS__
       planModeChip.hidden = !enabled;
     }
 
+    function pluginKey(item) {
+      return String((item && (item.id || item.name)) || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    }
+
+    function pluginMention(item) {
+      const key = pluginKey(item);
+      return key ? "@" + key : "";
+    }
+
+    function createPluginIcon(item, sizeClass = "") {
+      const dot = document.createElement("span");
+      dot.className = sizeClass ? "plugin-dot " + sizeClass : "plugin-dot";
+      if (item && item.brand_color) dot.style.background = item.brand_color;
+      if (item && item.icon) {
+        const image = document.createElement("img");
+        image.src = item.icon;
+        image.alt = "";
+        dot.append(image);
+      } else {
+        dot.textContent = String((item && item.name) || "?").trim().slice(0, 1).toUpperCase() || "?";
+      }
+      return dot;
+    }
+
+    function availablePluginItems() {
+      return SUPPORTS_PLUGIN_MENU && Array.isArray(PLUGIN_MENU_ITEMS) ? PLUGIN_MENU_ITEMS : [];
+    }
+
+    function renderSelectedPlugins() {
+      selectedPluginStrip.innerHTML = "";
+      selectedPluginStrip.hidden = !selectedPlugins.length;
+      for (const item of selectedPlugins) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "selected-plugin-chip";
+        chip.title = item.description || item.name || "Plugin";
+        chip.append(createPluginIcon(item));
+        const label = document.createElement("span");
+        label.className = "selected-plugin-name";
+        label.textContent = item.name || "Plugin";
+        chip.append(label);
+        chip.onclick = () => {
+          selectedPlugins = selectedPlugins.filter(plugin => pluginKey(plugin) !== pluginKey(item));
+          renderSelectedPlugins();
+          updateStartControls();
+        };
+        selectedPluginStrip.append(chip);
+      }
+    }
+
+    function currentPluginQuery() {
+      if (viewMode !== "compose" || !SUPPORTS_PLUGIN_MENU) return null;
+      const cursor = Number.isFinite(promptEl.selectionStart) ? promptEl.selectionStart : promptEl.value.length;
+      const before = promptEl.value.slice(0, cursor);
+      const match = before.match(/(?:^|\\s)@([a-zA-Z0-9_-]*)$/);
+      return match ? match[1].toLowerCase() : null;
+    }
+
+    function pluginAutocompleteMatches(query) {
+      if (query === null) return [];
+      const needle = String(query || "").toLowerCase();
+      return availablePluginItems()
+        .filter(item => {
+          const name = String(item.name || "").toLowerCase();
+          const key = pluginKey(item);
+          return !needle || name.includes(needle) || key.includes(needle);
+        })
+        .slice(0, 4);
+    }
+
+    function promptHasPluginMention(value, mention) {
+      return String(value || "").toLowerCase().split(/\\s+/).includes(String(mention || "").toLowerCase());
+    }
+
+    function replacePromptPluginQuery(item) {
+      const mention = pluginMention(item);
+      if (!mention) return;
+      const value = promptEl.value;
+      const cursor = Number.isFinite(promptEl.selectionStart) ? promptEl.selectionStart : value.length;
+      const before = value.slice(0, cursor);
+      const match = before.match(/(^|\\s)@([a-zA-Z0-9_-]*)$/);
+      if (match) {
+        const prefix = match[1] || "";
+        const start = cursor - match[0].length;
+        const nextCursor = start + prefix.length + mention.length + 1;
+        promptEl.value = value.slice(0, start) + prefix + mention + " " + value.slice(cursor);
+        promptEl.setSelectionRange(nextCursor, nextCursor);
+        return;
+      }
+      if (promptHasPluginMention(value, mention)) return;
+      const separator = value && !value.endsWith(" ") ? " " : "";
+      promptEl.value = value + separator + mention + " ";
+      const nextCursor = promptEl.value.length;
+      promptEl.setSelectionRange(nextCursor, nextCursor);
+    }
+
+    function selectComposerPlugin(item) {
+      if (!item || !pluginKey(item)) return;
+      if (!selectedPlugins.some(plugin => pluginKey(plugin) === pluginKey(item))) {
+        selectedPlugins.push(item);
+      }
+      replacePromptPluginQuery(item);
+      renderSelectedPlugins();
+      updatePluginAutocomplete();
+      closeComposerActionMenu();
+      updateStartControls();
+      promptEl.focus({preventScroll: true});
+    }
+
+    function updatePluginAutocomplete() {
+      const matches = pluginAutocompleteMatches(currentPluginQuery());
+      pluginAutocomplete.innerHTML = "";
+      pluginAutocomplete.hidden = !matches.length;
+      for (const item of matches) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "plugin-suggestion";
+        row.append(createPluginIcon(item));
+        const copy = document.createElement("span");
+        const title = document.createElement("span");
+        title.className = "plugin-suggestion-title";
+        title.textContent = pluginMention(item);
+        const desc = document.createElement("span");
+        desc.className = "plugin-suggestion-desc";
+        desc.textContent = `${item.name || "Plugin"} · ${item.description || "本机插件"}`;
+        copy.append(title, desc);
+        row.append(copy);
+        row.onclick = () => selectComposerPlugin(item);
+        pluginAutocomplete.append(row);
+      }
+    }
+
+    function resetComposerPlugins() {
+      selectedPlugins = [];
+      renderSelectedPlugins();
+      updatePluginAutocomplete();
+    }
+
     function renderPluginList() {
       if (!SUPPORTS_PLUGIN_MENU) return;
       pluginList.innerHTML = "";
-      const items = Array.isArray(PLUGIN_MENU_ITEMS) ? PLUGIN_MENU_ITEMS : [];
+      const items = availablePluginItems();
       if (!items.length) {
         const empty = document.createElement("div");
         empty.className = "composer-menu-item";
@@ -3668,11 +3858,8 @@ __ICONS_JS__
         const row = document.createElement("button");
         row.type = "button";
         row.className = "composer-menu-item";
-        row.disabled = true;
-        const dot = document.createElement("span");
-        dot.className = "plugin-dot";
-        if (item.brand_color) dot.style.background = item.brand_color;
-        dot.textContent = String(item.name || "?").trim().slice(0, 1).toUpperCase() || "?";
+        row.onclick = () => selectComposerPlugin(item);
+        const dot = createPluginIcon(item);
         const copy = document.createElement("span");
         const title = document.createElement("span");
         title.className = "composer-menu-title";
@@ -3829,6 +4016,7 @@ __ICONS_JS__
       promptEl.value = "";
       closeProjectPicker();
       closeComposerActionMenu();
+      resetComposerPlugins();
       renderNativePage();
     }
 
@@ -3841,6 +4029,7 @@ __ICONS_JS__
       promptEl.value = "";
       closeProjectPicker();
       closeComposerActionMenu();
+      resetComposerPlugins();
       renderNativePage();
     }
 
@@ -3852,6 +4041,7 @@ __ICONS_JS__
       promptEl.value = "";
       closeProjectPicker();
       closeComposerActionMenu();
+      resetComposerPlugins();
       renderNativePage();
       window.setTimeout(() => promptEl.focus({preventScroll: true}), 0);
     }
@@ -4076,6 +4266,7 @@ __ICONS_JS__
         promptEl.value = "";
         imageAttachments = [];
         renderAttachments();
+        resetComposerPlugins();
         openLive(result);
       } finally {
         startingChat = false;
@@ -4212,6 +4403,7 @@ __ICONS_JS__
       location.href = tokenizedPath("/native");
     };
     promptEl.addEventListener("input", () => {
+      updatePluginAutocomplete();
       if (viewMode === "compose") updateStartControls();
       else renderSessions();
       updateStartControls();
@@ -4652,7 +4844,19 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .composer-menu-check { color: var(--btn-primary-bg); font-size: 18px; font-weight: var(--weight-black); }
     .composer-menu-section { margin: 12px 2px 8px; padding-top: 12px; border-top: 1px solid var(--border-section); color: var(--text-dim); font-size: 14px; font-weight: var(--weight-medium); }
     .plugin-list { display: grid; gap: 4px; }
-    .plugin-dot { width: 30px; height: 30px; border-radius: 9px; background: var(--bg-pill); color: var(--btn-primary-bg); display: grid; place-items: center; font-size: 13px; font-weight: var(--weight-black); }
+    .plugin-dot { width: 30px; height: 30px; border-radius: 9px; background: var(--bg-pill); color: var(--btn-primary-bg); display: grid; place-items: center; font-size: 13px; font-weight: var(--weight-black); overflow: hidden; }
+    .plugin-dot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .selected-plugin-strip { display: flex; gap: 8px; min-height: 38px; align-items: center; overflow-x: auto; }
+    .selected-plugin-strip[hidden] { display: none; }
+    .selected-plugin-chip { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; max-width: 180px; padding: 0 12px; border: 0; border-radius: 19px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 14px; font-weight: var(--weight-extrabold); }
+    .selected-plugin-chip .plugin-dot { width: 20px; height: 20px; border-radius: 6px; font-size: 9px; }
+    .selected-plugin-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .plugin-autocomplete { position: absolute; left: 16px; right: 16px; bottom: 104px; display: grid; gap: 6px; padding: 8px; border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); z-index: 9; }
+    .plugin-autocomplete[hidden] { display: none; }
+    .plugin-suggestion { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 12px; align-items: center; min-height: 64px; padding: 10px 12px; border: 0; border-radius: 16px; background: transparent; color: var(--btn-primary-bg); text-align: left; }
+    button.plugin-suggestion:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
+    .plugin-suggestion-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--btn-primary-bg); font-size: 17px; font-weight: var(--weight-extrabold); }
+    .plugin-suggestion-desc { margin-top: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 13px; line-height: 1.35; }
     .send-status { min-width: 66px; color: var(--text-muted); font-size: 12px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color 300ms ease, opacity 300ms ease; }
     .send-status.error { color: var(--color-error-light); }
     .send-status.ok { color: var(--color-success); }
@@ -4802,11 +5006,13 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
           <div class="composer-menu-section" id="pluginMenuSection"__PLUGIN_MENU_HIDDEN__>插件</div>
           <div class="plugin-list" id="pluginList"__PLUGIN_MENU_HIDDEN__></div>
         </div>
+        <div class="plugin-autocomplete" id="pluginAutocomplete" hidden></div>
         <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
         <input id="imageInput" type="file" accept="image/*" multiple hidden>
         <span class="send-status" id="sendStatus"></span>
       </div>
       <div class="attachment-strip" id="attachmentStrip" hidden></div>
+      <div class="selected-plugin-strip" id="selectedPluginStrip" hidden></div>
       <div class="mode-chip-row">
         <div class="mode-chip plan-mode-chip" id="planModeChip" hidden>
           <span>☷ 计划</span>
@@ -4924,6 +5130,8 @@ __ICONS_JS__
     const menuPlanMode = document.getElementById("menuPlanMode");
     const pluginMenuSection = document.getElementById("pluginMenuSection");
     const pluginList = document.getElementById("pluginList");
+    const selectedPluginStrip = document.getElementById("selectedPluginStrip");
+    const pluginAutocomplete = document.getElementById("pluginAutocomplete");
     const planModeCheck = document.getElementById("planModeCheck");
     const planModeChip = document.getElementById("planModeChip");
     const planModeChipCancel = document.getElementById("planModeChipCancel");
@@ -4965,6 +5173,7 @@ __ICONS_JS__
     const commandNodes = new Map();
     let renderTarget = events;
     let imageAttachments = [];
+    let selectedPlugins = [];
     let sendingPrompt = false;
     let nativeTurnRunning = false;
     let modelCatalog = [];
@@ -5445,10 +5654,136 @@ __ICONS_JS__
       planModeCheck.innerHTML = enabled ? ICONS.check : "";
       planModeChip.hidden = !enabled;
     }
+    function pluginKey(item) {
+      return String((item && (item.id || item.name)) || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    }
+    function pluginMention(item) {
+      const key = pluginKey(item);
+      return key ? "@" + key : "";
+    }
+    function createPluginIcon(item, sizeClass = "") {
+      const dot = document.createElement("span");
+      dot.className = sizeClass ? "plugin-dot " + sizeClass : "plugin-dot";
+      if (item && item.brand_color) dot.style.background = item.brand_color;
+      if (item && item.icon) {
+        const image = document.createElement("img");
+        image.src = item.icon;
+        image.alt = "";
+        dot.append(image);
+      } else {
+        dot.textContent = String((item && item.name) || "?").trim().slice(0, 1).toUpperCase() || "?";
+      }
+      return dot;
+    }
+    function availablePluginItems() {
+      return SUPPORTS_PLUGIN_MENU && Array.isArray(PLUGIN_MENU_ITEMS) ? PLUGIN_MENU_ITEMS : [];
+    }
+    function renderSelectedPlugins() {
+      selectedPluginStrip.innerHTML = "";
+      selectedPluginStrip.hidden = !selectedPlugins.length;
+      for (const item of selectedPlugins) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "selected-plugin-chip";
+        chip.title = item.description || item.name || "Plugin";
+        chip.append(createPluginIcon(item));
+        const label = document.createElement("span");
+        label.className = "selected-plugin-name";
+        label.textContent = item.name || "Plugin";
+        chip.append(label);
+        chip.onclick = () => {
+          selectedPlugins = selectedPlugins.filter(plugin => pluginKey(plugin) !== pluginKey(item));
+          renderSelectedPlugins();
+          updateComposerDisabled();
+        };
+        selectedPluginStrip.append(chip);
+      }
+    }
+    function currentPluginQuery() {
+      if (!SUPPORTS_PLUGIN_MENU) return null;
+      const cursor = Number.isFinite(promptInput.selectionStart) ? promptInput.selectionStart : promptInput.value.length;
+      const before = promptInput.value.slice(0, cursor);
+      const match = before.match(/(?:^|\\s)@([a-zA-Z0-9_-]*)$/);
+      return match ? match[1].toLowerCase() : null;
+    }
+    function pluginAutocompleteMatches(query) {
+      if (query === null) return [];
+      const needle = String(query || "").toLowerCase();
+      return availablePluginItems()
+        .filter(item => {
+          const name = String(item.name || "").toLowerCase();
+          const key = pluginKey(item);
+          return !needle || name.includes(needle) || key.includes(needle);
+        })
+        .slice(0, 4);
+    }
+    function promptHasPluginMention(value, mention) {
+      return String(value || "").toLowerCase().split(/\\s+/).includes(String(mention || "").toLowerCase());
+    }
+    function replacePromptPluginQuery(item) {
+      const mention = pluginMention(item);
+      if (!mention) return;
+      const value = promptInput.value;
+      const cursor = Number.isFinite(promptInput.selectionStart) ? promptInput.selectionStart : value.length;
+      const before = value.slice(0, cursor);
+      const match = before.match(/(^|\\s)@([a-zA-Z0-9_-]*)$/);
+      if (match) {
+        const prefix = match[1] || "";
+        const start = cursor - match[0].length;
+        const nextCursor = start + prefix.length + mention.length + 1;
+        promptInput.value = value.slice(0, start) + prefix + mention + " " + value.slice(cursor);
+        promptInput.setSelectionRange(nextCursor, nextCursor);
+        return;
+      }
+      if (promptHasPluginMention(value, mention)) return;
+      const separator = value && !value.endsWith(" ") ? " " : "";
+      promptInput.value = value + separator + mention + " ";
+      const nextCursor = promptInput.value.length;
+      promptInput.setSelectionRange(nextCursor, nextCursor);
+    }
+    function selectComposerPlugin(item) {
+      if (!item || !pluginKey(item)) return;
+      if (!selectedPlugins.some(plugin => pluginKey(plugin) === pluginKey(item))) {
+        selectedPlugins.push(item);
+      }
+      replacePromptPluginQuery(item);
+      renderSelectedPlugins();
+      updatePluginAutocomplete();
+      closeComposerActionMenu();
+      updateComposerDisabled();
+      promptInput.focus({preventScroll: true});
+    }
+    function updatePluginAutocomplete() {
+      const matches = pluginAutocompleteMatches(currentPluginQuery());
+      pluginAutocomplete.innerHTML = "";
+      pluginAutocomplete.hidden = !matches.length;
+      for (const item of matches) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "plugin-suggestion";
+        row.append(createPluginIcon(item));
+        const copy = document.createElement("span");
+        const title = document.createElement("span");
+        title.className = "plugin-suggestion-title";
+        title.textContent = pluginMention(item);
+        const desc = document.createElement("span");
+        desc.className = "plugin-suggestion-desc";
+        desc.textContent = `${item.name || "Plugin"} · ${item.description || "本机插件"}`;
+        copy.append(title, desc);
+        row.append(copy);
+        row.onclick = () => selectComposerPlugin(item);
+        pluginAutocomplete.append(row);
+      }
+    }
+    function resetComposerPlugins() {
+      selectedPlugins = [];
+      renderSelectedPlugins();
+      updatePluginAutocomplete();
+    }
     function renderPluginList() {
       if (!SUPPORTS_PLUGIN_MENU) return;
       pluginList.innerHTML = "";
-      const items = Array.isArray(PLUGIN_MENU_ITEMS) ? PLUGIN_MENU_ITEMS : [];
+      const items = availablePluginItems();
       if (!items.length) {
         const empty = document.createElement("div");
         empty.className = "composer-menu-item";
@@ -5460,11 +5795,8 @@ __ICONS_JS__
         const row = document.createElement("button");
         row.type = "button";
         row.className = "composer-menu-item";
-        row.disabled = true;
-        const dot = document.createElement("span");
-        dot.className = "plugin-dot";
-        if (item.brand_color) dot.style.background = item.brand_color;
-        dot.textContent = String(item.name || "?").trim().slice(0, 1).toUpperCase() || "?";
+        row.onclick = () => selectComposerPlugin(item);
+        const dot = createPluginIcon(item);
         const copy = document.createElement("span");
         const title = document.createElement("span");
         title.className = "composer-menu-title";
@@ -5698,7 +6030,10 @@ __ICONS_JS__
         submitPrompt();
       }
     });
-    promptInput.addEventListener("input", updateComposerDisabled);
+    promptInput.addEventListener("input", () => {
+      updatePluginAutocomplete();
+      updateComposerDisabled();
+    });
     document.getElementById("back").onclick = () => {
       const params = new URLSearchParams();
       if (token) params.set("token", token);
@@ -5743,6 +6078,7 @@ __ICONS_JS__
         promptInput.value = "";
         imageAttachments = [];
         renderAttachments();
+        resetComposerPlugins();
         setSendStatus("已发送", "ok");
         await pollEvents();
       } catch (error) {
