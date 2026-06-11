@@ -2812,6 +2812,21 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .compose-mode-toggle { display: grid; grid-template-columns: 1fr 1fr; width: 208px; min-height: 68px; overflow: hidden; border: 1px solid #303036; border-radius: 34px; background: #000; }
     .compose-mode-toggle button { border: 0; border-radius: 0; background: transparent; color: #fff; font-size: 19px; font-weight: var(--weight-black); }
     .compose-mode-toggle button.selected { background: #4a4a4d; color: #fff; }
+    .project-picker { position: fixed; inset: 0; z-index: 7; display: grid; align-content: start; overflow-y: auto; padding: calc(180px + env(safe-area-inset-top)) 72px calc(158px + env(safe-area-inset-bottom)); background: rgba(0,0,0,.9); color: var(--text-primary); }
+    .project-picker[hidden] { display: none; }
+    .project-picker-panel { display: grid; gap: 26px; min-width: 0; }
+    .project-picker h2 { margin: 0 0 20px; font-size: 29px; line-height: 1.16; font-weight: var(--weight-medium); letter-spacing: 0; }
+    .project-picker-list { display: grid; gap: 18px; }
+    .project-picker-section { margin: 10px 0 -4px; color: #d9d9de; font-size: 15px; font-weight: var(--weight-bold); }
+    .project-picker-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) 24px; gap: 15px; align-items: center; width: 100%; min-height: 66px; padding: 0; border: 0; border-radius: 12px; background: transparent; color: var(--text-primary); text-align: left; }
+    .project-picker-row .icon-folder { width: 27px; height: 21px; border-color: #e8e8ed; }
+    .project-picker-row .icon-folder:before { border-color: #e8e8ed; }
+    .project-picker-row .icon-chat { width: 29px; height: 29px; border-color: #e8e8ed; color: #e8e8ed; }
+    .project-picker-copy { min-width: 0; display: grid; gap: 3px; }
+    .project-picker-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #f5f5f5; font-size: 20px; font-weight: var(--weight-medium); }
+    .project-picker-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c8c8ce; font-size: 14px; line-height: 1.25; }
+    .project-picker-check { color: #fff; font-size: 22px; font-weight: var(--weight-black); }
+    .project-picker-cancel { justify-self: end; margin-top: 22px; min-height: 44px; border: 0; border-radius: 22px; background: transparent; color: #fff; padding: 0; font-size: 18px; font-weight: var(--weight-extrabold); }
     .controls { position: fixed; left: 0; right: 0; bottom: 0; display: grid; gap: 9px; padding: 12px 26px 18px; background: linear-gradient(to top, rgba(0,0,0,.98) 55%, rgba(0,0,0,.85) 78%, rgba(0,0,0,0)); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
     body[data-native-view="home"] .composer-tools,
     body[data-native-view="history"] .composer-tools,
@@ -2933,6 +2948,18 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       <div class="compose-mode-toggle" aria-label="工作区模式">
         <button class="selected" type="button"><span>工作区</span></button>
         <button type="button"><span>工作树</span></button>
+      </div>
+    </section>
+    <section class="project-picker" id="projectPicker" hidden aria-label="选择项目">
+      <div class="project-picker-panel">
+        <h2>选择项目</h2>
+        <div class="project-picker-list">
+          <button class="project-picker-row" id="projectPickerCurrent" type="button"></button>
+          <button class="project-picker-row" id="projectPickerNone" type="button"></button>
+          <div class="project-picker-section">最近的项目</div>
+          <div class="project-picker-list" id="projectPickerRecent"></div>
+        </div>
+        <button class="project-picker-cancel" id="projectPickerCancel" type="button">取消</button>
       </div>
     </section>
     <div class="section-title">最近</div>
@@ -3060,6 +3087,11 @@ __ICONS_JS__
     const composeHero = document.getElementById("composeHero");
     const composeProjectButton = document.getElementById("composeProjectButton");
     const composeProjectLabel = document.getElementById("composeProjectLabel");
+    const projectPicker = document.getElementById("projectPicker");
+    const projectPickerCurrent = document.getElementById("projectPickerCurrent");
+    const projectPickerNone = document.getElementById("projectPickerNone");
+    const projectPickerRecent = document.getElementById("projectPickerRecent");
+    const projectPickerCancel = document.getElementById("projectPickerCancel");
     const projectNewChat = document.getElementById("projectNewChat");
     const projectNewChatMeta = document.getElementById("projectNewChatMeta");
     const modelSettingsButton = document.getElementById("modelSettingsButton");
@@ -3723,12 +3755,62 @@ __ICONS_JS__
       composeProjectLabel.textContent = label;
     }
 
+    function openProjectPicker() {
+      if (viewMode !== "compose") return;
+      renderProjectPicker();
+      projectPicker.hidden = false;
+    }
+
+    function closeProjectPicker() {
+      projectPicker.hidden = true;
+    }
+
+    function renderProjectPicker() {
+      const current = currentDirectoryProject();
+      renderProjectPickerRow(projectPickerCurrent, "当前目录", current.cwd || "", current.cwd || "", "folder");
+      renderProjectPickerRow(projectPickerNone, "无项目", "", "", "chat");
+      projectPickerRecent.innerHTML = "";
+      const seen = new Set();
+      for (const project of projectCatalog) {
+        const cwd = String(project.cwd || "");
+        if (!cwd || seen.has(cwd)) continue;
+        seen.add(cwd);
+        const row = document.createElement("button");
+        row.className = "project-picker-row";
+        row.type = "button";
+        renderProjectPickerRow(row, project.name || lastPath(cwd), cwd, cwd, "folder");
+        projectPickerRecent.appendChild(row);
+      }
+    }
+
+    function renderProjectPickerRow(row, title, path, cwd, icon) {
+      const selectedMark = String(cwd || "") === selectedProjectCwd ? "\\u2713" : "";
+      const iconMarkup = icon === "chat"
+        ? '<span class="icon-chat"><span class="chat-chevron"></span><span class="chat-prompt-dot"></span></span>'
+        : '<span class="icon-folder"></span>';
+      row.innerHTML = `${iconMarkup}<span class="project-picker-copy"><span class="project-picker-title">${escapeHtml(title)}</span><span class="project-picker-path">${escapeHtml(path)}</span></span><span class="project-picker-check">${selectedMark}</span>`;
+      row.onclick = () => selectComposeProject(cwd);
+    }
+
+    function currentDirectoryProject() {
+      const current = projectCatalog.find(project => lastPath(project.cwd || "") === "wlcodex");
+      if (current) return {cwd: String(current.cwd || ""), name: current.name || lastPath(current.cwd || "")};
+      return {cwd: projectRoot, name: lastPath(projectRoot || "")};
+    }
+
+    function selectComposeProject(cwd) {
+      selectedProjectCwd = String(cwd || "");
+      closeProjectPicker();
+      renderComposeProject();
+    }
+
     function showHome() {
       viewMode = "home";
       historyTitle = PROVIDER_LABEL;
       selectedProjectCwd = "";
       selected = null;
       promptEl.value = "";
+      closeProjectPicker();
       closeComposerActionMenu();
       renderNativePage();
     }
@@ -3739,6 +3821,7 @@ __ICONS_JS__
       historyTitle = String(label || (selectedProjectCwd ? lastPath(selectedProjectCwd) : "聊天"));
       selected = null;
       promptEl.value = "";
+      closeProjectPicker();
       closeComposerActionMenu();
       renderNativePage();
     }
@@ -3748,6 +3831,7 @@ __ICONS_JS__
       selectedProjectCwd = String(cwd || selectedProjectCwd || "");
       selected = null;
       promptEl.value = "";
+      closeProjectPicker();
       closeComposerActionMenu();
       renderNativePage();
       window.setTimeout(() => promptEl.focus({preventScroll: true}), 0);
@@ -4010,10 +4094,8 @@ __ICONS_JS__
       renderNativePage();
     });
     chatRow.onclick = () => openHistory("", "聊天");
-    composeProjectButton.onclick = () => {
-      const current = selectedProjectCwd || (projectCatalog[0] && projectCatalog[0].cwd) || "";
-      openCompose(current);
-    };
+    composeProjectButton.onclick = openProjectPicker;
+    projectPickerCancel.onclick = closeProjectPicker;
     projectNewChat.onclick = handleProjectNewChat;
     attachmentButton.onclick = toggleComposerActionMenu;
     menuUploadPhoto.onclick = () => {
@@ -4096,6 +4178,10 @@ __ICONS_JS__
       toggleSettingOptions(reasoningOptions);
     };
     document.getElementById("back").onclick = () => {
+      if (!projectPicker.hidden) {
+        closeProjectPicker();
+        return;
+      }
       if (viewMode !== "home") {
         showHome();
         return;

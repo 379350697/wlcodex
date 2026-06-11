@@ -1732,6 +1732,18 @@ def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
     assert '<section class="compose-hero" id="composeHero" hidden>' in response
     assert '<h2>开始处理</h2>' in response
     assert 'id="composeProjectButton"' in response
+    assert '<section class="project-picker" id="projectPicker" hidden aria-label="选择项目">' in response
+    assert 'function openProjectPicker()' in response
+    assert 'function closeProjectPicker()' in response
+    assert 'function renderProjectPicker()' in response
+    assert 'function selectComposeProject(cwd)' in response
+    assert 'composeProjectButton.onclick = openProjectPicker;' in response
+    assert 'const selectedMark = String(cwd || "") === selectedProjectCwd ? "\\u2713" : "";' in response
+    assert 'const selectedMark = String(cwd || "") === selectedProjectCwd ? "<svg' not in response
+    assert 'id="projectPickerRecent"' in response
+    assert 'id="projectPickerCancel"' in response
+    assert '当前目录' in response
+    assert '无项目' in response
     assert '<span>工作区</span>' in response
     assert '<span>工作树</span>' in response
     assert ".search-wrap { position: relative; min-width: 0;" in response
