@@ -2698,20 +2698,36 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .circle { width: 54px; min-height: 54px; border-radius: 50%; border-color: #343434; background: #202022; color: #f5f5f5; font-size: 34px; }
     .menu { font-size: 25px; }
     .devices { display: flex; gap: 10px; overflow-x: auto; padding: 14px 6px 4px; scrollbar-width: none; }
-    .device-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 9px; max-width: 82vw; min-height: 44px; border-radius: 22px; padding: 0 18px; border: 0; background: #fff; color: #111; font-size: 16px; font-weight: var(--weight-black); }
+    .title-stack { min-width: 0; display: grid; gap: 3px; text-align: center; }
+    .page-subtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cfcfd5; font-size: 13px; font-weight: var(--weight-bold); }
+    .page-subtitle[hidden] { display: none; }
+    .device-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; max-width: 82vw; min-height: 44px; border-radius: 22px; padding: 0 17px; border: 0; background: #fff; color: #111; font-size: 15px; font-weight: var(--weight-bold); }
     .device-chip.off { background: var(--bg-chip-off); color: #d8d8dc; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-success); }
     .off .dot { background: #8c8f98; }
     .laptop { width: 20px; height: 14px; border: 2px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
     .laptop:after { content: ""; position: absolute; left: -4px; right: -4px; bottom: -6px; height: 2px; background: currentColor; border-radius: 2px; }
     main { overflow-x: hidden; padding: 6px 26px calc(124px + env(safe-area-inset-bottom)); }
-    .nav-row, .project, .recent { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 62px; overflow: hidden; color: var(--text-primary); background: transparent; border: 0; border-radius: 12px; width: 100%; padding: 0; text-align: left; animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }
+    body[data-native-view="compose"] main { min-height: calc(100vh - 190px); display: grid; align-content: center; padding-bottom: calc(170px + env(safe-area-inset-bottom)); }
+    body[data-native-view="history"] #chat,
+    body[data-native-view="history"] #projects,
+    body[data-native-view="history"] #projectNewChat,
+    body[data-native-view="compose"] #chat,
+    body[data-native-view="compose"] #projects,
+    body[data-native-view="compose"] #projectNewChat,
+    body[data-native-view="compose"] .section-title,
+    body[data-native-view="compose"] #sessions { display: none; }
+    .nav-row, .project, .recent { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 56px; overflow: hidden; color: var(--text-primary); background: transparent; border: 0; border-radius: 12px; width: 100%; padding: 0; text-align: left; animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }
     .nav-row[hidden], .project-new-chat[hidden] { display: none; }
     .nav-row > span:nth-child(2), .project > span:nth-child(2) { min-width: 0; }
-    .icon-folder, .icon-chat { width: 30px; height: 24px; border: 3px solid var(--text-primary); border-radius: 5px; position: relative; }
-    .icon-folder:before { content: ""; position: absolute; left: 2px; top: -9px; width: 15px; height: 8px; border: 3px solid var(--text-primary); border-bottom: 0; border-radius: 4px 4px 0 0; background: #000; }
-    .icon-chat { width: 28px; height: 28px; border-radius: 50%; }
-    .icon-chat:after { content: ""; position: absolute; right: 2px; bottom: 1px; width: 7px; height: 7px; border-right: 3px solid var(--text-primary); border-bottom: 3px solid var(--text-primary); transform: rotate(28deg); background: #000; }
+    .icon-folder { width: 26px; height: 20px; border: 2.4px solid var(--text-primary); border-radius: 4px; position: relative; }
+    .icon-folder:before { content: ""; position: absolute; left: 2px; top: -7px; width: 12px; height: 7px; border: 2.4px solid var(--text-primary); border-bottom: 0; border-radius: 4px 4px 0 0; background: #000; }
+    .icon-chat { width: 27px; height: 27px; border: 2.4px solid var(--text-primary); border-radius: 50%; position: relative; color: var(--text-primary); }
+    .chat-chevron { position: absolute; left: 7px; top: 9px; width: 8px; height: 8px; }
+    .chat-chevron:before, .chat-chevron:after { content: ""; position: absolute; right: 0; width: 8px; height: 2.4px; border-radius: 999px; background: currentColor; transform-origin: right center; }
+    .chat-chevron:before { top: 1px; transform: rotate(38deg); }
+    .chat-chevron:after { bottom: 1px; transform: rotate(-38deg); }
+    .chat-prompt-dot { position: absolute; left: 16px; bottom: 8px; width: 4.5px; height: 4.5px; border-radius: 50%; background: currentColor; }
     .nav-row.active .label, .project.active .label { color: #fff; }
     .project .label { color: #f5f5f5; }
     .project .icon-folder { border-color: #f5f5f5; }
@@ -2763,9 +2779,9 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       background: rgba(147, 197, 253, 0.16);
       transform: none;
     }
-    .label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 19px; font-weight: var(--weight-medium); }
+    .label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; font-weight: var(--weight-medium); }
     .section-title { margin: 30px 0 12px; color: #f3f3f3; font-size: 16px; font-weight: var(--weight-medium); }
-    .recent { grid-template-columns: minmax(0, 1fr) 34px; gap: 10px; align-items: start; min-height: 62px; padding: 7px 0; }
+    .recent { grid-template-columns: minmax(0, 1fr) 32px; gap: 10px; align-items: start; min-height: 58px; padding: 6px 0; }
     .recent-copy { min-width: 0; overflow: hidden; }
     .recent-title { display: -webkit-box; max-height: 2.56em; white-space: normal; line-height: 1.28; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
     .recent.active .label { color: #fff; }
@@ -2784,7 +2800,29 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .time { max-width: 66px; overflow: hidden; color: var(--text-meta); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
     .meta { margin-top: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-meta); font-size: 12px; }
     .empty { color: var(--text-meta); padding: 16px 0; }
+    .compose-hero { display: none; justify-items: center; gap: 18px; color: var(--text-primary); text-align: center; }
+    body[data-native-view="compose"] .compose-hero { display: grid; }
+    .compose-hero[hidden] { display: none; }
+    .compose-hero h2 { margin: 0; font-size: 24px; line-height: 1.18; font-weight: var(--weight-black); }
+    .compose-project-button { display: inline-flex; align-items: center; gap: 8px; max-width: 86vw; min-height: 36px; border: 0; border-radius: 18px; background: transparent; color: #f4f4f5; padding: 0 4px; font-size: 23px; font-weight: var(--weight-black); }
+    .compose-project-button .icon-folder { width: 20px; height: 15px; border-width: 2px; flex: 0 0 auto; }
+    .compose-project-button .icon-folder:before { top: -6px; width: 10px; height: 6px; border-width: 2px; }
+    .compose-project-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .compose-project-chevron { color: #d7d7dc; font-size: 16px; line-height: 1; }
+    .compose-mode-toggle { display: grid; grid-template-columns: 1fr 1fr; width: 208px; min-height: 68px; overflow: hidden; border: 1px solid #303036; border-radius: 34px; background: #000; }
+    .compose-mode-toggle button { border: 0; border-radius: 0; background: transparent; color: #fff; font-size: 19px; font-weight: var(--weight-black); }
+    .compose-mode-toggle button.selected { background: #4a4a4d; color: #fff; }
     .controls { position: fixed; left: 0; right: 0; bottom: 0; display: grid; gap: 9px; padding: 12px 26px 18px; background: linear-gradient(to top, rgba(0,0,0,.98) 55%, rgba(0,0,0,.85) 78%, rgba(0,0,0,0)); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+    body[data-native-view="home"] .composer-tools,
+    body[data-native-view="history"] .composer-tools,
+    body[data-native-view="home"] .mode-chip-row,
+    body[data-native-view="history"] .mode-chip-row,
+    body[data-native-view="home"] .attachment-strip,
+    body[data-native-view="history"] .attachment-strip,
+    body[data-native-view="home"] .composer-action-menu,
+    body[data-native-view="history"] .composer-action-menu,
+    body[data-native-view="home"] .attach-button,
+    body[data-native-view="history"] .attach-button { display: none; }
     .composer-tools { display: flex; gap: 8px; align-items: center; min-width: 0; }
     .composer-settings { position: relative; flex: 1; display: flex; gap: 8px; min-width: 0; }
     .setting-pill { min-height: 38px; max-width: 100%; border-radius: 19px; padding: 0 14px; overflow: hidden; background: var(--bg-pill); color: var(--btn-primary-bg); border: 1px solid transparent; font-size: 14px; font-weight: var(--weight-extrabold); text-overflow: ellipsis; white-space: nowrap; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
@@ -2814,7 +2852,9 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .setting-option.selected { background: var(--bg-option-selected); color: #fff; }
     button.setting-option:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
     .setting-option-check { color: var(--btn-primary-bg); font-weight: var(--weight-black); }
-    .attach-button { width: 56px; height: 56px; padding: 0; border-radius: 28px; border: 1px solid var(--border-popover); background: var(--bg-composer-input); color: var(--text-primary); font-size: 26px; line-height: 1; }
+    .attach-button { position: relative; width: 56px; height: 56px; padding: 0; border-radius: 28px; border: 1px solid #3d3d42; background: #202022; color: var(--text-primary); font-size: 0; line-height: 1; }
+    .attach-button:before, .attach-button:after { content: ""; position: absolute; left: 50%; top: 50%; width: 24px; height: 2.6px; border-radius: 999px; background: currentColor; transform: translate(-50%, -50%); }
+    .attach-button:after { width: 2.6px; height: 24px; }
     button.attach-button:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
     .composer-action-menu { position: absolute; left: 26px; right: 26px; bottom: 92px; max-height: min(58vh, 520px); overflow-y: auto; border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 14px; z-index: 8; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
     .composer-action-menu.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
@@ -2834,16 +2874,37 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 12px; }
     .attachment-remove { width: 26px; min-height: 26px; padding: 0; border-radius: 50%; background: var(--bg-remove-btn); color: var(--btn-primary-bg); font-size: 15px; }
     .start-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; }
-    input { min-width: 0; height: 56px; border-radius: 28px; border: 1px solid var(--border-popover); background: var(--bg-composer-input); color: var(--text-primary); padding: 0 20px; font-size: 17px; }
-    button.chat { height: 56px; min-width: 118px; border-radius: 28px; border: 0; background: #fff; color: #000; font-size: 17px; font-weight: var(--weight-extrabold); transition: background var(--duration-fast) ease, color var(--duration-fast) ease, opacity var(--duration-fast) ease; }
+    body[data-native-view="home"] .start-row,
+    body[data-native-view="history"] .start-row { grid-template-columns: minmax(0, 1fr) auto; }
+    body[data-native-view="compose"] .start-row { grid-template-columns: auto minmax(0, 1fr); }
+    .search-wrap { position: relative; min-width: 0; }
+    .search-wrap input { width: 100%; min-width: 0; height: 56px; border-radius: 28px; border: 1px solid #49494f; background: #222224; color: var(--text-primary); padding: 0 20px 0 56px; font-size: 17px; }
+    body[data-native-view="compose"] .search-wrap input { padding-left: 24px; padding-right: 54px; }
+    .search-wrap input::placeholder { color: #bfc0c6; opacity: 1; }
+    .search-icon { position: absolute; left: 20px; top: 50%; width: 22px; height: 22px; color: #d9d9de; transform: translateY(-50%); pointer-events: none; }
+    body[data-native-view="compose"] .search-icon { display: none; }
+    .search-icon:before { content: ""; position: absolute; left: 1px; top: 1px; width: 14px; height: 14px; border: 2.5px solid currentColor; border-radius: 50%; }
+    .search-icon:after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 9px; height: 2.5px; border-radius: 999px; background: currentColor; transform: rotate(45deg); transform-origin: center; }
+    .mic-icon { display: none; position: absolute; right: 20px; top: 50%; width: 20px; height: 24px; color: #d9d9de; transform: translateY(-50%); pointer-events: none; }
+    body[data-native-view="compose"] .mic-icon { display: block; }
+    .mic-icon:before { content: ""; position: absolute; left: 5px; top: 0; width: 10px; height: 16px; border: 2.4px solid currentColor; border-radius: 8px; }
+    .mic-icon:after { content: ""; position: absolute; left: 1px; bottom: 0; width: 18px; height: 12px; border: 2.4px solid currentColor; border-top: 0; border-radius: 0 0 10px 10px; }
+    button.chat { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 56px; min-width: 118px; border-radius: 28px; border: 0; background: #fff; color: #000; font-size: 17px; font-weight: var(--weight-extrabold); transition: background var(--duration-fast) ease, color var(--duration-fast) ease, opacity var(--duration-fast) ease; }
+    body[data-native-view="compose"] button.chat { display: none; }
+    .compose-icon { position: relative; width: 22px; height: 22px; flex: 0 0 22px; }
+    .compose-icon:before { content: ""; position: absolute; left: 3px; top: 8px; width: 15px; height: 8px; border: 2.5px solid currentColor; border-top: 0; border-radius: 0 0 5px 5px; transform: rotate(-45deg); }
+    .compose-icon:after { content: ""; position: absolute; right: 2px; top: 2px; width: 10px; height: 2.5px; border-radius: 999px; background: currentColor; transform: rotate(-45deg); transform-origin: center; }
     button.chat:disabled { background: var(--bg-pill); color: var(--text-dim); opacity: 1; cursor: default; }
   </style>
 </head>
-<body class="aurora-bg noise-overlay">
+<body class="aurora-bg noise-overlay" data-native-view="home">
   <header>
     <div class="topbar">
       <button class="circle" id="back" aria-label="back">‹</button>
-      <h1>__PROVIDER_LABEL__</h1>
+      <div class="title-stack">
+        <h1 id="pageTitle">__PROVIDER_LABEL__</h1>
+        <div class="page-subtitle" id="pageSubtitle" hidden></div>
+      </div>
       <button class="circle menu" aria-label="menu">⋮</button>
     </div>
     <div class="devices" id="devices">
@@ -2852,16 +2913,28 @@ def _native_codex_page(provider_name: str = "codex") -> str:
   </header>
   <main>
     <button class="nav-row" id="chat">
-      <span class="icon-chat"></span>
+      <span class="icon-chat"><span class="chat-chevron"></span><span class="chat-prompt-dot"></span></span>
       <span class="label">聊天</span>
       <span></span>
     </button>
     <div id="projects"></div>
     <button class="nav-row project-new-chat" id="projectNewChat" hidden>
-      <span class="icon-chat"></span>
+      <span class="icon-chat"><span class="chat-chevron"></span><span class="chat-prompt-dot"></span></span>
       <span><span class="label">聊天</span><span class="meta" id="projectNewChatMeta"></span></span>
       <span></span>
     </button>
+    <section class="compose-hero" id="composeHero" hidden>
+      <h2>开始处理</h2>
+      <button class="compose-project-button" id="composeProjectButton" type="button">
+        <span class="icon-folder"></span>
+        <span class="compose-project-label" id="composeProjectLabel">选择项目</span>
+        <span class="compose-project-chevron">⌄</span>
+      </button>
+      <div class="compose-mode-toggle" aria-label="工作区模式">
+        <button class="selected" type="button"><span>工作区</span></button>
+        <button type="button"><span>工作树</span></button>
+      </div>
+    </section>
     <div class="section-title">最近</div>
     <div id="sessions"></div>
   </main>
@@ -2935,10 +3008,14 @@ def _native_codex_page(provider_name: str = "codex") -> str:
       <div class="plugin-list" id="pluginList"__PLUGIN_MENU_HIDDEN__></div>
     </div>
     <div class="start-row">
-      <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
+      <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片"></button>
       <input id="imageInput" type="file" accept="image/*" multiple hidden>
-      <input id="prompt" placeholder="搜索聊天或开始新聊天">
-      <button class="chat" id="send">聊天</button>
+      <label class="search-wrap" for="prompt">
+        <span class="search-icon" aria-hidden="true"></span>
+        <span class="mic-icon" aria-hidden="true"></span>
+        <input id="prompt" placeholder="搜索聊天">
+      </label>
+      <button class="chat" id="send"><span class="compose-icon" aria-hidden="true"></span><span>聊天</span></button>
     </div>
   </section>
   <script>
@@ -2958,6 +3035,9 @@ __ICONS_JS__
     const headers = token ? {"Authorization": "Bearer " + token} : {};
     let selected = null;
     let selectedProjectCwd = "";
+    let viewMode = "home";
+    let historyTitle = PROVIDER_LABEL;
+    let deviceStatusText = "";
     let sessions = [];
     let projectRoot = "";
     let projectCatalog = [];
@@ -2966,6 +3046,8 @@ __ICONS_JS__
     const LIVE_PREFETCH_LIMIT = 4;
     const prefetchedLiveUrls = new Set();
     const devicesEl = document.getElementById("devices");
+    const pageTitle = document.getElementById("pageTitle");
+    const pageSubtitle = document.getElementById("pageSubtitle");
     const sessionsEl = document.getElementById("sessions");
     const projectsEl = document.getElementById("projects");
     const promptEl = document.getElementById("prompt");
@@ -2975,6 +3057,9 @@ __ICONS_JS__
     const imageInput = document.getElementById("imageInput");
     const attachmentStrip = document.getElementById("attachmentStrip");
     const chatRow = document.getElementById("chat");
+    const composeHero = document.getElementById("composeHero");
+    const composeProjectButton = document.getElementById("composeProjectButton");
+    const composeProjectLabel = document.getElementById("composeProjectLabel");
     const projectNewChat = document.getElementById("projectNewChat");
     const projectNewChatMeta = document.getElementById("projectNewChatMeta");
     const modelSettingsButton = document.getElementById("modelSettingsButton");
@@ -3041,9 +3126,13 @@ __ICONS_JS__
       try {
         const status = await api(`${API_BASE}/status`);
         const name = status.server_name || PROVIDER_LABEL;
+        deviceStatusText = `${name} · ${status.connected ? "已连接" : "未连接"}`;
         devicesEl.innerHTML = `<button class="device-chip${status.connected ? "" : " off"}"><span class="dot"></span><span class="laptop"></span><span>${escapeHtml(name)}</span></button>`;
+        updateNativeChrome();
       } catch (error) {
+        deviceStatusText = `${PROVIDER_LABEL} · 未连接`;
         devicesEl.innerHTML = `<button class="device-chip off"><span class="dot"></span><span class="laptop"></span><span>${escapeHtml(error.message)}</span></button>`;
+        updateNativeChrome();
       }
     }
 
@@ -3054,8 +3143,7 @@ __ICONS_JS__
         if (selected && !sessions.some(session => session.native_thread_id === selected.native_thread_id)) selected = null;
         if (render) {
           renderedHomeDataSignature = homeDataSignature();
-          renderProjects();
-          renderSessions();
+          renderNativePage();
         }
       } catch (error) {
         sessionsEl.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
@@ -3100,8 +3188,7 @@ __ICONS_JS__
       const signature = homeDataSignature();
       if (signature === renderedHomeDataSignature) return;
       renderedHomeDataSignature = signature;
-      renderProjects();
-      renderSessions();
+      renderNativePage();
     }
 
     async function loadModelCatalog() {
@@ -3611,24 +3698,74 @@ __ICONS_JS__
       return (option && option.textContent ? option.textContent : fallback) || fallback;
     }
 
+    function renderNativePage() {
+      updateNativeChrome();
+      renderProjects();
+      renderSessions();
+    }
+
+    function updateNativeChrome() {
+      document.body.dataset.nativeView = viewMode;
+      controlsEl.dataset.view = viewMode;
+      const title = viewMode === "home" ? PROVIDER_LABEL : (viewMode === "compose" ? "新聊天" : historyTitle);
+      pageTitle.textContent = title || PROVIDER_LABEL;
+      const showSubtitle = viewMode !== "home" && Boolean(deviceStatusText);
+      pageSubtitle.hidden = !showSubtitle;
+      if (showSubtitle) pageSubtitle.textContent = deviceStatusText;
+      devicesEl.hidden = viewMode !== "home";
+      composeHero.hidden = viewMode !== "compose";
+      promptEl.placeholder = viewMode === "compose" ? "接下来我们该写什么代码？" : "搜索聊天";
+      renderComposeProject();
+    }
+
+    function renderComposeProject() {
+      const label = selectedProjectCwd ? lastPath(selectedProjectCwd) : "选择项目";
+      composeProjectLabel.textContent = label;
+    }
+
+    function showHome() {
+      viewMode = "home";
+      historyTitle = PROVIDER_LABEL;
+      selectedProjectCwd = "";
+      selected = null;
+      promptEl.value = "";
+      closeComposerActionMenu();
+      renderNativePage();
+    }
+
+    function openHistory(cwd, label) {
+      viewMode = "history";
+      selectedProjectCwd = String(cwd || "");
+      historyTitle = String(label || (selectedProjectCwd ? lastPath(selectedProjectCwd) : "聊天"));
+      selected = null;
+      promptEl.value = "";
+      closeComposerActionMenu();
+      renderNativePage();
+    }
+
+    function openCompose(cwd) {
+      viewMode = "compose";
+      selectedProjectCwd = String(cwd || selectedProjectCwd || "");
+      selected = null;
+      promptEl.value = "";
+      closeComposerActionMenu();
+      renderNativePage();
+      window.setTimeout(() => promptEl.focus({preventScroll: true}), 0);
+    }
+
     function renderProjects() {
       const seen = new Set();
-      let selectedProjectRendered = false;
       projectsEl.innerHTML = "";
-      chatRow.className = "nav-row" + (selectedProjectCwd ? "" : " active");
+      chatRow.className = "nav-row";
       function addProjectOption(cwd, label) {
         cwd = String(cwd || "");
         if (!cwd || seen.has(cwd)) return;
         seen.add(cwd);
         const btn = document.createElement("button");
-        btn.className = "project" + (selectedProjectCwd === cwd ? " active" : "");
+        btn.className = "project";
         btn.innerHTML = `<span class="icon-folder"></span><span class="label">${escapeHtml(label || lastPath(cwd))}</span><span></span>`;
-        btn.onclick = () => selectProject(cwd);
+        btn.onclick = () => openHistory(cwd, label || lastPath(cwd));
         projectsEl.appendChild(btn);
-        if (selectedProjectCwd === cwd) {
-          projectsEl.appendChild(projectNewChat);
-          selectedProjectRendered = true;
-        }
       }
       for (const project of projectCatalog) {
         addProjectOption(project.cwd, project.name);
@@ -3637,24 +3774,25 @@ __ICONS_JS__
         if (!isKnownProjectWorkspace(session.cwd)) continue;
         addProjectOption(session.cwd || "", lastPath(session.cwd || ""));
       }
-      if (selectedProjectCwd && !selectedProjectRendered) projectsEl.appendChild(projectNewChat);
-      updateContextHint();
+      projectNewChat.hidden = true;
       renderProjectAction();
     }
 
     function selectProject(cwd) {
-      selectedProjectCwd = String(cwd || "");
-      selected = null;
-      renderProjects();
-      renderSessions();
+      const project = projectCatalog.find(item => String(item.cwd || "") === String(cwd || ""));
+      openHistory(cwd, project ? project.name : lastPath(cwd));
     }
 
     function renderProjectAction() {
-      projectNewChat.hidden = !selectedProjectCwd;
+      projectNewChat.hidden = true;
       projectNewChatMeta.textContent = selectedProjectCwd ? `在 ${lastPath(selectedProjectCwd)} 新建会话` : "";
     }
 
     function renderSessions() {
+      if (viewMode === "compose") {
+        sessionsEl.innerHTML = "";
+        return;
+      }
       const needle = promptEl.value.trim().toLowerCase();
       const filtered = sortedSessions().filter(session => {
         if (selectedProjectCwd && !(sessionProjectKey(session) === selectedProjectCwd)) return false;
@@ -3690,6 +3828,7 @@ __ICONS_JS__
         btn.onpointerdown = () => prefetchLive(session);
         btn.onclick = () => {
           selected = session;
+          markSessionViewed(session);
           btn.classList.add("loading");
           const timeEl = btn.querySelector(".status-time");
           if (timeEl) timeEl.textContent = "打开中";
@@ -3701,8 +3840,48 @@ __ICONS_JS__
     function sessionVisualStateClass(session) {
       const status = String((session && session.status) || "").trim().toLowerCase();
       if (status === "running" || status === "in_progress" || status === "queued") return "running";
-      if (status === "completed" || status === "done" || status === "succeeded" || status === "success") return "finished";
+      if (isUnreadCompletedSession(session)) return "finished";
       return "idle";
+    }
+    function isUnreadCompletedSession(session) {
+      const status = String((session && session.status) || "").trim().toLowerCase();
+      const completed = (
+        status === "completed" ||
+        status === "complete" ||
+        status === "done" ||
+        status === "succeeded" ||
+        status === "success" ||
+        status === "failed" ||
+        status === "error" ||
+        status === "cancelled" ||
+        status === "canceled" ||
+        status === "interrupted" ||
+        status === "aborted" ||
+        (status === "idle" && hasReviewableTurn(session))
+      );
+      return completed && !hasViewedSession(session);
+    }
+    function hasReviewableTurn(session) {
+      return Boolean(session && (session.last_turn_id || session.lastTurnId));
+    }
+    function hasViewedSession(session) {
+      const threadId = String((session && session.native_thread_id) || "");
+      if (!threadId) return false;
+      try {
+        return localStorage.getItem(sessionViewedStorageKey(threadId)) === "1";
+      } catch (error) {
+        return false;
+      }
+    }
+    function markSessionViewed(session) {
+      const threadId = String((session && session.native_thread_id) || "");
+      if (!threadId) return;
+      try {
+        localStorage.setItem(sessionViewedStorageKey(threadId), "1");
+      } catch (error) {}
+    }
+    function sessionViewedStorageKey(threadId) {
+      return "wlcodex:native-session-viewed:" + PROVIDER + ":" + threadId;
     }
     function liveUrlForSession(session) {
       if (!session || !session.agent_run_id || !session.native_thread_id) return "";
@@ -3803,7 +3982,7 @@ __ICONS_JS__
 
     async function handleProjectNewChat() {
       if (!selectedProjectCwd) return;
-      await startNewChat(promptEl.value.trim());
+      openCompose(selectedProjectCwd);
     }
 
     function composerHasDraft() {
@@ -3821,9 +4000,20 @@ __ICONS_JS__
       location.href = url;
     }
     sendButton.onclick = async () => {
+      if (viewMode !== "compose") {
+        openCompose(selectedProjectCwd);
+        return;
+      }
       await startNewChat(promptEl.value.trim());
     };
-    document.getElementById("chat").onclick = () => selectProject("");
+    window.addEventListener("pageshow", () => {
+      renderNativePage();
+    });
+    chatRow.onclick = () => openHistory("", "聊天");
+    composeProjectButton.onclick = () => {
+      const current = selectedProjectCwd || (projectCatalog[0] && projectCatalog[0].cwd) || "";
+      openCompose(current);
+    };
     projectNewChat.onclick = handleProjectNewChat;
     attachmentButton.onclick = toggleComposerActionMenu;
     menuUploadPhoto.onclick = () => {
@@ -3906,11 +4096,21 @@ __ICONS_JS__
       toggleSettingOptions(reasoningOptions);
     };
     document.getElementById("back").onclick = () => {
+      if (viewMode !== "home") {
+        showHome();
+        return;
+      }
       location.href = tokenizedPath("/native");
     };
     promptEl.addEventListener("input", () => {
-      renderSessions();
+      if (viewMode === "compose") updateStartControls();
+      else renderSessions();
       updateStartControls();
+    });
+    promptEl.addEventListener("keydown", async event => {
+      if (viewMode !== "compose" || event.key !== "Enter" || event.shiftKey) return;
+      event.preventDefault();
+      await startNewChat(promptEl.value.trim());
     });
     function sessionProjectKey(session) {
       return String((session && session.cwd) || "");
@@ -3936,7 +4136,7 @@ __ICONS_JS__
     function updateContextHint() {
       const project = selectedProjectCwd ? lastPath(selectedProjectCwd) : "";
       controlsEl.dataset.project = project;
-      promptEl.placeholder = project ? `在 ${project} 中开始新聊天或搜索` : "搜索聊天或开始新聊天";
+      promptEl.placeholder = viewMode === "compose" ? "接下来我们该写什么代码？" : "搜索聊天";
     }
     async function readImageAttachment(file) {
       const dataUrl = await readFileAsDataUrl(file);
@@ -4562,6 +4762,7 @@ __ICONS_JS__
     let nativeThreadId = params.get("native_thread_id") || "";
     let invalidNativeThreadId = Boolean(nativeThreadId && !isValidNativeThreadId(nativeThreadId));
     if (invalidNativeThreadId) nativeThreadId = "";
+    markNativeSessionViewed(nativeThreadId);
     let nativeTurnId = "";
     let activeTurnId = "";
     let attached = false;
@@ -4600,6 +4801,14 @@ __ICONS_JS__
     const interruptionChoice = document.getElementById("interruptionChoice");
     const steerChoice = document.getElementById("steerChoice");
     const queueChoice = document.getElementById("queueChoice");
+
+    function markNativeSessionViewed(threadId) {
+      threadId = String(threadId || "");
+      if (!threadId) return;
+      try {
+        localStorage.setItem("wlcodex:native-session-viewed:" + PROVIDER + ":" + threadId, "1");
+      } catch (error) {}
+    }
     const sendStatus = document.getElementById("sendStatus");
     const composerActionMenu = document.getElementById("composerActionMenu");
     const menuUploadPhoto = document.getElementById("menuUploadPhoto");

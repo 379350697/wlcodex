@@ -1708,16 +1708,49 @@ def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
     assert ".topbar { position: relative; display: grid; grid-template-columns: 54px 1fr 54px;" in response
     assert ".circle { width: 54px; min-height: 54px;" in response
     assert "h1 { margin: 0; text-align: center; font-size: 22px;" in response
-    assert ".device-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 9px; max-width: 82vw; min-height: 44px;" in response
-    assert ".label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 19px;" in response
-    assert ".recent { grid-template-columns: minmax(0, 1fr) 34px;" in response
+    assert ".device-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; max-width: 82vw; min-height: 44px;" in response
+    assert ".nav-row, .project, .recent { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto;" in response
+    assert ".icon-folder { width: 26px; height: 20px; border: 2.4px solid var(--text-primary);" in response
+    assert ".icon-chat { width: 27px; height: 27px; border: 2.4px solid var(--text-primary); border-radius: 50%;" in response
+    assert '<span class="chat-chevron"></span><span class="chat-prompt-dot"></span>' in response
+    assert ".chat-chevron:before, .chat-chevron:after" in response
+    assert ".label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px;" in response
+    assert ".recent { grid-template-columns: minmax(0, 1fr) 32px;" in response
+    assert ".attach-button:before, .attach-button:after" in response
+    assert 'controlsEl.dataset.view = viewMode;' in response
+    assert 'body[data-native-view="home"] .attach-button' in response
+    assert 'body[data-native-view="history"] .attach-button' in response
+    assert 'body[data-native-view="compose"] .compose-hero' in response
+    assert 'function openHistory(cwd, label)' in response
+    assert 'function openCompose(cwd)' in response
+    assert 'function showHome()' in response
+    assert 'if (viewMode !== "compose") {' in response
+    assert 'openCompose(selectedProjectCwd);' in response
+    assert 'promptEl.placeholder = viewMode === "compose" ? "接下来我们该写什么代码？" : "搜索聊天";' in response
+    assert 'if (viewMode === "compose") updateStartControls();' in response
+    assert 'chatRow.onclick = () => openHistory("", "聊天");' in response
+    assert '<section class="compose-hero" id="composeHero" hidden>' in response
+    assert '<h2>开始处理</h2>' in response
+    assert 'id="composeProjectButton"' in response
+    assert '<span>工作区</span>' in response
+    assert '<span>工作树</span>' in response
+    assert ".search-wrap { position: relative; min-width: 0;" in response
+    assert ".search-icon { position: absolute; left: 20px; top: 50%;" in response
+    assert ".search-icon:before" in response
+    assert '<span class="compose-icon" aria-hidden="true"></span><span>聊天</span>' in response
+    assert ".compose-icon:before" in response
     assert ".recent-status.running::before" in response
     assert "border-right-color: var(--native-remote-blue);" in response
     assert ".recent-status.finished::before" in response
     assert "background: var(--native-remote-red);" in response
     assert "function sessionVisualStateClass(session)" in response
+    assert "function hasViewedSession(session)" in response
+    assert "markSessionViewed(session);" in response
+    assert 'window.addEventListener("pageshow"' in response
     assert "status === \"running\" || status === \"in_progress\" || status === \"queued\"" in response
-    assert "status === \"completed\" || status === \"done\" || status === \"succeeded\" || status === \"success\"" in response
+    assert "isUnreadCompletedSession(session)" in response
+    assert 'status === "idle" && hasReviewableTurn(session)' in response
+    assert "function hasReviewableTurn(session)" in response
     assert 'class="recent-status ${sessionVisualStateClass(session)}"' in response
 
 
@@ -1781,6 +1814,14 @@ def test_worker_live_page_rejects_invalid_native_thread_id_before_attach() -> No
     assert 'renderStatus("native_session_invalid", "会话链接无效，请从最近会话重新打开");' in response
     assert "if (invalidNativeThreadId) return;" in response
     assert "if (!nativeThreadId || invalidNativeThreadId) return;" in response
+
+
+def test_worker_live_page_marks_native_session_viewed_on_open() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function markNativeSessionViewed(threadId)" in response
+    assert "markNativeSessionViewed(nativeThreadId);" in response
+    assert '"wlcodex:native-session-viewed:" + PROVIDER + ":" + threadId' in response
 
 
 @pytest.mark.asyncio
@@ -1976,10 +2017,10 @@ async def test_native_codex_page_uses_project_context_for_new_chat(
     assert "HTTP/1.1 200 OK" in response
     assert "let selectedProjectCwd = \"\";" in response
     assert "function selectProject(cwd)" in response
-    assert "selectedProjectCwd === cwd ? \" active\" : \"\"" in response
-    assert "let selectedProjectRendered = false;" in response
-    assert "projectsEl.appendChild(projectNewChat);" in response
-    assert "selectedProjectRendered = true;" in response
+    assert "function openHistory(cwd, label)" in response
+    assert "function openCompose(cwd)" in response
+    assert "btn.onclick = () => openHistory(cwd, label || lastPath(cwd));" in response
+    assert "projectNewChat.hidden = true;" in response
     assert "sessionProjectKey(session) === selectedProjectCwd" in response
     assert 'id="projectNewChat"' in response
     assert "function renderProjectAction()" in response
@@ -1987,7 +2028,7 @@ async def test_native_codex_page_uses_project_context_for_new_chat(
     assert "async function startNewChat(prompt)" in response
     assert 'const API_BASE = "/api/native/codex";' in response
     assert "api(`${API_BASE}/sessions/start`" in response
-    assert "document.getElementById(\"chat\").onclick = () => selectProject(\"\");" in response
+    assert 'chatRow.onclick = () => openHistory("", "聊天");' in response
     assert "document.querySelector(\".controls\")" in response
     assert "const SESSION_PREVIEW_LIMIT = 10;" in response
     assert "renderSessionList(filtered.slice(0, SESSION_PREVIEW_LIMIT)" in response
