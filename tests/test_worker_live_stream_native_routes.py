@@ -1738,8 +1738,19 @@ def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
     assert 'function renderProjectPicker()' in response
     assert 'function selectComposeProject(cwd)' in response
     assert 'composeProjectButton.onclick = openProjectPicker;' in response
-    assert 'const selectedMark = String(cwd || "") === selectedProjectCwd ? "\\u2713" : "";' in response
+    assert 'let noProjectSelected = false;' in response
+    assert 'const label = selectedProjectCwd ? lastPath(selectedProjectCwd) : (noProjectSelected ? "无项目" : "选择项目");' in response
+    assert 'const selectedMark = isProjectPickerRowSelected(cwd) ? "\\u2713" : "";' in response
+    assert 'function isProjectPickerRowSelected(cwd)' in response
+    assert 'noProjectSelected = !selectedProjectCwd;' in response
+    assert 'const selectedMark = String(cwd || "") === selectedProjectCwd ? "\\u2713" : "";' not in response
     assert 'const selectedMark = String(cwd || "") === selectedProjectCwd ? "<svg' not in response
+    assert 'button.project-picker-row:not(.secondary):not(.warn):not(:disabled):hover { background: transparent; filter: none; }' in response
+    assert 'button.project-picker-row:not(.secondary):not(.warn):not(:disabled):active { background: transparent; filter: none; transform: none; }' in response
+    assert 'body[data-native-view="compose"] .controls.has-draft button.chat { display: grid;' in response
+    assert 'body[data-native-view="compose"] .controls.has-draft .mic-icon { display: none; }' in response
+    assert 'controlsEl.classList.toggle("has-draft", viewMode === "compose" && hasDraft);' in response
+    assert 'sendButton.innerHTML = viewMode === "compose" ? ICONS.send : \'<span class="compose-icon" aria-hidden="true"></span><span>聊天</span>\';' in response
     assert 'id="projectPickerRecent"' in response
     assert 'id="projectPickerCancel"' in response
     assert '当前目录' in response
@@ -2217,7 +2228,8 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "const sendButton = document.getElementById(\"send\");" in response
     assert "let startingChat = false;" in response
     assert "function updateStartControls()" in response
-    assert "sendButton.disabled = startingChat;" in response
+    assert 'controlsEl.classList.toggle("has-draft", viewMode === "compose" && hasDraft);' in response
+    assert 'sendButton.disabled = startingChat || (viewMode === "compose" && !hasDraft);' in response
     assert "async function handleProjectNewChat()" in response
     assert "await startNewChat(promptEl.value.trim());" in response
     assert "promptEl.focus();" not in response

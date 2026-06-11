@@ -2818,7 +2818,9 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .project-picker h2 { margin: 0 0 20px; font-size: 29px; line-height: 1.16; font-weight: var(--weight-medium); letter-spacing: 0; }
     .project-picker-list { display: grid; gap: 18px; }
     .project-picker-section { margin: 10px 0 -4px; color: #d9d9de; font-size: 15px; font-weight: var(--weight-bold); }
-    .project-picker-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) 24px; gap: 15px; align-items: center; width: 100%; min-height: 66px; padding: 0; border: 0; border-radius: 12px; background: transparent; color: var(--text-primary); text-align: left; }
+    .project-picker-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) 24px; gap: 15px; align-items: center; width: 100%; min-height: 66px; padding: 0; border: 0; border-radius: 12px; background: transparent; color: var(--text-primary); text-align: left; box-shadow: none; -webkit-tap-highlight-color: transparent; }
+    button.project-picker-row:not(.secondary):not(.warn):not(:disabled):hover { background: transparent; filter: none; }
+    button.project-picker-row:not(.secondary):not(.warn):not(:disabled):active { background: transparent; filter: none; transform: none; }
     .project-picker-row .icon-folder { width: 27px; height: 21px; border-color: #e8e8ed; }
     .project-picker-row .icon-folder:before { border-color: #e8e8ed; }
     .project-picker-row .icon-chat { width: 29px; height: 29px; border-color: #e8e8ed; color: #e8e8ed; }
@@ -2891,7 +2893,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .start-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; }
     body[data-native-view="home"] .start-row,
     body[data-native-view="history"] .start-row { grid-template-columns: minmax(0, 1fr) auto; }
-    body[data-native-view="compose"] .start-row { grid-template-columns: auto minmax(0, 1fr); }
+    body[data-native-view="compose"] .start-row { position: relative; grid-template-columns: auto minmax(0, 1fr); }
     .search-wrap { position: relative; min-width: 0; }
     .search-wrap input { width: 100%; min-width: 0; height: 56px; border-radius: 28px; border: 1px solid #49494f; background: #222224; color: var(--text-primary); padding: 0 20px 0 56px; font-size: 17px; }
     body[data-native-view="compose"] .search-wrap input { padding-left: 24px; padding-right: 54px; }
@@ -2906,6 +2908,10 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     .mic-icon:after { content: ""; position: absolute; left: 1px; bottom: 0; width: 18px; height: 12px; border: 2.4px solid currentColor; border-top: 0; border-radius: 0 0 10px 10px; }
     button.chat { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 56px; min-width: 118px; border-radius: 28px; border: 0; background: #fff; color: #000; font-size: 17px; font-weight: var(--weight-extrabold); transition: background var(--duration-fast) ease, color var(--duration-fast) ease, opacity var(--duration-fast) ease; }
     body[data-native-view="compose"] button.chat { display: none; }
+    body[data-native-view="compose"] .controls.has-draft button.chat { display: grid; position: absolute; right: 8px; top: 50%; z-index: 2; place-items: center; width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; border-radius: 50%; background: #fff; color: #000; transform: translateY(-50%); }
+    body[data-native-view="compose"] .controls.has-draft button.chat svg { width: 28px; height: 28px; stroke-width: 2.4; }
+    body[data-native-view="compose"] .controls.has-draft button.chat:not(:disabled):active { transform: translateY(-50%) scale(.96); }
+    body[data-native-view="compose"] .controls.has-draft .mic-icon { display: none; }
     .compose-icon { position: relative; width: 22px; height: 22px; flex: 0 0 22px; }
     .compose-icon:before { content: ""; position: absolute; left: 3px; top: 8px; width: 15px; height: 8px; border: 2.5px solid currentColor; border-top: 0; border-radius: 0 0 5px 5px; transform: rotate(-45deg); }
     .compose-icon:after { content: ""; position: absolute; right: 2px; top: 2px; width: 10px; height: 2.5px; border-radius: 999px; background: currentColor; transform: rotate(-45deg); transform-origin: center; }
@@ -3062,6 +3068,7 @@ __ICONS_JS__
     const headers = token ? {"Authorization": "Bearer " + token} : {};
     let selected = null;
     let selectedProjectCwd = "";
+    let noProjectSelected = false;
     let viewMode = "home";
     let historyTitle = PROVIDER_LABEL;
     let deviceStatusText = "";
@@ -3751,7 +3758,7 @@ __ICONS_JS__
     }
 
     function renderComposeProject() {
-      const label = selectedProjectCwd ? lastPath(selectedProjectCwd) : "选择项目";
+      const label = selectedProjectCwd ? lastPath(selectedProjectCwd) : (noProjectSelected ? "无项目" : "选择项目");
       composeProjectLabel.textContent = label;
     }
 
@@ -3784,12 +3791,18 @@ __ICONS_JS__
     }
 
     function renderProjectPickerRow(row, title, path, cwd, icon) {
-      const selectedMark = String(cwd || "") === selectedProjectCwd ? "\\u2713" : "";
+      const selectedMark = isProjectPickerRowSelected(cwd) ? "\\u2713" : "";
       const iconMarkup = icon === "chat"
         ? '<span class="icon-chat"><span class="chat-chevron"></span><span class="chat-prompt-dot"></span></span>'
         : '<span class="icon-folder"></span>';
       row.innerHTML = `${iconMarkup}<span class="project-picker-copy"><span class="project-picker-title">${escapeHtml(title)}</span><span class="project-picker-path">${escapeHtml(path)}</span></span><span class="project-picker-check">${selectedMark}</span>`;
       row.onclick = () => selectComposeProject(cwd);
+    }
+
+    function isProjectPickerRowSelected(cwd) {
+      const value = String(cwd || "");
+      if (!value) return noProjectSelected;
+      return value === selectedProjectCwd;
     }
 
     function currentDirectoryProject() {
@@ -3800,14 +3813,18 @@ __ICONS_JS__
 
     function selectComposeProject(cwd) {
       selectedProjectCwd = String(cwd || "");
+      noProjectSelected = !selectedProjectCwd;
       closeProjectPicker();
       renderComposeProject();
+      updateContextHint();
+      updateStartControls();
     }
 
     function showHome() {
       viewMode = "home";
       historyTitle = PROVIDER_LABEL;
       selectedProjectCwd = "";
+      noProjectSelected = false;
       selected = null;
       promptEl.value = "";
       closeProjectPicker();
@@ -3818,6 +3835,7 @@ __ICONS_JS__
     function openHistory(cwd, label) {
       viewMode = "history";
       selectedProjectCwd = String(cwd || "");
+      noProjectSelected = false;
       historyTitle = String(label || (selectedProjectCwd ? lastPath(selectedProjectCwd) : "聊天"));
       selected = null;
       promptEl.value = "";
@@ -3829,6 +3847,7 @@ __ICONS_JS__
     function openCompose(cwd) {
       viewMode = "compose";
       selectedProjectCwd = String(cwd || selectedProjectCwd || "");
+      noProjectSelected = false;
       selected = null;
       promptEl.value = "";
       closeProjectPicker();
@@ -4074,7 +4093,11 @@ __ICONS_JS__
     }
 
     function updateStartControls() {
-      sendButton.disabled = startingChat;
+      const hasDraft = composerHasDraft();
+      controlsEl.classList.toggle("has-draft", viewMode === "compose" && hasDraft);
+      sendButton.innerHTML = viewMode === "compose" ? ICONS.send : '<span class="compose-icon" aria-hidden="true"></span><span>聊天</span>';
+      sendButton.setAttribute("aria-label", viewMode === "compose" ? "发送" : "聊天");
+      sendButton.disabled = startingChat || (viewMode === "compose" && !hasDraft);
     }
 
     async function openLive(session = selected) {
@@ -4220,7 +4243,7 @@ __ICONS_JS__
       return session.activity_at || session.updated_at || "";
     }
     function updateContextHint() {
-      const project = selectedProjectCwd ? lastPath(selectedProjectCwd) : "";
+      const project = selectedProjectCwd ? lastPath(selectedProjectCwd) : (noProjectSelected ? "无项目" : "");
       controlsEl.dataset.project = project;
       promptEl.placeholder = viewMode === "compose" ? "接下来我们该写什么代码？" : "搜索聊天";
     }
