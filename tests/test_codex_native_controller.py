@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -440,6 +441,72 @@ async def test_controller_read_session_projects_turn_history(tmp_path: Path) -> 
         EventType.AGENT_RUN_ACTIVITY,
     ]
     assert events[1].payload["delta"] == "historical answer"
+
+
+@pytest.mark.asyncio
+async def test_controller_read_session_adds_native_status_from_jsonl(
+    tmp_path: Path,
+) -> None:
+    controller, client, _session_store, _runtime_store = _controller(tmp_path)
+    session_path = tmp_path / "rollout.jsonl"
+    session_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-status"}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "last_token_usage": {"total_tokens": 140_000},
+                                "model_context_window": 260_000,
+                            },
+                            "rate_limits": {
+                                "primary": {
+                                    "used_percent": 2.0,
+                                    "window_minutes": 300,
+                                    "resets_at": 1_781_213_931,
+                                },
+                                "secondary": {
+                                    "used_percent": 7.0,
+                                    "window_minutes": 10_080,
+                                    "resets_at": 1_781_746_761,
+                                },
+                            },
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    client.details["thread-status"] = {
+        "thread": {
+            "id": "thread-status",
+            "title": "Status task",
+            "cwd": "/workspace/status",
+            "path": str(session_path),
+            "sourceKind": "ide",
+            "status": "done",
+        },
+        "turns": [],
+    }
+
+    detail = await controller.read_session("thread-status")
+
+    metadata = detail["thread"]["metadata"]
+    assert metadata["context"]["used_tokens"] == 140_000
+    assert metadata["context"]["total_tokens"] == 260_000
+    assert metadata["context"]["remaining_percent"] == pytest.approx(
+        (260_000 - 140_000) / 260_000 * 100
+    )
+    assert metadata["rate_limits"]["five_hour"]["remaining_percent"] == 98
+    assert metadata["rate_limits"]["five_hour"]["reset_at"] == 1_781_213_931
+    assert metadata["rate_limits"]["seven_day"]["remaining_percent"] == 93
+    assert metadata["rate_limits"]["seven_day"]["reset_at"] == 1_781_746_761
+    assert metadata["native_status"]["context"] == metadata["context"]
 
 
 @pytest.mark.asyncio

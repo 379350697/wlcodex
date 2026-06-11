@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 from wlcodex.codex_backend import (
@@ -235,6 +237,7 @@ class CodexNativeController:
 
     async def read_session(self, native_thread_id: str) -> dict[str, Any]:
         detail = await self._client.read_session(native_thread_id)
+        _augment_detail_with_native_status(detail)
         self._project_detail(native_thread_id, detail)
         return detail
 
@@ -956,3 +959,168 @@ def _approval_protocol_response(
             allow_session=True,
         )
     )
+
+
+def _augment_detail_with_native_status(detail: dict[str, Any]) -> None:
+    thread = detail.get("thread")
+    if not isinstance(thread, dict):
+        return
+    status = _latest_native_status_from_jsonl(thread.get("path"))
+    if not status:
+        return
+    metadata = thread.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        thread["metadata"] = metadata
+    if status.get("context"):
+        metadata["context"] = status["context"]
+    if status.get("rate_limits"):
+        metadata["rate_limits"] = status["rate_limits"]
+    metadata["native_status"] = status
+
+
+def _latest_native_status_from_jsonl(path_value: object) -> dict[str, Any] | None:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return None
+    path = Path(path_text)
+    if not path.is_file():
+        return None
+    latest: dict[str, Any] | None = None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    entry = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                payload = entry.get("payload")
+                if not isinstance(payload, dict):
+                    payload = entry
+                if payload.get("type") != "token_count":
+                    continue
+                status = _native_status_from_token_count_payload(payload)
+                if status:
+                    latest = status
+    except OSError:
+        return None
+    return latest
+
+
+def _native_status_from_token_count_payload(
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        info = {}
+    context = _native_context_summary(info)
+    rate_limits = _native_rate_limits_summary(payload.get("rate_limits"))
+    status: dict[str, Any] = {}
+    if context:
+        status["context"] = context
+    if rate_limits:
+        status["rate_limits"] = rate_limits
+    return status or None
+
+
+def _native_context_summary(info: dict[str, Any]) -> dict[str, Any] | None:
+    usage = info.get("last_token_usage")
+    if not isinstance(usage, dict):
+        usage = info.get("token_usage")
+    if not isinstance(usage, dict):
+        usage = info.get("total_token_usage")
+    used_tokens = _token_total(usage)
+    total_tokens = (
+        _number_value(info, "model_context_window")
+        or _number_value(info, "context_window")
+        or _number_value(info, "contextWindow")
+    )
+    if used_tokens is None or total_tokens is None or total_tokens <= 0:
+        return None
+    remaining_percent = max(
+        0.0,
+        min(100.0, (total_tokens - used_tokens) / total_tokens * 100),
+    )
+    return {
+        "used_tokens": used_tokens,
+        "total_tokens": total_tokens,
+        "remaining_percent": remaining_percent,
+    }
+
+
+def _native_rate_limits_summary(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    primary = _native_rate_limit_summary(raw.get("primary"))
+    secondary = _native_rate_limit_summary(raw.get("secondary"))
+    if primary:
+        summary["five_hour"] = primary
+    if secondary:
+        summary["seven_day"] = secondary
+    return summary
+
+
+def _native_rate_limit_summary(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    used_percent = _number_value(raw, "used_percent")
+    remaining_percent = _number_value(raw, "remaining_percent")
+    if remaining_percent is None and used_percent is not None:
+        remaining_percent = max(0.0, min(100.0, 100.0 - used_percent))
+    reset_at = (
+        _number_value(raw, "resets_at")
+        or _number_value(raw, "reset_at")
+        or _string_value(raw, "resets_at")
+        or _string_value(raw, "reset_at")
+    )
+    window_minutes = _number_value(raw, "window_minutes")
+    summary: dict[str, Any] = {}
+    if used_percent is not None:
+        summary["used_percent"] = used_percent
+    if remaining_percent is not None:
+        summary["remaining_percent"] = remaining_percent
+    if reset_at:
+        summary["reset_at"] = reset_at
+    if window_minutes is not None:
+        summary["window_minutes"] = window_minutes
+    return summary or None
+
+
+def _token_total(raw: object) -> float | None:
+    if not isinstance(raw, dict):
+        return None
+    direct = (
+        _number_value(raw, "total_tokens")
+        or _number_value(raw, "totalTokens")
+        or _number_value(raw, "total")
+    )
+    if direct is not None:
+        return direct
+    input_tokens = _number_value(raw, "input_tokens")
+    output_tokens = _number_value(raw, "output_tokens")
+    if input_tokens is not None or output_tokens is not None:
+        return (input_tokens or 0.0) + (output_tokens or 0.0)
+    return None
+
+
+def _number_value(raw: dict[str, Any], key: str) -> float | None:
+    value = raw.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None

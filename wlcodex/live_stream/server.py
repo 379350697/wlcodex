@@ -43,9 +43,9 @@ from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.jsonrpc import JsonRpcError
 
 
-_REQUEST_TIMEOUT_SECONDS = 5.0
+_REQUEST_TIMEOUT_SECONDS = 30.0
 _MAX_HEADER_BYTES = 16 * 1024
-_MAX_BODY_BYTES = 8 * 1024 * 1024
+_MAX_BODY_BYTES = 24 * 1024 * 1024
 _MAX_NATIVE_IMAGE_ATTACHMENTS = 8
 _MAX_PLUGIN_ICON_BYTES = 128 * 1024
 _CODEX_PERMISSION_PRESETS: dict[str, dict[str, object]] = {
@@ -3195,6 +3195,9 @@ __ICONS_JS__
     let modelSettingsDirty = false;
     let permissionSettingsDirty = false;
     let imageAttachments = [];
+    const MAX_IMAGE_DATA_URL_CHARS = 2500000;
+    const IMAGE_RESIZE_MAX_SIDE = 1280;
+    const IMAGE_RESIZE_MIN_SIDE = 640;
     let selectedPlugins = [];
     const composerActionMenu = document.getElementById("composerActionMenu");
     const menuUploadPhoto = document.getElementById("menuUploadPhoto");
@@ -4455,7 +4458,10 @@ __ICONS_JS__
       const dataUrl = await readFileAsDataUrl(file);
       try {
         return await resizeImageAttachment(file, dataUrl);
-      } catch (_error) {
+      } catch (error) {
+        if (dataUrl.length > MAX_IMAGE_DATA_URL_CHARS) {
+          throw new Error(error.message || "图片过大，请换成 JPG 或 PNG 后重试");
+        }
         return {
           url: dataUrl,
           filename: file.name || "image",
@@ -4475,34 +4481,61 @@ __ICONS_JS__
       return new Promise((resolve, reject) => {
         const image = new Image();
         image.onload = () => {
-          const maxSide = 1280;
-          const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
-          if (!Number.isFinite(scale) || scale <= 0) {
-            reject(new Error("图片尺寸无效"));
-            return;
+          try {
+            const initialScale = Math.min(1, IMAGE_RESIZE_MAX_SIDE / Math.max(image.width, image.height));
+            if (!Number.isFinite(initialScale) || initialScale <= 0) {
+              reject(new Error("图片尺寸无效"));
+              return;
+            }
+            if (
+              dataUrl.length <= MAX_IMAGE_DATA_URL_CHARS &&
+              file.size <= 900000 &&
+              image.width <= IMAGE_RESIZE_MAX_SIDE &&
+              image.height <= IMAGE_RESIZE_MAX_SIDE
+            ) {
+              resolve({
+                url: dataUrl,
+                filename: file.name || "image",
+                mime_type: file.type || "image/*"
+              });
+              return;
+            }
+            const canvas = document.createElement("canvas");
+            let width = Math.max(1, Math.round(image.width * initialScale));
+            let height = Math.max(1, Math.round(image.height * initialScale));
+            const draw = () => {
+              canvas.width = width;
+              canvas.height = height;
+              const context = canvas.getContext("2d");
+              if (!context) throw new Error("图片处理失败");
+              context.drawImage(image, 0, 0, width, height);
+            };
+            draw();
+            let quality = .82;
+            let url = canvas.toDataURL("image/jpeg", quality);
+            while (url.length > MAX_IMAGE_DATA_URL_CHARS && quality > .58) {
+              quality = Math.max(.58, quality - .08);
+              url = canvas.toDataURL("image/jpeg", quality);
+            }
+            while (url.length > MAX_IMAGE_DATA_URL_CHARS && Math.max(width, height) > IMAGE_RESIZE_MIN_SIDE) {
+              width = Math.max(1, Math.round(width * .82));
+              height = Math.max(1, Math.round(height * .82));
+              draw();
+              quality = .72;
+              url = canvas.toDataURL("image/jpeg", quality);
+            }
+            if (url.length > MAX_IMAGE_DATA_URL_CHARS) {
+              reject(new Error("图片压缩后仍过大，请换一张较小的图片"));
+              return;
+            }
+            resolve({
+              url,
+              filename: file.name || "image",
+              mime_type: "image/jpeg"
+            });
+          } catch (error) {
+            reject(error);
           }
-          const width = Math.max(1, Math.round(image.width * scale));
-          const height = Math.max(1, Math.round(image.height * scale));
-          const canvas = document.createElement("canvas");
-          canvas.width = width;
-          canvas.height = height;
-          const context = canvas.getContext("2d");
-          if (!context) {
-            reject(new Error("图片处理失败"));
-            return;
-          }
-          context.drawImage(image, 0, 0, width, height);
-          const mime = file.type === "image/png" && file.size < 900000
-            ? "image/png"
-            : "image/jpeg";
-          const url = scale < 1 || file.size > 1200000
-            ? canvas.toDataURL(mime, .86)
-            : dataUrl;
-          resolve({
-            url,
-            filename: file.name || "image",
-            mime_type: mime
-          });
         };
         image.onerror = () => reject(new Error("图片解码失败"));
         image.src = dataUrl;
@@ -4635,31 +4668,40 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .native-mobile-shell, .codex-run-shell { min-height: 100vh; background: #000; }
     header { position: sticky; top: 0; z-index: 3; display: grid; grid-template-columns: 54px 1fr 54px; align-items: center; gap: 8px; min-height: 72px; padding: 10px 20px 8px; background: #000; border-bottom: 0; }
     .circle { width: 54px; min-height: 54px; border-radius: 50%; border-color: #343434; background: #202022; color: #f5f5f5; font-size: 34px; }
-    .session-float { position: fixed; top: calc(24px + env(safe-area-inset-top)); left: 90px; right: 112px; z-index: 5; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; min-height: 50px; padding: 0 15px; border: 1px solid #343434; border-radius: 25px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
+    .session-float { position: fixed; top: calc(24px + env(safe-area-inset-top)); left: 90px; right: 146px; z-index: 5; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; min-height: 50px; padding: 0 15px; border: 1px solid #343434; border-radius: 25px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
     .session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.15; font-weight: var(--weight-black); }
     .session-float-meta { display: flex; gap: 7px; align-items: center; min-width: 0; margin-top: 4px; color: #d0d0d4; font-size: 11px; line-height: 1; overflow: hidden; white-space: nowrap; }
     .session-float-meta .laptop { width: 13px; height: 9px; border: 1.6px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
     .session-float-meta .laptop:after { content: ""; position: absolute; left: -3px; right: -3px; bottom: -5px; height: 2px; background: currentColor; border-radius: 2px; }
-    .header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top)); right: 20px; z-index: 6; display: grid; grid-template-columns: 24px 1px 16px; gap: 9px; align-items: center; justify-content: center; width: 86px; min-height: 54px; border: 1px solid #343434; border-radius: 27px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
-    .header-run-button { width: 24px; min-height: 24px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; -webkit-tap-highlight-color: transparent; }
+    .header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top)); right: 20px; z-index: 6; display: grid; grid-template-columns: 34px 1px 24px; gap: 10px; align-items: center; justify-content: center; width: 116px; min-height: 58px; border: 1px solid #343434; border-radius: 30px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
+    .header-run-button { width: 34px; min-height: 34px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; -webkit-tap-highlight-color: transparent; }
     button.header-run-button:not(.secondary):not(.warn):not(:disabled):hover { background: transparent; filter: none; }
-    .header-run-status { display: grid; place-items: center; width: 24px; min-height: 24px; }
-    .header-run-spinner { width: 20px; height: 20px; border: 2px solid #5a5b60; border-right-color: transparent; border-radius: 50%; opacity: .7; }
-    .header-run-divider { width: 1px; height: 20px; background: #3a3a3d; }
-    .header-run-menu { display: grid; place-items: center; width: 20px; height: 24px; line-height: 1; transform: translateY(-1px); }
-    .header-run-menu svg { width: 22px; height: 22px; }
+    .header-run-status { display: grid; place-items: center; width: 34px; min-height: 34px; }
+    .header-run-spinner { width: 28px; height: 28px; border: 3px solid #5a5b60; border-right-color: transparent; border-radius: 50%; opacity: .72; }
+    .header-run-divider { width: 1px; height: 28px; background: #4c4c50; }
+    .header-run-menu { display: grid; place-items: center; width: 24px; height: 34px; line-height: 1; color: #f4f4f5; font-size: 30px; font-weight: var(--weight-extrabold); transform: translateY(-1px); }
+    .header-run-menu svg { width: 24px; height: 24px; }
     .header-run-dot { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--native-remote-red); box-shadow: 0 0 10px rgba(255,59,79,.35); }
     .header-run-indicator.running .header-run-spinner { border-color: transparent; border-top-color: var(--native-remote-blue); border-right-color: var(--native-remote-blue); opacity: 1; animation: nativeRemoteSpin .85s linear infinite; }
     .header-run-indicator.finished .header-run-spinner { display: none; }
     .header-run-indicator.finished .header-run-dot { display: block; }
     .native-header-popover { position: fixed; top: calc(86px + env(safe-area-inset-top)); right: 20px; z-index: 10; width: min(326px, calc(100vw - 40px)); border: 1px solid #343434; border-radius: 24px; background: #242426; color: #f4f4f5; box-shadow: 0 18px 44px rgba(0,0,0,.55); overflow: hidden; }
     .native-header-popover[hidden] { display: none; }
-    .context-info-popover { display: grid; gap: 14px; padding: 18px; }
-    .context-info-title { margin: 0; color: #d7d7dc; font-size: 18px; line-height: 1.2; font-weight: var(--weight-extrabold); text-align: center; }
-    .context-info-grid { display: grid; gap: 10px; }
-    .context-info-row { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 12px; align-items: start; min-height: 26px; }
-    .context-info-label { color: #9b9ca3; font-size: 14px; line-height: 1.35; }
-    .context-info-value { min-width: 0; color: #f4f4f5; font-size: 15px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .context-info-sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: grid; padding: 13px 38px calc(42px + env(safe-area-inset-bottom)); border-radius: 30px 30px 0 0; background: #000; color: #f4f4f5; border-top: 1px solid #111114; box-shadow: 0 -22px 54px rgba(0,0,0,.78); }
+    .context-info-sheet[hidden] { display: none; }
+    .context-sheet-handle { justify-self: center; width: 58px; height: 5px; margin: 0 0 28px; border-radius: 999px; background: #252529; }
+    .context-sheet-header { position: relative; display: grid; place-items: center; min-height: 42px; margin-bottom: 24px; }
+    .context-info-title { margin: 0; color: #f4f4f5; font-size: 24px; line-height: 1.15; font-weight: var(--weight-black); text-align: center; letter-spacing: 0; }
+    .context-info-close { position: absolute; top: -2px; right: -10px; width: 42px; min-height: 42px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #f4f4f5; font-size: 34px; line-height: 1; font-weight: var(--weight-medium); -webkit-tap-highlight-color: transparent; }
+    button.context-info-close:not(.secondary):not(.warn):not(:disabled):hover { background: transparent; filter: none; }
+    .context-info-grid { display: grid; gap: 15px; }
+    .context-info-row { display: grid; grid-template-columns: 136px minmax(0, 1fr); gap: 36px; align-items: start; min-height: 28px; }
+    .context-info-label { color: #d9d9dd; font-size: 18px; line-height: 1.35; font-weight: var(--weight-medium); white-space: nowrap; }
+    .context-info-value { min-width: 0; color: #f4f4f5; font-size: 19px; line-height: 1.35; font-weight: var(--weight-extrabold); overflow-wrap: anywhere; white-space: normal; }
+    .context-info-value-wrap { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 42px; gap: 10px; align-items: start; }
+    .context-info-copy { width: 42px; min-height: 42px; display: grid; place-items: center; padding: 0; margin-top: -6px; border: 0; border-radius: 50%; background: transparent; color: #f4f4f5; -webkit-tap-highlight-color: transparent; }
+    .context-info-copy svg { width: 32px; height: 32px; }
+    button.context-info-copy:not(.secondary):not(.warn):not(:disabled):hover { background: transparent; filter: none; }
     .session-action-menu { padding: 18px 0; }
     .session-action-title { min-width: 0; margin: 0; padding: 0 38px 12px; color: #d7d7dc; font-size: 18px; line-height: 1.2; font-weight: var(--weight-extrabold); text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .session-action-item { width: 100%; min-height: 64px; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 18px; align-items: center; padding: 0 42px; border: 0; border-radius: 0; background: transparent; color: #f4f4f5; text-align: left; font-size: 20px; line-height: 1.2; font-weight: var(--weight-medium); -webkit-tap-highlight-color: transparent; }
@@ -4933,7 +4975,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       <span class="session-float-meta"><span class="laptop"></span><span id="sessionFloatMeta">wlcodex</span></span>
     </div>
     <div class="header-run-indicator neutral" id="headerRunIndicator">
-      <button class="header-run-button header-context-button" id="headerContextButton" type="button" aria-label="上下文信息">
+      <button class="header-run-button header-context-button" id="headerContextButton" type="button" aria-label="状态">
         <span class="header-run-status" aria-hidden="true"><span class="header-run-spinner"></span><span class="header-run-dot"></span></span>
       </button>
       <span class="header-run-divider"></span>
@@ -4941,15 +4983,24 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         <span class="header-run-menu" aria-hidden="true">⋮</span>
       </button>
     </div>
-    <section class="native-header-popover context-info-popover" id="contextInfoPopover" aria-label="上下文信息" hidden>
-      <h2 class="context-info-title">上下文信息</h2>
+    <section class="context-info-sheet" id="contextInfoPopover" aria-label="状态" hidden>
+      <span class="context-sheet-handle" aria-hidden="true"></span>
+      <div class="context-sheet-header">
+        <h2 class="context-info-title">状态</h2>
+        <button class="context-info-close" id="contextInfoClose" type="button" aria-label="关闭">×</button>
+      </div>
       <div class="context-info-grid">
-        <div class="context-info-row"><span class="context-info-label">会话</span><span class="context-info-value" id="contextSessionTitle">__PROVIDER_LABEL_TEXT__</span></div>
-        <div class="context-info-row"><span class="context-info-label">项目</span><span class="context-info-value" id="contextProjectValue">wlcodex</span></div>
-        <div class="context-info-row"><span class="context-info-label">状态</span><span class="context-info-value" id="contextStatusValue">连接中</span></div>
-        <div class="context-info-row"><span class="context-info-label">模型</span><span class="context-info-value" id="contextModelValue">默认</span></div>
-        <div class="context-info-row"><span class="context-info-label">会话 ID</span><span class="context-info-value" id="contextThreadValue">未连接</span></div>
-        <div class="context-info-row"><span class="context-info-label">运行</span><span class="context-info-value" id="contextRunValue">#__AGENT_RUN_ID__</span></div>
+        <div class="context-info-row">
+          <span class="context-info-label">对话线程:</span>
+          <span class="context-info-value-wrap">
+            <span class="context-info-value" id="contextThreadValue">未连接</span>
+            <button class="context-info-copy" id="contextThreadCopyButton" type="button" aria-label="复制会话 ID"></button>
+          </span>
+        </div>
+        <div class="context-info-row"><span class="context-info-label">目录:</span><span class="context-info-value" id="contextDirectoryValue">wlcodex</span></div>
+        <div class="context-info-row"><span class="context-info-label">上下文:</span><span class="context-info-value" id="contextUsageValue">等待同步</span></div>
+        <div class="context-info-row"><span class="context-info-label">5 小时限制:</span><span class="context-info-value" id="contextFiveHourValue">等待同步</span></div>
+        <div class="context-info-row"><span class="context-info-label">7 天限制:</span><span class="context-info-value" id="contextSevenDayValue">等待同步</span></div>
       </div>
     </section>
     <section class="native-header-popover session-action-menu" id="sessionActionMenu" role="menu" aria-label="会话操作" hidden>
@@ -5129,13 +5180,14 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     const headerContextButton = document.getElementById("headerContextButton");
     const headerSessionMenuButton = document.getElementById("headerSessionMenuButton");
     const contextInfoPopover = document.getElementById("contextInfoPopover");
+    const contextInfoClose = document.getElementById("contextInfoClose");
     const sessionActionMenu = document.getElementById("sessionActionMenu");
-    const contextSessionTitle = document.getElementById("contextSessionTitle");
-    const contextProjectValue = document.getElementById("contextProjectValue");
-    const contextStatusValue = document.getElementById("contextStatusValue");
-    const contextModelValue = document.getElementById("contextModelValue");
     const contextThreadValue = document.getElementById("contextThreadValue");
-    const contextRunValue = document.getElementById("contextRunValue");
+    const contextDirectoryValue = document.getElementById("contextDirectoryValue");
+    const contextUsageValue = document.getElementById("contextUsageValue");
+    const contextFiveHourValue = document.getElementById("contextFiveHourValue");
+    const contextSevenDayValue = document.getElementById("contextSevenDayValue");
+    const contextThreadCopyButton = document.getElementById("contextThreadCopyButton");
     const sessionActionTitle = document.getElementById("sessionActionTitle");
     const pinSessionButton = document.getElementById("pinSessionButton");
     const copySessionIdButton = document.getElementById("copySessionIdButton");
@@ -5255,6 +5307,9 @@ __ICONS_JS__
     const fileChangeSummaryStates = new Map();
     let renderTarget = events;
     let imageAttachments = [];
+    const MAX_IMAGE_DATA_URL_CHARS = 2500000;
+    const IMAGE_RESIZE_MAX_SIDE = 1280;
+    const IMAGE_RESIZE_MIN_SIDE = 640;
     let selectedPlugins = [];
     let currentSessionInfo = {};
     let sendingPrompt = false;
@@ -5275,6 +5330,7 @@ __ICONS_JS__
     planPageDownload.innerHTML = ICONS.download;
     planPageCopy.innerHTML = ICONS.copy;
     pinSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.pin;
+    contextThreadCopyButton.innerHTML = ICONS.copy;
     copySessionIdButton.querySelector(".session-action-icon").innerHTML = ICONS.copy;
     renameSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.pencil;
     archiveSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.archive;
@@ -5374,49 +5430,204 @@ __ICONS_JS__
     }
     function updateNativeHeaderContext() {
       const title = nativeSessionTitle();
-      const project = nativeSessionProjectLabel();
+      const directory = nativeSessionDirectory();
+      const project = nativeSessionProjectLabel(directory);
       writeCompactText(sessionFloatTitle, title);
       writeCompactText(sessionFloatMeta, project || "wlcodex");
-      writeCompactText(contextSessionTitle, title);
-      writeCompactText(contextProjectValue, project || "wlcodex");
-      writeCompactText(contextStatusValue, nativeSessionStatusText());
-      writeCompactText(contextModelValue, nativeSessionModelSummary());
       writeCompactText(contextThreadValue, nativeThreadId || "未连接");
-      writeCompactText(contextRunValue, "#" + agentRunId);
+      writeCompactText(contextDirectoryValue, directory || project || "wlcodex");
+      writeCompactText(contextUsageValue, nativeContextUsageSummary());
+      writeCompactText(contextFiveHourValue, nativeLimitSummary("fiveHour"));
+      writeCompactText(contextSevenDayValue, nativeLimitSummary("sevenDay"));
       writeCompactText(sessionActionTitle, title);
     }
     function nativeSessionTitle() {
+      const thread = nativeSessionThread();
       return String(
         currentSessionInfo.title ||
         currentSessionInfo.name ||
         currentSessionInfo.summary ||
+        thread.title ||
+        thread.name ||
+        thread.preview ||
         PROVIDER_LABEL
       ).trim() || PROVIDER_LABEL;
     }
-    function nativeSessionProjectLabel() {
-      const cwd = String(
-        currentSessionInfo.cwd ||
-        currentSessionInfo.workdir ||
-        currentSessionInfo.workspace ||
-        currentWorkspaceCwd() ||
-        ""
-      );
-      if (cwd) return lastPathComponent(cwd);
-      return String(currentSessionInfo.project || "wlcodex");
+    function nativeSessionProjectLabel(directory = nativeSessionDirectory()) {
+      if (directory) return lastPathComponent(directory);
+      const thread = nativeSessionThread();
+      return String(currentSessionInfo.project || thread.project || "wlcodex");
     }
-    function nativeSessionStatusText() {
-      if (invalidNativeThreadId) return "链接无效";
-      if (nativeTurnRunning) return "运行中";
-      if (currentSessionInfo.status) return String(currentSessionInfo.status);
-      return attached ? "已连接" : "连接中";
+    function nativeSessionDirectory() {
+      const thread = nativeSessionThread();
+      const direct = firstStringFromSources([currentSessionInfo, thread], [
+        "cwd",
+        "workdir",
+        "working_directory",
+        "directory",
+        "workspace_dir",
+        "repo_path",
+        "project_path"
+      ]);
+      if (direct) return direct;
+      const workspace = currentSessionInfo.workspace;
+      if (workspace && typeof workspace === "object") {
+        const workspacePath = firstStringFromSources([workspace], ["cwd", "path", "root", "directory", "workdir"]);
+        if (workspacePath) return workspacePath;
+      }
+      const metadata = nativeSessionMetadata();
+      return firstStringFromSources([metadata], [
+        "cwd",
+        "workdir",
+        "working_directory",
+        "directory",
+        "workspace",
+        "workspace_dir",
+        "repo_path",
+        "project_path"
+      ]) || currentWorkspaceCwd() || "";
     }
-    function nativeSessionModelSummary() {
-      const metadata = currentSessionInfo.metadata && typeof currentSessionInfo.metadata === "object" ? currentSessionInfo.metadata : {};
-      const model = currentSessionInfo.model || metadata.model || metadata.model_id || "";
-      const effort = currentSessionInfo.effort || metadata.effort || metadata.reasoning_effort || "";
-      const tier = currentSessionInfo.service_tier || metadata.service_tier || metadata.serviceTier || "";
-      const parts = [model, effort, tier].map(value => String(value || "").trim()).filter(Boolean);
-      return parts.join(" · ") || "默认";
+    function nativeContextUsageSummary() {
+      const metadata = nativeSessionMetadata();
+      const thread = nativeSessionThread();
+      const contextUsage = firstObjectFromSources([currentSessionInfo, thread, metadata], [
+        "context",
+        "context_window",
+        "context_window_usage",
+        "contextUsage",
+        "token_usage",
+        "tokenUsage"
+      ]) || {};
+      const sources = [contextUsage, metadata, thread, currentSessionInfo];
+      const remaining = firstNumberFromSources(sources, [
+        "remaining_percent",
+        "remaining_percentage",
+        "remainingPct",
+        "remaining_context_percent",
+        "context_remaining_percent",
+        "contextRemainingPercent"
+      ]);
+      const used = firstNumberFromSources(sources, [
+        "used",
+        "used_tokens",
+        "usedTokens",
+        "tokens_used",
+        "context_used",
+        "context_used_tokens",
+        "contextUsedTokens"
+      ]);
+      const total = firstNumberFromSources(sources, [
+        "total",
+        "total_tokens",
+        "totalTokens",
+        "limit",
+        "max_tokens",
+        "context_window",
+        "contextWindow",
+        "context_total",
+        "context_total_tokens",
+        "contextTotalTokens"
+      ]);
+      const computedRemaining = remaining === null && used !== null && total ? Math.max(0, (total - used) / total * 100) : remaining;
+      if (computedRemaining === null && used === null && total === null) return "等待同步";
+      const prefix = computedRemaining === null ? "剩余 --%" : `剩余 ${formatNativePercent(computedRemaining)}`;
+      if (used !== null && total !== null) {
+        return `${prefix}（已用 ${formatNativeTokenCount(used)} / ${formatNativeTokenCount(total)}）`;
+      }
+      return `${prefix}（等待同步）`;
+    }
+    function nativeLimitSummary(kind) {
+      const metadata = nativeSessionMetadata();
+      const thread = nativeSessionThread();
+      const groupKeys = kind === "fiveHour"
+        ? ["five_hour", "fiveHour", "five_hour_limit", "fiveHourLimit", "five_hours", "fiveHours"]
+        : ["seven_day", "sevenDay", "weekly", "week", "seven_day_limit", "sevenDayLimit"];
+      const limitRoot = firstObjectFromSources([currentSessionInfo, thread, metadata], ["rate_limits", "rateLimits", "limits", "quota", "quotas"]) || {};
+      const limit = firstObjectFromSources([currentSessionInfo, thread, metadata, limitRoot], groupKeys) || {};
+      const remainingKeys = kind === "fiveHour"
+        ? ["remaining_percent", "remaining_percentage", "remainingPct", "five_hour_remaining_percent", "fiveHourRemainingPercent", "five_hour_limit_remaining_percent"]
+        : ["remaining_percent", "remaining_percentage", "remainingPct", "seven_day_remaining_percent", "sevenDayRemainingPercent", "weekly_remaining_percent"];
+      const resetKeys = kind === "fiveHour"
+        ? ["reset_at", "resetAt", "resets_at", "resetsAt", "reset_time", "resetTime", "five_hour_reset_at", "fiveHourResetAt"]
+        : ["reset_at", "resetAt", "resets_at", "resetsAt", "reset_time", "resetTime", "seven_day_reset_at", "sevenDayResetAt", "weekly_reset_at"];
+      const sources = [limit, limitRoot, metadata, thread, currentSessionInfo];
+      const remaining = firstNumberFromSources(sources, remainingKeys);
+      const reset = firstStringFromSources(sources, resetKeys) || firstNumberFromSources(sources, resetKeys);
+      if (remaining === null && reset === null) return "等待同步";
+      const prefix = remaining === null ? "剩余 --%" : `剩余 ${formatNativePercent(remaining)}`;
+      if (reset === null) return `${prefix}（等待同步）`;
+      return `${prefix}（将于 ${formatNativeResetTime(reset, kind)} 重置）`;
+    }
+    function nativeSessionMetadata() {
+      const thread = nativeSessionThread();
+      if (currentSessionInfo.metadata && typeof currentSessionInfo.metadata === "object") return currentSessionInfo.metadata;
+      if (thread.metadata && typeof thread.metadata === "object") return thread.metadata;
+      return {};
+    }
+    function nativeSessionThread() {
+      return currentSessionInfo.thread && typeof currentSessionInfo.thread === "object" ? currentSessionInfo.thread : {};
+    }
+    function firstObjectFromSources(sources, keys) {
+      for (const source of sources) {
+        if (!source || typeof source !== "object") continue;
+        for (const key of keys) {
+          const value = source[key];
+          if (value && typeof value === "object" && !Array.isArray(value)) return value;
+        }
+      }
+      return null;
+    }
+    function firstStringFromSources(sources, keys) {
+      for (const source of sources) {
+        if (!source || typeof source !== "object") continue;
+        for (const key of keys) {
+          const value = source[key];
+          if (typeof value === "string" && value.trim()) return value.trim();
+        }
+      }
+      return "";
+    }
+    function firstNumberFromSources(sources, keys) {
+      for (const source of sources) {
+        if (!source || typeof source !== "object") continue;
+        for (const key of keys) {
+          const value = source[key];
+          if (typeof value === "number" && Number.isFinite(value)) return value;
+          if (typeof value === "string" && value.trim()) {
+            const parsed = Number.parseFloat(value);
+            if (Number.isFinite(parsed)) return parsed;
+          }
+        }
+      }
+      return null;
+    }
+    function formatNativePercent(value) {
+      const normalized = value >= 0 && value <= 1 ? value * 100 : value;
+      return `${Math.round(normalized)}%`;
+    }
+    function formatNativeTokenCount(value) {
+      const rounded = Math.max(0, Math.round(value));
+      if (rounded >= 10000) {
+        const wan = rounded / 10000;
+        return `${Number.isInteger(wan) ? wan : Math.round(wan * 10) / 10}万`;
+      }
+      return String(rounded);
+    }
+    function formatNativeResetTime(value, kind) {
+      let date = null;
+      if (typeof value === "number" && Number.isFinite(value)) {
+        date = new Date(value > 1000000000000 ? value : value * 1000);
+      } else {
+        const text = String(value || "").trim();
+        const parsed = new Date(text);
+        if (!Number.isNaN(parsed.getTime())) date = parsed;
+        else return text;
+      }
+      if (!date || Number.isNaN(date.getTime())) return String(value || "");
+      if (kind === "fiveHour") {
+        return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+      }
+      return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
     }
     function lastPathComponent(path) {
       const parts = String(path || "").split("/").filter(Boolean);
@@ -6169,6 +6380,8 @@ __ICONS_JS__
     }
     headerContextButton.onclick = toggleContextInfoPopover;
     headerSessionMenuButton.onclick = toggleSessionActionMenu;
+    contextInfoClose.onclick = closeHeaderPopovers;
+    contextThreadCopyButton.onclick = copyNativeSessionId;
     pinSessionButton.onclick = () => unavailableSessionAction("置顶");
     copySessionIdButton.onclick = copyNativeSessionId;
     renameSessionButton.onclick = () => unavailableSessionAction("重命名");
@@ -6294,7 +6507,7 @@ __ICONS_JS__
     document.addEventListener("click", event => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (target.closest("#headerRunIndicator") || target.closest(".native-header-popover")) return;
+      if (target.closest("#headerRunIndicator") || target.closest(".native-header-popover") || target.closest(".context-info-sheet")) return;
       closeHeaderPopovers();
     });
     document.addEventListener("keydown", event => {
@@ -6802,7 +7015,10 @@ __ICONS_JS__
       const dataUrl = await readFileAsDataUrl(file);
       try {
         return await resizeImageAttachment(file, dataUrl);
-      } catch (_error) {
+      } catch (error) {
+        if (dataUrl.length > MAX_IMAGE_DATA_URL_CHARS) {
+          throw new Error(error.message || "图片过大，请换成 JPG 或 PNG 后重试");
+        }
         return {
           url: dataUrl,
           filename: file.name || "image",
@@ -6822,34 +7038,61 @@ __ICONS_JS__
       return new Promise((resolve, reject) => {
         const image = new Image();
         image.onload = () => {
-          const maxSide = 1280;
-          const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
-          if (!Number.isFinite(scale) || scale <= 0) {
-            reject(new Error("图片尺寸无效"));
-            return;
+          try {
+            const initialScale = Math.min(1, IMAGE_RESIZE_MAX_SIDE / Math.max(image.width, image.height));
+            if (!Number.isFinite(initialScale) || initialScale <= 0) {
+              reject(new Error("图片尺寸无效"));
+              return;
+            }
+            if (
+              dataUrl.length <= MAX_IMAGE_DATA_URL_CHARS &&
+              file.size <= 900000 &&
+              image.width <= IMAGE_RESIZE_MAX_SIDE &&
+              image.height <= IMAGE_RESIZE_MAX_SIDE
+            ) {
+              resolve({
+                url: dataUrl,
+                filename: file.name || "image",
+                mime_type: file.type || "image/*"
+              });
+              return;
+            }
+            const canvas = document.createElement("canvas");
+            let width = Math.max(1, Math.round(image.width * initialScale));
+            let height = Math.max(1, Math.round(image.height * initialScale));
+            const draw = () => {
+              canvas.width = width;
+              canvas.height = height;
+              const context = canvas.getContext("2d");
+              if (!context) throw new Error("图片处理失败");
+              context.drawImage(image, 0, 0, width, height);
+            };
+            draw();
+            let quality = .82;
+            let url = canvas.toDataURL("image/jpeg", quality);
+            while (url.length > MAX_IMAGE_DATA_URL_CHARS && quality > .58) {
+              quality = Math.max(.58, quality - .08);
+              url = canvas.toDataURL("image/jpeg", quality);
+            }
+            while (url.length > MAX_IMAGE_DATA_URL_CHARS && Math.max(width, height) > IMAGE_RESIZE_MIN_SIDE) {
+              width = Math.max(1, Math.round(width * .82));
+              height = Math.max(1, Math.round(height * .82));
+              draw();
+              quality = .72;
+              url = canvas.toDataURL("image/jpeg", quality);
+            }
+            if (url.length > MAX_IMAGE_DATA_URL_CHARS) {
+              reject(new Error("图片压缩后仍过大，请换一张较小的图片"));
+              return;
+            }
+            resolve({
+              url,
+              filename: file.name || "image",
+              mime_type: "image/jpeg"
+            });
+          } catch (error) {
+            reject(error);
           }
-          const width = Math.max(1, Math.round(image.width * scale));
-          const height = Math.max(1, Math.round(image.height * scale));
-          const canvas = document.createElement("canvas");
-          canvas.width = width;
-          canvas.height = height;
-          const context = canvas.getContext("2d");
-          if (!context) {
-            reject(new Error("图片处理失败"));
-            return;
-          }
-          context.drawImage(image, 0, 0, width, height);
-          const mime = file.type === "image/png" && file.size < 900000
-            ? "image/png"
-            : "image/jpeg";
-          const url = scale < 1 || file.size > 1200000
-            ? canvas.toDataURL(mime, .86)
-            : dataUrl;
-          resolve({
-            url,
-            filename: file.name || "image",
-            mime_type: mime
-          });
         };
         image.onerror = () => reject(new Error("图片解码失败"));
         image.src = dataUrl;

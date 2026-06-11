@@ -13,6 +13,7 @@ from wlcodex.jsonrpc import JsonRpcError
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.server import (
     WorkerLiveStreamServer,
+    _MAX_BODY_BYTES,
     _live_page,
     _native_codex_page,
     _plugin_icon_data_url,
@@ -412,13 +413,19 @@ def _store(tmp_path: Path) -> RuntimeEventStore:
     return RuntimeEventStore(ledger._conn)
 
 
-async def _read_response(host: str, port: int, request: str) -> str:
+async def _read_response(
+    host: str,
+    port: int,
+    request: str,
+    *,
+    read_limit: int = 65536,
+) -> str:
     reader, writer = await asyncio.open_connection(host, port)
     writer.write(request.encode("utf-8"))
     await writer.drain()
     chunks: list[bytes] = []
     while True:
-        chunk = await asyncio.wait_for(reader.read(65536), timeout=1.0)
+        chunk = await asyncio.wait_for(reader.read(read_limit), timeout=1.0)
         if not chunk:
             break
         chunks.append(chunk)
@@ -1682,6 +1689,56 @@ async def test_native_routes_return_rpc_error_message_instead_of_exception_class
 
 
 @pytest.mark.asyncio
+async def test_native_continue_accepts_mobile_sized_image_json_body(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    image_payload = "a" * (9 * 1024 * 1024)
+    body = json.dumps(
+        {
+            "prompt": "describe this phone photo",
+            "images": [{"url": f"data:image/jpeg;base64,{image_payload}"}],
+        }
+    )
+    assert len(body.encode("utf-8")) > 8 * 1024 * 1024
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/thread-1/continue HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+            read_limit=1024 * 1024,
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    call = controller.calls[-1]
+    assert call[:6] == (
+        "continue_session",
+        "thread-1",
+        "describe this phone photo",
+        None,
+        None,
+        None,
+    )
+    assert len(call[6][0]["url"]) > 8 * 1024 * 1024
+
+
+@pytest.mark.asyncio
 async def test_native_post_rejects_oversized_json_body_before_controller_call(
     tmp_path: Path,
 ) -> None:
@@ -1703,7 +1760,7 @@ async def test_native_post_rejects_oversized_json_body_before_controller_call(
             "POST /api/native/codex/sessions/thread-1/continue HTTP/1.1\r\n"
             "Host: test\r\nAuthorization: Bearer secret\r\n"
             "Content-Type: application/json\r\n"
-            "Content-Length: 9000000\r\n"
+            f"Content-Length: {_MAX_BODY_BYTES + 1}\r\n"
             "Connection: close\r\n\r\n"
             f"{body}",
         )
@@ -1869,9 +1926,14 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert ".session-float { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
     assert ".header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
+    assert "grid-template-columns: 34px 1px 24px;" in response
+    assert "width: 116px; min-height: 58px;" in response
+    assert ".header-run-spinner { width: 28px; height: 28px; border: 3px solid #5a5b60;" in response
     assert ".header-run-indicator.running .header-run-spinner" in response
     assert "border-right-color: var(--native-remote-blue);" in response
     assert ".header-run-indicator.finished .header-run-dot" in response
+    assert 'tone === "busy" ? "running"' in response
+    assert 'tone === "failed" || tone === "done" ? "finished"' in response
     assert "background: var(--native-remote-red);" in response
     assert ".primary-action { flex: 0 0 52px; width: 52px; min-height: 52px; border-radius: 26px;" in response
     assert ".primary-action.stop { background: #f4f4f5; color: #050505;" in response
@@ -1888,13 +1950,23 @@ def test_worker_live_page_exposes_header_context_and_session_actions() -> None:
     assert 'id="headerContextButton"' in response
     assert 'id="headerSessionMenuButton"' in response
     assert 'id="contextInfoPopover"' in response
+    assert 'class="context-info-sheet"' in response
+    assert 'id="contextInfoClose"' in response
+    assert 'id="contextThreadCopyButton"' in response
     assert 'id="sessionActionMenu"' in response
-    assert "上下文信息" in response
+    assert "状态</h2>" in response
+    assert "对话线程:" in response
+    assert "目录:" in response
+    assert "上下文:" in response
+    assert "5 小时限制:" in response
+    assert "7 天限制:" in response
     assert "置顶" in response
     assert "复制会话 ID" in response
     assert "重命名" in response
     assert "归档" in response
     assert "function toggleContextInfoPopover()" in response
+    assert "function nativeContextUsageSummary()" in response
+    assert "function nativeLimitSummary(kind)" in response
     assert "function toggleSessionActionMenu()" in response
     assert "function copyNativeSessionId()" in response
 
