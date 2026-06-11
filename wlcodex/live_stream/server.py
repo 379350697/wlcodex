@@ -147,6 +147,10 @@ _ICON_SVG = {
     "copy": f'<svg {_ICON_ATTRS}><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4c0-1.1.9-2 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
     "download": f'<svg {_ICON_ATTRS}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>',
     "plan": f'<svg {_ICON_ATTRS}><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/><path d="M7 9h4"/><path d="M7 15h2"/></svg>',
+    "pin": f'<svg {_ICON_ATTRS}><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14"/><path d="M7 10l5-7 5 7"/><path d="M8 10h8l1 7H7z"/></svg>',
+    "pencil": f'<svg {_ICON_ATTRS}><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+    "archive": f'<svg {_ICON_ATTRS}><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>',
+    "info": f'<svg {_ICON_ATTRS}><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
     # Extended icon set
     "settings": f'<svg {_ICON_ATTRS}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
     "folder": f'<svg {_ICON_ATTRS}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
@@ -4629,14 +4633,32 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .session-float-meta .laptop { width: 13px; height: 9px; border: 1.6px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
     .session-float-meta .laptop:after { content: ""; position: absolute; left: -3px; right: -3px; bottom: -5px; height: 2px; background: currentColor; border-radius: 2px; }
     .header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top)); right: 20px; z-index: 6; display: grid; grid-template-columns: 24px 1px 16px; gap: 9px; align-items: center; justify-content: center; width: 86px; min-height: 54px; border: 1px solid #343434; border-radius: 27px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
+    .header-run-button { width: 24px; min-height: 24px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; -webkit-tap-highlight-color: transparent; }
+    button.header-run-button:not(.secondary):not(.warn):not(:disabled):hover { background: transparent; filter: none; }
     .header-run-status { display: grid; place-items: center; width: 24px; min-height: 24px; }
     .header-run-spinner { width: 20px; height: 20px; border: 2px solid #5a5b60; border-right-color: transparent; border-radius: 50%; opacity: .7; }
     .header-run-divider { width: 1px; height: 20px; background: #3a3a3d; }
-    .header-run-menu { font-size: 23px; line-height: 1; transform: translateY(-1px); }
+    .header-run-menu { display: grid; place-items: center; width: 20px; height: 24px; line-height: 1; transform: translateY(-1px); }
+    .header-run-menu svg { width: 22px; height: 22px; }
     .header-run-dot { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--native-remote-red); box-shadow: 0 0 10px rgba(255,59,79,.35); }
     .header-run-indicator.running .header-run-spinner { border-color: transparent; border-top-color: var(--native-remote-blue); border-right-color: var(--native-remote-blue); opacity: 1; animation: nativeRemoteSpin .85s linear infinite; }
     .header-run-indicator.finished .header-run-spinner { display: none; }
     .header-run-indicator.finished .header-run-dot { display: block; }
+    .native-header-popover { position: fixed; top: calc(86px + env(safe-area-inset-top)); right: 20px; z-index: 10; width: min(326px, calc(100vw - 40px)); border: 1px solid #343434; border-radius: 24px; background: #242426; color: #f4f4f5; box-shadow: 0 18px 44px rgba(0,0,0,.55); overflow: hidden; }
+    .native-header-popover[hidden] { display: none; }
+    .context-info-popover { display: grid; gap: 14px; padding: 18px; }
+    .context-info-title { margin: 0; color: #d7d7dc; font-size: 18px; line-height: 1.2; font-weight: var(--weight-extrabold); text-align: center; }
+    .context-info-grid { display: grid; gap: 10px; }
+    .context-info-row { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 12px; align-items: start; min-height: 26px; }
+    .context-info-label { color: #9b9ca3; font-size: 14px; line-height: 1.35; }
+    .context-info-value { min-width: 0; color: #f4f4f5; font-size: 15px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-action-menu { padding: 18px 0; }
+    .session-action-title { min-width: 0; margin: 0; padding: 0 38px 12px; color: #d7d7dc; font-size: 18px; line-height: 1.2; font-weight: var(--weight-extrabold); text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-action-item { width: 100%; min-height: 64px; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 18px; align-items: center; padding: 0 42px; border: 0; border-radius: 0; background: transparent; color: #f4f4f5; text-align: left; font-size: 20px; line-height: 1.2; font-weight: var(--weight-medium); -webkit-tap-highlight-color: transparent; }
+    button.session-action-item:not(.secondary):not(.warn):not(:disabled):hover { background: rgba(255,255,255,.06); filter: none; }
+    .session-action-item.danger { color: #ff4b55; }
+    .session-action-icon { display: grid; place-items: center; width: 36px; height: 36px; }
+    .session-action-icon svg { width: 30px; height: 30px; }
     @keyframes nativeRemoteSpin { to { transform: rotate(360deg); } }
     .screen-title { min-width: 0; text-align: center; visibility: hidden; }
     header > button:last-child { visibility: hidden; pointer-events: none; }
@@ -4751,12 +4773,12 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .turn-fold-body { display: grid; grid-template-rows: 0fr; overflow: hidden; opacity: 0; transition: grid-template-rows 200ms ease, opacity 200ms ease 50ms; }
     .turn-fold-body-inner { min-height: 0; overflow: hidden; }
     .turn-fold:not(.collapsed) .turn-fold-body { grid-template-rows: 1fr; opacity: 1; padding: 12px 0 18px; }
-    .codex-tool-call, .file-change-card, .approval-card { position: relative; border: 1px solid var(--border-default); background: #0f1014; border-radius: 10px; overflow: hidden; animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }
+    .codex-tool-call, .approval-card { position: relative; border: 1px solid var(--border-default); background: #0f1014; border-radius: 10px; overflow: hidden; animation: fadeInUp var(--duration-enter, 250ms) var(--ease-out-expo, cubic-bezier(0.19, 1, 0.22, 1)) both; }
     .codex-tool-call.failed { border-color: #7f1d1d; }
-    .tool-head, .file-head, .approval-head { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 11px 12px; border-bottom: 1px solid var(--border-header); }
-    .tool-title, .file-title, .approval-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--btn-primary-bg); font-size: 14px; font-weight: var(--weight-bold); }
-    .tool-state, .file-state { color: var(--text-muted); font-size: 12px; }
-    .tool-output, .file-body { margin: 0; max-height: 260px; overflow: auto; padding: 11px 12px; color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }
+    .tool-head, .approval-head { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 11px 12px; border-bottom: 1px solid var(--border-header); }
+    .tool-title, .approval-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--btn-primary-bg); font-size: 14px; font-weight: var(--weight-bold); }
+    .tool-state { color: var(--text-muted); font-size: 12px; }
+    .tool-output { margin: 0; max-height: 260px; overflow: auto; padding: 11px 12px; color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }
     .approval-card { border-color: #854d0e; background: #171107; }
     .approval-card::after { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 3px; border-radius: 2px; background: var(--color-warning); }
     .approval-card.resolving { border-color: #a16207; }
@@ -4764,6 +4786,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .approval-card.resolved::after { background: var(--color-success); }
     .approval-card.failed { border-color: #7f1d1d; background: #17090a; }
     .approval-card.failed::after { background: var(--color-error); }
+    .file-change-summary { display: flex; justify-content: center; margin: 4px 0 10px; }
+    .file-change-summary-pill { display: inline-flex; align-items: center; gap: 14px; min-height: 40px; max-width: 100%; padding: 0 18px; border: 1px solid #343434; border-radius: 20px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.32); font-size: 16px; line-height: 1; font-weight: var(--weight-extrabold); }
+    .file-change-summary-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-change-summary-add { color: #22c55e; }
+    .file-change-summary-del { color: #ff3b4f; }
     .approval-body { padding: 0 12px 12px; color: #fde68a; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.5; }
     .approval-state { padding: 0 12px 10px; color: #d6d3d1; font-size: 13px; }
     .approval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0 12px 12px; }
@@ -4897,11 +4924,41 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
       <span class="session-float-title" id="sessionFloatTitle">__PROVIDER_LABEL_TEXT__</span>
       <span class="session-float-meta"><span class="laptop"></span><span id="sessionFloatMeta">wlcodex</span></span>
     </div>
-    <div class="header-run-indicator neutral" id="headerRunIndicator" aria-hidden="true">
-      <span class="header-run-status"><span class="header-run-spinner"></span><span class="header-run-dot"></span></span>
+    <div class="header-run-indicator neutral" id="headerRunIndicator">
+      <button class="header-run-button header-context-button" id="headerContextButton" type="button" aria-label="上下文信息">
+        <span class="header-run-status" aria-hidden="true"><span class="header-run-spinner"></span><span class="header-run-dot"></span></span>
+      </button>
       <span class="header-run-divider"></span>
-      <span class="header-run-menu">⋮</span>
+      <button class="header-run-button header-session-menu-button" id="headerSessionMenuButton" type="button" aria-label="会话操作">
+        <span class="header-run-menu" aria-hidden="true">⋮</span>
+      </button>
     </div>
+    <section class="native-header-popover context-info-popover" id="contextInfoPopover" aria-label="上下文信息" hidden>
+      <h2 class="context-info-title">上下文信息</h2>
+      <div class="context-info-grid">
+        <div class="context-info-row"><span class="context-info-label">会话</span><span class="context-info-value" id="contextSessionTitle">__PROVIDER_LABEL_TEXT__</span></div>
+        <div class="context-info-row"><span class="context-info-label">项目</span><span class="context-info-value" id="contextProjectValue">wlcodex</span></div>
+        <div class="context-info-row"><span class="context-info-label">状态</span><span class="context-info-value" id="contextStatusValue">连接中</span></div>
+        <div class="context-info-row"><span class="context-info-label">模型</span><span class="context-info-value" id="contextModelValue">默认</span></div>
+        <div class="context-info-row"><span class="context-info-label">会话 ID</span><span class="context-info-value" id="contextThreadValue">未连接</span></div>
+        <div class="context-info-row"><span class="context-info-label">运行</span><span class="context-info-value" id="contextRunValue">#__AGENT_RUN_ID__</span></div>
+      </div>
+    </section>
+    <section class="native-header-popover session-action-menu" id="sessionActionMenu" role="menu" aria-label="会话操作" hidden>
+      <h2 class="session-action-title" id="sessionActionTitle">__PROVIDER_LABEL_TEXT__</h2>
+      <button class="session-action-item" id="pinSessionButton" type="button" role="menuitem">
+        <span class="session-action-icon"></span><span>置顶</span>
+      </button>
+      <button class="session-action-item" id="copySessionIdButton" type="button" role="menuitem">
+        <span class="session-action-icon"></span><span>复制会话 ID</span>
+      </button>
+      <button class="session-action-item" id="renameSessionButton" type="button" role="menuitem">
+        <span class="session-action-icon"></span><span>重命名</span>
+      </button>
+      <button class="session-action-item danger" id="archiveSessionButton" type="button" role="menuitem">
+        <span class="session-action-icon"></span><span>归档</span>
+      </button>
+    </section>
     <main>
       <section class="codex-status-flow run-state" id="runStatus">
         <span class="run-pulse"></span>
@@ -5061,6 +5118,21 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     const runStatus = document.getElementById("runStatus");
     const runStateLabel = document.getElementById("runStateLabel");
     const headerRunIndicator = document.getElementById("headerRunIndicator");
+    const headerContextButton = document.getElementById("headerContextButton");
+    const headerSessionMenuButton = document.getElementById("headerSessionMenuButton");
+    const contextInfoPopover = document.getElementById("contextInfoPopover");
+    const sessionActionMenu = document.getElementById("sessionActionMenu");
+    const contextSessionTitle = document.getElementById("contextSessionTitle");
+    const contextProjectValue = document.getElementById("contextProjectValue");
+    const contextStatusValue = document.getElementById("contextStatusValue");
+    const contextModelValue = document.getElementById("contextModelValue");
+    const contextThreadValue = document.getElementById("contextThreadValue");
+    const contextRunValue = document.getElementById("contextRunValue");
+    const sessionActionTitle = document.getElementById("sessionActionTitle");
+    const pinSessionButton = document.getElementById("pinSessionButton");
+    const copySessionIdButton = document.getElementById("copySessionIdButton");
+    const renameSessionButton = document.getElementById("renameSessionButton");
+    const archiveSessionButton = document.getElementById("archiveSessionButton");
     const sessionFloatTitle = document.getElementById("sessionFloatTitle");
     const sessionFloatMeta = document.getElementById("sessionFloatMeta");
     const historyFold = document.getElementById("historyFold");
@@ -5171,9 +5243,12 @@ __ICONS_JS__
     const transcriptNodes = new Map();
     const statusNodes = new Map();
     const commandNodes = new Map();
+    const fileChangeSummaryNodes = new Map();
+    const fileChangeSummaryStates = new Map();
     let renderTarget = events;
     let imageAttachments = [];
     let selectedPlugins = [];
+    let currentSessionInfo = {};
     let sendingPrompt = false;
     let nativeTurnRunning = false;
     let modelCatalog = [];
@@ -5191,6 +5266,10 @@ __ICONS_JS__
     handoffCopyButton.innerHTML = ICONS.copy;
     planPageDownload.innerHTML = ICONS.download;
     planPageCopy.innerHTML = ICONS.copy;
+    pinSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.pin;
+    copySessionIdButton.querySelector(".session-action-icon").innerHTML = ICONS.copy;
+    renameSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.pencil;
+    archiveSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.archive;
     historyFold.onclick = loadOlderEvents;
     function isValidNativeThreadId(value) {
       return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
@@ -5233,6 +5312,132 @@ __ICONS_JS__
         method: "POST",
         body: JSON.stringify(body)
       });
+    }
+    async function loadNativeSessionInfo() {
+      if (!nativeThreadId || invalidNativeThreadId) {
+        updateNativeSessionInfo({});
+        return;
+      }
+      try {
+        const session = await api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}`);
+        updateNativeSessionInfo(session || {});
+      } catch (error) {
+        updateNativeSessionInfo({status: error.message || "不可用"});
+      }
+    }
+    function updateNativeSessionInfo(session) {
+      currentSessionInfo = {...currentSessionInfo, ...(session || {})};
+      updateNativeHeaderContext();
+    }
+    function updateNativeHeaderContext() {
+      const title = nativeSessionTitle();
+      const project = nativeSessionProjectLabel();
+      writeCompactText(sessionFloatTitle, title);
+      writeCompactText(sessionFloatMeta, project || "wlcodex");
+      writeCompactText(contextSessionTitle, title);
+      writeCompactText(contextProjectValue, project || "wlcodex");
+      writeCompactText(contextStatusValue, nativeSessionStatusText());
+      writeCompactText(contextModelValue, nativeSessionModelSummary());
+      writeCompactText(contextThreadValue, nativeThreadId || "未连接");
+      writeCompactText(contextRunValue, "#" + agentRunId);
+      writeCompactText(sessionActionTitle, title);
+    }
+    function nativeSessionTitle() {
+      return String(
+        currentSessionInfo.title ||
+        currentSessionInfo.name ||
+        currentSessionInfo.summary ||
+        PROVIDER_LABEL
+      ).trim() || PROVIDER_LABEL;
+    }
+    function nativeSessionProjectLabel() {
+      const cwd = String(
+        currentSessionInfo.cwd ||
+        currentSessionInfo.workdir ||
+        currentSessionInfo.workspace ||
+        currentWorkspaceCwd() ||
+        ""
+      );
+      if (cwd) return lastPathComponent(cwd);
+      return String(currentSessionInfo.project || "wlcodex");
+    }
+    function nativeSessionStatusText() {
+      if (invalidNativeThreadId) return "链接无效";
+      if (nativeTurnRunning) return "运行中";
+      if (currentSessionInfo.status) return String(currentSessionInfo.status);
+      return attached ? "已连接" : "连接中";
+    }
+    function nativeSessionModelSummary() {
+      const metadata = currentSessionInfo.metadata && typeof currentSessionInfo.metadata === "object" ? currentSessionInfo.metadata : {};
+      const model = currentSessionInfo.model || metadata.model || metadata.model_id || "";
+      const effort = currentSessionInfo.effort || metadata.effort || metadata.reasoning_effort || "";
+      const tier = currentSessionInfo.service_tier || metadata.service_tier || metadata.serviceTier || "";
+      const parts = [model, effort, tier].map(value => String(value || "").trim()).filter(Boolean);
+      return parts.join(" · ") || "默认";
+    }
+    function lastPathComponent(path) {
+      const parts = String(path || "").split("/").filter(Boolean);
+      return parts.length ? parts[parts.length - 1] : "";
+    }
+    function writeCompactText(node, text) {
+      if (!node) return;
+      const value = String(text || "");
+      node.textContent = value;
+      node.title = value;
+    }
+    function closeHeaderPopovers() {
+      contextInfoPopover.hidden = true;
+      sessionActionMenu.hidden = true;
+    }
+    function toggleContextInfoPopover() {
+      const willOpen = contextInfoPopover.hidden;
+      closeComposerActionMenu();
+      modelPopover.classList.add("closed");
+      permissionPopover.classList.add("closed");
+      handoffPanel.hidden = true;
+      closeHeaderPopovers();
+      if (willOpen) {
+        updateNativeHeaderContext();
+        contextInfoPopover.hidden = false;
+      }
+    }
+    function toggleSessionActionMenu() {
+      const willOpen = sessionActionMenu.hidden;
+      closeComposerActionMenu();
+      modelPopover.classList.add("closed");
+      permissionPopover.classList.add("closed");
+      handoffPanel.hidden = true;
+      closeHeaderPopovers();
+      if (willOpen) {
+        updateNativeHeaderContext();
+        sessionActionMenu.hidden = false;
+      }
+    }
+    async function copyNativeSessionId() {
+      closeHeaderPopovers();
+      if (!nativeThreadId) {
+        setSendStatus("没有会话 ID", "error");
+        return;
+      }
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(nativeThreadId);
+        } else {
+          fallbackCopyText(nativeThreadId);
+        }
+        setSendStatus("已复制会话 ID", "ok");
+      } catch (_error) {
+        try {
+          fallbackCopyText(nativeThreadId);
+          setSendStatus("已复制会话 ID", "ok");
+        } catch (_fallbackError) {
+          setSendStatus("复制失败", "error");
+        }
+      }
+    }
+    function unavailableSessionAction(label) {
+      closeHeaderPopovers();
+      setSendStatus(label + "暂未接入", "error");
     }
     function workflowApi(path, body) {
       return api(path, {
@@ -5816,6 +6021,7 @@ __ICONS_JS__
       const willClose = !composerActionMenu.classList.contains("closed");
       composerActionMenu.classList.toggle("closed", willClose);
       if (!willClose) {
+        closeHeaderPopovers();
         modelPopover.classList.add("closed");
         permissionPopover.classList.add("closed");
         handoffPanel.hidden = true;
@@ -5918,6 +6124,12 @@ __ICONS_JS__
       if (action === "cancel") return "取消";
       return "审批";
     }
+    headerContextButton.onclick = toggleContextInfoPopover;
+    headerSessionMenuButton.onclick = toggleSessionActionMenu;
+    pinSessionButton.onclick = () => unavailableSessionAction("置顶");
+    copySessionIdButton.onclick = copyNativeSessionId;
+    renameSessionButton.onclick = () => unavailableSessionAction("重命名");
+    archiveSessionButton.onclick = () => unavailableSessionAction("归档");
     continueButton.onclick = () => submitPrompt();
     steerChoice.onclick = () => submitPrompt("steer");
     queueChoice.onclick = () => submitPrompt("continue");
@@ -5946,6 +6158,7 @@ __ICONS_JS__
       const willClose = !modelPopover.classList.contains("closed");
       if (willClose) saveModelSettingsIfChanged();
       modelPopover.classList.toggle("closed", willClose);
+      if (!willClose) closeHeaderPopovers();
       if (!willClose) permissionPopover.classList.add("closed");
       if (!willClose) handoffPanel.hidden = true;
       if (!willClose) closeComposerActionMenu();
@@ -5960,6 +6173,7 @@ __ICONS_JS__
       if (willClose) savePermissionSettingsIfChanged();
       permissionPopover.classList.toggle("closed", willClose);
       if (!willClose) {
+        closeHeaderPopovers();
         modelPopover.classList.add("closed");
         handoffPanel.hidden = true;
         closeComposerActionMenu();
@@ -6034,6 +6248,15 @@ __ICONS_JS__
       updatePluginAutocomplete();
       updateComposerDisabled();
     });
+    document.addEventListener("click", event => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest("#headerRunIndicator") || target.closest(".native-header-popover")) return;
+      closeHeaderPopovers();
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape") closeHeaderPopovers();
+    });
     document.getElementById("back").onclick = () => {
       const params = new URLSearchParams();
       if (token) params.set("token", token);
@@ -6075,6 +6298,7 @@ __ICONS_JS__
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.active_turn_id || (result.turn_running ? result.turn_id || "" : "");
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
+        updateNativeHeaderContext();
         promptInput.value = "";
         imageAttachments = [];
         renderAttachments();
@@ -6121,6 +6345,7 @@ __ICONS_JS__
         await nativeControl("interrupt", {turn_id: activeTurnId});
         activeTurnId = "";
         nativeTurnRunning = false;
+        updateNativeHeaderContext();
         setSendStatus("已中断", "ok");
         await pollEvents();
       } catch (error) {
@@ -6160,6 +6385,7 @@ __ICONS_JS__
         nativeTurnRunning = true;
       }
       setComposerActivity(nativeTurnRunning || sendingPrompt);
+      updateNativeHeaderContext();
     }
     function isMirroredTranscriptEvent(event) {
       const payload = (event && event.payload) || {};
@@ -6193,6 +6419,7 @@ __ICONS_JS__
       permissionOptions.hidden = true;
       serviceTierOptions.hidden = true;
       reasoningOptions.hidden = true;
+      closeHeaderPopovers();
       closeComposerActionMenu();
       handoffPanel.hidden = !handoffPanel.hidden;
       updateHandoffControls();
@@ -6628,6 +6855,7 @@ __ICONS_JS__
         activeTurnId = result.active_turn_id || "";
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
         updateComposerDisabled();
+        updateNativeHeaderContext();
       } catch (error) {
         renderStatus("attach_failed", error.message || String(error));
       }
@@ -6643,6 +6871,7 @@ __ICONS_JS__
         activeTurnId = result.active_turn_id || activeTurnId || "";
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
         updateComposerDisabled();
+        updateNativeHeaderContext();
       } catch (error) {
         renderStatus("native_sync_failed", error.message || String(error));
       }
@@ -6654,9 +6883,10 @@ __ICONS_JS__
     loadProviderCapabilities();
     loadModelCatalog();
     if (invalidNativeThreadId) renderStatus("native_session_invalid", "会话链接无效，请从最近会话重新打开");
-    attachNative().then(syncNativeTranscript).then(() => {
+    attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).then(() => {
       return loadRecentEvents();
     }).catch(() => {
+      loadNativeSessionInfo().catch(() => {});
       return loadRecentEvents();
     }).then(() => {
       setInterval(pollEvents, 1000);
@@ -6817,6 +7047,8 @@ __ICONS_JS__
       transcriptNodes.clear();
       statusNodes.clear();
       commandNodes.clear();
+      fileChangeSummaryNodes.clear();
+      fileChangeSummaryStates.clear();
       events.innerHTML = "";
       const groups = foldGroups(dedupeDisplayEvents(loadedEvents)).map(orderTranscriptGroupEvents);
       const latestTurnId = latestFoldGroupTurnId(groups);
@@ -7216,7 +7448,7 @@ __ICONS_JS__
       else if (event.kind === "text_delta" || event.kind === "message_completed") renderAssistant(event, options);
       else if (event.kind === "reasoning_delta") renderStatusEvent(event, "思考中", "busy");
       else if (isCommandEvent(event)) renderToolCall(event);
-      else if (event.kind === "diff_updated" || event.kind === "file_changed") renderFileChange(event);
+      else if (event.kind === "diff_updated" || event.kind === "file_changed") renderFileChangeSummary(event);
       else if (event.kind === "approval_requested") renderApproval(event);
       else if (event.kind === "approval_resolved") {
         markApprovalResolved(event);
@@ -7719,27 +7951,115 @@ __ICONS_JS__
       appendText(node.output, payload.delta || payload.output || "");
       updateRunState(commandStatus(event.kind), event.kind === "command_failed" ? "failed" : "busy");
     }
-    function renderFileChange(event) {
+    function renderFileChangeSummary(event) {
       const payload = event.payload || {};
-      const row = document.createElement("div");
-      row.className = "file-change-item";
-      const card = document.createElement("section");
-      card.className = "file-change-card";
-      const head = document.createElement("div");
-      head.className = "file-head";
-      const title = document.createElement("span");
-      title.className = "file-title";
-      title.textContent = payload.filePath || payload.path || "文件变更";
-      const state = document.createElement("span");
-      state.className = "file-state";
-      state.textContent = event.kind === "diff_updated" ? "diff" : "file";
-      const body = document.createElement("pre");
-      body.className = "file-body";
-      body.textContent = payload.patch || payload.diff || payload.delta || payload.filePath || "";
-      head.append(title, state);
-      card.append(head, body);
-      row.append(card);
-      renderTarget.append(row);
+      const key = fileChangeSummaryKey(event);
+      const incoming = summarizeDiffPayload(payload);
+      const state = mergeFileChangeSummaryState(key, incoming, event.kind);
+      let node = fileChangeSummaryNodes.get(key);
+      if (!node || !node.row.isConnected) {
+        const row = document.createElement("div");
+        row.className = "file-change-summary";
+        const pill = document.createElement("div");
+        pill.className = "file-change-summary-pill";
+        const label = document.createElement("span");
+        label.className = "file-change-summary-label";
+        const add = document.createElement("span");
+        add.className = "file-change-summary-add";
+        const del = document.createElement("span");
+        del.className = "file-change-summary-del";
+        pill.append(label, add, del);
+        row.append(pill);
+        renderTarget.append(row);
+        node = {row, pill, label, add, del};
+        fileChangeSummaryNodes.set(key, node);
+      }
+      node.label.textContent = `已更改 ${state.fileCount} 个文件`;
+      node.add.textContent = `+${state.additions}`;
+      node.del.textContent = `-${state.deletions}`;
+      node.pill.title = state.files.length ? state.files.join("\\n") : node.label.textContent;
+    }
+    function fileChangeSummaryKey(event) {
+      const payload = event.payload || {};
+      return String(payload.native_turn_id || payload.turnId || nativeTurnId || "global");
+    }
+    function mergeFileChangeSummaryState(key, incoming, kind) {
+      if (kind === "diff_updated") {
+        const files = incoming.files.length ? incoming.files : [incoming.fileLabel].filter(Boolean);
+        const next = {
+          files,
+          fileSet: new Set(files),
+          additions: incoming.additions,
+          deletions: incoming.deletions,
+        };
+        fileChangeSummaryStates.set(key, next);
+        return visibleFileChangeSummaryState(next, incoming);
+      }
+      const current = fileChangeSummaryStates.get(key) || {
+        files: [],
+        fileSet: new Set(),
+        additions: 0,
+        deletions: 0,
+      };
+      for (const file of incoming.files) {
+        if (!current.fileSet.has(file)) {
+          current.fileSet.add(file);
+          current.files.push(file);
+        }
+      }
+      current.additions += incoming.additions;
+      current.deletions += incoming.deletions;
+      fileChangeSummaryStates.set(key, current);
+      return visibleFileChangeSummaryState(current, incoming);
+    }
+    function visibleFileChangeSummaryState(state, fallback) {
+      const fileCount = state.files.length || fallback.fileCount || 1;
+      return {
+        files: state.files,
+        fileCount,
+        additions: state.additions,
+        deletions: state.deletions,
+      };
+    }
+    function summarizeDiffPayload(payload) {
+      const text = rawDiffText(payload);
+      const files = diffFiles(payload, text);
+      const counts = diffLineCounts(text);
+      return {
+        files,
+        fileLabel: payload.filePath || payload.path || "",
+        fileCount: files.length || (text.trim() ? 1 : 0),
+        additions: counts.additions,
+        deletions: counts.deletions,
+      };
+    }
+    function rawDiffText(payload) {
+      return String((payload && (payload.diff || payload.patch || payload.delta)) || "");
+    }
+    function diffFiles(payload, text) {
+      const files = new Set();
+      const direct = payload && (payload.filePath || payload.path);
+      if (direct) files.add(String(direct));
+      for (const line of String(text || "").split("\\n")) {
+        let match = /^diff --git a\\/(.+?) b\\/(.+)$/.exec(line);
+        if (match) {
+          files.add(match[2]);
+          continue;
+        }
+        match = /^\\+\\+\\+ b\\/(.+)$/.exec(line);
+        if (match && match[1] !== "/dev/null") files.add(match[1]);
+      }
+      return Array.from(files);
+    }
+    function diffLineCounts(text) {
+      let additions = 0;
+      let deletions = 0;
+      for (const line of String(text || "").split("\\n")) {
+        if (line.startsWith("+++") || line.startsWith("---")) continue;
+        if (line.startsWith("+")) additions += 1;
+        else if (line.startsWith("-")) deletions += 1;
+      }
+      return {additions, deletions};
     }
     function renderApproval(event) {
       const payload = event.payload || {};
@@ -7807,6 +8127,7 @@ __ICONS_JS__
       runStateLabel.textContent = text;
       runStatus.className = "codex-status-flow run-state " + (tone || "neutral");
       updateHeaderRunIndicator(tone || "neutral");
+      updateNativeHeaderContext();
     }
     function updateHeaderRunIndicator(tone) {
       const visual = tone === "busy" ? "running" : tone === "failed" || tone === "done" ? "finished" : "neutral";

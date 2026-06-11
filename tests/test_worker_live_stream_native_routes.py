@@ -1842,6 +1842,23 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert "updateHeaderRunIndicator(tone || \"neutral\");" in response
 
 
+def test_worker_live_page_exposes_header_context_and_session_actions() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert 'id="headerContextButton"' in response
+    assert 'id="headerSessionMenuButton"' in response
+    assert 'id="contextInfoPopover"' in response
+    assert 'id="sessionActionMenu"' in response
+    assert "上下文信息" in response
+    assert "置顶" in response
+    assert "复制会话 ID" in response
+    assert "重命名" in response
+    assert "归档" in response
+    assert "function toggleContextInfoPopover()" in response
+    assert "function toggleSessionActionMenu()" in response
+    assert "function copyNativeSessionId()" in response
+
+
 def test_worker_live_page_rejects_invalid_native_thread_id_before_attach() -> None:
     response = _live_page(42, native_provider="codex")
 
@@ -3266,7 +3283,7 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert 'eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true})' in response
     assert "function syncNativeTranscript" in response
     assert '`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`' in response
-    assert "attachNative().then(syncNativeTranscript).then(() => {" in response
+    assert "attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).then(() => {" in response
     assert "hasLiveDisplayEvents" in response
     assert "model.usage.updated" in response
     assert "function loadRecentEvents" in response
@@ -3443,6 +3460,17 @@ async def test_worker_live_page_hides_native_execution_details_from_user_feedbac
         "renderToolCall(event);"
         not in response
     )
+
+
+def test_worker_live_page_summarizes_native_diff_events_without_raw_patch() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function renderFileChangeSummary(event)" in response
+    assert "function summarizeDiffPayload(payload)" in response
+    assert "已更改" in response
+    assert 'state.files.join("\\n")' in response
+    assert 'String(text || "").split("\\n")' in response
+    assert "payload.patch || payload.diff || payload.delta" not in response
 
 
 @pytest.mark.asyncio
@@ -3626,7 +3654,6 @@ async def test_worker_live_page_fold_keeps_native_transcript_previews(
     assert "for (let index = group.length - 1; index >= 0; index--)" in response
     assert ".turn-fold:not(.collapsed) .turn-fold-preview { grid-template-rows: 0fr;" in response
     assert "/turn-summary" not in response
-    assert "summarize" not in response
 
 
 @pytest.mark.asyncio

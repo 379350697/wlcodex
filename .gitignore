@@ -19,3 +19,6 @@ config/wlcodex.toml
 config/*.env
 tests/fixtures/
 wlcodex_*_probe.txt
+chrome-profile-*/
+scripts/run_mock_server.py
+skills-lock.json
