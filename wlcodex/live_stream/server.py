@@ -5568,15 +5568,29 @@ __ICONS_JS__
       updateComposerDisabled();
     }
     async function api(path, options = {}) {
-      const response = await fetch(path, {
-        ...options,
-        headers: {"Content-Type": "application/json", ...authHeaders, ...(options.headers || {})}
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        throw new Error(nativeErrorMessage(body.error || response.statusText));
+      const {timeoutMs = 0, ...fetchOptions} = options;
+      let timeoutId = 0;
+      if (timeoutMs > 0 && !fetchOptions.signal) {
+        const controller = new AbortController();
+        fetchOptions.signal = controller.signal;
+        timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
       }
-      return response.json().catch(() => ({}));
+      try {
+        const response = await fetch(path, {
+          ...fetchOptions,
+          headers: {"Content-Type": "application/json", ...authHeaders, ...(fetchOptions.headers || {})}
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(nativeErrorMessage(body.error || response.statusText));
+        }
+        return response.json().catch(() => ({}));
+      } catch (error) {
+        if (error && error.name === "AbortError") throw new Error("请求超时");
+        throw error;
+      } finally {
+        if (timeoutId) window.clearTimeout(timeoutId);
+      }
     }
     async function loadProviderCapabilities() {
       try {
@@ -5605,7 +5619,7 @@ __ICONS_JS__
         return;
       }
       try {
-        const session = await api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}`);
+        const session = await api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}`, {timeoutMs: 2500});
         updateNativeSessionInfo(session || {});
       } catch (error) {
         updateNativeSessionInfo({status: error.message || "不可用"});
@@ -7358,7 +7372,8 @@ __ICONS_JS__
       try {
         const result = await api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/attach`, {
           method: "POST",
-          body: "{}"
+          body: "{}",
+          timeoutMs: 2500
         });
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.active_turn_id || "";
@@ -7374,7 +7389,8 @@ __ICONS_JS__
       try {
         const result = await api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`, {
           method: "POST",
-          body: "{}"
+          body: "{}",
+          timeoutMs: 2500
         });
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.turn_running ? (result.active_turn_id || result.turn_id || activeTurnId || "") : "";
@@ -7392,14 +7408,18 @@ __ICONS_JS__
     loadProviderCapabilities();
     loadModelCatalog();
     if (invalidNativeThreadId) renderStatus("native_session_invalid", "会话链接无效，请从最近会话重新打开");
-    attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).then(() => {
-      return loadRecentEvents();
-    }).catch(() => {
-      loadNativeSessionInfo().catch(() => {});
-      return loadRecentEvents();
+    refreshNativeControlInBackground();
+    loadNativeSessionInfo().catch(() => {});
+    loadRecentEvents().catch(error => {
+      renderStatus("load_recent_failed", error.message || String(error));
     }).then(() => {
       setInterval(pollEvents, 1000);
     });
+    function refreshNativeControlInBackground() {
+      attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).catch(error => {
+        renderStatus("native_sync_failed", error.message || String(error));
+      });
+    }
     async function loadRecentEvents() {
       let snapshot = await api(eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true}));
       if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);

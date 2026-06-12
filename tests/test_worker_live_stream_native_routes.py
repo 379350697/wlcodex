@@ -3623,7 +3623,13 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert 'eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true})' in response
     assert "function syncNativeTranscript" in response
     assert '`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`' in response
-    assert "attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).then(() => {" in response
+    assert "function refreshNativeControlInBackground()" in response
+    assert "refreshNativeControlInBackground();" in response
+    assert "loadNativeSessionInfo().catch(() => {});" in response
+    assert "loadRecentEvents().catch(error => {" in response
+    assert "loadNativeSessionInfo().catch(() => {}).then(loadRecentEvents)" not in response
+    assert "attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).then(() => {" not in response
+    assert "timeoutMs: 2500" in response
     assert "hasLiveDisplayEvents" in response
     assert "model.usage.updated" in response
     assert "function loadRecentEvents" in response
