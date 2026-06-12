@@ -7529,8 +7529,12 @@ __ICONS_JS__
     }
     function isDuplicateDisplayEvent(event, previousEvents) {
       const key = mirroredDisplayKey(event);
-      if (!key) return false;
-      return previousEvents.some(previous => mirroredDisplayKey(previous) === key);
+      if (key && previousEvents.some(previous => mirroredDisplayKey(previous) === key)) {
+        return true;
+      }
+      if (!event.id) return false;
+      const eventId = String(event.id);
+      return previousEvents.some(previous => String(previous.id || "") === eventId);
     }
     function mirroredDisplayKey(event) {
       const payload = (event && event.payload) || {};
