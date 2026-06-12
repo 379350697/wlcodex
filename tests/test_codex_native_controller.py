@@ -655,7 +655,7 @@ async def test_controller_continue_steer_interrupt(tmp_path: Path) -> None:
     assert client.calls == [
         ("list_sessions", 50),
         ("attach_session", "thread-1"),
-        ("continue_session", "thread-1", "continue"),
+        ("start_turn", "thread-1", "continue"),
         ("attach_session", "thread-1"),
         ("steer_turn", "thread-1", "turn-2", "steer"),
         ("interrupt_turn", "thread-1", "turn-2"),
@@ -755,8 +755,7 @@ async def test_controller_continue_can_force_new_turn_when_current_turn_is_activ
     assert result.turn_id == "turn-2"
     assert result.active_turn_id == "turn-2"
     assert client.calls == [
-        ("attach_session", "thread-active"),
-        ("continue_session", "thread-active", "show this on native clients"),
+        ("start_turn", "thread-active", "show this on native clients"),
     ]
 
 
@@ -833,7 +832,7 @@ async def test_controller_continue_starts_new_turn_when_only_stale_approval_is_a
     assert result.turn_id == "turn-2"
     assert client.calls == [
         ("attach_session", "thread-active"),
-        ("continue_session", "thread-active", "new work"),
+        ("start_turn", "thread-active", "new work"),
     ]
 
 
@@ -1034,7 +1033,7 @@ async def test_controller_continue_starts_new_turn_when_rpc_reports_older_stale_
             "new current work",
         ),
         ("interrupt_turn", "thread-stale", "019e78af-e5d0-7643-9a23-3679652f923b"),
-        ("continue_session", "thread-stale", "new current work"),
+        ("start_turn", "thread-stale", "new current work"),
     ]
 
 
@@ -1063,7 +1062,7 @@ async def test_controller_steer_starts_new_turn_when_thread_is_not_active(
     assert result.turn_id == "turn-2"
     assert client.calls == [
         ("attach_session", "thread-done"),
-        ("continue_session", "thread-done", "new follow-up"),
+        ("start_turn", "thread-done", "new follow-up"),
     ]
 
 
@@ -1093,7 +1092,7 @@ async def test_controller_passes_native_model_settings_and_images(tmp_path: Path
         ("list_sessions", 50),
         ("attach_session", "thread-1"),
         (
-            "continue_session",
+            "start_turn",
             "thread-1",
             "describe",
             "gpt-5.5",
@@ -1179,7 +1178,7 @@ async def test_controller_passes_codex_permission_overrides_to_new_turns(
         ("list_sessions", 50),
         ("attach_session", "thread-1"),
         (
-            "continue_session",
+            "start_turn",
             "thread-1",
             "continue with permissions",
             None,

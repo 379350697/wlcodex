@@ -296,6 +296,20 @@ class CodexNativeController:
         native_thread_id = native_thread_id.strip()
         if not native_thread_id:
             raise ValueError("native_thread_id is required")
+        if force_new_turn:
+            return await self._start_new_turn(
+                native_thread_id,
+                prompt,
+                model=model,
+                effort=effort,
+                service_tier=service_tier,
+                images=images,
+                approval_policy=approval_policy,
+                approvals_reviewer=approvals_reviewer,
+                sandbox_policy=sandbox_policy,
+                collaboration_mode=collaboration_mode,
+                resume_first=False,
+            )
         turn_state = await self._refresh_turn_state(native_thread_id)
         session = turn_state.session
         active_turn_id = turn_state.active_turn_id
@@ -320,6 +334,7 @@ class CodexNativeController:
                     approvals_reviewer=approvals_reviewer,
                     sandbox_policy=sandbox_policy,
                     collaboration_mode=collaboration_mode,
+                    resume_first=False,
                 )
             session = self._session_store.update_session(
                 session.id,
@@ -344,6 +359,7 @@ class CodexNativeController:
             approvals_reviewer=approvals_reviewer,
             sandbox_policy=sandbox_policy,
             collaboration_mode=collaboration_mode,
+            resume_first=False,
         )
 
     async def _start_new_turn(
@@ -490,6 +506,7 @@ class CodexNativeController:
                 approval_policy=approval_policy,
                 approvals_reviewer=approvals_reviewer,
                 sandbox_policy=sandbox_policy,
+                resume_first=False,
             )
         try:
             turn_id = await self._steer_active_turn(
@@ -510,6 +527,7 @@ class CodexNativeController:
                 approval_policy=approval_policy,
                 approvals_reviewer=approvals_reviewer,
                 sandbox_policy=sandbox_policy,
+                resume_first=False,
             )
         session = self._session_store.update_session(
             session.id,

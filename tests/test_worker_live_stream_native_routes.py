@@ -3070,7 +3070,7 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "planModeChipCancel.onclick = () => setSelectedCollaborationMode(\"default\");" in response
     assert "function renderAttachments" in response
     assert "function renderLocalUserEcho" in response
-    assert 'if (action === "continue" && nativeTurnRunning) body.force_new_turn = true;' in response
+    assert 'if (action === "continue") body.force_new_turn = true;' in response
     assert (
         'if (action !== "steer") '
         'renderLocalUserEcho(prompt, attachmentsSnapshot, draftTurnId);'

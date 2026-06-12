@@ -6755,7 +6755,7 @@ __ICONS_JS__
         }));
       }
       if (action === "steer") body.expected_turn_id = activeTurnId;
-      if (action === "continue" && nativeTurnRunning) body.force_new_turn = true;
+      if (action === "continue") body.force_new_turn = true;
       sendingPrompt = true;
       pendingUserEcho = {
         text: normalizeTranscriptText(prompt),
