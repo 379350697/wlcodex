@@ -209,6 +209,7 @@ class WorkerLiveStreamServer:
         turn_summary_client: DigestClient | None = None,
         native_transcript_mirror: Any = None,
         workflow_service: Any = None,
+        native_sync_timeout_seconds: float = 3.0,
     ) -> None:
         if host not in ("127.0.0.1", "localhost"):
             raise ValueError(f"Worker live stream server is loopback-only, got {host!r}")
@@ -223,6 +224,7 @@ class WorkerLiveStreamServer:
         self._turn_summary_client = turn_summary_client
         self._native_transcript_mirror = native_transcript_mirror
         self._workflow_service = workflow_service
+        self._native_sync_timeout_seconds = max(0.1, float(native_sync_timeout_seconds))
         self._server: asyncio.AbstractServer | None = None
         self._client_tasks: set[asyncio.Task[None]] = set()
         self._council_runs: dict[str, dict[str, Any]] = {}
@@ -497,10 +499,16 @@ class WorkerLiveStreamServer:
                     "tail" in query or "before" in query
                 )
                 if should_sync_native:
-                    native_sync_error = await self._sync_native_transcript(
-                        native_thread_id,
-                        native_provider=native_provider,
-                    )
+                    try:
+                        native_sync_error = await asyncio.wait_for(
+                            self._sync_native_transcript(
+                                native_thread_id,
+                                native_provider=native_provider,
+                            ),
+                            timeout=self._native_sync_timeout_seconds,
+                        )
+                    except TimeoutError:
+                        native_sync_error = "native sync timed out"
                 previous_event_count = 0
                 if "tail" in query:
                     tail_limit = _safe_int(query.get("tail", ["80"])[0], default=80)
@@ -3725,11 +3733,8 @@ __ICONS_JS__
     function readSelectedCollaborationMode() {
       if (!SUPPORTS_PLAN_MODE) return null;
       if (USES_CLAUDE_PLAN_PERMISSION_MODE) return null;
-      if (selectedCollaborationMode === "plan") {
-        const settings = readSelectedModelSettings();
-        return {"mode": "plan", "settings": {"model": settings.model}};
-      }
-      return null;
+      const settings = readSelectedModelSettings();
+      return {"mode": selectedCollaborationMode === "plan" ? "plan" : "default", "settings": {"model": settings.model}};
     }
 
     function setSelectedCollaborationMode(mode) {
@@ -6143,11 +6148,8 @@ __ICONS_JS__
     function readSelectedCollaborationMode() {
       if (!SUPPORTS_PLAN_MODE) return null;
       if (USES_CLAUDE_PLAN_PERMISSION_MODE) return null;
-      if (selectedCollaborationMode === "plan") {
-        const settings = readSelectedModelSettings();
-        return {"mode": "plan", "settings": {"model": settings.model}};
-      }
-      return null;
+      const settings = readSelectedModelSettings();
+      return {"mode": selectedCollaborationMode === "plan" ? "plan" : "default", "settings": {"model": settings.model}};
     }
     function explicitDefaultCollaborationMode() {
       if (!SUPPORTS_PLAN_MODE) return null;
@@ -7009,10 +7011,8 @@ __ICONS_JS__
       }
     }
     function updateHandoffControls() {
-      const hideHandoffForPlan = PROVIDER === "codex" && (selectedCollaborationMode === "plan" || Boolean(activePlan && activePlan.executable));
-      handoffButton.hidden = hideHandoffForPlan;
-      if (hideHandoffForPlan) handoffPanel.hidden = true;
-      handoffButton.disabled = hideHandoffForPlan || sendingPrompt || !nativeThreadId;
+      handoffButton.hidden = false;
+      handoffButton.disabled = sendingPrompt || !nativeThreadId;
       handoffPreviewButton.disabled = handoffBusy || !nativeThreadId || !handoffTargetProvider;
       handoffExecuteButton.disabled = handoffBusy || !handoffPreviewPayload;
       for (const button of handoffTargetButtons) button.disabled = handoffBusy;

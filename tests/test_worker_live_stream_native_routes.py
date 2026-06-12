@@ -2357,7 +2357,7 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "const COLLABORATION_MODE_STORAGE_KEY" in response
     assert "function readSelectedCollaborationMode()" in response
     assert "body.collaboration_mode = collaborationMode;" in response
-    assert 'return {"mode": "plan", "settings": {"model": settings.model}};' in response
+    assert 'return {"mode": selectedCollaborationMode === "plan" ? "plan" : "default", "settings": {"model": settings.model}};' in response
     assert 'planModeCheck.innerHTML = enabled ? ICONS.check : "";' in response
     assert 'class="mode-chip plan-mode-chip" id="planModeChip" hidden' in response
     assert 'id="planModeChipCancel"' in response
@@ -2642,6 +2642,46 @@ async def test_worker_events_syncs_native_thread_before_returning_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_worker_events_tail_returns_snapshot_when_native_sync_times_out(
+    tmp_path: Path,
+) -> None:
+    class SlowNativeController(FakeNativeController):
+        async def sync_session(self, native_thread_id: str) -> FakeControlResult:
+            self.calls.append(("sync_session", native_thread_id))
+            await asyncio.sleep(2)
+            return FakeControlResult(native_thread_id, 42, "turn-1", status="synced")
+
+    store = _store(tmp_path)
+    _append_worker_event(store, agent_run_id=42, native_thread_id="thread-1")
+    controller = SlowNativeController()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+        native_sync_timeout_seconds=0.01,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/workers/42/events?tail=80&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert body["events"][0]["payload"]["delta"] == "hello"
+    assert body["native_sync_error"] == "native sync timed out"
+    assert controller.calls == [("sync_session", "thread-1")]
+
+
+@pytest.mark.asyncio
 async def test_worker_events_poll_does_not_sync_native_thread(
     tmp_path: Path,
 ) -> None:
@@ -2894,7 +2934,7 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "renderSelectedPlugins();" in response
     assert "function readSelectedCollaborationMode()" in response
     assert "body.collaboration_mode = collaborationMode;" in response
-    assert 'return {"mode": "plan", "settings": {"model": settings.model}};' in response
+    assert 'return {"mode": selectedCollaborationMode === "plan" ? "plan" : "default", "settings": {"model": settings.model}};' in response
     assert 'planModeCheck.innerHTML = enabled ? ICONS.check : "";' in response
     assert 'class="mode-chip plan-mode-chip" id="planModeChip" hidden' in response
     assert 'id="planModeChipCancel"' in response
@@ -3150,8 +3190,9 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
         "clearSelectedPlanModeForExecution();"
     )
     assert "planDetailTextFromText(plan.body, plan.summary)" in response
-    assert 'const hideHandoffForPlan = PROVIDER === "codex" && (selectedCollaborationMode === "plan" || Boolean(activePlan && activePlan.executable));' in response
-    assert "handoffButton.hidden = hideHandoffForPlan;" in response
+    assert "hideHandoffForPlan" not in response
+    assert "handoffButton.hidden = false;" in response
+    assert "handoffButton.disabled = sendingPrompt || !nativeThreadId;" in response
     assert "function explicitDefaultCollaborationMode()" in response
     assert (
         "buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()})"
