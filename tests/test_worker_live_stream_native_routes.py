@@ -430,6 +430,12 @@ class SlowCodexProviderWithCache:
         ]
 
 
+class SlowCodexProviderWithoutCache(SlowCodexProviderWithCache):
+    async def list_cached_sessions(self, limit: int = 50) -> list[FakeNativeSession]:
+        self.calls.append(("list_cached_sessions", limit))
+        return []
+
+
 def _store(tmp_path: Path) -> RuntimeEventStore:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
@@ -574,8 +580,10 @@ async def test_native_routes_allow_public_loopback_when_token_is_disabled(
                     "updated_at": "2026-05-31T13:00:00+00:00",
                     "metadata": _FAKE_SESSION_METADATA,
                 }
-            ]
-        }
+            ],
+        "native_refresh_pending": False,
+        "native_session_source": "daemon",
+    }
     assert controller.calls == [("list_sessions",)]
 
 
@@ -770,6 +778,7 @@ async def test_native_sessions_returns_json_with_bearer_token(tmp_path: Path) ->
             "Authorization: Bearer secret\r\n"
             "Connection: close\r\n\r\n",
         )
+        await asyncio.sleep(0.1)
     finally:
         await server.stop()
 
@@ -783,8 +792,10 @@ async def test_native_sessions_returns_json_with_bearer_token(tmp_path: Path) ->
                     "updated_at": "2026-05-31T13:00:00+00:00",
                     "metadata": _FAKE_SESSION_METADATA,
                 }
-            ]
-        }
+            ],
+        "native_refresh_pending": False,
+        "native_session_source": "daemon",
+    }
     assert controller.calls == [("list_sessions",)]
 
 
@@ -801,7 +812,7 @@ async def test_native_sessions_returns_cached_snapshot_when_provider_times_out(
         native_registry=NativeAgentRegistry([provider]),
         access_token="secret",
         allow_unauthenticated_loopback=False,
-        native_sessions_timeout_seconds=0.01,
+        native_sessions_timeout_seconds=10,
     )
     await server.start()
     try:
@@ -813,6 +824,7 @@ async def test_native_sessions_returns_cached_snapshot_when_provider_times_out(
             "Authorization: Bearer secret\r\n"
             "Connection: close\r\n\r\n",
         )
+        await asyncio.sleep(0.1)
     finally:
         await server.stop()
 
@@ -827,8 +839,46 @@ async def test_native_sessions_returns_cached_snapshot_when_provider_times_out(
             "metadata": {"source": "cache"},
         }
     ]
-    assert body["native_sync_error"] == "native sessions sync timed out"
-    assert provider.calls == [("list_sessions", 50), ("list_cached_sessions", 50)]
+    assert body["native_refresh_pending"] is True
+    assert body["native_session_source"] == "cache"
+    assert provider.calls == [("list_cached_sessions", 50), ("list_sessions", 50)]
+
+
+@pytest.mark.asyncio
+async def test_native_sessions_returns_immediately_with_empty_cache(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    provider = SlowCodexProviderWithoutCache()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([provider]),
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+        native_sessions_timeout_seconds=10,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        await asyncio.sleep(0.1)
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert body["sessions"] == []
+    assert body["native_refresh_pending"] is True
+    assert body["native_session_source"] == "cache"
+    assert provider.calls == [("list_cached_sessions", 50), ("list_sessions", 50)]
 
 
 @pytest.mark.asyncio
@@ -2463,6 +2513,9 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "reasoningEffortLabel(metadata.effort" in response
     assert "serviceTierLabel(metadata.service_tier" in response
     assert 'const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";' in response
+    assert "let sessionsRefreshTimer = null;" in response
+    assert "data.native_refresh_pending && sessionsRefreshTimer === null" in response
+    assert "loadSessions(true);" in response
 
 
 @pytest.mark.asyncio
@@ -2677,7 +2730,7 @@ async def test_worker_stream_routes_require_auth_when_token_is_configured(
 
 
 @pytest.mark.asyncio
-async def test_worker_events_syncs_native_thread_before_returning_snapshot(
+async def test_worker_events_schedules_native_thread_sync_before_returning_snapshot(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -2699,11 +2752,14 @@ async def test_worker_events_syncs_native_thread_before_returning_snapshot(
             "Host: test\r\nAuthorization: Bearer secret\r\n"
             "Connection: close\r\n\r\n",
         )
+        await asyncio.sleep(0.1)
     finally:
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert _json_body(response)["native_sync_error"] == ""
+    body = _json_body(response)
+    assert body["native_sync_error"] == ""
+    assert body["native_sync_pending"] is True
     assert controller.calls == [("sync_session", "thread-1")]
 
 
@@ -2726,7 +2782,7 @@ async def test_worker_events_tail_returns_snapshot_when_native_sync_times_out(
         hub=WorkerLiveStreamHub(store),
         native_controller=controller,
         access_token="secret",
-        native_sync_timeout_seconds=0.01,
+        native_sync_timeout_seconds=10,
     )
     await server.start()
     try:
@@ -2737,13 +2793,15 @@ async def test_worker_events_tail_returns_snapshot_when_native_sync_times_out(
             "Host: test\r\nAuthorization: Bearer secret\r\n"
             "Connection: close\r\n\r\n",
         )
+        await asyncio.sleep(0.1)
     finally:
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
     body = _json_body(response)
     assert body["events"][0]["payload"]["delta"] == "hello"
-    assert body["native_sync_error"] == "native sync timed out"
+    assert body["native_sync_error"] == ""
+    assert body["native_sync_pending"] is True
     assert controller.calls == [("sync_session", "thread-1")]
 
 
@@ -2774,7 +2832,9 @@ async def test_worker_events_poll_does_not_sync_native_thread(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert _json_body(response)["native_sync_error"] == ""
+    body = _json_body(response)
+    assert body["native_sync_error"] == ""
+    assert body["native_sync_pending"] is False
     assert controller.calls == []
 
 
@@ -2812,14 +2872,15 @@ async def test_worker_events_tail_filters_to_current_native_turn(
     )
     await server.start()
     try:
-            response = await _read_response(
-                server.host,
-                server.port,
-                "GET /api/workers/42/events?tail=80&native_thread_id=thread-1"
-                "&native_turn_id=turn-current HTTP/1.1\r\n"
-                "Host: test\r\nAuthorization: Bearer secret\r\n"
-                "Connection: close\r\n\r\n",
-            )
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/workers/42/events?tail=80&native_thread_id=thread-1"
+            "&native_turn_id=turn-current HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        await asyncio.sleep(0.1)
     finally:
         await server.stop()
 

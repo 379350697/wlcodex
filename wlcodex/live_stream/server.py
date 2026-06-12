@@ -48,6 +48,7 @@ _MAX_HEADER_BYTES = 16 * 1024
 _MAX_BODY_BYTES = 24 * 1024 * 1024
 _MAX_NATIVE_IMAGE_ATTACHMENTS = 8
 _MAX_PLUGIN_ICON_BYTES = 128 * 1024
+_NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS = 0.05
 _CODEX_PERMISSION_PRESETS: dict[str, dict[str, object]] = {
     "default": {},
     "read_only": {
@@ -232,6 +233,7 @@ class WorkerLiveStreamServer:
         )
         self._server: asyncio.AbstractServer | None = None
         self._client_tasks: set[asyncio.Task[None]] = set()
+        self._native_background_tasks: dict[tuple[str, ...], asyncio.Task[None]] = {}
         self._council_runs: dict[str, dict[str, Any]] = {}
         self._council_run_tasks: set[asyncio.Task[None]] = set()
         self._login_tickets: dict[str, float] = {}
@@ -254,6 +256,11 @@ class WorkerLiveStreamServer:
         await self._server.wait_closed()
         self._server = None
         tasks = [task for task in self._client_tasks if task is not asyncio.current_task()]
+        tasks.extend(
+            task
+            for task in self._native_background_tasks.values()
+            if task is not asyncio.current_task()
+        )
         tasks.extend(
             task
             for task in self._council_run_tasks
@@ -500,20 +507,15 @@ class WorkerLiveStreamServer:
                     query.get("native_turn_id", [""])[0]
                 ) or ""
                 native_sync_error = ""
+                native_sync_pending = False
                 should_sync_native = bool(native_thread_id) and (
                     "tail" in query or "before" in query
                 )
                 if should_sync_native:
-                    try:
-                        native_sync_error = await asyncio.wait_for(
-                            self._sync_native_transcript(
-                                native_thread_id,
-                                native_provider=native_provider,
-                            ),
-                            timeout=self._native_sync_timeout_seconds,
-                        )
-                    except TimeoutError:
-                        native_sync_error = "native sync timed out"
+                    native_sync_pending = self._schedule_native_transcript_sync(
+                        native_thread_id,
+                        native_provider=native_provider,
+                    )
                 previous_event_count = 0
                 if "tail" in query:
                     tail_limit = _safe_int(query.get("tail", ["80"])[0], default=80)
@@ -557,6 +559,7 @@ class WorkerLiveStreamServer:
                         "events": [event.to_json_dict() for event in events],
                         "previous_event_count": previous_event_count,
                         "native_sync_error": native_sync_error,
+                        "native_sync_pending": native_sync_pending,
                     },
                 )
                 return
@@ -719,6 +722,66 @@ class WorkerLiveStreamServer:
             return await result
         return list(result)
 
+    def _schedule_native_sessions_refresh(
+        self,
+        provider_name: str,
+        target: Any,
+        *,
+        legacy_codex_controller: bool,
+    ) -> bool:
+        key = ("native_sessions", provider_name)
+        existing = self._native_background_tasks.get(key)
+        if existing is not None and not existing.done():
+            return True
+
+        async def refresh() -> None:
+            try:
+                await asyncio.sleep(_NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS)
+                await self._list_native_sessions(
+                    target,
+                    legacy_codex_controller=legacy_codex_controller,
+                )
+            except Exception:
+                pass
+            finally:
+                if self._native_background_tasks.get(key) is task:
+                    self._native_background_tasks.pop(key, None)
+
+        task = asyncio.create_task(refresh())
+        self._native_background_tasks[key] = task
+        return True
+
+    def _schedule_native_transcript_sync(
+        self,
+        native_thread_id: str,
+        *,
+        native_provider: str = "codex",
+    ) -> bool:
+        if not native_thread_id:
+            return False
+        provider_name = native_provider.strip().lower() or "codex"
+        key = ("native_transcript", provider_name, native_thread_id)
+        existing = self._native_background_tasks.get(key)
+        if existing is not None and not existing.done():
+            return True
+
+        async def sync() -> None:
+            try:
+                await asyncio.sleep(_NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS)
+                await self._sync_native_transcript(
+                    native_thread_id,
+                    native_provider=provider_name,
+                )
+            except Exception:
+                pass
+            finally:
+                if self._native_background_tasks.get(key) is task:
+                    self._native_background_tasks.pop(key, None)
+
+        task = asyncio.create_task(sync())
+        self._native_background_tasks[key] = task
+        return True
+
     async def _handle_native_agent_route(
         self,
         reader: asyncio.StreamReader,
@@ -801,19 +864,34 @@ class WorkerLiveStreamServer:
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
             native_sync_error = ""
-            try:
-                sessions = await asyncio.wait_for(
-                    self._list_native_sessions(
-                        target,
-                        legacy_codex_controller=legacy_codex_controller,
-                    ),
-                    timeout=self._native_sessions_timeout_seconds,
-                )
-            except (asyncio.TimeoutError, JsonRpcTimeout) as exc:
-                native_sync_error = str(exc) or "native sessions sync timed out"
+            native_refresh_pending = False
+            fresh = query.get("fresh", [""])[0].lower() in ("1", "true", "yes")
+            if not fresh and getattr(target, "list_cached_sessions", None) is not None:
                 sessions = await self._list_cached_native_sessions(target)
+                native_refresh_pending = self._schedule_native_sessions_refresh(
+                    provider_name,
+                    target,
+                    legacy_codex_controller=legacy_codex_controller,
+                )
+                native_session_source = "cache"
+            else:
+                try:
+                    sessions = await asyncio.wait_for(
+                        self._list_native_sessions(
+                            target,
+                            legacy_codex_controller=legacy_codex_controller,
+                        ),
+                        timeout=self._native_sessions_timeout_seconds,
+                    )
+                    native_session_source = "daemon"
+                except (asyncio.TimeoutError, JsonRpcTimeout) as exc:
+                    native_sync_error = str(exc) or "native sessions sync timed out"
+                    sessions = await self._list_cached_native_sessions(target)
+                    native_session_source = "cache"
             payload: dict[str, Any] = {
                 "sessions": [_json_object(session) for session in sessions],
+                "native_refresh_pending": native_refresh_pending,
+                "native_session_source": native_session_source,
             }
             if native_sync_error:
                 payload["native_sync_error"] = native_sync_error
@@ -3212,6 +3290,7 @@ __ICONS_JS__
     let historyTitle = PROVIDER_LABEL;
     let deviceStatusText = "";
     let sessions = [];
+    let sessionsRefreshTimer = null;
     let projectRoot = "";
     let projectCatalog = [];
     let renderedHomeDataSignature = "";
@@ -3324,6 +3403,12 @@ __ICONS_JS__
       try {
         const data = await api(`${API_BASE}/sessions`);
         sessions = data.sessions || [];
+        if (data.native_refresh_pending && sessionsRefreshTimer === null) {
+          sessionsRefreshTimer = setTimeout(() => {
+            sessionsRefreshTimer = null;
+            loadSessions(true);
+          }, 800);
+        }
         if (selected && !sessions.some(session => session.native_thread_id === selected.native_thread_id)) selected = null;
         if (render) {
           renderedHomeDataSignature = homeDataSignature();
