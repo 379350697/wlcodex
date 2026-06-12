@@ -154,6 +154,9 @@ class CodexNativeController:
         raw_sessions = await self._client.list_sessions(limit)
         return [self._map_thread(raw) for raw in raw_sessions]
 
+    async def list_cached_sessions(self, limit: int = 50) -> list[NativeCodexSession]:
+        return self._session_store.list_recent(limit=limit)
+
     async def list_models(self) -> list[dict[str, Any]]:
         return await self._client.list_models()
 

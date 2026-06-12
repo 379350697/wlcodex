@@ -407,6 +407,29 @@ class FakeClaudeProvider:
         ]
 
 
+class SlowCodexProviderWithCache:
+    provider = "codex"
+    provider_engine = "app-server"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, ...]] = []
+
+    async def list_sessions(self, limit: int = 50) -> list[FakeNativeSession]:
+        self.calls.append(("list_sessions", limit))
+        await asyncio.sleep(2)
+        return []
+
+    async def list_cached_sessions(self, limit: int = 50) -> list[FakeNativeSession]:
+        self.calls.append(("list_cached_sessions", limit))
+        return [
+            FakeNativeSession(
+                "cached-thread",
+                123,
+                metadata={"source": "cache"},
+            )
+        ]
+
+
 def _store(tmp_path: Path) -> RuntimeEventStore:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
@@ -763,6 +786,49 @@ async def test_native_sessions_returns_json_with_bearer_token(tmp_path: Path) ->
             ]
         }
     assert controller.calls == [("list_sessions",)]
+
+
+@pytest.mark.asyncio
+async def test_native_sessions_returns_cached_snapshot_when_provider_times_out(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    provider = SlowCodexProviderWithCache()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([provider]),
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+        native_sessions_timeout_seconds=0.01,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert body["sessions"] == [
+        {
+            "native_thread_id": "cached-thread",
+            "agent_run_id": 123,
+            "activity_at": "2026-05-31T12:39:00+00:00",
+            "updated_at": "2026-05-31T13:00:00+00:00",
+            "metadata": {"source": "cache"},
+        }
+    ]
+    assert body["native_sync_error"] == "native sessions sync timed out"
+    assert provider.calls == [("list_sessions", 50), ("list_cached_sessions", 50)]
 
 
 @pytest.mark.asyncio

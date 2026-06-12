@@ -214,6 +214,26 @@ async def test_request_times_out() -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_cancellation_clears_pending_request() -> None:
+    sent = []
+
+    async def send_json(message: dict) -> None:
+        sent.append(message)
+
+    client = JsonRpcClient(send_json=send_json, request_timeout_seconds=60)
+    task = asyncio.create_task(client.request("thread/list", {}))
+    await asyncio.sleep(0)
+
+    assert len(client._pending) == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sent[0]["method"] == "thread/list"
+    assert len(client._pending) == 0
+
+
+@pytest.mark.asyncio
 async def test_server_request_does_not_block_next_response() -> None:
     """Server request handling must not block the receive loop from
     processing normal responses."""

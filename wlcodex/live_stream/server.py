@@ -40,7 +40,7 @@ from wlcodex.live_stream.collapse import (
 )
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
-from wlcodex.jsonrpc import JsonRpcError
+from wlcodex.jsonrpc import JsonRpcError, JsonRpcTimeout
 
 
 _REQUEST_TIMEOUT_SECONDS = 30.0
@@ -210,6 +210,7 @@ class WorkerLiveStreamServer:
         native_transcript_mirror: Any = None,
         workflow_service: Any = None,
         native_sync_timeout_seconds: float = 3.0,
+        native_sessions_timeout_seconds: float = 3.0,
     ) -> None:
         if host not in ("127.0.0.1", "localhost"):
             raise ValueError(f"Worker live stream server is loopback-only, got {host!r}")
@@ -225,6 +226,10 @@ class WorkerLiveStreamServer:
         self._native_transcript_mirror = native_transcript_mirror
         self._workflow_service = workflow_service
         self._native_sync_timeout_seconds = max(0.1, float(native_sync_timeout_seconds))
+        self._native_sessions_timeout_seconds = max(
+            0.1,
+            float(native_sessions_timeout_seconds),
+        )
         self._server: asyncio.AbstractServer | None = None
         self._client_tasks: set[asyncio.Task[None]] = set()
         self._council_runs: dict[str, dict[str, Any]] = {}
@@ -695,6 +700,25 @@ class WorkerLiveStreamServer:
             raise ValueError("JSON body must be an object")
         return parsed
 
+    async def _list_native_sessions(
+        self,
+        target: Any,
+        *,
+        legacy_codex_controller: bool,
+    ) -> list[Any]:
+        if legacy_codex_controller:
+            return await target.list_sessions()
+        return await target.list_sessions(50)
+
+    async def _list_cached_native_sessions(self, target: Any) -> list[Any]:
+        cached = getattr(target, "list_cached_sessions", None)
+        if cached is None:
+            return []
+        result = cached(50)
+        if asyncio.iscoroutine(result):
+            return await result
+        return list(result)
+
     async def _handle_native_agent_route(
         self,
         reader: asyncio.StreamReader,
@@ -776,14 +800,27 @@ class WorkerLiveStreamServer:
             if method != "GET":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
-            if legacy_codex_controller:
-                sessions = await target.list_sessions()
-            else:
-                sessions = await target.list_sessions(50)
+            native_sync_error = ""
+            try:
+                sessions = await asyncio.wait_for(
+                    self._list_native_sessions(
+                        target,
+                        legacy_codex_controller=legacy_codex_controller,
+                    ),
+                    timeout=self._native_sessions_timeout_seconds,
+                )
+            except (asyncio.TimeoutError, JsonRpcTimeout) as exc:
+                native_sync_error = str(exc) or "native sessions sync timed out"
+                sessions = await self._list_cached_native_sessions(target)
+            payload: dict[str, Any] = {
+                "sessions": [_json_object(session) for session in sessions],
+            }
+            if native_sync_error:
+                payload["native_sync_error"] = native_sync_error
             await self._send_json(
                 writer,
                 200,
-                {"sessions": [_json_object(session) for session in sessions]},
+                payload,
             )
             return
 

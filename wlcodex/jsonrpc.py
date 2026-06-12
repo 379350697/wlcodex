@@ -66,6 +66,9 @@ class JsonRpcClient:
 
         try:
             return await asyncio.wait_for(future, timeout=self.request_timeout_seconds)
+        except asyncio.CancelledError:
+            self._pending.pop(rid, None)
+            raise
         except asyncio.TimeoutError:
             self._pending.pop(rid, None)
             raise JsonRpcTimeout(

@@ -71,6 +71,10 @@ class CodexAppServerProvider:
         sessions = await self._controller.list_sessions(limit)
         return [_session_from_codex(session) for session in sessions]
 
+    async def list_cached_sessions(self, limit: int = 50) -> list[NativeAgentSession]:
+        sessions = await self._controller.list_cached_sessions(limit)
+        return [_session_from_codex(session) for session in sessions]
+
     async def list_models(self) -> list[dict[str, Any]]:
         models = await self._controller.list_models()
         return [_model_with_highest_reasoning_default(model) for model in models]
