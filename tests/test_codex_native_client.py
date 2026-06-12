@@ -49,7 +49,7 @@ async def test_native_client_uses_official_app_server_protocol() -> None:
             case "initialize":
                 assert msg["params"] == {
                     "clientInfo": {"name": "wlcodex", "version": "1.0.0"},
-                    "capabilities": None,
+                    "capabilities": {"experimentalApi": True},
                 }
                 return {"serverInfo": {"name": "Codex"}}
             case "thread/list":
@@ -191,7 +191,10 @@ async def test_native_client_continue_sends_model_images_and_collaboration_mode(
                         {"type": "image", "url": "data:image/png;base64,abc"},
                     ],
                     "model": "gpt-5.5",
-                    "collaborationMode": {"mode": "plan"},
+                    "collaborationMode": {
+                        "mode": "plan",
+                        "settings": {"model": "gpt-5.5"},
+                    },
                 }
                 return {"turn": {"id": "turn-2"}}
         raise AssertionError(f"unexpected method: {msg['method']}")

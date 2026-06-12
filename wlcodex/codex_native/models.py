@@ -13,6 +13,7 @@ class NativeCodexStatus:
     installation_id: str = ""
     environment_id: str | None = None
     error: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

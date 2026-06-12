@@ -118,8 +118,11 @@ allow_unauthenticated_loopback = true
 
 [codex_native]
 enabled = false
-transport = "app-server"
-listen_endpoint = "ws://127.0.0.1:18742"
+transport = "daemon"
+# sock_path = "/Users/wl/.codex/app-server-control/app-server-control.sock"
+# Legacy compatibility only; can split sessions from Codex desktop:
+# transport = "app-server"
+# listen_endpoint = "ws://127.0.0.1:18742"
 ```
 
 When enabled, WLCodex starts a loopback-only server and exposes:

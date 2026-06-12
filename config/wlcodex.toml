@@ -109,6 +109,32 @@ block_idle_seconds = 2.0
 preview_enabled = true
 preview_edit_min_interval_seconds = 2.0
 
+[live_stream]
+enabled = true
+host = "127.0.0.1"
+port = 18731
+access_token_env = "WLCODEX_LIVE_STREAM_TOKEN"
+allow_unauthenticated_loopback = true
+
+[codex_native]
+enabled = true
+transport = "daemon"
+
+[native_agents]
+enabled = true
+default_provider = "codex"
+
+[native_agents.codex]
+enabled = true
+
+[native_agents.claude]
+enabled = true
+engine = "cli-local"
+
+[native_agents.antigravity]
+enabled = true
+engine = "cli-local"
+
 [telegram_output]
 preview_enabled = true
 preview_edit_min_interval_seconds = 2.0

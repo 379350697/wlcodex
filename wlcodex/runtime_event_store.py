@@ -262,6 +262,47 @@ class RuntimeEventStore:
         ).fetchone()
         return row is not None
 
+    def payload_item_ids_by_agent_run(self, agent_run_id: int) -> set[str]:
+        """Return all payload item ids already stored for an agent run."""
+        return set(self.payload_item_turn_ids_by_agent_run(agent_run_id))
+
+    def payload_item_turn_ids_by_agent_run(
+        self,
+        agent_run_id: int,
+    ) -> dict[str, set[str]]:
+        """Return stored payload item ids and their known turn ids."""
+        rows = self._conn.execute(
+            """
+            SELECT payload_json
+            FROM runtime_events
+            WHERE agent_run_id = ?
+            """,
+            (agent_run_id,),
+        ).fetchall()
+        item_turn_ids: dict[str, set[str]] = {}
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            item_id = ""
+            for key in ("itemId", "item_id"):
+                value = payload.get(key)
+                if value:
+                    item_id = str(value)
+                    break
+            if not item_id:
+                continue
+            turn_id = str(
+                payload.get("turnId") or payload.get("native_turn_id") or ""
+            )
+            item_turn_ids.setdefault(item_id, set())
+            if turn_id:
+                item_turn_ids[item_id].add(turn_id)
+        return item_turn_ids
+
     def correct_payload_item_turn_id(
         self,
         agent_run_id: int,

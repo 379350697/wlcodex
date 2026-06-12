@@ -252,27 +252,24 @@ def _create_live_stream_components(
                 CodexSessionTranscriptMirror,
             )
             from wlcodex.codex_native.transport import (
-                CodexAppServerWebSocketTransport,
-                CodexProxyTransport,
+                create_codex_native_transport,
             )
 
-            if config.codex_native.transport == "proxy":
-                transport = CodexProxyTransport(
-                    binary=config.codex.binary,
-                    sock_path=config.codex_native.sock_path,
-                )
-            else:
-                transport = CodexAppServerWebSocketTransport(
-                    binary=config.codex.binary,
-                    listen_endpoint=config.codex_native.listen_endpoint,
-                    startup_timeout_seconds=config.backend.startup_timeout_seconds,
-                )
+            transport = create_codex_native_transport(
+                transport=config.codex_native.transport,
+                binary=config.codex.binary,
+                sock_path=config.codex_native.sock_path,
+                listen_endpoint=config.codex_native.listen_endpoint,
+                startup_timeout_seconds=config.backend.startup_timeout_seconds,
+                remote_control=config.codex_native.remote_control,
+            )
 
             async def _start_native_client() -> CodexNativeClient:
                 client = CodexNativeClient(
                     send_json=transport.send_json,
                     close=transport.close,
                     request_timeout_seconds=config.backend.request_timeout_seconds,
+                    metadata=transport.describe,
                 )
 
                 async def _on_message(msg: dict) -> None:
@@ -441,6 +438,45 @@ def _create_live_stream_components(
     )
 
 
+def _missing_telegram_token_is_fatal(config: object, token: str | None) -> bool:
+    """Telegram token is only required when no web entry is configured."""
+    return not token and not bool(getattr(config.live_stream, "enabled", False))
+
+
+def _should_run_web_entry_only(
+    config: object,
+    *,
+    token: str | None,
+    live_stream_components: SimpleNamespace | None,
+) -> bool:
+    """Select the formal web entry when Telegram is not configured."""
+    return (
+        not token
+        and bool(getattr(config.live_stream, "enabled", False))
+        and live_stream_components is not None
+    )
+
+
+async def _run_web_entry_only(live_stream_components: SimpleNamespace) -> None:
+    """Run the formal native web entry without Telegram polling."""
+    live_stream_server = live_stream_components.server
+    logger.info("WLCodex starting in web entry mode. Telegram polling disabled.")
+    try:
+        await live_stream_server.start()
+        logger.info(
+            "Worker live stream listening at http://%s:%s",
+            live_stream_server.host,
+            live_stream_server.port,
+        )
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        await live_stream_server.stop()
+        native_client = getattr(live_stream_components, "native_client", None)
+        if native_client is not None and hasattr(native_client, "close"):
+            await native_client.close()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     # httpx logs full Telegram Bot API URLs at INFO, including the bot token.
@@ -457,7 +493,7 @@ def main() -> None:
     config = load_config(Path(args.config))
 
     token = os.environ.get(config.telegram.bot_token_env)
-    if not token:
+    if _missing_telegram_token_is_fatal(config, token):
         raise SystemExit(
             f"Missing Telegram token env variable: {config.telegram.bot_token_env}"
         )
@@ -478,6 +514,25 @@ def main() -> None:
         runtime_store,
         ledger,
     )
+    if _should_run_web_entry_only(
+        config,
+        token=token,
+        live_stream_components=live_stream_components,
+    ):
+        logger.warning(
+            "Telegram token env variable %s is missing; running formal web entry only",
+            config.telegram.bot_token_env,
+        )
+        assert live_stream_components is not None
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_run_web_entry_only(live_stream_components))
+        except KeyboardInterrupt:
+            logger.info("Shutting down.")
+        finally:
+            loop.close()
+        return
 
     # Telegram delivery outbox — isolates network failures from orchestration
     from wlcodex.telegram_outbox import TelegramOutbox

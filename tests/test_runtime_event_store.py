@@ -169,6 +169,68 @@ def test_list_by_agent_run_after_rejects_non_positive_limit(tmp_path: Path) -> N
     assert events == []
 
 
+def test_payload_item_ids_by_agent_run_reads_item_id_variants(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.append(
+        _make_event(
+            agent_run_id=7,
+            payload={"itemId": "item-official", "text": "hello"},
+        )
+    )
+    store.append(
+        _make_event(
+            agent_run_id=7,
+            payload={"item_id": "item-legacy", "text": "world"},
+        )
+    )
+    store.append(
+        _make_event(
+            agent_run_id=8,
+            payload={"itemId": "item-other-run"},
+        )
+    )
+
+    assert store.payload_item_ids_by_agent_run(7) == {
+        "item-official",
+        "item-legacy",
+    }
+    assert store.payload_item_turn_ids_by_agent_run(7) == {
+        "item-official": set(),
+        "item-legacy": set(),
+    }
+
+
+def test_payload_item_turn_ids_by_agent_run_reads_turn_id_variants(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.append(
+        _make_event(
+            agent_run_id=7,
+            payload={"itemId": "item-one", "turnId": "turn-official"},
+        )
+    )
+    store.append(
+        _make_event(
+            agent_run_id=7,
+            payload={"itemId": "item-one", "native_turn_id": "turn-fallback"},
+        )
+    )
+    store.append(
+        _make_event(
+            agent_run_id=7,
+            payload={"item_id": "item-two", "native_turn_id": "turn-two"},
+        )
+    )
+
+    assert store.payload_item_turn_ids_by_agent_run(7) == {
+        "item-one": {"turn-official", "turn-fallback"},
+        "item-two": {"turn-two"},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Query by conversation_id
 # ---------------------------------------------------------------------------

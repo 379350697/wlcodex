@@ -575,7 +575,7 @@ async def test_controller_attach_session_refreshes_without_projecting_history(
 
 
 @pytest.mark.asyncio
-async def test_controller_sync_session_refreshes_header_without_projecting_history(
+async def test_controller_sync_session_projects_plan_history(
     tmp_path: Path,
 ) -> None:
     controller, client, session_store, runtime_store = _controller(tmp_path)
@@ -589,12 +589,12 @@ async def test_controller_sync_session_refreshes_header_without_projecting_histo
             "turns": [
                 {
                     "id": "turn-sync",
-                    "status": "running",
+                    "status": "completed",
                     "items": [
                         {
-                            "id": "message-sync",
-                            "type": "agentMessage",
-                            "text": "synced answer",
+                            "id": "plan-sync",
+                            "type": "plan",
+                            "text": "# Synced Plan\n\n## Summary\nRender this plan.",
                         }
                     ],
                 }
@@ -608,15 +608,23 @@ async def test_controller_sync_session_refreshes_header_without_projecting_histo
         native_thread_id="thread-sync",
         agent_run_id=result.agent_run_id,
         turn_id="turn-sync",
-        active_turn_id="turn-sync",
-        turn_running=True,
+        active_turn_id="",
+        turn_running=False,
         status="synced",
     )
-    assert client.calls == [("read_session", "thread-sync", False)]
+    assert client.calls == [("read_session", "thread-sync")]
     session = session_store.get_by_thread_id("thread-sync")
     assert session is not None
     events = runtime_store.list_by_agent_run(session.agent_run_id)
-    assert events == []
+    assert [event.event_type for event in events] == [
+        EventType.AGENT_RUN_ACTIVITY,
+        EventType.AGENT_RUN_ACTIVITY,
+        EventType.AGENT_RUN_ACTIVITY,
+    ]
+    assert events[1].payload["action"] == "plan_updated"
+    assert events[1].payload["plan"].startswith("# Synced Plan")
+    assert events[1].payload["itemId"] == "plan-sync"
+    assert events[1].payload["native_turn_id"] == "turn-sync"
 
 
 @pytest.mark.asyncio

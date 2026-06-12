@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from wlcodex.codex_native.projector import NativeCodexEventProjector
 from wlcodex.codex_native.session_store import NativeCodexSessionStore
 from wlcodex.codex_native.transcript_mirror import CodexSessionTranscriptMirror
 from wlcodex.db import Ledger
@@ -155,6 +156,54 @@ def test_transcript_mirror_imports_task_complete_last_agent_message(
     assert events[1].payload["text"].startswith("结论：这份文档")
     assert events[1].payload["native_turn_id"] == "official-turn-1"
     assert str(events[1].payload["itemId"]).startswith("jsonl-assistant-final:")
+
+
+def test_transcript_mirror_imports_official_plan_response_item_as_plan_activity(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    thread_id = "019f0010-0000-4f00-8f00-333333333333"
+    root = tmp_path / "sessions"
+    _write_session_jsonl(
+        root,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-06-04T11:30:00.000Z",
+                "type": "turn_context",
+                "payload": {"turn_id": "official-turn-plan"},
+            },
+            {
+                "timestamp": "2026-06-04T11:30:01.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "plan",
+                    "id": "official-plan-item",
+                    "text": "# WLCodex Plan\n\n## Summary\nRender the plan card.",
+                },
+            },
+        ],
+    )
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+        tail_lines=20,
+    )
+
+    first_count = mirror.sync_thread(thread_id)
+    second_count = mirror.sync_thread(thread_id)
+
+    session = session_store.get_by_thread_id(thread_id)
+    assert session is not None
+    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+    assert first_count == 1
+    assert second_count == 0
+    assert [event.event_type for event in events] == [EventType.AGENT_RUN_ACTIVITY]
+    assert events[0].payload["action"] == "plan_updated"
+    assert events[0].payload["plan"].startswith("# WLCodex Plan")
+    assert events[0].payload["itemId"] == "official-plan-item"
+    assert events[0].payload["native_turn_id"] == "official-turn-plan"
 
 
 def test_transcript_mirror_uses_official_turn_context_id(tmp_path: Path) -> None:
@@ -346,6 +395,110 @@ def test_transcript_mirror_corrects_existing_item_turn_ids(
         "official-turn-1",
     ]
     assert session_store.get_by_thread_id(thread_id).last_turn_id == "official-turn-1"
+
+
+def test_transcript_mirror_skips_user_message_when_local_echo_exists(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    projector = NativeCodexEventProjector(session_store, runtime_store)
+    thread_id = "019f000d-0000-4f00-8f00-111111111111"
+    root = tmp_path / "sessions"
+    projector.project_user_message(
+        native_thread_id=thread_id,
+        native_turn_id="official-turn-1",
+        text="评估这份文档",
+    )
+    _write_session_jsonl(
+        root,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-06-04T12:00:00.000Z",
+                "type": "turn_context",
+                "payload": {"turn_id": "official-turn-1"},
+            },
+            {
+                "timestamp": "2026-06-04T12:00:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "评估这份文档",
+                },
+            },
+            {
+                "timestamp": "2026-06-04T12:00:02.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "我来评估",
+                },
+            },
+        ],
+    )
+
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+        tail_lines=20,
+    )
+    projected_count = mirror.sync_thread(thread_id)
+
+    session = session_store.get_by_thread_id(thread_id)
+    assert session is not None
+    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+
+    assert projected_count == 1
+    assert len(events) == 2
+    assert events[0].event_type == EventType.USER_MESSAGE_RECEIVED
+    assert str(events[0].payload["itemId"]).startswith("local-user-")
+    assert events[1].event_type == EventType.MODEL_TEXT_DELTA
+
+
+def test_transcript_mirror_skips_user_message_with_jsonl_turn_fallback(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    projector = NativeCodexEventProjector(session_store, runtime_store)
+    thread_id = "019f000d-0000-4f00-8f00-222222222222"
+    root = tmp_path / "sessions"
+    projector.project_user_message(
+        native_thread_id=thread_id,
+        native_turn_id="official-turn-1",
+        text="继续执行",
+    )
+    _write_session_jsonl(
+        root,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-06-04T13:00:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "继续执行",
+                },
+            },
+        ],
+    )
+
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+        tail_lines=20,
+    )
+    projected_count = mirror.sync_thread(thread_id)
+
+    session = session_store.get_by_thread_id(thread_id)
+    assert session is not None
+    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+
+    assert projected_count == 0
+    assert len(events) == 1
+    assert events[0].event_type == EventType.USER_MESSAGE_RECEIVED
+    assert str(events[0].payload["itemId"]).startswith("local-user-")
 
 
 def test_transcript_mirror_default_tail_handles_tool_heavy_jsonl(

@@ -9,6 +9,7 @@ from typing import Any, Iterable
 from wlcodex.codex_native.projector import NativeCodexEventProjector
 from wlcodex.codex_native.session_store import NativeCodexSessionStore
 from wlcodex.runtime_event_store import RuntimeEventStore
+from wlcodex.runtime_events import EventType
 
 
 _DEFAULT_TAIL_LINES = 2_000
@@ -65,20 +66,29 @@ class CodexSessionTranscriptMirror:
             source_kind=_SOURCE_KIND,
         )
         fallback_turn_id = f"jsonl-tail:{native_thread_id}"
+        existing_item_turn_ids = self._runtime_store.payload_item_turn_ids_by_agent_run(
+            session.agent_run_id
+        )
+        existing_item_ids = set(existing_item_turn_ids)
+        recent_user_events = self._runtime_store.list_by_agent_run_tail(
+            session.agent_run_id,
+            limit=60,
+        )
         projected_count = 0
         for item in _parse_transcript_items(
             _read_tail_lines(path, limit=self._tail_lines, max_bytes=self._max_bytes),
             native_thread_id=native_thread_id,
             fallback_turn_id=fallback_turn_id,
         ):
-            if item.item_id in self._seen_item_ids or (
-                self._runtime_store.has_payload_item_id(
-                    session.agent_run_id,
-                    item.item_id,
-                )
+            if (
+                item.item_id in self._seen_item_ids
+                or item.item_id in existing_item_ids
             ):
                 self._seen_item_ids.add(item.item_id)
-                if _is_official_turn_id(item.turn_id):
+                stored_turn_ids = existing_item_turn_ids.get(item.item_id, set())
+                if _is_official_turn_id(item.turn_id) and (
+                    item.turn_id not in stored_turn_ids
+                ):
                     self._runtime_store.correct_payload_item_turn_id(
                         session.agent_run_id,
                         item.item_id,
@@ -89,13 +99,36 @@ class CodexSessionTranscriptMirror:
                         native_thread_id=native_thread_id,
                         last_turn_id=item.turn_id,
                     )
+                    existing_item_turn_ids.setdefault(item.item_id, set()).add(
+                        item.turn_id
+                    )
                 continue
             if item.role == "user":
+                if self._has_duplicate_user_item(
+                    item,
+                    recent_user_events,
+                ):
+                    self._seen_item_ids.add(item.item_id)
+                    existing_item_ids.add(item.item_id)
+                    existing_item_turn_ids.setdefault(item.item_id, set()).add(
+                        item.turn_id
+                    )
+                    continue
                 projected = self._projector.project_user_message(
                     native_thread_id=native_thread_id,
                     native_turn_id=item.turn_id,
                     text=item.text,
                     item_id=item.item_id,
+                )
+            elif item.role == "plan":
+                projected = self._projector.project_notification(
+                    "turn/plan/updated",
+                    {
+                        "threadId": native_thread_id,
+                        "turnId": item.turn_id,
+                        "plan": item.text,
+                        "itemId": item.item_id,
+                    },
                 )
             elif item.role == "assistant":
                 projected = self._projector.project_notification(
@@ -117,7 +150,14 @@ class CodexSessionTranscriptMirror:
             else:
                 projected = []
             self._seen_item_ids.add(item.item_id)
+            existing_item_ids.add(item.item_id)
+            existing_item_turn_ids.setdefault(item.item_id, set()).add(item.turn_id)
             if projected:
+                recent_user_events.extend(
+                    event
+                    for event in projected
+                    if event.event_type == EventType.USER_MESSAGE_RECEIVED
+                )
                 self._session_store.update_session(
                     native_thread_id=native_thread_id,
                     status="running",
@@ -125,6 +165,39 @@ class CodexSessionTranscriptMirror:
                 )
                 projected_count += len(projected)
         return projected_count
+
+    def _has_duplicate_user_item(
+        self,
+        item: _TranscriptItem,
+        recent_user_events: Iterable[Any],
+    ) -> bool:
+        if not item.text:
+            return False
+        normalized_text = _canonical_user_text(item.text)
+        if not normalized_text:
+            return False
+        for event in recent_user_events:
+            if event.event_type != EventType.USER_MESSAGE_RECEIVED:
+                continue
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if _canonical_user_text(str(payload.get("text") or "")) != normalized_text:
+                continue
+            existing_turn = str(
+                payload.get("turnId") or payload.get("native_turn_id") or ""
+            )
+            if not _turn_ids_compatible_for_local_user_dedupe(
+                item.turn_id,
+                existing_turn,
+            ):
+                continue
+            existing_item_id = str(
+                payload.get("itemId") or payload.get("item_id") or ""
+            )
+            if existing_item_id.startswith("local-user-") or (
+                item.turn_id == existing_turn
+            ):
+                return True
+        return False
 
     def _find_session_file(self, native_thread_id: str) -> Path | None:
         cached = self._path_cache.get(native_thread_id)
@@ -169,14 +242,39 @@ def _parse_transcript_items(
         if not isinstance(payload, dict):
             continue
         row_turn_id = _turn_id(payload)
+        payload_type = str(payload.get("type") or "")
+        timestamp = str(row.get("timestamp") or "")
         if row_type == "turn_context":
             if row_turn_id:
                 current_turn_id = row_turn_id
             continue
+        if row_type == "response_item":
+            if row_turn_id:
+                current_turn_id = row_turn_id
+            if payload_type != "plan":
+                continue
+            text = _response_item_text(payload)
+            if not text:
+                continue
+            item_turn_id = row_turn_id or current_turn_id
+            item_id = _text(payload.get("id")) or _stable_id(
+                "jsonl-plan",
+                native_thread_id,
+                item_turn_id,
+                text,
+            )
+            items.append(
+                _TranscriptItem(
+                    role="plan",
+                    text=text,
+                    timestamp=timestamp,
+                    turn_id=item_turn_id,
+                    item_id=item_id,
+                )
+            )
+            continue
         if row_type != "event_msg":
             continue
-        payload_type = str(payload.get("type") or "")
-        timestamp = str(row.get("timestamp") or "")
         if row_turn_id:
             current_turn_id = row_turn_id
         if payload_type in {"task_started", "turn_aborted"}:
@@ -263,6 +361,14 @@ def _text(value: object) -> str:
     return str(value or "").strip()
 
 
+def _response_item_text(payload: dict[str, Any]) -> str:
+    for key in ("text", "plan", "summary", "content"):
+        text = _text(payload.get(key))
+        if text:
+            return text
+    return ""
+
+
 def _turn_id(payload: dict[str, Any]) -> str:
     for key in ("turn_id", "turnId"):
         turn_id = _text(payload.get(key))
@@ -278,3 +384,22 @@ def _is_official_turn_id(turn_id: str) -> bool:
 def _stable_id(prefix: str, *parts: str) -> str:
     digest = hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()[:24]
     return f"{prefix}:{digest}"
+
+
+def _canonical_user_text(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _turn_ids_compatible_for_local_user_dedupe(
+    left_turn_id: str,
+    right_turn_id: str,
+) -> bool:
+    if left_turn_id == right_turn_id:
+        return True
+    if not left_turn_id or not right_turn_id:
+        return True
+    if left_turn_id.startswith("jsonl-turn:") or right_turn_id.startswith(
+        "jsonl-turn:"
+    ):
+        return True
+    return False

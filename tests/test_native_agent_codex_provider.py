@@ -18,6 +18,7 @@ class FakeCodexController:
             connected=True,
             remote_control_status="enabled",
             server_name="Codex",
+            metadata={"transport_source": "daemon", "framing": "unix-websocket-json"},
         )
 
     async def list_sessions(self, limit: int = 50):
@@ -81,6 +82,8 @@ async def test_codex_provider_normalizes_status_and_sessions() -> None:
     assert provider.provider_engine == "app-server"
     assert status.provider == "codex"
     assert status.status_code == "enabled"
+    assert status.metadata["transport_source"] == "daemon"
+    assert status.metadata["framing"] == "unix-websocket-json"
     assert sessions[0].provider == "codex"
     assert sessions[0].native_session_id == "thread-1"
     assert sessions[0].metadata == {

@@ -921,6 +921,7 @@ async def test_native_start_route_passes_codex_collaboration_mode(
         {
             "cwd": "/Users/wl/projects/wlcodex",
             "prompt": "make a plan",
+            "model": "gpt-5.5",
             "collaboration_mode": {"mode": "plan"},
         }
     )
@@ -954,6 +955,7 @@ async def test_native_start_route_passes_codex_collaboration_mode(
             "start_session",
             "/Users/wl/projects/wlcodex",
             "make a plan",
+            "gpt-5.5",
             None,
             None,
             None,
@@ -961,8 +963,7 @@ async def test_native_start_route_passes_codex_collaboration_mode(
             None,
             None,
             None,
-            None,
-            {"mode": "plan"},
+            {"mode": "plan", "settings": {"model": "gpt-5.5"}},
         )
     ]
 
@@ -1331,6 +1332,7 @@ async def test_native_continue_route_passes_codex_collaboration_mode(
     body = json.dumps(
         {
             "prompt": "continue with a plan",
+            "model": "gpt-5.5",
             "collaboration_mode": {"mode": "plan"},
         }
     )
@@ -1363,14 +1365,14 @@ async def test_native_continue_route_passes_codex_collaboration_mode(
             "continue_session",
             "thread-1",
             "continue with a plan",
+            "gpt-5.5",
             None,
             None,
             None,
             None,
             None,
             None,
-            None,
-            {"mode": "plan"},
+            {"mode": "plan", "settings": {"model": "gpt-5.5"}},
         )
     ]
 
@@ -1926,8 +1928,8 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert ".session-float { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
     assert ".header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
-    assert "grid-template-columns: 34px 1px 24px;" in response
-    assert "width: 116px; min-height: 58px;" in response
+    assert "grid-template-columns: 34px 34px;" in response
+    assert "width: 96px; min-height: 58px;" in response
     assert ".header-run-spinner { width: 28px; height: 28px; border: 3px solid #5a5b60;" in response
     assert ".header-run-indicator.running .header-run-spinner" in response
     assert "border-right-color: var(--native-remote-blue);" in response
@@ -2343,8 +2345,8 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "if (settings.model) body.model = settings.model;" in response
     assert "if (settings.effort) body.effort = settings.effort;" in response
     assert "if (settings.service_tier) body.service_tier = settings.service_tier;" in response
-    assert "if (imageAttachments.length) {" in response
-    assert "body.images = imageAttachments.map(image => ({" in response
+    assert "if (attachmentsForSend.length) {" in response
+    assert "body.images = attachmentsForSend.map(image => ({" in response
     assert "function selectComposerPlugin(item)" in response
     assert "function pluginAutocompleteMatches(query)" in response
     assert "function promptHasPluginMention(value, mention)" in response
@@ -2355,7 +2357,7 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "const COLLABORATION_MODE_STORAGE_KEY" in response
     assert "function readSelectedCollaborationMode()" in response
     assert "body.collaboration_mode = collaborationMode;" in response
-    assert 'return {"mode": "plan"};' in response
+    assert 'return {"mode": "plan", "settings": {"model": settings.model}};' in response
     assert 'planModeCheck.innerHTML = enabled ? ICONS.check : "";' in response
     assert 'class="mode-chip plan-mode-chip" id="planModeChip" hidden' in response
     assert 'id="planModeChipCancel"' in response
@@ -2609,7 +2611,38 @@ async def test_worker_stream_routes_require_auth_when_token_is_configured(
 
 
 @pytest.mark.asyncio
-async def test_worker_events_does_not_sync_native_thread_before_returning_snapshot(
+async def test_worker_events_syncs_native_thread_before_returning_snapshot(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _append_worker_event(store, agent_run_id=42)
+    controller = FakeNativeController()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/workers/42/events?tail=80&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert _json_body(response)["native_sync_error"] == ""
+    assert controller.calls == [("sync_session", "thread-1")]
+
+
+@pytest.mark.asyncio
+async def test_worker_events_poll_does_not_sync_native_thread(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -2688,7 +2721,7 @@ async def test_worker_events_tail_filters_to_current_native_turn(
     body = _json_body(response)
     assert [event["payload"]["delta"] for event in body["events"]] == ["current turn"]
     assert body["previous_event_count"] == 1
-    assert controller.calls == []
+    assert controller.calls == [("sync_session", "thread-1")]
 
 
 @pytest.mark.asyncio
@@ -2832,9 +2865,9 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert 'class="interruption-choice" id="interruptionChoice" hidden' in response
     assert "function submitPrompt" in response
     assert "continueButton.onclick = () => submitPrompt();" in response
-    assert 'throw new Error(`${PROVIDER_LABEL} 会话未连接`);' in response
+    assert 'throw new Error("会话未连接");' in response
     assert "function nativeErrorMessage(message)" in response
-    assert 'return `${PROVIDER_LABEL} 会话不存在或已被清理`;' in response
+    assert 'return "会话不存在或已被清理";' in response
     assert "let providerCapabilities = {};" in response
     assert "async function loadProviderCapabilities()" in response
     assert "await api(`${API_BASE}/capabilities`)" in response
@@ -2861,6 +2894,7 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "renderSelectedPlugins();" in response
     assert "function readSelectedCollaborationMode()" in response
     assert "body.collaboration_mode = collaborationMode;" in response
+    assert 'return {"mode": "plan", "settings": {"model": settings.model}};' in response
     assert 'planModeCheck.innerHTML = enabled ? ICONS.check : "";' in response
     assert 'class="mode-chip plan-mode-chip" id="planModeChip" hidden' in response
     assert 'id="planModeChipCancel"' in response
@@ -2870,7 +2904,10 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "function renderAttachments" in response
     assert "function renderLocalUserEcho" in response
     assert 'if (action === "continue" && nativeTurnRunning) body.force_new_turn = true;' in response
-    assert 'if (action !== "steer") renderLocalUserEcho(prompt, echoAttachments);' in response
+    assert (
+        'if (action !== "steer") '
+        'renderLocalUserEcho(prompt, attachmentsSnapshot, draftTurnId);'
+    ) in response
     assert "function clearMatchingLocalUserEcho(event)" in response
     assert "function localUserEchoMatchesEvent(node, incomingText, incomingImages)" in response
     assert "if (!options.historical) clearMatchingLocalUserEcho(event);" in response
@@ -3033,7 +3070,11 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert "function hasNativePlanEventForTurn(event)" in response
     assert "function planTextFromExecutionPrompt(text)" in response
     assert "plan.className = \"plan-item prompt-plan-fallback\";" in response
-    assert "plan.append(createPlanCardElement(planText, \"\"));" in response
+    assert (
+        "plan.append(createPlanCardElement(planText, \"\", {executable: false}));"
+        in response
+    )
+    assert "仅文本计划，不能一键执行" in response
     assert "node.row.classList.toggle(\"prompt-message\", renderedPrompt);" in response
     assert "const generatedPrompt = groupHasGeneratedPrompt(group);" in response
     assert "!generatedPrompt &&" in response
@@ -3078,7 +3119,14 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert "function openPlanPage(plan = activePlan)" in response
     assert "function renderPlanPage(plan)" in response
     assert "function closePlanPage()" in response
-    assert "function createPlanCardElement(planText, titleFallback)" in response
+    assert (
+        "function createPlanCardElement(planText, titleFallback, options = {})"
+        in response
+    )
+    assert 'executable: true' in response
+    assert "const executable = options.executable === true;" in response
+    assert "if (plan.executable) {" in response
+    assert 'readonly.textContent = "仅文本计划，不能一键执行";' in response
     assert "function planTextFromPayload(payload)" in response
     assert "function planTitleFromText(text, fallback)" in response
     assert "function planSummaryFromText(text)" in response
@@ -3087,18 +3135,28 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert "planExecutionPrompt(activePlan.body)" in response
     assert "function clearSelectedPlanModeForExecution()" in response
     assert response.index("clearSelectedPlanModeForExecution();") < response.index(
-        "const body = buildNativePromptBody(prompt, {includeCollaborationMode: false});"
+        "const body = buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()});"
     )
     assert 'if (selectedCollaborationMode !== "plan") return;' in response
     assert 'setSelectedCollaborationMode("default");' in response
     assert (
         'if (isNativeExecutionDetail(event)) clearSelectedPlanModeForExecution();'
-        in response
+        not in response
+    )
+    assert (
+        "function handleHiddenNativeFeedback(event)" in response
+    )
+    assert response.index("function handleHiddenNativeFeedback(event)") > response.index(
+        "clearSelectedPlanModeForExecution();"
     )
     assert "planDetailTextFromText(plan.body, plan.summary)" in response
-    assert 'const hideHandoffForPlan = PROVIDER === "codex" && (selectedCollaborationMode === "plan" || Boolean(activePlan));' in response
+    assert 'const hideHandoffForPlan = PROVIDER === "codex" && (selectedCollaborationMode === "plan" || Boolean(activePlan && activePlan.executable));' in response
     assert "handoffButton.hidden = hideHandoffForPlan;" in response
-    assert "buildNativePromptBody(prompt, {includeCollaborationMode: false})" in response
+    assert "function explicitDefaultCollaborationMode()" in response
+    assert (
+        "buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()})"
+        in response
+    )
     assert "buildNativePromptBody(prompt, {includeCollaborationMode: true})" in response
     assert 'body: JSON.stringify(body)' in response
     assert "if (isNativePlanEvent(event)) return 35;" in response
@@ -3166,7 +3224,7 @@ async def test_worker_live_page_hides_success_lifecycle_events_from_transcript(
     ) in response
     assert (
         'if (event.kind === "lifecycle" && status === "running") '
-        'return `${PROVIDER_LABEL} 正在回复`;'
+        'return "正在回复";'
     ) in response
 
 
@@ -3401,6 +3459,9 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "hasLiveDisplayEvents" in response
     assert "model.usage.updated" in response
     assert "function loadRecentEvents" in response
+    assert "if (nativeThreadId && !hasNativePlanEvents(loadedEvents)) {" in response
+    assert 'snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));' in response
+    assert "function hasNativePlanEvents(sourceEvents)" in response
     assert "hasUnresolvedApprovalRequests(loadedEvents)\n        ) && nativeTurnId" not in response
     assert "function loadOlderEvents" in response
     assert "function pollEvents" in response
@@ -3708,6 +3769,9 @@ async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns
     assert "if (isInternalEvent(event)) continue;" in response
     assert 'if (event.kind === "lifecycle" || event.kind === "completed") return "";' in response
     assert "function dedupeDisplayEvents(sourceEvents)" in response
+    assert "const seenUserMessages = new Map();" in response
+    assert "function isSyntheticUserMessageEvent(event)" in response
+    assert "function userMessageDedupePriority(event)" in response
     assert "const groups = foldGroups(dedupeDisplayEvents(loadedEvents)).map(orderTranscriptGroupEvents);" in response
     assert "title.textContent = turnFoldTitle(group);" in response
     assert "nativeTurnId !== latestTurnId" in response

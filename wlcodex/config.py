@@ -239,9 +239,10 @@ class LiveStreamConfig:
 @dataclass(frozen=True)
 class CodexNativeConfig:
     enabled: bool = False
-    transport: str = "app-server"
+    transport: str = "daemon"
     sock_path: Path | None = None
     listen_endpoint: str = "ws://127.0.0.1:18742"
+    remote_control: bool = True
 
 
 @dataclass(frozen=True)
@@ -648,10 +649,15 @@ def _live_stream_config(data: dict[str, object]) -> LiveStreamConfig:
 
 
 def _codex_native_config(data: dict[str, object]) -> CodexNativeConfig:
-    transport = str(data.get("transport", "app-server"))
-    if transport not in {"app-server", "proxy"}:
+    transport = str(data.get("transport", "daemon"))
+    if transport == "proxy":
+        logging.getLogger(__name__).warning(
+            "codex_native.transport='proxy' is deprecated; using 'daemon'"
+        )
+        transport = "daemon"
+    if transport not in {"daemon", "app-server"}:
         raise ConfigError(
-            "codex_native.transport must be 'app-server' or 'proxy', "
+            "codex_native.transport must be 'daemon', 'app-server', or 'proxy', "
             f"got: {transport!r}"
         )
     return CodexNativeConfig(
@@ -661,6 +667,7 @@ def _codex_native_config(data: dict[str, object]) -> CodexNativeConfig:
         listen_endpoint=str(
             data.get("listen_endpoint", "ws://127.0.0.1:18742")
         ),
+        remote_control=bool(data.get("remote_control", True)),
     )
 
 

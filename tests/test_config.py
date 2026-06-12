@@ -144,9 +144,10 @@ def test_live_stream_config_defaults_disabled(tmp_path: Path) -> None:
     assert config.live_stream.access_token_env == "WLCODEX_LIVE_STREAM_TOKEN"
     assert config.live_stream.allow_unauthenticated_loopback is True
     assert config.codex_native.enabled is False
-    assert config.codex_native.transport == "app-server"
+    assert config.codex_native.transport == "daemon"
     assert config.codex_native.sock_path is None
     assert config.codex_native.listen_endpoint == "ws://127.0.0.1:18742"
+    assert config.codex_native.remote_control is True
 
 
 def test_live_stream_config_can_be_enabled(tmp_path: Path) -> None:
@@ -177,18 +178,53 @@ def test_codex_native_config_can_be_enabled(tmp_path: Path) -> None:
         live_stream_block="""
 [codex_native]
 enabled = true
-transport = "proxy"
+transport = "daemon"
 sock_path = "~/wlcodex-native.sock"
 listen_endpoint = "ws://127.0.0.1:19999"
+remote_control = false
 """,
     )
 
     config = load_config(config_path)
 
     assert config.codex_native.enabled is True
-    assert config.codex_native.transport == "proxy"
+    assert config.codex_native.transport == "daemon"
     assert config.codex_native.sock_path == Path.home() / "wlcodex-native.sock"
     assert config.codex_native.listen_endpoint == "ws://127.0.0.1:19999"
+    assert config.codex_native.remote_control is False
+
+
+def test_codex_native_proxy_transport_aliases_to_daemon(tmp_path: Path, caplog) -> None:
+    config_path = _write_live_stream_config(
+        tmp_path,
+        live_stream_block="""
+[codex_native]
+enabled = true
+transport = "proxy"
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.codex_native.transport == "daemon"
+    assert "codex_native.transport='proxy' is deprecated" in caplog.text
+
+
+def test_codex_native_legacy_app_server_must_be_explicit(tmp_path: Path) -> None:
+    config_path = _write_live_stream_config(
+        tmp_path,
+        live_stream_block="""
+[codex_native]
+enabled = true
+transport = "app-server"
+listen_endpoint = "ws://127.0.0.1:18742"
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.codex_native.transport == "app-server"
+    assert config.codex_native.listen_endpoint == "ws://127.0.0.1:18742"
 
 
 def test_codex_native_config_rejects_unknown_transport(tmp_path: Path) -> None:

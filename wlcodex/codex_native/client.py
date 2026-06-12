@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from wlcodex.codex_backend import (
@@ -15,18 +15,38 @@ from wlcodex.codex_native.models import NativeCodexStatus
 from wlcodex.jsonrpc import JsonRpcClient
 
 
+def _collaboration_mode_with_settings(
+    collaboration_mode: dict[str, object] | None,
+    *,
+    model: str | None = None,
+) -> dict[str, object] | None:
+    if collaboration_mode is None:
+        return None
+    clean = dict(collaboration_mode)
+    settings = clean.get("settings")
+    clean_settings = dict(settings) if isinstance(settings, dict) else {}
+    existing_model = clean_settings.get("model")
+    if not (isinstance(existing_model, str) and existing_model.strip()):
+        if isinstance(model, str) and model.strip():
+            clean_settings["model"] = model.strip()
+    clean["settings"] = clean_settings
+    return clean
+
+
 class CodexNativeClient:
     def __init__(
         self,
         send_json: Callable[[dict[str, Any]], Awaitable[None]],
         close: Callable[[], Awaitable[None]],
         request_timeout_seconds: float = 60.0,
+        metadata: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         self.rpc = JsonRpcClient(
             send_json=send_json,
             request_timeout_seconds=request_timeout_seconds,
         )
         self._close = close
+        self._metadata = metadata
         self._initialized = False
         self._initialize_lock = asyncio.Lock()
 
@@ -40,7 +60,7 @@ class CodexNativeClient:
                 "initialize",
                 {
                     "clientInfo": {"name": "wlcodex", "version": "1.0.0"},
-                    "capabilities": None,
+                    "capabilities": {"experimentalApi": True},
                 },
             )
             await self.rpc.notify("initialized")
@@ -53,6 +73,7 @@ class CodexNativeClient:
             connected=True,
             remote_control_status="connected",
             server_name="local Codex app-server",
+            metadata=dict(self._metadata() if self._metadata is not None else {}),
         )
 
     async def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -202,7 +223,10 @@ class CodexNativeClient:
                 approval_policy=approval_policy,
                 approvals_reviewer=approvals_reviewer,
                 sandbox_policy=sandbox_policy,
-                collaboration_mode=collaboration_mode,
+                collaboration_mode=_collaboration_mode_with_settings(
+                    collaboration_mode,
+                    model=model,
+                ),
             ),
         )
         return parse_turn_response(result)

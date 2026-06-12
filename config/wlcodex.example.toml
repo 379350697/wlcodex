@@ -167,11 +167,13 @@ allow_unauthenticated_loopback = true
 [codex_native]
 # Official Codex IDE/mobile-style bridge for the "Codex干活的" station.
 enabled = false
-transport = "app-server"
-listen_endpoint = "ws://127.0.0.1:18742"
-# Legacy standalone daemon proxy, only when the official control socket exists:
-# transport = "proxy"
+transport = "daemon"
 # sock_path = "/Users/wl/.codex/app-server-control/app-server-control.sock"
+# Legacy compatibility only. This starts a separate app-server and can split
+# sessions from the official Codex desktop daemon:
+# transport = "app-server"
+# listen_endpoint = "ws://127.0.0.1:18742"
+# remote_control = true
 
 [native_agents]
 # Provider-based native web control surface at /native/{provider}.

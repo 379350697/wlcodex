@@ -193,6 +193,18 @@ class NativeCodexEventProjector:
                 "item/agentMessage/delta",
                 {**base, "delta": text},
             )
+        if item_type == "plan":
+            text = _first_string(item, "text", "plan", "summary", "content")
+            if not text:
+                return []
+            payload = {**base, "plan": text}
+            title = _first_string(item, "title", "name")
+            status = _first_string(item, "status")
+            if title:
+                payload["title"] = title
+            if status:
+                payload["status"] = status
+            return self.project_notification("turn/plan/updated", payload)
         if item_type == "commandExecution":
             projected = self.project_notification("item/started", base)
             output = _first_string(

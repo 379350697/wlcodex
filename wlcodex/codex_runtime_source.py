@@ -347,7 +347,7 @@ def _map_plan_updated(
         "threadId": payload.get("threadId", ""),
         "turnId": payload.get("turnId", ""),
     }
-    for key in ("plan", "summary", "title", "status"):
+    for key in ("plan", "summary", "title", "status", "itemId"):
         if key in payload:
             plan_payload[key] = payload.get(key)
     return [src._make(

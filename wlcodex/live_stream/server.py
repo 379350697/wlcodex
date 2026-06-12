@@ -486,10 +486,21 @@ class WorkerLiveStreamServer:
                 native_thread_id = _optional_nonempty_string(
                     query.get("native_thread_id", [""])[0]
                 ) or ""
+                native_provider = _optional_nonempty_string(
+                    query.get("native_provider", [""])[0]
+                ) or "codex"
                 native_turn_id = _optional_nonempty_string(
                     query.get("native_turn_id", [""])[0]
                 ) or ""
-                native_sync_error = self._sync_native_transcript(native_thread_id)
+                native_sync_error = ""
+                should_sync_native = bool(native_thread_id) and (
+                    "tail" in query or "before" in query
+                )
+                if should_sync_native:
+                    native_sync_error = await self._sync_native_transcript(
+                        native_thread_id,
+                        native_provider=native_provider,
+                    )
                 previous_event_count = 0
                 if "tail" in query:
                     tail_limit = _safe_int(query.get("tail", ["80"])[0], default=80)
@@ -625,14 +636,29 @@ class WorkerLiveStreamServer:
             if task is not None:
                 self._client_tasks.discard(task)
 
-    def _sync_native_transcript(self, native_thread_id: str) -> str:
-        if not native_thread_id or self._native_transcript_mirror is None:
+    async def _sync_native_transcript(
+        self,
+        native_thread_id: str,
+        *,
+        native_provider: str = "codex",
+    ) -> str:
+        if not native_thread_id:
             return ""
-        try:
-            self._native_transcript_mirror.sync_thread(native_thread_id)
-        except Exception as exc:
-            return str(exc) or type(exc).__name__
-        return ""
+        errors: list[str] = []
+        if self._native_transcript_mirror is not None:
+            try:
+                self._native_transcript_mirror.sync_thread(native_thread_id)
+            except Exception as exc:
+                errors.append(str(exc) or type(exc).__name__)
+        provider_name = native_provider.strip().lower() or "codex"
+        if provider_name == "codex":
+            provider = self._native_provider("codex")
+            if provider is not None:
+                try:
+                    await provider.sync_session(native_thread_id)
+                except Exception as exc:
+                    errors.append(str(exc) or type(exc).__name__)
+        return "; ".join(error for error in errors if error)
 
     async def _read_json_body(
         self,
@@ -1779,8 +1805,15 @@ def _codex_collaboration_kwargs_from_body(
         return {}
     clean: dict[str, object] = {"mode": mode}
     settings = raw.get("settings")
-    if isinstance(settings, dict):
-        clean["settings"] = dict(settings)
+    clean_settings = dict(settings) if isinstance(settings, dict) else {}
+    existing_model = clean_settings.get("model")
+    if mode == "plan" and not (
+        isinstance(existing_model, str) and existing_model.strip()
+    ):
+        body_model = body.get("model")
+        if isinstance(body_model, str) and body_model.strip():
+            clean_settings["model"] = body_model.strip()
+    clean["settings"] = clean_settings
     return {"collaboration_mode": clean}
 
 
@@ -3692,7 +3725,10 @@ __ICONS_JS__
     function readSelectedCollaborationMode() {
       if (!SUPPORTS_PLAN_MODE) return null;
       if (USES_CLAUDE_PLAN_PERMISSION_MODE) return null;
-      if (selectedCollaborationMode === "plan") return {"mode": "plan"};
+      if (selectedCollaborationMode === "plan") {
+        const settings = readSelectedModelSettings();
+        return {"mode": "plan", "settings": {"model": settings.model}};
+      }
       return null;
     }
 
@@ -4789,6 +4825,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .plan-card:not(.expanded)::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 72px; background: linear-gradient(to bottom, rgba(36,36,36,0), #242424 86%); pointer-events: none; }
     .plan-card-execute { min-height: 44px; align-self: end; justify-self: start; padding: 0 18px; border-radius: 22px; border: 1px solid rgba(255,255,255,.14); background: #f4f4f5; color: #111; font-size: 16px; font-weight: var(--weight-extrabold); z-index: 1; }
     .plan-card-execute:disabled { opacity: .48; }
+    .plan-card-readonly { min-height: 44px; align-self: end; justify-self: start; display: inline-flex; align-items: center; padding: 0 18px; border-radius: 22px; border: 1px solid rgba(255,255,255,.14); color: #d4d4d8; font-size: 15px; font-weight: var(--weight-bold); z-index: 1; }
     .plan-page-backdrop { position: fixed; inset: 0; z-index: 12; overflow-y: auto; overflow-x: hidden; max-width: 100vw; background: #000; color: #fff; }
     .plan-page-backdrop[hidden] { display: none; }
     .plan-page-shell { box-sizing: border-box; width: 100%; max-width: 100vw; min-height: 100vh; min-width: 0; display: grid; grid-template-rows: auto 1fr; overflow-x: hidden; background: #000; }
@@ -6106,8 +6143,17 @@ __ICONS_JS__
     function readSelectedCollaborationMode() {
       if (!SUPPORTS_PLAN_MODE) return null;
       if (USES_CLAUDE_PLAN_PERMISSION_MODE) return null;
-      if (selectedCollaborationMode === "plan") return {"mode": "plan"};
+      if (selectedCollaborationMode === "plan") {
+        const settings = readSelectedModelSettings();
+        return {"mode": "plan", "settings": {"model": settings.model}};
+      }
       return null;
+    }
+    function explicitDefaultCollaborationMode() {
+      if (!SUPPORTS_PLAN_MODE) return null;
+      if (USES_CLAUDE_PLAN_PERMISSION_MODE) return null;
+      const settings = readSelectedModelSettings();
+      return {"mode": "default", "settings": {"model": settings.model}};
     }
     function setSelectedCollaborationMode(mode) {
       selectedCollaborationMode = SUPPORTS_PLAN_MODE && mode === "plan" ? "plan" : "default";
@@ -6578,7 +6624,8 @@ __ICONS_JS__
         images: attachmentsSnapshot.length
       };
       closeInterruptionChoice();
-      if (action !== "steer") renderLocalUserEcho(prompt, attachmentsSnapshot);
+      const draftTurnId = activeTurnId || nativeTurnId || "";
+      if (action !== "steer") renderLocalUserEcho(prompt, attachmentsSnapshot, draftTurnId);
       clearComposerDraft();
       updateComposerDisabled();
       setSendStatus(action === "steer" ? "修正中" : "发送中", "");
@@ -6624,7 +6671,9 @@ __ICONS_JS__
         permissionMode = "plan";
       }
       body.permission_mode = permissionMode;
-      if (options.includeCollaborationMode) {
+      if (options.collaborationMode) {
+        body.collaboration_mode = options.collaborationMode;
+      } else if (options.includeCollaborationMode) {
         const collaborationMode = readSelectedCollaborationMode();
         if (collaborationMode) {
           body.collaboration_mode = collaborationMode;
@@ -6753,7 +6802,9 @@ __ICONS_JS__
         title: String(titleText || "计划"),
         summary: String(summaryText || ""),
         body: String(planText || ""),
-        status: String(payload.status || "")
+        status: String(payload.status || ""),
+        source: "native_plan_event",
+        executable: true
       };
       updatePlanActionState();
       return activePlan;
@@ -6772,6 +6823,8 @@ __ICONS_JS__
       if (plan.summary) renderMarkdownLite(planPageSummary, plan.summary);
       planPageBody.replaceChildren();
       renderMarkdownLite(planPageBody, planDetailTextFromText(plan.body, plan.summary));
+      planPageExecute.textContent = plan.executable ? "执行计划" : "仅文本计划";
+      planPageExecute.title = plan.executable ? "" : "仅文本计划，不能一键执行";
     }
     function planDetailTextFromText(text, summaryText) {
       let source = String(text || "").trim();
@@ -6788,7 +6841,7 @@ __ICONS_JS__
       document.body.style.overflow = "";
     }
     function updatePlanActionState() {
-      const disabled = !activePlan || !nativeThreadId || sendingPrompt || nativeTurnRunning;
+      const disabled = !activePlan || !activePlan.executable || !nativeThreadId || sendingPrompt || nativeTurnRunning;
       planPageExecute.disabled = disabled;
       document.querySelectorAll(".plan-card-execute").forEach(button => {
         button.disabled = disabled;
@@ -6802,13 +6855,17 @@ __ICONS_JS__
         setSendStatus("没有可执行计划", "error");
         return;
       }
+      if (!activePlan.executable) {
+        setSendStatus("仅文本计划，不能一键执行", "error");
+        return;
+      }
       if (nativeTurnRunning) {
         setSendStatus("等待当前轮结束", "error");
         return;
       }
       const prompt = planExecutionPrompt(activePlan.body);
       clearSelectedPlanModeForExecution();
-      const body = buildNativePromptBody(prompt, {includeCollaborationMode: false});
+      const body = buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()});
       renderLocalUserEcho(prompt, []);
       closePlanPage();
       sendingPrompt = true;
@@ -6952,7 +7009,7 @@ __ICONS_JS__
       }
     }
     function updateHandoffControls() {
-      const hideHandoffForPlan = PROVIDER === "codex" && (selectedCollaborationMode === "plan" || Boolean(activePlan));
+      const hideHandoffForPlan = PROVIDER === "codex" && (selectedCollaborationMode === "plan" || Boolean(activePlan && activePlan.executable));
       handoffButton.hidden = hideHandoffForPlan;
       if (hideHandoffForPlan) handoffPanel.hidden = true;
       handoffButton.disabled = hideHandoffForPlan || sendingPrompt || !nativeThreadId;
@@ -7159,13 +7216,14 @@ __ICONS_JS__
         attachmentStrip.append(chip);
       });
     }
-    function renderLocalUserEcho(text, images) {
+    function renderLocalUserEcho(text, images, turnId = "") {
       const event = {
         kind: "user_message",
         payload: {
           text: text || "",
           images: images || [],
-          itemId: "local-user-" + Date.now()
+          itemId: "local-user-" + Date.now(),
+          native_turn_id: turnId
         }
       };
       renderTranscript(event, "user local-pending", "你");
@@ -7233,6 +7291,11 @@ __ICONS_JS__
         if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
         loadedEvents = snapshot.events || [];
       }
+      if (nativeThreadId && !hasNativePlanEvents(loadedEvents)) {
+        snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));
+        if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
+        loadedEvents = mergeDisplayEvents(loadedEvents, snapshot.events || []);
+      }
       previousEventCount = snapshot.previous_event_count || 0;
       oldestEventId = loadedEvents.length ? loadedEvents[0].id : 0;
       latestEventId = loadedEvents.length ? loadedEvents[loadedEvents.length - 1].id : 0;
@@ -7247,6 +7310,19 @@ __ICONS_JS__
         if (isInternalEvent(event)) return false;
         return event.kind !== "event";
       });
+    }
+    function hasNativePlanEvents(sourceEvents) {
+      return sourceEvents.some(event => isNativePlanEvent(event));
+    }
+    function mergeDisplayEvents(currentEvents, nextEvents) {
+      const byId = new Map();
+      for (const event of currentEvents || []) {
+        if (event && event.id) byId.set(event.id, event);
+      }
+      for (const event of nextEvents || []) {
+        if (event && event.id) byId.set(event.id, event);
+      }
+      return Array.from(byId.values()).sort((left, right) => (left.id || 0) - (right.id || 0));
     }
     function hasUnresolvedApprovalRequests(sourceEvents) {
       const requested = new Set();
@@ -7354,6 +7430,7 @@ __ICONS_JS__
     function eventsPath(params, options = {}) {
       const search = new URLSearchParams(params);
       if (nativeThreadId) search.set("native_thread_id", nativeThreadId);
+      if (PROVIDER) search.set("native_provider", PROVIDER);
       if (options.currentTurn && nativeTurnId) search.set("native_turn_id", nativeTurnId);
       return `/api/workers/__AGENT_RUN_ID__/events?${search.toString()}`;
     }
@@ -7457,6 +7534,7 @@ __ICONS_JS__
       const officialAssistantTurns = completedAssistantTurnSet(sourceEvents);
       const canonicalUserTurns = canonicalUserTranscriptTurnSet(sourceEvents);
       const seen = new Set();
+      const seenUserMessages = new Map();
       const result = [];
       for (const event of sourceEvents) {
         if (isInternalEvent(event)) continue;
@@ -7473,6 +7551,20 @@ __ICONS_JS__
           !isOfficialAssistantTranscriptEvent(event)
         ) {
           continue;
+        }
+        if (event.kind === "user_message") {
+          const userFingerprint = canonicalUserMessageFingerprint(event);
+          const previousUserIndex = userFingerprint ? seenUserMessages.get(userFingerprint) : undefined;
+          if (previousUserIndex !== undefined) {
+            const previousUser = result[previousUserIndex];
+            if (isSyntheticUserMessageEvent(event) || isSyntheticUserMessageEvent(previousUser)) {
+              if (userMessageDedupePriority(event) > userMessageDedupePriority(previousUser)) {
+                result[previousUserIndex] = event;
+              }
+              continue;
+            }
+          }
+          if (userFingerprint) seenUserMessages.set(userFingerprint, result.length);
         }
         const key = mirroredDisplayKey(event);
         if (key) {
@@ -7492,6 +7584,21 @@ __ICONS_JS__
         if (turnId) turns.add(turnId);
       }
       return turns;
+    }
+    function isSyntheticUserMessageEvent(event) {
+      if (!event || event.kind !== "user_message") return false;
+      const payload = event.payload || {};
+      const itemId = String(payload.itemId || payload.item_id || "");
+      const turnId = String(payload.native_turn_id || payload.turnId || "");
+      return itemId.startsWith("local-user-") || itemId.startsWith("jsonl-user:") || turnId.startsWith("jsonl-turn:");
+    }
+    function userMessageDedupePriority(event) {
+      if (isCanonicalTranscriptItem(event)) return 30;
+      if (!isSyntheticUserMessageEvent(event)) return 20;
+      const payload = event.payload || {};
+      const itemId = String(payload.itemId || payload.item_id || "");
+      if (itemId.startsWith("local-user-")) return 10;
+      return 5;
     }
     function completedAssistantTurnSet(sourceEvents) {
       const turns = new Set();
@@ -7531,6 +7638,12 @@ __ICONS_JS__
       const key = mirroredDisplayKey(event);
       if (key && previousEvents.some(previous => mirroredDisplayKey(previous) === key)) {
         return true;
+      }
+      if (event.kind === "user_message") {
+        const fingerprint = canonicalUserMessageFingerprint(event);
+        if (fingerprint && previousEvents.some(previous => canonicalUserMessageFingerprint(previous) === fingerprint)) {
+          return true;
+        }
       }
       if (!event.id) return false;
       const eventId = String(event.id);
@@ -7811,7 +7924,7 @@ __ICONS_JS__
         transcriptNodes.delete(key);
         matched = true;
       }
-      if (!matched && incomingText && pendingUserEcho) {
+      if (!matched && pendingUserEcho && (incomingText || incomingImages || event.kind === "user_message")) {
         for (const [key, node] of Array.from(transcriptNodes.entries())) {
           if (!node || !node.row || !node.row.classList.contains("local-pending")) continue;
           node.row.remove();
@@ -7832,7 +7945,17 @@ __ICONS_JS__
       return text === incomingText || text.startsWith(incomingText) || incomingText.startsWith(text);
     }
     function normalizeTranscriptText(value) {
-      return String(value || "").replace(/\s+/g, " ").trim();
+      return String(value || "").replace(/\\s+/g, " ").trim();
+    }
+    function canonicalUserMessageFingerprint(event) {
+      if (!event || event.kind !== "user_message") return "";
+      const payload = event.payload || {};
+      const text = normalizeTranscriptText(
+        String(payload.text || payload.delta || payload.summary || payload.content || payload.prompt || "")
+      );
+      const images = Array.isArray(payload.images) ? payload.images.length : 0;
+      const turnId = String(eventFoldTurnId(event) || nativeThreadId || "");
+      return `user-message:${turnId}:${text}:${images}`;
     }
     function renderCommand(event) {
       renderToolCall(event);
@@ -7849,20 +7972,23 @@ __ICONS_JS__
       setActivePlanFromEvent(event, planText, titleText, summaryText);
       const row = document.createElement("div");
       row.className = "plan-item";
-      row.append(createPlanCardElement(planText, titleText));
+      row.append(createPlanCardElement(planText, titleText, {executable: true}));
       renderTarget.append(row);
       updateRunState("计划已更新", "busy");
     }
-    function createPlanCardElement(planText, titleFallback) {
+    function createPlanCardElement(planText, titleFallback, options = {}) {
+      const executable = options.executable === true;
       const titleText = planTitleFromText(planText, titleFallback || "");
       const summaryText = planSummaryFromText(planText);
-      const plan = activePlan && activePlan.body === planText ? activePlan : {
+      const plan = activePlan && activePlan.body === planText && Boolean(activePlan.executable) === executable ? activePlan : {
         title: titleText,
         summary: summaryText,
         body: planText,
         threadId: nativeThreadId,
         turnId: "",
-        status: ""
+        status: "",
+        source: executable ? "native_plan_event" : "text_fallback",
+        executable
       };
       const card = document.createElement("section");
       card.className = "plan-card";
@@ -7913,16 +8039,23 @@ __ICONS_JS__
       const summary = document.createElement("div");
       summary.className = "plan-card-summary";
       if (summaryText) renderMarkdownLite(summary, summaryText);
-      const execute = document.createElement("button");
-      execute.type = "button";
-      execute.className = "plan-card-execute";
-      execute.textContent = "执行计划";
-      execute.onclick = click => {
-        click.stopPropagation();
-        activePlan = plan;
-        executeActivePlan();
-      };
-      card.append(head, title, summaryTitle, summary, execute);
+      if (plan.executable) {
+        const execute = document.createElement("button");
+        execute.type = "button";
+        execute.className = "plan-card-execute";
+        execute.textContent = "执行计划";
+        execute.onclick = click => {
+          click.stopPropagation();
+          activePlan = plan;
+          executeActivePlan();
+        };
+        card.append(head, title, summaryTitle, summary, execute);
+      } else {
+        const readonly = document.createElement("span");
+        readonly.className = "plan-card-readonly";
+        readonly.textContent = "仅文本计划，不能一键执行";
+        card.append(head, title, summaryTitle, summary, readonly);
+      }
       updatePlanActionState();
       return card;
     }
@@ -7995,7 +8128,6 @@ __ICONS_JS__
       const payload = event.payload || {};
       if (payload.native_thread_id) nativeThreadId = payload.native_thread_id;
       applyNativeTurnState(event);
-      if (isNativeExecutionDetail(event)) clearSelectedPlanModeForExecution();
       updateComposerDisabled();
       if (isNativeExecutionDetail(event)) {
         updateRunState(
@@ -8064,7 +8196,7 @@ __ICONS_JS__
         if (planText) {
           const plan = document.createElement("div");
           plan.className = "plan-item prompt-plan-fallback";
-          plan.append(createPlanCardElement(planText, ""));
+          plan.append(createPlanCardElement(planText, "", {executable: false}));
           target.append(plan);
         }
       }

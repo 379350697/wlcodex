@@ -311,6 +311,50 @@ def test_projector_reads_official_thread_turns_and_deduplicates_history(
     assert events[4].payload["delta"] == "passed"
 
 
+def test_projector_maps_official_plan_history_items_to_plan_activity(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    projector = NativeCodexEventProjector(session_store, runtime_store)
+    detail = {
+        "thread": {
+            "id": "thread_plan_history",
+            "turns": [
+                {
+                    "id": "turn_plan_history",
+                    "status": "completed",
+                    "items": [
+                        {
+                            "type": "plan",
+                            "id": "plan_item_1",
+                            "text": "# WLCodex Plan\n\n## Summary\nRender the plan card.",
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+    first = projector.project_history(detail)
+    second = projector.project_history(detail)
+
+    session = session_store.get_by_thread_id("thread_plan_history")
+    assert session is not None
+    events = runtime_store.list_by_agent_run(session.agent_run_id)
+    assert second == []
+    assert first == events
+    assert [event.event_type for event in events] == [
+        EventType.AGENT_RUN_ACTIVITY,
+        EventType.AGENT_RUN_ACTIVITY,
+        EventType.AGENT_RUN_ACTIVITY,
+    ]
+    assert events[1].payload["action"] == "plan_updated"
+    assert events[1].payload["plan"].startswith("# WLCodex Plan")
+    assert events[1].payload["itemId"] == "plan_item_1"
+    assert events[1].payload["native_thread_id"] == "thread_plan_history"
+    assert events[1].payload["native_turn_id"] == "turn_plan_history"
+
+
 def test_projector_restores_dedupe_keys_from_persisted_events(
     tmp_path: Path,
 ) -> None:

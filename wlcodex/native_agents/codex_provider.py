@@ -33,6 +33,14 @@ class CodexAppServerProvider:
 
     async def status(self) -> NativeAgentStatus:
         status = await self._controller.status()
+        metadata = {
+            "server_name": str(getattr(status, "server_name", "") or ""),
+            "installation_id": str(getattr(status, "installation_id", "") or ""),
+            "environment_id": getattr(status, "environment_id", None),
+        }
+        status_metadata = getattr(status, "metadata", {})
+        if isinstance(status_metadata, dict):
+            metadata.update(status_metadata)
         return NativeAgentStatus(
             provider=self.provider,
             provider_engine=self.provider_engine,
@@ -40,11 +48,7 @@ class CodexAppServerProvider:
             connected=bool(getattr(status, "connected", False)),
             status_code=str(getattr(status, "remote_control_status", "unknown")),
             message=str(getattr(status, "error", "") or ""),
-            metadata={
-                "server_name": str(getattr(status, "server_name", "") or ""),
-                "installation_id": str(getattr(status, "installation_id", "") or ""),
-                "environment_id": getattr(status, "environment_id", None),
-            },
+            metadata=metadata,
         )
 
     def capabilities(self) -> NativeAgentCapabilities:

@@ -474,6 +474,7 @@ def test_plan_updated() -> None:
     events = src.map_event(BackendEvent("plan_updated", {
         "threadId": "th-1",
         "turnId": "tu-1",
+        "itemId": "plan-1",
         "title": "CL-063",
         "plan": "# CL-063\n\n## Summary\nFix the issue.",
         "summary": "Fix the issue.",
@@ -484,6 +485,7 @@ def test_plan_updated() -> None:
     assert events[0].payload["action"] == "plan_updated"
     assert events[0].payload["threadId"] == "th-1"
     assert events[0].payload["turnId"] == "tu-1"
+    assert events[0].payload["itemId"] == "plan-1"
     assert events[0].payload["title"] == "CL-063"
     assert events[0].payload["plan"] == "# CL-063\n\n## Summary\nFix the issue."
     assert events[0].payload["summary"] == "Fix the issue."

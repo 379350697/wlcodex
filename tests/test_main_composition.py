@@ -166,6 +166,36 @@ def test_missing_token_exits(tmp_path: Path) -> None:
             os.environ[config.telegram.bot_token_env] = old
 
 
+def test_missing_telegram_token_is_not_fatal_for_web_entry() -> None:
+    from wlcodex.main import _missing_telegram_token_is_fatal
+
+    config = load_config(_write_test_config_toml(live_stream_enabled=True))
+
+    assert _missing_telegram_token_is_fatal(config, token=None) is False
+
+
+def test_missing_telegram_token_is_fatal_without_web_entry() -> None:
+    from wlcodex.main import _missing_telegram_token_is_fatal
+
+    config = load_config(_write_test_config_toml(live_stream_enabled=False))
+
+    assert _missing_telegram_token_is_fatal(config, token=None) is True
+
+
+def test_web_only_entry_is_selected_when_live_stream_exists() -> None:
+    from types import SimpleNamespace
+
+    from wlcodex.main import _should_run_web_entry_only
+
+    config = load_config(_write_test_config_toml(live_stream_enabled=True))
+
+    assert _should_run_web_entry_only(
+        config,
+        token=None,
+        live_stream_components=SimpleNamespace(server=object()),
+    ) is True
+
+
 class _FakeUpdater:
     def __init__(self, *, running: bool = False) -> None:
         self.running = running

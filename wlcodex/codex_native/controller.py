@@ -262,7 +262,8 @@ class CodexNativeController:
         native_thread_id = native_thread_id.strip()
         if not native_thread_id:
             raise ValueError("native_thread_id is required")
-        detail = await self._client.read_session(native_thread_id, include_turns=False)
+        detail = await self._client.read_session(native_thread_id)
+        self._project_detail(native_thread_id, detail)
         turn_state = self._project_detail_header(native_thread_id, detail)
         session = turn_state.session
         return NativeCodexControlResult(
