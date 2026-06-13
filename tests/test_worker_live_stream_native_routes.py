@@ -436,6 +436,12 @@ class SlowCodexProviderWithoutCache(SlowCodexProviderWithCache):
         return []
 
 
+class FailingCodexProviderWithCache(SlowCodexProviderWithCache):
+    async def list_sessions(self, limit: int = 50) -> list[FakeNativeSession]:
+        self.calls.append(("list_sessions", limit))
+        raise RuntimeError("boom")
+
+
 def _store(tmp_path: Path) -> RuntimeEventStore:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
@@ -879,6 +885,60 @@ async def test_native_sessions_returns_immediately_with_empty_cache(
     assert body["native_refresh_pending"] is True
     assert body["native_session_source"] == "cache"
     assert provider.calls == [("list_cached_sessions", 50), ("list_sessions", 50)]
+
+
+@pytest.mark.asyncio
+async def test_native_sessions_cache_response_reports_background_refresh_error(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    provider = FailingCodexProviderWithCache()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([provider]),
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+        native_sessions_timeout_seconds=10,
+    )
+    await server.start()
+    try:
+        first_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        await asyncio.sleep(0.1)
+        second_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in first_response
+    first_body = _json_body(first_response)
+    assert "native_sync_error" not in first_body
+    assert first_body["native_refresh_pending"] is True
+
+    assert "HTTP/1.1 200 OK" in second_response
+    second_body = _json_body(second_response)
+    assert second_body["native_session_source"] == "cache"
+    assert second_body["native_sync_error"] == "boom"
+    assert second_body["native_refresh_pending"] is True
+    assert provider.calls == [
+        ("list_cached_sessions", 50),
+        ("list_sessions", 50),
+        ("list_cached_sessions", 50),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2470,6 +2530,14 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "row.onclick = () => selectComposerPlugin(item);" in response
     assert "replacePromptPluginQuery(item);" in response
     assert "renderSelectedPlugins();" in response
+    assert "selectedPlugins: selectedPlugins.map(plugin => ({...plugin}))" in response
+    assert "selectedPlugins = composerSnapshot.selectedPlugins.map(plugin => ({...plugin}));" in response
+    assert (
+        "imageAttachments = composerSnapshot.imageAttachments.map(image => ({...image}));\n"
+        "        selectedPlugins = composerSnapshot.selectedPlugins.map(plugin => ({...plugin}));\n"
+        "        renderAttachments();\n"
+        "        renderSelectedPlugins();"
+    ) in response
     assert "const COLLABORATION_MODE_STORAGE_KEY" in response
     assert "function readSelectedCollaborationMode()" in response
     assert "body.collaboration_mode = collaborationMode;" in response
@@ -2802,6 +2870,59 @@ async def test_worker_events_tail_returns_snapshot_when_native_sync_times_out(
     assert body["events"][0]["payload"]["delta"] == "hello"
     assert body["native_sync_error"] == ""
     assert body["native_sync_pending"] is True
+    assert controller.calls == [("sync_session", "thread-1")]
+
+
+@pytest.mark.asyncio
+async def test_worker_events_tail_reports_background_native_sync_error(
+    tmp_path: Path,
+) -> None:
+    class FailingNativeController(FakeNativeController):
+        async def sync_session(self, native_thread_id: str) -> FakeControlResult:
+            self.calls.append(("sync_session", native_thread_id))
+            raise RuntimeError("boom")
+
+    store = _store(tmp_path)
+    _append_worker_event(store, agent_run_id=42, native_thread_id="thread-1")
+    controller = FailingNativeController()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        first_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/workers/42/events?tail=80&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        await asyncio.sleep(0.1)
+        second_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/workers/42/events?tail=80&native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in first_response
+    first_body = _json_body(first_response)
+    assert first_body["events"][0]["payload"]["delta"] == "hello"
+    assert first_body["native_sync_error"] == ""
+    assert first_body["native_sync_pending"] is True
+
+    assert "HTTP/1.1 200 OK" in second_response
+    second_body = _json_body(second_response)
+    assert second_body["events"][0]["payload"]["delta"] == "hello"
+    assert second_body["native_sync_error"] == "boom"
+    assert second_body["native_sync_pending"] is True
     assert controller.calls == [("sync_session", "thread-1")]
 
 
@@ -3304,6 +3425,10 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert response.index("clearSelectedPlanModeForExecution();") < response.index(
         "const body = buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()});"
     )
+    assert (
+        "const body = buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()});\n"
+        "      body.force_new_turn = true;"
+    ) in response
     assert 'if (selectedCollaborationMode !== "plan") return;' in response
     assert 'setSelectedCollaborationMode("default");' in response
     assert (

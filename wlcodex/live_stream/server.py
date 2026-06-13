@@ -234,6 +234,7 @@ class WorkerLiveStreamServer:
         self._server: asyncio.AbstractServer | None = None
         self._client_tasks: set[asyncio.Task[None]] = set()
         self._native_background_tasks: dict[tuple[str, ...], asyncio.Task[None]] = {}
+        self._native_background_errors: dict[tuple[str, ...], str] = {}
         self._council_runs: dict[str, dict[str, Any]] = {}
         self._council_run_tasks: set[asyncio.Task[None]] = set()
         self._login_tickets: dict[str, float] = {}
@@ -503,10 +504,14 @@ class WorkerLiveStreamServer:
                 native_provider = _optional_nonempty_string(
                     query.get("native_provider", [""])[0]
                 ) or "codex"
+                native_provider_key = native_provider.strip().lower() or "codex"
                 native_turn_id = _optional_nonempty_string(
                     query.get("native_turn_id", [""])[0]
                 ) or ""
-                native_sync_error = ""
+                native_sync_error = self._native_background_errors.get(
+                    ("native_transcript", native_provider_key, native_thread_id),
+                    "",
+                )
                 native_sync_pending = False
                 should_sync_native = bool(native_thread_id) and (
                     "tail" in query or "before" in query
@@ -514,7 +519,7 @@ class WorkerLiveStreamServer:
                 if should_sync_native:
                     native_sync_pending = self._schedule_native_transcript_sync(
                         native_thread_id,
-                        native_provider=native_provider,
+                        native_provider=native_provider_key,
                     )
                 previous_event_count = 0
                 if "tail" in query:
@@ -741,8 +746,11 @@ class WorkerLiveStreamServer:
                     target,
                     legacy_codex_controller=legacy_codex_controller,
                 )
-            except Exception:
-                pass
+                self._native_background_errors.pop(key, None)
+            except Exception as exc:
+                self._native_background_errors[key] = (
+                    str(exc) or "native sessions sync failed"
+                )
             finally:
                 if self._native_background_tasks.get(key) is task:
                     self._native_background_tasks.pop(key, None)
@@ -768,12 +776,18 @@ class WorkerLiveStreamServer:
         async def sync() -> None:
             try:
                 await asyncio.sleep(_NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS)
-                await self._sync_native_transcript(
+                sync_error = await self._sync_native_transcript(
                     native_thread_id,
                     native_provider=provider_name,
                 )
-            except Exception:
-                pass
+                if sync_error:
+                    self._native_background_errors[key] = sync_error
+                else:
+                    self._native_background_errors.pop(key, None)
+            except Exception as exc:
+                self._native_background_errors[key] = (
+                    str(exc) or "native transcript sync failed"
+                )
             finally:
                 if self._native_background_tasks.get(key) is task:
                     self._native_background_tasks.pop(key, None)
@@ -863,7 +877,10 @@ class WorkerLiveStreamServer:
             if method != "GET":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
-            native_sync_error = ""
+            native_sync_error = self._native_background_errors.get(
+                ("native_sessions", provider_name),
+                "",
+            )
             native_refresh_pending = False
             fresh = query.get("fresh", [""])[0].lower() in ("1", "true", "yes")
             if not fresh and getattr(target, "list_cached_sessions", None) is not None:
@@ -4421,7 +4438,8 @@ __ICONS_JS__
       const attachmentsForSend = imageAttachments.map(image => ({...image}));
       const composerSnapshot = {
         prompt: promptText,
-        imageAttachments: attachmentsForSend
+        imageAttachments: attachmentsForSend,
+        selectedPlugins: selectedPlugins.map(plugin => ({...plugin}))
       };
       const body = {cwd: selectedProjectCwd, prompt: promptText};
       if (settings.model) body.model = settings.model;
@@ -4456,8 +4474,9 @@ __ICONS_JS__
       } catch (error) {
         promptEl.value = composerSnapshot.prompt;
         imageAttachments = composerSnapshot.imageAttachments.map(image => ({...image}));
+        selectedPlugins = composerSnapshot.selectedPlugins.map(plugin => ({...plugin}));
         renderAttachments();
-        resetComposerPlugins();
+        renderSelectedPlugins();
         throw error;
       } finally {
         startingChat = false;
@@ -7004,6 +7023,7 @@ __ICONS_JS__
       const prompt = planExecutionPrompt(activePlan.body);
       clearSelectedPlanModeForExecution();
       const body = buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()});
+      body.force_new_turn = true;
       renderLocalUserEcho(prompt, []);
       closePlanPage();
       sendingPrompt = true;
