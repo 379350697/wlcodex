@@ -4911,7 +4911,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; background: var(--color-warning); vertical-align: 1px; transition: background 300ms ease; }
     .connected .status-dot { background: var(--color-success); animation: breathe 2s ease-in-out infinite; }
     .reconnecting .status-dot { background: var(--color-error); animation: breathe 1s ease-in-out infinite; }
-    main { padding: 12px 20px 150px; }
+    main { padding: 12px 20px calc(var(--codex-dock-height, 150px) + 32px + env(safe-area-inset-bottom)); }
     .codex-status-flow { position: sticky; top: 78px; z-index: 2; display: grid; grid-template-columns: 12px 1fr auto; gap: 10px; align-items: center; min-height: 42px; margin: 0 -20px 8px; padding: 10px 20px; background: rgba(0,0,0,.94); border-bottom: 1px solid #17181c; color: var(--text-dim); font-size: 14px; }
     .run-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--color-success); box-shadow: 0 0 16px rgba(34,197,94,.7); transition: background 300ms ease, box-shadow 300ms ease; }
     .run-state.busy .run-pulse { background: var(--color-warning); box-shadow: 0 0 16px rgba(245,158,11,.7); animation: statusPulse 2s ease-in-out infinite; }
@@ -4921,8 +4921,8 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .codex-transcript { display: grid; gap: 18px; padding-top: 8px; }
     .transcript-item { display: grid; gap: 7px; min-width: 0; padding: 0; }
     .transcript-meta { color: #9aa0aa; font-size: 12px; }
-    .transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: 15px; line-height: 1.55; letter-spacing: 0.01em; }
-    .transcript-body p { margin: 0 0 13px; }
+    .transcript-body { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: 15px; line-height: 1.55; letter-spacing: 0; }
+    .transcript-body p { margin: 0 0 13px; overflow-wrap: anywhere; word-break: break-word; }
     .transcript-body p:last-child { margin-bottom: 0; }
     .transcript-body h3 { margin: 18px 0 8px; color: var(--text-heading); font-size: 16px; line-height: 1.35; }
     .transcript-body h3:first-child { margin-top: 0; }
@@ -4931,12 +4931,12 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     .transcript-body strong { color: var(--text-heading); font-weight: var(--weight-extrabold); }
     .transcript-body a { color: var(--color-link); text-decoration: none; border-bottom: 1px solid rgba(147, 197, 253, .45); transition: border-color 150ms ease; }
     .transcript-body a:hover { border-bottom-color: rgba(147, 197, 253, .7); }
-    .transcript-body code { padding: 1px 5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06); background: var(--bg-code); color: var(--text-code); font: .88em var(--font-mono); }
+    .transcript-body code { white-space: normal; overflow-wrap: anywhere; word-break: break-word; padding: 1px 5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06); background: var(--bg-code); color: var(--text-code); font: .88em var(--font-mono); }
     .transcript-body pre { margin: 0 0 13px; overflow: auto; padding: 14px 16px; border: 1px solid var(--border-code); border-radius: 8px; background: linear-gradient(145deg, #0c0e14, #101420); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); white-space: pre; scrollbar-width: thin; scrollbar-color: #383c46 transparent; }
-    .transcript-body pre code { padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }
+    .transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal; padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }
     .transcript-item.user { justify-self: end; justify-items: end; max-width: min(82%, 520px); }
     .transcript-item.user .transcript-meta { display: none; }
-    .transcript-item.user .transcript-body { padding: 10px 13px; border: 1px solid #333842; border-radius: 20px 20px 4px 20px; background: var(--bg-user-bubble); line-height: 1.5; }
+    .transcript-item.user .transcript-body { white-space: pre-wrap; padding: 10px 13px; border: 1px solid #333842; border-radius: 20px 20px 4px 20px; background: var(--bg-user-bubble); line-height: 1.5; }
     .transcript-item.local-pending .transcript-body { opacity: .86; }
     .transcript-item.assistant { justify-self: start; max-width: 100%; padding-left: 22px; border-left: 2px solid var(--border-default); }
     .transcript-item.prompt-message { justify-self: stretch; max-width: 100%; margin-left: 6px; margin-right: 6px; padding-left: 0; border-left: 0; }
@@ -5391,6 +5391,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     const sessionFloatMeta = document.getElementById("sessionFloatMeta");
     const historyFold = document.getElementById("historyFold");
     const composerActivity = document.getElementById("composerActivity");
+    const inputDock = document.querySelector(".codex-input-dock");
     const params = new URLSearchParams(location.search);
     const token = params.get("token") || "";
     const PROVIDER = __PROVIDER_JSON__;
@@ -5450,6 +5451,17 @@ __ICONS_JS__
         localStorage.setItem("wlcodex:native-session-viewed:" + PROVIDER + ":" + threadId, "1");
       } catch (error) {}
     }
+    function syncDockHeight() {
+      if (!inputDock) return;
+      const rect = inputDock.getBoundingClientRect();
+      document.documentElement.style.setProperty("--codex-dock-height", `${Math.ceil(rect.height)}px`);
+    }
+    syncDockHeight();
+    if ("ResizeObserver" in window && inputDock) {
+      const dockResizeObserver = new ResizeObserver(syncDockHeight);
+      dockResizeObserver.observe(inputDock);
+    }
+    window.addEventListener("resize", syncDockHeight);
     const sendStatus = document.getElementById("sendStatus");
     const composerActionMenu = document.getElementById("composerActionMenu");
     const menuUploadPhoto = document.getElementById("menuUploadPhoto");

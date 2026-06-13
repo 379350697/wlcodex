@@ -3822,9 +3822,23 @@ def test_live_page_uses_native_codex_font_scale_for_all_native_providers() -> No
     for provider in ("codex", "claude", "antigravity"):
         response = _live_page(42, native_provider=provider)
 
-        assert ".transcript-body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: 15px; line-height: 1.55;" in response
-        assert ".transcript-body pre code { padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }" in response
+        assert ".transcript-body { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: 15px; line-height: 1.55;" in response
+        assert ".transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal; padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }" in response
         assert "input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 0 14px; font-size: 15px; }" in response
+
+
+def test_live_page_protects_mobile_transcript_layout_from_overlay_and_long_inline_code() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "main { padding: 12px 20px calc(var(--codex-dock-height, 150px) + 32px + env(safe-area-inset-bottom)); }" in response
+    assert ".transcript-body { min-width: 0; max-width: 100%; white-space: normal;" in response
+    assert ".transcript-body p { margin: 0 0 13px; overflow-wrap: anywhere; word-break: break-word; }" in response
+    assert ".transcript-body code { white-space: normal; overflow-wrap: anywhere; word-break: break-word;" in response
+    assert ".transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal;" in response
+    assert ".transcript-item.user .transcript-body { white-space: pre-wrap;" in response
+    assert "function syncDockHeight()" in response
+    assert 'document.documentElement.style.setProperty("--codex-dock-height", `${Math.ceil(rect.height)}px`);' in response
+    assert "new ResizeObserver(syncDockHeight)" in response
 
 
 @pytest.mark.asyncio
