@@ -4034,6 +4034,13 @@ async def test_worker_live_page_clears_running_composer_state_on_terminal_turn_e
     assert 'continueButton.innerHTML = mode === "interrupt" ? ICONS.stop : ICONS.send;' in response
     assert "(!nativeTurnRunning && !composerHasDraft())" in response
     assert 'activeTurnId = result.turn_running ? (result.active_turn_id || result.turn_id || activeTurnId || "") : "";' in response
+    assert "const terminalTranscriptSyncTurns = new Set();" in response
+    assert "function scheduleTerminalTranscriptSync(event)" in response
+    assert "function shouldSyncNativeTranscriptAfterTerminalEvent(event)" in response
+    assert "scheduleTerminalTranscriptSync(event);" in response
+    assert "await syncNativeTranscript();" in response
+    assert "await pollEvents();" in response
+    assert 'if (event.kind === "message_completed") return false;' in response
 
 
 def test_worker_live_page_recovers_after_post_fetch_drop_without_resubmitting() -> None:

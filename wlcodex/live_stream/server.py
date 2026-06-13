@@ -5414,6 +5414,7 @@ __ICONS_JS__
     let previousEventCount = 0;
     let source = null;
     let pollInFlight = false;
+    const terminalTranscriptSyncTurns = new Set();
     const authHeaders = token ? {"Authorization": "Bearer " + token} : {};
     const promptInput = document.getElementById("prompt");
     const continueButton = document.getElementById("continue");
@@ -7433,6 +7434,22 @@ __ICONS_JS__
         renderStatus("native_sync_failed", error.message || String(error));
       }
     }
+    function scheduleTerminalTranscriptSync(event) {
+      if (!shouldSyncNativeTranscriptAfterTerminalEvent(event)) return;
+      const key = eventFoldTurnId(event) || String((event && event.id) || "");
+      if (!key || terminalTranscriptSyncTurns.has(key)) return;
+      terminalTranscriptSyncTurns.add(key);
+      window.setTimeout(async () => {
+        await syncNativeTranscript();
+        await pollEvents();
+      }, 250);
+    }
+    function shouldSyncNativeTranscriptAfterTerminalEvent(event) {
+      if (!nativeThreadId || invalidNativeThreadId) return false;
+      if (!isTerminalTurnEvent(event)) return false;
+      if (event.kind === "message_completed") return false;
+      return !isMirroredTranscriptEvent(event);
+    }
     renderPluginList();
     updateCollaborationMenu();
     updateComposerDisabled();
@@ -7643,6 +7660,7 @@ __ICONS_JS__
       const incomingTurnId = eventFoldTurnId(event);
       const duplicateDisplayEvent = isDuplicateDisplayEvent(event, loadedEvents);
       loadedEvents.push(event);
+      scheduleTerminalTranscriptSync(event);
       if (isInternalEvent(event)) {
         if (isNativeExecutionDetail(event)) {
           handleHiddenNativeFeedback(event);
