@@ -4207,6 +4207,7 @@ def _relay_task_detail_page(
     }}
     const conversationTimeline = document.querySelector("[data-native-conversation-timeline]");
     const nativeTranscriptNodes = new Map();
+    const nativeEnvelopeBuffers = new Map();
     function scrollNativeConversationToEnd() {{
       if (conversationTimeline) conversationTimeline.scrollTop = conversationTimeline.scrollHeight;
     }}
@@ -4218,33 +4219,83 @@ def _relay_task_detail_page(
       const value = payload.text ?? payload.delta ?? payload.summary ?? payload.content ?? payload.message ?? payload.output ?? payload.chunk ?? "";
       return String(value || "");
     }}
+    function relayTextLooksLikeEnvelope(text) {{
+      const value = String(text || "").trim();
+      if (!value.startsWith("{{")) return false;
+      return [
+        "artifact_type",
+        "relay_role",
+        "routing_decision",
+        "acceptance_criteria",
+        "handoff_to",
+        "required_roles",
+        "open_questions",
+        "next_action",
+      ].some((marker) => value.includes(marker));
+    }}
+    function relayDictLooksLikeEnvelope(payload) {{
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+      return [
+        "artifact_type",
+        "relay_role",
+        "summary",
+        "next_action",
+        "open_questions",
+        "required_roles",
+        "acceptance_criteria",
+      ].some((key) => Object.prototype.hasOwnProperty.call(payload, key));
+    }}
+    function relayParseEnvelope(text) {{
+      try {{
+        const parsed = JSON.parse(String(text || "").trim());
+        return relayDictLooksLikeEnvelope(parsed) ? parsed : null;
+      }} catch (_error) {{
+        return null;
+      }}
+    }}
+    function relayJoinTextList(value) {{
+      if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean).join("；");
+      return String(value || "").trim();
+    }}
+    function relayRouteLabel(route) {{
+      const labels = {{
+        director_only: "总工程师直接完成",
+        core_relay: "核心接力",
+        full_relay: "完整五角色接力",
+        audit_first: "审计优先",
+        waiting_user: "等待用户确认",
+        blocked: "已阻塞",
+      }};
+      return labels[route] || route || "";
+    }}
+    function relayRiskLabel(risk) {{
+      const labels = {{ low: "低", medium: "中", high: "高", critical: "关键" }};
+      return labels[risk] || risk || "";
+    }}
+    function relayHumanizeEnvelope(envelope) {{
+      const lines = [];
+      const summary = String(envelope.summary || envelope.output || envelope.reason || "").trim();
+      if (summary) lines.push(`结论：${{summary}}`);
+      const nextAction = String(envelope.next_action || "").trim();
+      if (nextAction) lines.push(`下一步：${{nextAction}}`);
+      const questions = relayJoinTextList(envelope.open_questions);
+      if (questions) lines.push(`待确认：${{questions}}`);
+      const route = String(envelope.route || "").trim();
+      const risk = String(envelope.risk || "").trim();
+      if (route || risk) {{
+        const parts = [];
+        if (route) parts.push(`路径：${{relayRouteLabel(route)}}`);
+        if (risk) parts.push(`风险：${{relayRiskLabel(risk)}}`);
+        lines.push(parts.join(" · "));
+      }}
+      const acceptance = relayJoinTextList(envelope.acceptance_criteria);
+      if (acceptance) lines.push(`验收依据：${{acceptance}}`);
+      return lines.length ? lines.join("\\n") : "角色已返回结构化结果。";
+    }}
     function nativeMessageKey(role, nativeEvent, bucket = "") {{
       const payload = nativeEventPayload(nativeEvent);
       const stable = payload.itemId || payload.item_id || payload.message_id || payload.native_message_id || payload.native_turn_id || payload.turnId || nativeEvent?.id || `${{Date.now()}}:${{Math.random()}}`;
       return `${{bucket}}:${{role || ""}}:${{stable}}`;
-    }}
-    function nativeCommandTitle(nativeEvent) {{
-      const payload = nativeEventPayload(nativeEvent);
-      const command = payload.command || payload.cmd || payload.name || payload.tool || "";
-      return command ? `命令 · ${{command}}` : "命令";
-    }}
-    function nativeStatusTitle(kind) {{
-      const labels = {{
-        reasoning_delta: "思考中",
-        command_started: "命令开始",
-        command_output: "命令输出",
-        command_completed: "命令完成",
-        command_failed: "命令失败",
-        file_changed: "文件变更",
-        diff_updated: "Diff 更新",
-        approval_requested: "请求审批",
-        approval_resolved: "审批已处理",
-        lifecycle: "会话状态",
-        activity: "会话活动",
-        completed: "会话完成",
-        failed: "会话失败",
-      }};
-      return labels[kind] || "系统";
     }}
     function setNativeBodyText(node, text, append = false) {{
       const body = node?.querySelector("[data-native-message-body]");
@@ -4301,6 +4352,23 @@ def _relay_task_detail_page(
       }}
       if (kind === "text_delta" || kind === "message_completed") {{
         const key = nativeMessageKey(role, nativeEvent, "assistant");
+        const bufferedEnvelope = nativeEnvelopeBuffers.get(key) || "";
+        if (bufferedEnvelope || relayTextLooksLikeEnvelope(text)) {{
+          const candidate = kind === "text_delta" ? bufferedEnvelope + text : text || bufferedEnvelope;
+          if (kind === "text_delta") nativeEnvelopeBuffers.set(key, candidate);
+          const envelope = relayParseEnvelope(candidate);
+          if (!envelope) return;
+          nativeEnvelopeBuffers.delete(key);
+          let node = nativeTranscriptNodes.get(key);
+          if (!node) {{
+            node = createNativeMessage(role, "role_envelope", roleLabel, provider, key);
+            nativeTranscriptNodes.set(key, node);
+          }}
+          node.dataset.nativeKind = "role_envelope";
+          setNativeBodyText(node, relayHumanizeEnvelope(envelope));
+          setRoleStatus(role, "streaming");
+          return;
+        }}
         let node = nativeTranscriptNodes.get(key);
         if (!node) {{
           node = createNativeMessage(role, kind, roleLabel, provider, key);
@@ -4311,21 +4379,6 @@ def _relay_task_detail_page(
         setRoleStatus(role, "streaming");
         return;
       }}
-      if (kind === "command_started" || kind === "command_output" || kind === "command_completed" || kind === "command_failed") {{
-        const key = nativeMessageKey(role, nativeEvent, "command");
-        let node = nativeTranscriptNodes.get(key);
-        if (!node) {{
-          node = createNativeMessage(role, kind, nativeCommandTitle(nativeEvent), roleLabel, key);
-          nativeTranscriptNodes.set(key, node);
-        }}
-        node.dataset.nativeKind = kind;
-        setNativeBodyText(node, text || payload.command || payload.status || "", kind === "command_output");
-        return;
-      }}
-      const statusText = text || payload.status || payload.action || payload.error || nativeStatusTitle(kind);
-      if (!statusText) return;
-      const node = createNativeMessage(role, kind, nativeStatusTitle(kind), roleLabel, nativeMessageKey(role, nativeEvent, "status"));
-      setNativeBodyText(node, statusText);
     }}
     document.querySelectorAll("[data-native-key]").forEach((node) => {{
       if (node.dataset.nativeKey) nativeTranscriptNodes.set(node.dataset.nativeKey, node);
@@ -4547,6 +4600,7 @@ def _relay_native_conversation_html(
     hub: WorkerLiveStreamHub | None,
 ) -> str:
     events: list[tuple[str, int, str, str, WorkerStreamEvent]] = []
+    job_by_role = {str(getattr(job, "role", "") or ""): job for job in role_jobs}
     if hub is not None:
         for job in role_jobs:
             agent_run_id = getattr(job, "agent_run_id", None)
@@ -4609,6 +4663,22 @@ def _relay_native_conversation_html(
         row = _relay_native_event_row(role, display_name, worker_event)
         if row is not None:
             rows.append(row)
+    projected_rows: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+    for row in rows:
+        projected = _relay_project_native_conversation_row(
+            row,
+            job=job_by_role.get(str(row.get("role") or "")),
+        )
+        if projected is None:
+            continue
+        key = str(projected.get("key") or "")
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        projected_rows.append(projected)
+    rows = projected_rows
     if not rows:
         return _relay_native_empty_conversation_html()
     return "\n".join(_relay_native_message_html(row) for row in rows)
@@ -4630,7 +4700,6 @@ def _relay_native_event_row(
 ) -> dict[str, str] | None:
     kind = str(worker_event.kind or "event")
     text = _relay_native_event_text(worker_event)
-    payload = dict(worker_event.payload or {})
     if kind == "user_message":
         return {
             "role": role,
@@ -4649,60 +4718,133 @@ def _relay_native_event_row(
             "body": text,
             "key": _relay_native_message_key(role, worker_event, bucket="assistant"),
         }
-    if kind in {
-        "command_started",
-        "command_output",
-        "command_completed",
-        "command_failed",
-    }:
-        body = text or str(payload.get("command") or payload.get("status") or "")
-        return {
-            "role": role,
-            "kind": kind,
-            "speaker": _relay_native_command_title(worker_event),
-            "meta": display_name,
-            "body": body,
-            "key": _relay_native_message_key(role, worker_event, bucket="command"),
-        }
-    if kind in {
-        "reasoning_delta",
-        "activity",
-        "lifecycle",
-        "file_changed",
-        "diff_updated",
-        "approval_requested",
-        "approval_resolved",
-        "completed",
-        "failed",
-        "event",
-    }:
-        body = (
-            text
-            or str(payload.get("status") or "")
-            or str(payload.get("action") or "")
-            or str(payload.get("error") or "")
-            or _relay_native_status_title(kind)
-        )
-        if not body:
-            return None
-        return {
-            "role": role,
-            "kind": kind,
-            "speaker": _relay_native_status_title(kind),
-            "meta": display_name,
-            "body": body,
-            "key": _relay_native_message_key(role, worker_event, bucket="status"),
-        }
-    if not text:
+    return None
+
+
+def _relay_project_native_conversation_row(
+    row: dict[str, str],
+    *,
+    job: Any | None,
+) -> dict[str, str] | None:
+    kind = str(row.get("kind") or "")
+    if kind == "user_message":
+        return row
+    if kind not in {"text_delta", "message_completed"}:
         return None
-    return {
-        "role": role,
-        "kind": kind,
-        "speaker": display_name,
-        "meta": str(worker_event.source or ""),
-        "body": text,
-        "key": _relay_native_message_key(role, worker_event, bucket="event"),
-    }
+    body = str(row.get("body") or "").strip()
+    if not body:
+        return None
+    humanized = _relay_humanized_role_output_row(row, body, job=job)
+    if humanized is not None:
+        return humanized
+    return row
+
+
+def _relay_humanized_role_output_row(
+    row: dict[str, str],
+    body: str,
+    *,
+    job: Any | None,
+) -> dict[str, str] | None:
+    if not _relay_text_looks_like_role_envelope(body):
+        return None
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and _relay_dict_looks_like_role_envelope(parsed):
+        return {
+            **row,
+            "kind": "role_envelope",
+            "body": _relay_humanize_role_envelope(parsed),
+        }
+
+    error = str(getattr(job, "error_message", "") or "").strip() if job else ""
+    status = str(getattr(job, "status", "") or "").strip() if job else ""
+    if error or status in {"blocked", "failed"}:
+        return {
+            **row,
+            "kind": "role_error",
+            "body": _relay_role_output_error_text(str(row.get("role") or ""), error),
+        }
+    return None
+
+
+def _relay_text_looks_like_role_envelope(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return False
+    markers = (
+        "artifact_type",
+        "relay_role",
+        "routing_decision",
+        "acceptance_criteria",
+        "handoff_to",
+        "required_roles",
+        "open_questions",
+        "next_action",
+    )
+    return any(marker in stripped for marker in markers)
+
+
+def _relay_dict_looks_like_role_envelope(payload: dict[str, Any]) -> bool:
+    return any(
+        key in payload
+        for key in (
+            "artifact_type",
+            "relay_role",
+            "summary",
+            "next_action",
+            "open_questions",
+            "required_roles",
+            "acceptance_criteria",
+        )
+    )
+
+
+def _relay_humanize_role_envelope(payload: dict[str, Any]) -> str:
+    lines: list[str] = []
+    summary = str(
+        payload.get("summary") or payload.get("output") or payload.get("reason") or ""
+    ).strip()
+    if summary:
+        lines.append(f"结论：{summary}")
+    next_action = str(payload.get("next_action") or "").strip()
+    if next_action:
+        lines.append(f"下一步：{next_action}")
+    questions = _relay_join_text_list(payload.get("open_questions"))
+    if questions:
+        lines.append(f"待确认：{questions}")
+    route = str(payload.get("route") or "").strip()
+    risk = str(payload.get("risk") or "").strip()
+    if route or risk:
+        parts: list[str] = []
+        if route:
+            parts.append(f"路径：{_relay_routing_route_label(route)}")
+        if risk:
+            parts.append(f"风险：{_relay_routing_risk_label(risk)}")
+        lines.append(" · ".join(parts))
+    acceptance = _relay_join_text_list(payload.get("acceptance_criteria"))
+    if acceptance:
+        lines.append(f"验收依据：{acceptance}")
+    if not lines:
+        lines.append("角色已返回结构化结果。")
+    return "\n".join(lines)
+
+
+def _relay_join_text_list(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return "；".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
+def _relay_role_output_error_text(role: str, error: str) -> str:
+    role_label = _relay_role_label(role)
+    lines = [f"{role_label}输出格式异常，任务已阻塞。"]
+    if error:
+        lines.append(f"错误：{error}")
+    lines.append("请补充确认后重新调度，原始结构化输出不在主会话展示。")
+    return "\n".join(lines)
 
 
 def _relay_native_message_html(row: dict[str, str]) -> str:
@@ -4752,36 +4894,6 @@ def _relay_native_message_key(
         or worker_event.id
     )
     return f"{bucket}:{role}:{stable}"
-
-
-def _relay_native_command_title(worker_event: WorkerStreamEvent) -> str:
-    payload = dict(worker_event.payload or {})
-    command = str(
-        payload.get("command")
-        or payload.get("cmd")
-        or payload.get("name")
-        or payload.get("tool")
-        or ""
-    ).strip()
-    return f"命令 · {command}" if command else "命令"
-
-
-def _relay_native_status_title(kind: str) -> str:
-    return {
-        "reasoning_delta": "思考中",
-        "command_started": "命令开始",
-        "command_output": "命令输出",
-        "command_completed": "命令完成",
-        "command_failed": "命令失败",
-        "file_changed": "文件变更",
-        "diff_updated": "Diff 更新",
-        "approval_requested": "请求审批",
-        "approval_resolved": "审批已处理",
-        "lifecycle": "会话状态",
-        "activity": "会话活动",
-        "completed": "会话完成",
-        "failed": "会话失败",
-    }.get(kind, "系统")
 
 
 def _council_review_page() -> str:

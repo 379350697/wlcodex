@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +122,17 @@ def _append_runtime_event(
             occurred_at=occurred_at,
             agent_run_id=agent_run_id,
         )
+    )
+
+
+def _native_message_keys(response: str) -> list[str]:
+    return re.findall(r'data-native-key="([^"]+)"', response)
+
+
+def _native_message_kinds(response: str) -> list[str]:
+    return re.findall(
+        r'<article class="relay-message"[^>]*data-native-kind="([^"]+)"',
+        response,
     )
 
 
@@ -542,6 +555,234 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
         "task.interrupted",
     ]:
         assert event_name in response
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_hides_native_activity_from_conversation(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Readable detail task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="claude",
+        model="sonnet",
+        native_session_id="native-director-readable",
+        agent_run_id=201,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "streaming")
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=201,
+        event_type=EventType.USER_MESSAGE_RECEIVED,
+        payload={
+            "text": "请确认要删除哪个文件",
+            "native_turn_id": "turn-readable-1",
+            "itemId": "readable-user-1",
+        },
+        occurred_at="2026-06-14T12:10:01+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=201,
+        event_type=EventType.AGENT_RUN_ACTIVITY,
+        payload={
+            "status": "turn_started",
+            "native_turn_id": "turn-readable-1",
+        },
+        occurred_at="2026-06-14T12:10:02+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=201,
+        event_type=EventType.AGENT_RUN_ACTIVITY,
+        payload={
+            "status": "turn_completed",
+            "native_turn_id": "turn-readable-1",
+        },
+        occurred_at="2026-06-14T12:10:03+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=201,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "需要你确认精确文件路径。",
+            "native_turn_id": "turn-readable-1",
+            "itemId": "readable-assistant-1",
+        },
+        occurred_at="2026-06-14T12:10:04+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=201,
+        event_type=EventType.AGENT_RUN_COMPLETED,
+        payload={
+            "status": "completed",
+            "native_turn_id": "turn-readable-1",
+        },
+        occurred_at="2026-06-14T12:10:05+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "请确认要删除哪个文件" in response
+    assert "需要你确认精确文件路径。" in response
+    kinds = _native_message_kinds(response)
+    assert "activity" not in kinds
+    assert "completed" not in kinds
+    assert "turn_started" not in response
+    assert "turn_completed" not in response
+    keys = _native_message_keys(response)
+    assert keys == list(dict.fromkeys(keys))
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_humanizes_malformed_role_envelope(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Malformed envelope task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-malformed",
+        agent_run_id=301,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "blocked")
+    service._store.update_task_status(task.id, "blocked")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "relay_role": "director",
+            "error": "invalid json: Expecting ':' delimiter",
+        },
+        summary="invalid json: Expecting ':' delimiter",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=301,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": (
+                '{"acceptance_criteria":["确认目标文件"],'
+                '"artifact_type":"routing_decisioncomplexitylowevidence_refs":[]'
+            ),
+            "native_turn_id": "turn-malformed-1",
+            "itemId": "malformed-assistant-1",
+        },
+        occurred_at="2026-06-14T12:20:01+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert 'data-native-kind="role_error"' in response
+    assert "总工程师输出格式异常，任务已阻塞。" in response
+    assert "invalid json: Expecting" in response
+    assert "routing_decisioncomplexitylow" not in response
+    assert '{"acceptance_criteria"' not in response
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_humanizes_valid_role_envelope(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Valid envelope task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-valid",
+        agent_run_id=401,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "streaming")
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=401,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": json.dumps(
+                {
+                    "status": "waiting_user",
+                    "role": "director",
+                    "artifact_type": "routing_decision",
+                    "summary": "需要先确认具体文件路径。",
+                    "next_action": "请用户确认要删除的 md 文件。",
+                    "open_questions": ["是否删除 /repo/测试接力.md？"],
+                    "route": "waiting_user",
+                    "risk": "medium",
+                    "required_roles": ["director"],
+                    "acceptance_criteria": ["确认精确路径后再执行"],
+                    "requires_user_approval": True,
+                },
+                ensure_ascii=False,
+            ),
+            "native_turn_id": "turn-valid-1",
+            "itemId": "valid-assistant-1",
+        },
+        occurred_at="2026-06-14T12:30:01+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert 'data-native-kind="role_envelope"' in response
+    assert "结论：需要先确认具体文件路径。" in response
+    assert "下一步：请用户确认要删除的 md 文件。" in response
+    assert "待确认：是否删除 /repo/测试接力.md？" in response
+    assert '"artifact_type": "routing_decision"' not in response
+    assert '"required_roles": ["director"]' not in response
 
 
 @pytest.mark.asyncio
