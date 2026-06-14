@@ -55,12 +55,20 @@ async def _read_response(host: str, port: int, request: str) -> str:
 def _server(tmp_path: Path, relay_service: RelayService | None = None):
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
+    providers = [FakeCodexProvider(), FakeProvider(), FakeAntigravityProvider()]
     service = relay_service or RelayService(
         store=RelayStore(ledger),
-        registry=NativeAgentRegistry([FakeProvider()]),
+        registry=NativeAgentRegistry(providers),
         default_provider="claude",
+        role_skills={
+            "architect": ("gitnexus-impact-analysis",),
+            "implementer": ("test-driven-development",),
+        },
+        role_capabilities={
+            "architect": ("read", "gitnexus"),
+            "implementer": ("write", "tests"),
+        },
     )
-    providers = [FakeCodexProvider(), FakeProvider(), FakeAntigravityProvider()]
     return WorkerLiveStreamServer(
         host="127.0.0.1",
         port=0,
@@ -128,6 +136,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "流式接力" in response
     assert "任务历史" in response
     assert "新接力任务" in response
+    assert "配置" in response
     assert "新聊天" not in response
     assert '<section class="relay-create-panel" id="new-task-panel" hidden>' in response
     assert "发布大任务" not in response
@@ -139,12 +148,19 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert 'data-filter="blocked"' in response
     assert 'data-filter="completed"' in response
     assert 'data-filter="interrupted"' in response
+    assert "全部工作区" in response
+    assert 'data-workspace-value=""' in response
+    assert "wlcodex" in response
     assert "工作区（可选）" in response
     assert '<option value="">不指定工作区</option>' in response
     assert 'name="workspace"' in response
     assert "角色配置" in response
-    assert "v1 固定五角色" in response
-    assert "当前 Provider 应用于全部角色" in response
+    assert "Provider 应用于全部角色" not in response
+    assert "Codex" in response
+    assert "Claude" in response
+    assert "Antigravity" in response
+    assert "gitnexus-impact-analysis" in response
+    assert "test-driven-development" in response
     assert 'aria-label="relay task history"' in response
     assert "native session list" not in response.lower()
 
@@ -154,14 +170,21 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         workspace="/repo",
         provider="claude",
     )
+    other = service.create_task(
+        title="Other workspace relay",
+        prompt="Prompt",
+        workspace="/other",
+        provider="claude",
+    )
     populated, _ = await _request(
         tmp_path,
-        "GET /native/workflows/relay?token=secret HTTP/1.1\r\n"
+        "GET /native/workflows/relay?token=secret&workspace=%2Frepo HTTP/1.1\r\n"
         "Host: test\r\nConnection: close\r\n\r\n",
         relay_service=service,
     )
     assert "Long relay title wraps without overlap" in populated
-    assert '<option value="/repo">repo</option>' in populated
+    assert "Other workspace relay" not in populated
+    assert 'value="/repo" selected' in populated
     assert 'class="relay-task-card"' in populated
     assert 'class="relay-status-badge"' in populated
     assert "总工程师" in populated
@@ -173,6 +196,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "打开任务" in populated
     assert "open task" not in populated
     assert f'/native/workflows/relay/tasks/{task.id}?token=secret' in populated
+    assert f'/native/workflows/relay/tasks/{other.id}?token=secret' not in populated
 
 
 @pytest.mark.asyncio

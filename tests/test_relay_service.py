@@ -1,6 +1,8 @@
 import asyncio
 from typing import Any
 
+import pytest
+
 from wlcodex.db import Ledger
 from wlcodex.native_agents.models import (
     NativeAgentCapabilities,
@@ -64,6 +66,16 @@ class FakeProvider:
             agent_run_id=201,
             status="continued",
         )
+
+
+class FakeCodexProvider(FakeProvider):
+    provider = "codex"
+    provider_engine = "app-server"
+
+
+class FakeAntigravityProvider(FakeProvider):
+    provider = "antigravity"
+    provider_engine = "cli-local"
 
 
 class ActiveTurnProvider(FakeProvider):
@@ -177,6 +189,82 @@ def test_dispatch_role_uses_native_agent_registry_provider(tmp_path) -> None:
     assert director.native_session_id == "native-1"
     assert director.provider == "claude"
     assert director.status == "streaming"
+
+
+def test_create_task_snapshots_role_providers_and_dispatches_each_role_provider(
+    tmp_path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    codex = FakeCodexProvider()
+    claude = FakeProvider()
+    antigravity = FakeAntigravityProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([codex, claude, antigravity]),
+        default_provider="codex",
+    )
+    service.save_config(
+        {
+            "director": "codex",
+            "architect": "claude",
+            "implementer": "antigravity",
+            "tester": "claude",
+            "auditor": "codex",
+        }
+    )
+
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="codex",
+    )
+
+    detail = service.get_task(task.id)
+    assert detail.task.role_providers == {
+        "director": "codex",
+        "architect": "claude",
+        "implementer": "antigravity",
+        "tester": "claude",
+        "auditor": "codex",
+    }
+    assert {job.role: job.provider for job in detail.role_jobs} == detail.task.role_providers
+
+    asyncio.run(service.dispatch_role(task.id, "implementer"))
+
+    assert antigravity.calls[0][0] == "start_session"
+    assert not codex.calls
+    assert not claude.calls
+    implementer = next(job for job in service.get_task(task.id).role_jobs if job.role == "implementer")
+    assert implementer.provider == "antigravity"
+    assert implementer.native_session_id == "native-1"
+
+
+def test_create_task_rejects_unknown_role_provider_assignment(tmp_path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([FakeCodexProvider()]),
+        default_provider="codex",
+    )
+
+    with pytest.raises(ValueError, match="unknown relay role: investigator"):
+        service.create_task(
+            title="Relay",
+            prompt="Build it",
+            workspace="/repo",
+            provider="codex",
+            role_providers={
+                "director": "codex",
+                "architect": "codex",
+                "implementer": "codex",
+                "tester": "codex",
+                "auditor": "codex",
+                "investigator": "codex",
+            },
+        )
 
 
 def test_dispatch_role_blocks_task_when_provider_cannot_start(tmp_path) -> None:

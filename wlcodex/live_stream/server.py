@@ -858,13 +858,21 @@ class WorkerLiveStreamServer:
             await self._send_html(writer, 200, _native_workflows_page(access_token=token))
             return
         if path == "/native/workflows/relay":
+            selected_workspace = str((query.get("workspace") or [""])[0] or "")
             summaries = (
-                self._relay_service.list_tasks() if self._relay_service is not None else []
+                self._relay_service.list_tasks(
+                    workspace=_optional_nonempty_string(selected_workspace)
+                )
+                if self._relay_service is not None
+                else []
             )
             providers = (
                 self._native_registry.list_provider_summaries()
                 if self._native_registry is not None
                 else []
+            )
+            relay_config = (
+                self._relay_service.config() if self._relay_service is not None else {}
             )
             await self._send_html(
                 writer,
@@ -872,6 +880,8 @@ class WorkerLiveStreamServer:
                 _relay_task_list_page(
                     summaries,
                     providers=providers,
+                    relay_config=relay_config,
+                    selected_workspace=selected_workspace,
                     access_token=token,
                 ),
             )
@@ -916,6 +926,36 @@ class WorkerLiveStreamServer:
             return
         normalized_path = _normalize_relay_api_path(path)
         try:
+            if normalized_path == "/api/relay/config":
+                if method == "GET":
+                    await self._send_json(writer, 200, self._relay_service.config())
+                    return
+                if method == "POST":
+                    body = await self._read_request_json(writer, reader, headers)
+                    if body is None:
+                        return
+                    assignments = body.get("assignments", body)
+                    if not isinstance(assignments, dict):
+                        await self._send_json(
+                            writer,
+                            400,
+                            {"error": "assignments must be an object"},
+                        )
+                        return
+                    try:
+                        config = self._relay_service.save_config(
+                            {
+                                str(role): str(provider)
+                                for role, provider in assignments.items()
+                            }
+                        )
+                    except ValueError as exc:
+                        await self._send_json(writer, 400, {"error": str(exc)})
+                        return
+                    await self._send_json(writer, 200, config)
+                    return
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
             if normalized_path == "/api/relay/tasks":
                 if method == "GET":
                     summaries = self._relay_service.list_tasks(
@@ -941,6 +981,14 @@ class WorkerLiveStreamServer:
                         prompt=str(body.get("prompt") or ""),
                         workspace=str(body.get("workspace") or ""),
                         provider=str(body.get("provider") or ""),
+                        role_providers=(
+                            {
+                                str(role): str(provider)
+                                for role, provider in body.get("role_providers", {}).items()
+                            }
+                            if isinstance(body.get("role_providers"), dict)
+                            else None
+                        ),
                     )
                     await self._relay_service.dispatch_role(task.id, "director")
                     await self._send_json(
@@ -2910,20 +2958,22 @@ def _relay_task_list_page(
     summaries: list[Any],
     *,
     providers: list[dict[str, str]],
+    relay_config: dict[str, Any] | None = None,
+    selected_workspace: str = "",
     access_token: str = "",
 ) -> str:
     token_suffix = _token_suffix(access_token)
+    relay_config = relay_config or {}
+    selected_workspace = str(selected_workspace or "")
     sorted_summaries = sorted(
         summaries,
         key=lambda summary: str(getattr(summary, "last_activity_at", "") or ""),
         reverse=True,
     )
-    provider_options = "\n".join(
-        f'<option value="{escape(str(provider.get("provider", "")))}">'
-        f'{escape(_native_provider_display_name(str(provider.get("provider", ""))))}'
-        "</option>"
-        for provider in providers
-    ) or '<option value="codex">Codex</option>'
+    config_providers = relay_config.get("providers")
+    provider_rows = (
+        config_providers if isinstance(config_providers, list) and config_providers else providers
+    )
     filters = ["running", "waiting_user", "blocked", "completed", "interrupted"]
     counts = {status: 0 for status in filters}
     for summary in sorted_summaries:
@@ -2947,7 +2997,7 @@ def _relay_task_list_page(
           <section class="relay-empty-state">
             <h2>还没有接力任务</h2>
             <p>创建一个大任务后，总工程师会先接收并调度架构、开发、测试和审计角色。</p>
-            <p>角色 v1 固定五角色；Provider 在新建任务里选择，并应用到全部角色。</p>
+            <p>先选择工作区，再通过配置为每个角色指定 Codex、Claude 或 Antigravity。</p>
             <button class="relay-primary" type="button" data-open-new-task>新接力任务</button>
           </section>
         """
@@ -2957,23 +3007,33 @@ def _relay_task_list_page(
         for summary in sorted_summaries
         if str(getattr(summary, "status", "") or "") in {"running", "waiting_user", "blocked"}
     )
-    project_workspaces = {
-        str(project.get("cwd", "") or "")
-        for project in _council_projects_payload().get("projects", [])
+    project_payload = _council_projects_payload()
+    project_rows = [
+        project
+        for project in project_payload.get("projects", [])
         if str(project.get("cwd", "") or "")
-    }
+    ]
+    project_workspaces = {str(project.get("cwd", "") or "") for project in project_rows}
     workspace_options = sorted(
         {str(getattr(summary, "workspace", "") or "") for summary in sorted_summaries if getattr(summary, "workspace", "")}
         | project_workspaces
         | {"/Users/wl/projects/wlcodex"}
+        | ({selected_workspace} if selected_workspace else set())
     )
     workspace_select_options = '<option value="">不指定工作区</option>\n' + "\n".join(
-        f'<option value="{escape(workspace)}">{escape(Path(workspace).name or workspace)}</option>'
+        f'<option value="{escape(workspace)}"'
+        f'{" selected" if workspace == selected_workspace else ""}>'
+        f'{escape(Path(workspace).name or workspace)}</option>'
         for workspace in workspace_options
     )
-    role_config_html = "\n".join(
-        f'<span class="relay-chip">{escape(_relay_role_label(role))}</span>'
-        for role in RELAY_ROLE_IDS
+    workspace_nav = _relay_workspace_nav_html(
+        project_rows,
+        selected_workspace=selected_workspace,
+        access_token=access_token,
+    )
+    role_config_html = _relay_role_config_html(
+        relay_config,
+        provider_rows,
     )
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
@@ -2992,6 +3052,11 @@ def _relay_task_list_page(
     .relay-shell {{ display: grid; gap: 18px; align-items: start; }}
     .relay-create-panel {{ border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 14px; min-width: 0; }}
     .relay-toolbar {{ display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }}
+    .relay-secondary {{ min-height: 38px; border: 1px solid var(--border-subtle); border-radius: 6px; background: transparent; color: var(--text-primary); padding: 0 12px; }}
+    .relay-workspace-nav {{ display: grid; gap: 8px; border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 12px; }}
+    .relay-workspace-row {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+    .relay-workspace-link {{ min-height: 34px; display: inline-grid; place-items: center; border: 1px solid var(--border-subtle); border-radius: 999px; padding: 0 11px; color: var(--text-muted); text-decoration: none; }}
+    .relay-workspace-link.active {{ border-color: var(--color-link); color: var(--text-primary); background: rgba(88, 166, 255, .1); }}
     .relay-form {{ display: grid; gap: 10px; }}
     .relay-form label {{ display: grid; gap: 6px; color: var(--text-muted); font-size: 13px; }}
     .relay-form input, .relay-form textarea, .relay-form select {{ width: 100%; box-sizing: border-box; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px; background: rgba(255,255,255,.04); color: var(--text-primary); }}
@@ -3000,6 +3065,11 @@ def _relay_task_list_page(
     .relay-form-section {{ display: grid; gap: 8px; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 12px; }}
     .relay-form-section h3 {{ font-size: 14px; }}
     .relay-config-copy {{ margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.5; }}
+    .relay-config-panel {{ display: grid; gap: 12px; border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 14px; }}
+    .relay-config-grid {{ display: grid; gap: 8px; }}
+    .relay-config-row {{ display: grid; grid-template-columns: minmax(120px, 160px) minmax(150px, 220px) minmax(0, 1fr); gap: 10px; align-items: center; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px; min-width: 0; }}
+    .relay-config-row select {{ width: 100%; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 8px; background: rgba(255,255,255,.04); color: var(--text-primary); }}
+    .relay-config-tools {{ display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }}
     .relay-primary {{ background: rgba(88, 166, 255, .12); font-weight: var(--weight-bold); }}
     .relay-primary:hover, .relay-open:hover, .relay-filter-chip:hover {{ background: rgba(255,255,255,.07); }}
     .relay-history-list {{ display: grid; gap: 14px; min-width: 0; }}
@@ -3021,7 +3091,7 @@ def _relay_task_list_page(
     .relay-empty-state {{ display: grid; justify-items: start; gap: 10px; border: 1px dashed var(--border-subtle); border-radius: 8px; padding: 18px; color: var(--text-muted); }}
     .relay-empty-state h2 {{ color: var(--text-primary); font-size: 18px; }}
     .relay-empty-state p {{ margin: 0; max-width: 58ch; line-height: 1.55; }}
-    @media (max-width: 760px) {{ header {{ grid-template-columns: 48px 1fr; }} .relay-toolbar {{ grid-column: 1 / -1; justify-content: stretch; }} .relay-primary {{ width: 100%; }} .relay-card-head {{ grid-template-columns: 1fr; }} .relay-card-meta {{ justify-content: flex-start; }} main {{ padding: 12px; }} }}
+    @media (max-width: 760px) {{ header {{ grid-template-columns: 48px 1fr; }} .relay-toolbar {{ grid-column: 1 / -1; justify-content: stretch; }} .relay-primary, .relay-secondary {{ width: 100%; }} .relay-card-head {{ grid-template-columns: 1fr; }} .relay-card-meta {{ justify-content: flex-start; }} .relay-config-row {{ grid-template-columns: 1fr; }} main {{ padding: 12px; }} }}
   </style>
 </head>
 <body>
@@ -3029,23 +3099,25 @@ def _relay_task_list_page(
     <a class="circle" href="/native{token_suffix}" aria-label="back">‹</a>
     <h1>流式接力</h1>
     <div class="relay-toolbar">
+      <button class="relay-secondary" id="relay-config-button" type="button">配置</button>
       <button class="relay-primary" id="new-task-button" type="button" data-open-new-task>新接力任务</button>
     </div>
   </header>
   <main>
     <div class="relay-shell">
+      {workspace_nav}
+      <section class="relay-config-panel" id="relay-config-panel" hidden aria-label="relay role provider configuration">
+        <h2>角色配置</h2>
+        <p class="relay-config-copy">为固定五角色选择 agent provider；工具和能力来自团队配置，只读展示。</p>
+        <div class="relay-config-grid">{role_config_html}</div>
+        <button class="relay-primary" id="save-relay-config" type="button">保存配置</button>
+      </section>
       <section class="relay-create-panel" id="new-task-panel" hidden>
         <h2>新接力任务</h2>
         <form class="relay-form" method="post" action="/api/relay/tasks{token_suffix}">
           <label>任务标题<input name="title" placeholder="例如：修复流式接力历史页"></label>
           <label>任务目标<textarea name="prompt" placeholder="描述要接力完成的大任务、验收标准和限制"></textarea></label>
           <label>工作区（可选）<select name="workspace">{workspace_select_options}</select></label>
-          <label>执行 Provider（应用到全部角色）<select name="provider">{provider_options}</select></label>
-          <section class="relay-form-section" aria-label="relay role configuration">
-            <h3>角色配置</h3>
-            <p class="relay-config-copy">v1 固定五角色，当前 Provider 应用于全部角色。</p>
-            <div class="relay-role-chips">{role_config_html}</div>
-          </section>
           <button type="submit">开始接力</button>
         </form>
       </section>
@@ -3069,6 +3141,28 @@ def _relay_task_list_page(
   <script>
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
     const panel = document.getElementById("new-task-panel");
+    const configPanel = document.getElementById("relay-config-panel");
+    document.getElementById("relay-config-button")?.addEventListener("click", () => {{
+      if (!configPanel) return;
+      configPanel.hidden = !configPanel.hidden;
+    }});
+    document.getElementById("save-relay-config")?.addEventListener("click", async () => {{
+      const assignments = {{}};
+      document.querySelectorAll("[data-role-provider]").forEach((select) => {{
+        assignments[select.dataset.roleProvider] = select.value;
+      }});
+      const response = await fetch(`/api/relay/config${{TOKEN_SUFFIX}}`, {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify({{assignments}}),
+      }});
+      if (!response.ok) {{
+        const payload = await response.json().catch(() => ({{}}));
+        alert(payload.error || "保存失败");
+        return;
+      }}
+      configPanel.hidden = true;
+    }});
     function openNewTaskPanel() {{
       if (!panel) return;
       panel.hidden = false;
@@ -3105,10 +3199,114 @@ def _relay_task_list_page(
 </html>""")
 
 
+def _relay_workspace_nav_html(
+    projects: list[Any],
+    *,
+    selected_workspace: str,
+    access_token: str,
+) -> str:
+    rows = [
+        (
+            "",
+            "全部工作区",
+            "查看所有 Relay Task",
+        )
+    ]
+    seen: set[str] = set()
+    for project in projects:
+        cwd = str(project.get("cwd", "") or "")
+        if not cwd or cwd in seen:
+            continue
+        seen.add(cwd)
+        rows.append((
+            cwd,
+            str(project.get("name") or Path(cwd).name or cwd),
+            cwd,
+        ))
+    links = "\n".join(
+        '<a class="relay-workspace-link'
+        f'{" active" if workspace == selected_workspace else ""}" '
+        f'data-workspace-value="{escape(workspace)}" '
+        f'href="{escape(_relay_workspace_href(workspace, access_token))}">'
+        f'{escape(label)}</a>'
+        for workspace, label, _path in rows
+    )
+    current = selected_workspace or "全部工作区"
+    return f"""
+      <section class="relay-workspace-nav" aria-label="relay workspace picker">
+        <div class="relay-history-head">
+          <div class="relay-history-title">
+            <h2>工作区</h2>
+            <span class="relay-muted">当前：{escape(Path(current).name if selected_workspace else current)}</span>
+          </div>
+        </div>
+        <div class="relay-workspace-row">{links}</div>
+      </section>
+    """
+
+
+def _relay_workspace_href(workspace: str, access_token: str) -> str:
+    params = []
+    if access_token:
+        params.append(f"token={quote(access_token)}")
+    if workspace:
+        params.append(f"workspace={quote(workspace)}")
+    suffix = "?" + "&".join(params) if params else ""
+    return f"/native/workflows/relay{suffix}"
+
+
+def _relay_role_config_html(
+    relay_config: dict[str, Any],
+    providers: list[Any],
+) -> str:
+    assignments = relay_config.get("assignments")
+    assignment_map = assignments if isinstance(assignments, dict) else {}
+    roles = relay_config.get("roles")
+    role_rows = roles if isinstance(roles, list) and roles else [
+        {"role": role, "display_name": _relay_role_label(role)}
+        for role in RELAY_ROLE_IDS
+    ]
+    provider_rows = providers or [{"provider": "codex", "provider_engine": ""}]
+    rows = []
+    for role_entry in role_rows:
+        role = str(role_entry.get("role") or "")
+        if role not in RELAY_ROLE_IDS:
+            continue
+        selected = str(assignment_map.get(role) or provider_rows[0].get("provider") or "codex")
+        options = "\n".join(
+            f'<option value="{escape(str(provider.get("provider", "")))}"'
+            f'{" selected" if str(provider.get("provider", "")) == selected else ""}>'
+            f'{escape(_native_provider_display_name(str(provider.get("provider", ""))))}</option>'
+            for provider in provider_rows
+            if str(provider.get("provider", "")).strip()
+        )
+        tool_chips = "".join(
+            f'<span class="relay-chip">{escape(str(item))}</span>'
+            for item in [
+                *list(role_entry.get("skills") or []),
+                *list(role_entry.get("capabilities") or []),
+            ]
+        ) or '<span class="relay-chip">默认能力</span>'
+        rows.append(
+            f"""
+            <div class="relay-config-row">
+              <strong>{escape(str(role_entry.get("display_name") or _relay_role_label(role)))}</strong>
+              <select data-role-provider="{escape(role)}" aria-label="{escape(_relay_role_label(role))} Provider">
+                {options}
+              </select>
+              <div class="relay-config-tools">{tool_chips}</div>
+            </div>
+            """
+        )
+    return "\n".join(rows)
+
+
 def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
+    role_providers = getattr(summary, "role_providers", {}) or {}
     chips = "\n".join(
-        f'<span class="relay-chip">{escape(_relay_role_label(str(role)))}: '
-        f'{escape(_relay_role_status_label(str(status)))}</span>'
+        f'<span class="relay-chip">{escape(_relay_role_label(str(role)))} · '
+        f'{escape(_relay_role_status_label(str(status)))} · '
+        f'{escape(_native_provider_display_name(str(role_providers.get(role, ""))))}</span>'
         for role, status in summary.role_statuses.items()
     )
     status = str(summary.status)

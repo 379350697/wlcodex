@@ -7,6 +7,22 @@ from wlcodex.relay.context import build_role_context_packet
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.events import RelayEvent, RelayEventBus
 from wlcodex.relay.models import HandoffPacket, RelayTask, RelayTaskDetail
+from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
+from wlcodex.relay.store import RELAY_ASSIGNMENT_PREFIX
+
+
+def relay_provider_defaults_from_team_config(
+    assignments: dict[str, tuple[str, ...]],
+    model_profiles: dict[str, str],
+    *,
+    fallback_provider: str,
+) -> dict[str, str]:
+    defaults: dict[str, str] = {}
+    for role in RELAY_ROLE_IDS:
+        profiles = assignments.get(role, ())
+        profile = profiles[0] if profiles else fallback_provider
+        defaults[role] = str(model_profiles.get(profile, profile) or fallback_provider)
+    return defaults
 
 
 class RelayService:
@@ -17,6 +33,9 @@ class RelayService:
         registry: Any,
         default_provider: str = "codex",
         events: RelayEventBus | None = None,
+        role_provider_defaults: dict[str, str] | None = None,
+        role_skills: dict[str, tuple[str, ...]] | None = None,
+        role_capabilities: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
@@ -24,6 +43,18 @@ class RelayService:
         self._events = events or RelayEventBus()
         self._handled_runtime_completion_ids: set[int] = set()
         self._runtime_tasks: set[asyncio.Task[Any]] = set()
+        self._role_provider_defaults = self._normalize_assignments(
+            role_provider_defaults or {},
+            allow_partial=True,
+        )
+        self._role_skills = {
+            str(role): tuple(str(item) for item in items)
+            for role, items in (role_skills or {}).items()
+        }
+        self._role_capabilities = {
+            str(role): tuple(str(item) for item in items)
+            for role, items in (role_capabilities or {}).items()
+        }
 
     def create_task(
         self,
@@ -32,12 +63,20 @@ class RelayService:
         prompt: str,
         workspace: str,
         provider: str = "",
+        role_providers: dict[str, str] | None = None,
     ) -> RelayTask:
+        base_provider = provider or self._default_provider
+        assignments = (
+            self._normalize_assignments(role_providers)
+            if role_providers is not None
+            else self.role_provider_assignments()
+        )
         task = self._store.create_task(
             title=title,
             prompt=prompt,
             workspace=workspace,
-            provider=provider or self._default_provider,
+            provider=base_provider,
+            role_providers=assignments,
         )
         director_job = next(job for job in self._store.get_task_detail(task.id).role_jobs if job.role == "director")
         self._events.emit(task.id, "task.created", payload={"title": title})
@@ -60,6 +99,45 @@ class RelayService:
     def list_tasks(self, **kwargs: Any):
         return self._store.list_tasks(**kwargs)
 
+    def config(self) -> dict[str, Any]:
+        return {
+            "roles": [
+                {
+                    "role": role,
+                    "display_name": RELAY_ROLE_DISPLAY_NAMES.get(role, role),
+                    "skills": list(self._role_skills.get(role, ())),
+                    "capabilities": list(self._role_capabilities.get(role, ())),
+                }
+                for role in RELAY_ROLE_IDS
+            ],
+            "providers": self._registry.list_provider_summaries(),
+            "assignments": self.role_provider_assignments(),
+        }
+
+    def save_config(self, assignments: dict[str, str]) -> dict[str, Any]:
+        normalized = self._normalize_assignments(assignments)
+        for role, provider in normalized.items():
+            self._store.set_runtime_setting(
+                f"{RELAY_ASSIGNMENT_PREFIX}{role}",
+                provider,
+            )
+        return self.config()
+
+    def role_provider_assignments(self) -> dict[str, str]:
+        available = self._available_providers()
+        assignments = {}
+        for role in RELAY_ROLE_IDS:
+            stored = self._store.get_runtime_setting(f"{RELAY_ASSIGNMENT_PREFIX}{role}")
+            value = (
+                stored
+                or self._role_provider_defaults.get(role)
+                or self._default_provider
+            )
+            if value not in available:
+                value = self._default_available_provider()
+            assignments[role] = value
+        return assignments
+
     def get_task(self, task_id: int) -> RelayTaskDetail:
         return self._store.get_task_detail(task_id)
 
@@ -78,7 +156,11 @@ class RelayService:
 
     async def dispatch_role(self, task_id: int, role: str) -> None:
         detail = self._store.get_task_detail(task_id)
-        provider_name = detail.task.provider or self._default_provider
+        provider_name = (
+            detail.task.role_providers.get(role)
+            or detail.task.provider
+            or self._default_provider
+        )
         try:
             provider = self._registry.get(provider_name)
         except KeyError as exc:
@@ -159,6 +241,46 @@ class RelayService:
             role=role,
             payload={"native_session_id": native_session_id},
         )
+
+    def _available_providers(self) -> set[str]:
+        return {
+            str(summary.get("provider") or "").strip()
+            for summary in self._registry.list_provider_summaries()
+            if str(summary.get("provider") or "").strip()
+        }
+
+    def _default_available_provider(self) -> str:
+        available = self._available_providers()
+        if self._default_provider in available:
+            return self._default_provider
+        return sorted(available)[0] if available else self._default_provider
+
+    def _normalize_assignments(
+        self,
+        assignments: dict[str, str],
+        *,
+        allow_partial: bool = False,
+    ) -> dict[str, str]:
+        available = self._available_providers()
+        if not available:
+            available = {self._default_provider}
+        unknown_roles = sorted(
+            str(role) for role in assignments if str(role) not in RELAY_ROLE_IDS
+        )
+        if unknown_roles:
+            raise ValueError(f"unknown relay role: {unknown_roles[0]}")
+        normalized: dict[str, str] = {}
+        roles = assignments.keys() if allow_partial else RELAY_ROLE_IDS
+        for role in roles:
+            role_id = str(role)
+            provider = str(assignments.get(role_id) or self._default_available_provider()).strip()
+            if provider not in available:
+                raise ValueError(f"unknown relay provider: {provider}")
+            normalized[role_id] = provider
+        if not allow_partial:
+            for role in RELAY_ROLE_IDS:
+                normalized.setdefault(role, self._default_available_provider())
+        return normalized
 
     async def handle_role_output(
         self,

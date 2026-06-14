@@ -17,6 +17,9 @@ from wlcodex.relay.models import (
 )
 
 
+RELAY_ASSIGNMENT_PREFIX = "relay.assignment."
+
+
 class RelayStore:
     def __init__(self, ledger: Any) -> None:
         self._ledger = ledger
@@ -28,11 +31,22 @@ class RelayStore:
         prompt: str,
         workspace: str,
         provider: str,
+        role_providers: dict[str, str] | None = None,
     ) -> RelayTask:
+        role_provider_snapshot = _normalize_role_providers(
+            role_providers,
+            fallback=provider,
+        )
         team_run = self._ledger.create_team_run(
             0,
             None,
-            _encode_goal(title=title, prompt=prompt, workspace=workspace, provider=provider),
+            _encode_goal(
+                title=title,
+                prompt=prompt,
+                workspace=workspace,
+                provider=provider,
+                role_providers=role_provider_snapshot,
+            ),
             route="relay",
             risk_level="medium",
         )
@@ -40,7 +54,7 @@ class RelayStore:
             self._ledger.create_team_agent_job(
                 team_run_id=team_run.id,
                 role=role,
-                model_profile=provider,
+                model_profile=role_provider_snapshot.get(role, provider),
                 status="queued" if role == "director" else "idle",
             )
         task = self._task_from_run(team_run)
@@ -81,6 +95,7 @@ class RelayStore:
                 RelayTaskSummary.from_task(
                     task,
                     role_statuses={job.role: job.status for job in jobs},
+                    role_providers={job.role: job.provider for job in jobs},
                     director_decision_summary=_latest_summary(
                         artifacts, "routing_decision"
                     ),
@@ -88,6 +103,16 @@ class RelayStore:
                 )
             )
         return summaries
+
+    def get_runtime_setting(self, key: str, default: str | None = None) -> str | None:
+        if hasattr(self._ledger, "get_runtime_setting"):
+            return self._ledger.get_runtime_setting(key, default)
+        return default
+
+    def set_runtime_setting(self, key: str, value: str) -> None:
+        if not hasattr(self._ledger, "set_runtime_setting"):
+            raise RuntimeError("relay runtime settings are unavailable")
+        self._ledger.set_runtime_setting(key, value)
 
     def get_task_detail(self, task_id: int) -> RelayTaskDetail:
         team_run = self._ledger.get_team_run(task_id)
@@ -268,6 +293,10 @@ class RelayStore:
             phase=str(metadata.get("phase") or "director"),
             created_at=team_run.created_at.isoformat(),
             updated_at=team_run.updated_at.isoformat(),
+            role_providers=_normalize_role_providers(
+                metadata.get("role_providers"),
+                fallback=str(metadata.get("provider") or "codex"),
+            ),
         )
 
     def _role_jobs(
@@ -361,6 +390,7 @@ def _encode_goal(
     prompt: str,
     workspace: str,
     provider: str,
+    role_providers: dict[str, str] | None = None,
     phase: str = "director",
 ) -> str:
     return (
@@ -372,22 +402,31 @@ def _encode_goal(
                 "workspace": workspace,
                 "provider": provider,
                 "phase": phase,
+                "role_providers": _normalize_role_providers(
+                    role_providers,
+                    fallback=provider,
+                ),
             },
             ensure_ascii=False,
         )
     )
 
 
-def _decode_goal(goal: str) -> dict[str, str]:
+def _decode_goal(goal: str) -> dict[str, Any]:
     if goal.startswith("relay:"):
         try:
             payload = __import__("json").loads(goal.removeprefix("relay:"))
+            provider = str(payload.get("provider") or "codex")
             return {
                 "title": str(payload.get("title") or payload.get("prompt") or "Relay Task"),
                 "prompt": str(payload.get("prompt") or payload.get("title") or ""),
                 "workspace": str(payload.get("workspace") or ""),
-                "provider": str(payload.get("provider") or "codex"),
+                "provider": provider,
                 "phase": str(payload.get("phase") or "director"),
+                "role_providers": _normalize_role_providers(
+                    payload.get("role_providers"),
+                    fallback=provider,
+                ),
             }
         except Exception:
             pass
@@ -397,6 +436,20 @@ def _decode_goal(goal: str) -> dict[str, str]:
         "workspace": "",
         "provider": "codex",
         "phase": "director",
+        "role_providers": _normalize_role_providers(None, fallback="codex"),
+    }
+
+
+def _normalize_role_providers(
+    values: Any,
+    *,
+    fallback: str,
+) -> dict[str, str]:
+    source = values if isinstance(values, dict) else {}
+    fallback_provider = str(fallback or "codex")
+    return {
+        role: str(source.get(role) or fallback_provider).strip() or fallback_provider
+        for role in RELAY_ROLE_IDS
     }
 
 

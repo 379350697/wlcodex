@@ -412,6 +412,9 @@ def _create_live_stream_components(
                 store=WorkflowRunStore(ledger),
             )
             from wlcodex.relay import RelayService, RelayStore
+            from wlcodex.relay.service import (
+                relay_provider_defaults_from_team_config,
+            )
 
             relay_service = RelayService(
                 store=RelayStore(ledger),
@@ -419,6 +422,15 @@ def _create_live_stream_components(
                 default_provider=(
                     native_providers[0].provider if native_providers else "codex"
                 ),
+                role_provider_defaults=relay_provider_defaults_from_team_config(
+                    config.adaptive_team.assignments,
+                    config.adaptive_team.model_profiles,
+                    fallback_provider=(
+                        native_providers[0].provider if native_providers else "codex"
+                    ),
+                ),
+                role_skills=config.adaptive_team.role_skills,
+                role_capabilities=config.adaptive_team.role_capabilities,
             )
             runtime_store.add_projector(relay_service.project_runtime_event)
     server = WorkerLiveStreamServer(

@@ -71,6 +71,16 @@ class FakeProvider:
         )
 
 
+class FakeCodexProvider(FakeProvider):
+    provider = "codex"
+    provider_engine = "app-server"
+
+
+class FakeAntigravityProvider(FakeProvider):
+    provider = "antigravity"
+    provider_engine = "cli-local"
+
+
 async def _read_response(host: str, port: int, request: str) -> str:
     reader, writer = await asyncio.open_connection(host, port)
     writer.write(request.encode("utf-8"))
@@ -127,8 +137,11 @@ def _json_body(response: str) -> dict[str, Any]:
 def _relay_service(tmp_path: Path) -> RelayService:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
-    provider = FakeProvider()
-    registry = NativeAgentRegistry([provider])
+    registry = NativeAgentRegistry([
+        FakeCodexProvider(),
+        FakeProvider(),
+        FakeAntigravityProvider(),
+    ])
     return RelayService(
         store=RelayStore(ledger),
         registry=registry,
@@ -214,6 +227,120 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
         "tester",
         "auditor",
     ]
+
+
+@pytest.mark.asyncio
+async def test_relay_config_routes_persist_role_provider_assignments(tmp_path: Path) -> None:
+    service = _relay_service(tmp_path)
+
+    get_response = await _request_relay(
+        tmp_path,
+        "GET /api/relay/config HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 200 OK" in get_response
+    config = _json_body(get_response)
+    assert [role["role"] for role in config["roles"]] == [
+        "director",
+        "architect",
+        "implementer",
+        "tester",
+        "auditor",
+    ]
+    assert {provider["provider"] for provider in config["providers"]} == {
+        "codex",
+        "claude",
+        "antigravity",
+    }
+    assert config["assignments"]["director"] in {"codex", "claude"}
+
+    body = json.dumps(
+        {
+            "assignments": {
+                "director": "codex",
+                "architect": "claude",
+                "implementer": "antigravity",
+                "tester": "claude",
+                "auditor": "codex",
+            }
+        }
+    )
+    post_response = await _request_relay(
+        tmp_path,
+        "POST /api/relay/config HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 200 OK" in post_response
+    updated = _json_body(post_response)
+    assert updated["assignments"]["implementer"] == "antigravity"
+
+    create_body = json.dumps(
+        {
+            "title": "Configured relay",
+            "prompt": "Use role providers",
+            "workspace": "/repo",
+        }
+    )
+    create_response = await _request_relay(
+        tmp_path,
+        "POST /api/relay/tasks HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(create_body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{create_body}",
+        relay_service=service,
+    )
+    payload = _json_body(create_response)
+    detail = service.get_task(payload["task"]["id"])
+    assert {job.role: job.provider for job in detail.role_jobs} == updated["assignments"]
+
+
+@pytest.mark.asyncio
+async def test_relay_config_route_rejects_unknown_provider(tmp_path: Path) -> None:
+    service = _relay_service(tmp_path)
+    body = json.dumps({"assignments": {"director": "missing"}})
+
+    response = await _request_relay(
+        tmp_path,
+        "POST /api/relay/config HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 400 Bad Request" in response
+
+
+@pytest.mark.asyncio
+async def test_relay_config_route_rejects_unknown_role(tmp_path: Path) -> None:
+    service = _relay_service(tmp_path)
+    body = json.dumps({"assignments": {"investigator": "codex"}})
+
+    response = await _request_relay(
+        tmp_path,
+        "POST /api/relay/config HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 400 Bad Request" in response
+    assert "unknown relay role: investigator" in response
 
 
 @pytest.mark.asyncio

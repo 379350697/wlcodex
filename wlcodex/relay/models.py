@@ -68,6 +68,7 @@ class RelayTask:
     phase: str
     created_at: str
     updated_at: str
+    role_providers: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -216,6 +217,7 @@ class RelayTaskSummary:
     director_decision_summary: str
     latest_handoff_summary: str
     role_statuses: dict[str, str]
+    role_providers: dict[str, str]
     last_activity_at: str
 
     @classmethod
@@ -224,6 +226,7 @@ class RelayTaskSummary:
         task: RelayTask,
         *,
         role_statuses: dict[str, str],
+        role_providers: dict[str, str] | None = None,
         director_decision_summary: str = "",
         latest_handoff_summary: str = "",
     ) -> "RelayTaskSummary":
@@ -237,6 +240,7 @@ class RelayTaskSummary:
             director_decision_summary=director_decision_summary,
             latest_handoff_summary=latest_handoff_summary,
             role_statuses=role_statuses,
+            role_providers=dict(role_providers or task.role_providers),
             last_activity_at=task.updated_at,
         )
 
