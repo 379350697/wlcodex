@@ -142,6 +142,31 @@ must use `WLCODEX_LIVE_STREAM_TOKEN` when exposed through a tunnel. The first
 release rejects non-loopback bind hosts; use an authenticated tunnel to reach it
 from a phone.
 
+### Native Cloudflare Tunnel
+
+The named tunnel for `native.yjxjj.xyz` should run through HTTP/2. QUIC has
+caused public `/native/codex` loads to stall for tens of seconds while the
+loopback service stayed fast.
+
+On macOS, run this after local deployments that touch tunnel or launchd setup:
+
+```bash
+scripts/ensure-native-cloudflared-http2
+```
+
+The script writes and reloads
+`~/Library/LaunchAgents/com.wlcodex.cloudflared-native-yjxjj.plist` with:
+
+```bash
+/opt/homebrew/bin/cloudflared tunnel --protocol http2 --edge-ip-version 4 --config ~/.cloudflared/config.yml run wlcodex-native-18731
+```
+
+To verify the current machine without changing anything:
+
+```bash
+scripts/ensure-native-cloudflared-http2 --check
+```
+
 ## Safety rules
 
 - Private Telegram chat only

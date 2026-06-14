@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+label="${WLCODEX_NATIVE_CLOUDFLARED_LABEL:-com.wlcodex.cloudflared-native-yjxjj}"
+tunnel="${WLCODEX_NATIVE_CLOUDFLARED_TUNNEL:-wlcodex-native-18731}"
+config_path="${WLCODEX_NATIVE_CLOUDFLARED_CONFIG:-${HOME}/.cloudflared/config.yml}"
+cloudflared_bin="${WLCODEX_NATIVE_CLOUDFLARED_BIN:-/opt/homebrew/bin/cloudflared}"
+plist_path="${WLCODEX_NATIVE_CLOUDFLARED_PLIST:-${HOME}/Library/LaunchAgents/${label}.plist}"
+stdout_path="${WLCODEX_NATIVE_CLOUDFLARED_STDOUT:-/private/tmp/wlcodex-cloudflared-native-yjxjj.out.log}"
+stderr_path="${WLCODEX_NATIVE_CLOUDFLARED_STDERR:-/private/tmp/wlcodex-cloudflared-native-yjxjj.err.log}"
+edge_ip_version="${WLCODEX_NATIVE_CLOUDFLARED_EDGE_IP_VERSION:-4}"
+protocol="http2"
+
+install=false
+restart=false
+check=false
+curl_check=false
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/ensure-native-cloudflared-http2 [options]
+
+Without options, this writes the native.yjxjj.xyz cloudflared LaunchAgent,
+reloads it through launchctl, and verifies that launchd is running HTTP/2.
+
+Options:
+  --install      Write the LaunchAgent plist only.
+  --restart      Reload the LaunchAgent with launchctl bootout/bootstrap.
+  --check        Verify plist and launchd state only.
+  --curl-check   Verify state and curl the public health endpoint.
+  --no-check     Skip verification after install/restart.
+  -h, --help     Show this help.
+
+Environment overrides:
+  WLCODEX_NATIVE_CLOUDFLARED_BIN
+  WLCODEX_NATIVE_CLOUDFLARED_CONFIG
+  WLCODEX_NATIVE_CLOUDFLARED_LABEL
+  WLCODEX_NATIVE_CLOUDFLARED_PLIST
+  WLCODEX_NATIVE_CLOUDFLARED_TUNNEL
+USAGE
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+xml_escape() {
+  local value="$1"
+  value="${value//&/&amp;}"
+  value="${value//</&lt;}"
+  value="${value//>/&gt;}"
+  value="${value//\"/&quot;}"
+  value="${value//\'/&apos;}"
+  printf '%s' "$value"
+}
+
+write_plist() {
+  [[ -x "${cloudflared_bin}" ]] || die "cloudflared binary is not executable: ${cloudflared_bin}"
+  [[ -f "${config_path}" ]] || die "cloudflared config does not exist: ${config_path}"
+
+  local plist_dir
+  plist_dir="$(dirname -- "${plist_path}")"
+  mkdir -p -- "${plist_dir}"
+
+  local tmp
+  tmp="$(mktemp "${plist_path}.XXXXXX")"
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+    printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    printf '%s\n' '<plist version="1.0">'
+    printf '%s\n' '<dict>'
+    printf '  <key>Label</key>\n  <string>%s</string>\n' "$(xml_escape "${label}")"
+    printf '%s\n' '  <key>ProgramArguments</key>'
+    printf '%s\n' '  <array>'
+    printf '    <string>%s</string>\n' "$(xml_escape "${cloudflared_bin}")"
+    printf '%s\n' '    <string>tunnel</string>'
+    printf '%s\n' '    <string>--protocol</string>'
+    printf '    <string>%s</string>\n' "$(xml_escape "${protocol}")"
+    printf '%s\n' '    <string>--edge-ip-version</string>'
+    printf '    <string>%s</string>\n' "$(xml_escape "${edge_ip_version}")"
+    printf '%s\n' '    <string>--config</string>'
+    printf '    <string>%s</string>\n' "$(xml_escape "${config_path}")"
+    printf '%s\n' '    <string>run</string>'
+    printf '    <string>%s</string>\n' "$(xml_escape "${tunnel}")"
+    printf '%s\n' '  </array>'
+    printf '%s\n' '  <key>RunAtLoad</key>'
+    printf '%s\n' '  <true/>'
+    printf '%s\n' '  <key>KeepAlive</key>'
+    printf '%s\n' '  <true/>'
+    printf '%s\n' '  <key>StandardOutPath</key>'
+    printf '  <string>%s</string>\n' "$(xml_escape "${stdout_path}")"
+    printf '%s\n' '  <key>StandardErrorPath</key>'
+    printf '  <string>%s</string>\n' "$(xml_escape "${stderr_path}")"
+    printf '%s\n' '</dict>'
+    printf '%s\n' '</plist>'
+  } >"${tmp}"
+
+  plutil -lint "${tmp}" >/dev/null
+  mv -- "${tmp}" "${plist_path}"
+  printf 'Wrote %s with --protocol %s\n' "${plist_path}" "${protocol}"
+}
+
+restart_agent() {
+  local domain
+  domain="gui/$(id -u)"
+
+  launchctl bootout "${domain}/${label}" >/dev/null 2>&1 || true
+  launchctl bootstrap "${domain}" "${plist_path}"
+  printf 'Reloaded %s from %s\n' "${label}" "${plist_path}"
+}
+
+assert_plist_protocol() {
+  [[ -f "${plist_path}" ]] || die "LaunchAgent plist does not exist: ${plist_path}"
+
+  local plist_protocol
+  plist_protocol="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:3' "${plist_path}")"
+  [[ "${plist_protocol}" == "${protocol}" ]] || die "plist protocol is ${plist_protocol}, expected ${protocol}"
+}
+
+assert_launchd_protocol() {
+  local domain print_file launchd_protocol
+  domain="gui/$(id -u)"
+  print_file="$(mktemp)"
+
+  if ! launchctl print "${domain}/${label}" >"${print_file}"; then
+    rm -f -- "${print_file}"
+    die "LaunchAgent is not loaded: ${domain}/${label}"
+  fi
+
+  launchd_protocol="$(
+    awk '
+      found {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+        print
+        exit
+      }
+      /^[[:space:]]*--protocol[[:space:]]*$/ {
+        found = 1
+      }
+    ' "${print_file}"
+  )"
+  rm -f -- "${print_file}"
+
+  [[ "${launchd_protocol}" == "${protocol}" ]] || die "launchd protocol is ${launchd_protocol:-missing}, expected ${protocol}"
+  printf 'OK: %s is loaded with --protocol %s\n' "${label}" "${protocol}"
+}
+
+run_curl_check() {
+  curl -4 -sS -o /dev/null \
+    -w 'native health: http=%{http_code} total=%{time_total}s\n' \
+    https://native.yjxjj.xyz/health
+}
+
+if [[ "$#" -eq 0 ]]; then
+  install=true
+  restart=true
+  check=true
+fi
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --install)
+      install=true
+      ;;
+    --restart)
+      restart=true
+      ;;
+    --check)
+      check=true
+      ;;
+    --curl-check)
+      check=true
+      curl_check=true
+      ;;
+    --no-check)
+      check=false
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      die "unknown option: $1"
+      ;;
+  esac
+  shift
+done
+
+if [[ "${install}" == "true" ]]; then
+  write_plist
+fi
+
+if [[ "${restart}" == "true" ]]; then
+  restart_agent
+fi
+
+if [[ "${check}" == "true" ]]; then
+  assert_plist_protocol
+  assert_launchd_protocol
+fi
+
+if [[ "${curl_check}" == "true" ]]; then
+  run_curl_check
+fi
