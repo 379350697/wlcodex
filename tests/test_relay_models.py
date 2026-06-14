@@ -51,6 +51,7 @@ def test_relay_statuses_and_artifact_types_match_design_spec() -> None:
     assert RELAY_ARTIFACT_TYPES == (
         "relay_board",
         "routing_decision",
+        "role_dispatch_metadata",
         "architecture_plan",
         "implementation_report",
         "test_report",
@@ -100,9 +101,15 @@ def test_relay_api_shapes_are_serializable() -> None:
                 url="/native/codex?thread=native-1",
             )
         ],
+        routing_decision={
+            "route": "director_only",
+            "risk": "low",
+            "complexity": "simple",
+        },
     )
 
     assert summary.to_dict()["task_id"] == 7
     assert summary.to_dict()["role_statuses"]["director"] == "queued"
     assert detail.to_dict()["board"]["current_dispatch"] == "director"
     assert detail.to_dict()["session_links"][0]["url"].startswith("/native/")
+    assert detail.to_dict()["routing_decision"]["route"] == "director_only"

@@ -44,6 +44,8 @@ def parse_role_envelope(text: str | dict[str, Any]) -> EnvelopeParseResult:
             return EnvelopeParseResult(ok=False, error=f"invalid json: {exc.msg}")
     if not isinstance(payload, dict):
         return EnvelopeParseResult(ok=False, error="role envelope must be a JSON object")
+    if isinstance(payload.get("role_envelope"), dict):
+        payload = payload["role_envelope"]
 
     missing = [field for field in _REQUIRED_FIELDS if field not in payload]
     if missing:
@@ -76,4 +78,9 @@ def parse_role_envelope(text: str | dict[str, Any]) -> EnvelopeParseResult:
         )
 
     next_role = envelope.handoff_to or default_handoff_target(envelope.role)
-    return EnvelopeParseResult(ok=True, envelope=envelope, next_role=next_role)
+    return EnvelopeParseResult(
+        ok=True,
+        envelope=envelope,
+        next_role=next_role,
+        payload=dict(payload),
+    )

@@ -16,7 +16,14 @@ _RELAY_CONTEXT_CONSTRAINTS = [
     "No role inherits old permissions from another role.",
     "No role inherits old execution state from another role.",
     "Do not auto commit or auto deploy in relay v1.",
-    "Return a role_envelope JSON object with the required fields.",
+    "Return only one strict JSON object with the required role_envelope fields.",
+]
+_DIRECTOR_ROUTING_DECISION_CONSTRAINTS = [
+    "Director first action must be a routing_decision artifact before any task execution.",
+    "Do not inspect, edit, delete, test, commit, or deploy files before routing_decision is accepted.",
+    "If the user asks for a relay/process/test workflow, do not choose director_only.",
+    "If the task is destructive, high risk, cross-module, deployment, credentials, permissions, or migration related, do not choose director_only.",
+    "Use waiting_user when the target file/path or acceptance criteria are ambiguous.",
 ]
 
 
@@ -58,11 +65,22 @@ def build_role_context_packet(
     transcript: list[dict[str, Any]] | None = None,
 ) -> RoleContextPacket:
     del transcript
+    has_routing_decision = any(
+        str(artifact.get("artifact_type") or artifact.get("type") or "")
+        == "routing_decision"
+        and "dispatch_verified" not in artifact
+        for artifact in artifacts
+    )
     role_artifacts = [
         _artifact_summary(artifact)
         for artifact in artifacts
         if _artifact_is_relevant(artifact, role)
     ]
+    constraints = list(_RELAY_CONTEXT_CONSTRAINTS)
+    expected_output_envelope = _default_expected_output_envelope(role)
+    if role == "director" and not has_routing_decision:
+        constraints.extend(_DIRECTOR_ROUTING_DECISION_CONSTRAINTS)
+        expected_output_envelope = _director_routing_decision_envelope()
     return RoleContextPacket(
         task_id=task.id,
         role=role,
@@ -75,19 +93,44 @@ def build_role_context_packet(
         handoff_summaries=[
             handoff.summary for handoff in handoffs if handoff.to_role in (role, "")
         ],
-        constraints=list(_RELAY_CONTEXT_CONSTRAINTS),
-        expected_output_envelope={
-            "status": "passed|failed|blocked|waiting",
-            "reason": "brief reason",
-            "role": role,
-            "artifact_type": "relay artifact type",
-            "handoff_to": "next role or empty string",
-            "summary": "compact result summary",
-            "evidence_refs": [],
-            "open_questions": [],
-            "next_action": "what should happen next",
-        },
+        constraints=constraints,
+        expected_output_envelope=expected_output_envelope,
     )
+
+
+def _default_expected_output_envelope(role: str) -> dict[str, Any]:
+    return {
+        "status": "passed|failed|blocked|waiting",
+        "reason": "brief reason",
+        "role": role,
+        "artifact_type": "relay artifact type",
+        "handoff_to": "next role or empty string",
+        "summary": "compact result summary",
+        "evidence_refs": [],
+        "open_questions": [],
+        "next_action": "what should happen next",
+    }
+
+
+def _director_routing_decision_envelope() -> dict[str, Any]:
+    return {
+        "status": "passed|blocked|waiting",
+        "reason": "why this route is appropriate",
+        "role": "director",
+        "artifact_type": "routing_decision",
+        "handoff_to": "",
+        "summary": "director routing decision summary",
+        "evidence_refs": [],
+        "open_questions": [],
+        "next_action": "dispatch next role, wait for user, block, or complete directly",
+        "complexity": "low|medium|high",
+        "risk": "low|medium|high|critical",
+        "route": "director_only|core_relay|full_relay|audit_first|waiting_user|blocked",
+        "required_roles": ["director"],
+        "acceptance_criteria": ["observable acceptance criterion"],
+        "stop_conditions": ["condition that should stop or ask user"],
+        "requires_user_approval": False,
+    }
 
 
 def _artifact_is_relevant(artifact: dict[str, Any], role: str) -> bool:

@@ -9,6 +9,56 @@ from wlcodex.relay.events import RelayEvent, RelayEventBus
 from wlcodex.relay.models import HandoffPacket, RelayTask, RelayTaskDetail
 from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
 from wlcodex.relay.store import RELAY_ASSIGNMENT_PREFIX
+from wlcodex.runtime_event_store import RuntimeEventStore
+
+
+_ROUTING_DECISION_ROUTES = {
+    "director_only",
+    "core_relay",
+    "full_relay",
+    "audit_first",
+    "waiting_user",
+    "blocked",
+}
+_ROUTING_DECISION_RISKS = {"low", "medium", "high", "critical"}
+_FULL_RELAY_INTENT_KEYWORDS = (
+    "完整接力",
+    "接力流程",
+    "测试接力",
+    "五角色",
+    "走五",
+    "测试流程",
+    "按工作流",
+    "完整流程",
+    "验收",
+    "full relay",
+    "five roles",
+)
+_HIGH_RISK_INTENT_KEYWORDS = (
+    "上线",
+    "部署",
+    "deploy",
+    "production",
+    "权限",
+    "授权",
+    "认证",
+    "密钥",
+    "secret",
+    "credential",
+    "迁移",
+    "migration",
+    "数据库",
+    "schema",
+    "跨模块",
+    "api",
+    "公开接口",
+    "重构",
+    "删除",
+    "删",
+    "delete",
+    "remove",
+    "rm ",
+)
 
 
 def relay_provider_defaults_from_team_config(
@@ -292,6 +342,16 @@ class RelayService:
     ):
         result = parse_role_envelope(output)
         if not result.ok or result.envelope is None:
+            self._store.save_artifact(
+                task_id,
+                role,
+                "role_error",
+                {
+                    "error": result.error,
+                    "output": output,
+                },
+                summary=result.error,
+            )
             self._store.update_role_status(task_id, role, "blocked")
             self._store.update_task_status(task_id, "blocked")
             self._events.emit(
@@ -303,6 +363,25 @@ class RelayService:
             return result
 
         envelope = result.envelope
+        if envelope.artifact_type == "routing_decision":
+            return await self._handle_routing_decision(
+                task_id,
+                role,
+                output,
+                result.payload,
+                dispatch_next=dispatch_next,
+            )
+        if role == "director" and not self._store.get_task_detail(task_id).routing_decision:
+            self._block_role_with_error(
+                task_id,
+                role,
+                (
+                    "director must produce routing_decision before "
+                    f"{envelope.artifact_type}"
+                ),
+                output=output,
+            )
+            return result
         self._events.emit(
             task_id,
             "role.envelope",
@@ -346,6 +425,11 @@ class RelayService:
             and envelope.artifact_type == "final_summary"
             and not envelope.handoff_to
         ):
+            detail = self._store.get_task_detail(task_id)
+            completion_error = self._final_summary_completion_error(detail)
+            if completion_error:
+                self._block_role_with_error(task_id, role, completion_error, output=output)
+                return result
             self._store.update_task_status(task_id, "completed")
             self._events.emit(
                 task_id,
@@ -355,9 +439,26 @@ class RelayService:
             )
             return result
         if envelope.status == "passed" and result.next_role:
+            detail = self._store.get_task_detail(task_id)
+            next_role, handoff_error = self._resolve_handoff_target(
+                detail,
+                role,
+                envelope.handoff_to,
+                result.next_role,
+            )
+            if handoff_error:
+                self._block_role_with_error(
+                    task_id,
+                    role,
+                    handoff_error,
+                    output=output,
+                )
+                return result
+            if not next_role:
+                return result
             handoff = HandoffPacket(
                 from_role=role,
-                to_role=result.next_role,
+                to_role=next_role,
                 summary=envelope.summary,
                 confirmed_facts=[],
                 open_questions=envelope.open_questions,
@@ -367,10 +468,10 @@ class RelayService:
             self._store.save_handoff_packet(
                 task_id,
                 from_role=role,
-                to_role=result.next_role,
+                to_role=next_role,
                 packet=handoff,
             )
-            self._store.update_role_status(task_id, result.next_role, "queued")
+            self._store.update_role_status(task_id, next_role, "queued")
             self._events.emit(
                 task_id,
                 "handoff.created",
@@ -380,12 +481,285 @@ class RelayService:
             self._events.emit(
                 task_id,
                 "role.queued",
-                role=result.next_role,
-                payload={"role": result.next_role},
+                role=next_role,
+                payload={"role": next_role},
             )
             if dispatch_next:
-                await self.dispatch_role(task_id, result.next_role)
+                await self.dispatch_role(task_id, next_role)
         return result
+
+    async def _handle_routing_decision(
+        self,
+        task_id: int,
+        role: str,
+        output: str,
+        payload: dict[str, Any],
+        *,
+        dispatch_next: bool,
+    ):
+        result = parse_role_envelope(payload)
+        if role != "director":
+            self._block_role_with_error(
+                task_id,
+                role,
+                "routing_decision must be produced by director",
+                output=output,
+            )
+            return result
+        envelope = result.envelope
+        if envelope is None:
+            self._block_role_with_error(
+                task_id,
+                role,
+                result.error or "invalid routing_decision",
+                output=output,
+            )
+            return result
+        detail = self._store.get_task_detail(task_id)
+        decision, error = self._normalize_routing_decision(detail.task.prompt, payload)
+        if error:
+            self._block_role_with_error(task_id, role, error, output=output)
+            return result
+
+        artifact_payload = {
+            **envelope.to_json_dict(),
+            **decision,
+            "output": output,
+            "open_questions": envelope.open_questions,
+        }
+        self._store.save_artifact(
+            task_id,
+            role,
+            "routing_decision",
+            artifact_payload,
+            summary=envelope.summary,
+        )
+        self._events.emit(
+            task_id,
+            "routing.decision",
+            role=role,
+            payload=artifact_payload,
+        )
+        self._events.emit(
+            task_id,
+            "role.envelope",
+            role=role,
+            payload=artifact_payload,
+        )
+
+        route = decision["route"]
+        if route == "blocked":
+            self._store.update_role_status(task_id, role, "blocked")
+            self._store.update_task_status(task_id, "blocked")
+            self._events.emit(
+                task_id,
+                "role.status",
+                role=role,
+                payload={"status": "blocked"},
+            )
+            return result
+        if route == "waiting_user" or decision["requires_user_approval"]:
+            self._store.update_role_status(task_id, role, "waiting")
+            self._store.update_task_status(task_id, "waiting_user")
+            self._events.emit(
+                task_id,
+                "role.status",
+                role=role,
+                payload={"status": "waiting"},
+            )
+            return result
+
+        self._store.update_role_status(task_id, role, "passed")
+        self._store.update_task_status(task_id, "running")
+        self._events.emit(
+            task_id,
+            "role.status",
+            role=role,
+            payload={"status": "passed"},
+        )
+        next_role = _first_required_role_after_director(
+            decision["required_roles"],
+            route=route,
+        )
+        if next_role:
+            handoff = HandoffPacket(
+                from_role=role,
+                to_role=next_role,
+                summary=envelope.summary,
+                confirmed_facts=[],
+                open_questions=envelope.open_questions,
+                evidence_refs=envelope.evidence_refs,
+                next_action=envelope.next_action,
+            )
+            self._store.save_handoff_packet(
+                task_id,
+                from_role=role,
+                to_role=next_role,
+                packet=handoff,
+            )
+            self._store.update_role_status(task_id, next_role, "queued")
+            self._events.emit(
+                task_id,
+                "handoff.created",
+                role=role,
+                payload=handoff.to_json_dict(),
+            )
+            self._events.emit(
+                task_id,
+                "role.queued",
+                role=next_role,
+                payload={"role": next_role},
+            )
+            if dispatch_next:
+                await self.dispatch_role(task_id, next_role)
+        return result
+
+    def _normalize_routing_decision(
+        self,
+        prompt: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        missing = [
+            field
+            for field in (
+                "complexity",
+                "risk",
+                "route",
+                "required_roles",
+                "acceptance_criteria",
+                "stop_conditions",
+                "requires_user_approval",
+            )
+            if field not in payload
+        ]
+        if missing:
+            return {}, f"missing routing_decision fields: {', '.join(missing)}"
+        route = str(payload.get("route") or "").strip()
+        if route not in _ROUTING_DECISION_ROUTES:
+            return {}, f"invalid routing route: {route}"
+        risk = str(payload.get("risk") or "").strip().lower()
+        if risk not in _ROUTING_DECISION_RISKS:
+            return {}, f"invalid routing risk: {risk}"
+        required_roles = _clean_required_roles(payload.get("required_roles"))
+        if not required_roles:
+            return {}, "routing_decision requires at least one role"
+        if route == "director_only" and required_roles != ["director"]:
+            return {}, "director_only route may only require director"
+        if route == "director_only" and _user_requested_full_relay(prompt):
+            return {}, "user requested full relay; director_only is not allowed"
+        if route == "director_only" and _prompt_looks_high_risk(prompt):
+            return {}, "high risk task cannot use director_only"
+        return {
+            "complexity": str(payload.get("complexity") or "").strip(),
+            "risk": risk,
+            "route": route,
+            "required_roles": required_roles,
+            "acceptance_criteria": _clean_string_list(
+                payload.get("acceptance_criteria")
+            ),
+            "stop_conditions": _clean_string_list(payload.get("stop_conditions")),
+            "requires_user_approval": bool(payload.get("requires_user_approval")),
+        }, ""
+
+    def _final_summary_completion_error(self, detail: RelayTaskDetail) -> str:
+        decision = detail.routing_decision or {}
+        route = str(decision.get("route") or "")
+        if not route:
+            return "missing routing_decision before final_summary"
+        if route == "director_only":
+            return ""
+        required_roles = _clean_required_roles(decision.get("required_roles"))
+        completed_roles = {
+            str(job.role)
+            for job in detail.role_jobs
+            if str(job.status) in {"passed", "completed"}
+        }
+        missing_roles = [
+            role
+            for role in required_roles
+            if role != "director" and role not in completed_roles
+        ]
+        if missing_roles:
+            labels = ", ".join(RELAY_ROLE_DISPLAY_NAMES.get(role, role) for role in missing_roles)
+            return f"final_summary before required relay roles completed: {labels}"
+        return ""
+
+    def _resolve_handoff_target(
+        self,
+        detail: RelayTaskDetail,
+        role: str,
+        explicit_handoff_to: str,
+        proposed_next_role: str | None,
+    ) -> tuple[str | None, str]:
+        decision = detail.routing_decision or {}
+        if not decision:
+            return None, "missing routing_decision before role handoff"
+        required_roles = _clean_required_roles(decision.get("required_roles"))
+        if role != "director" and role not in required_roles:
+            return (
+                None,
+                f"{RELAY_ROLE_DISPLAY_NAMES.get(role, role)} is not in routing_decision.required_roles",
+            )
+        if not proposed_next_role:
+            return None, ""
+        explicit = str(explicit_handoff_to or "").strip()
+        proposed = str(proposed_next_role or "").strip()
+        route = str(decision.get("route") or "")
+        completed_roles = _completed_required_roles(detail, current_role=role)
+        next_required = _next_uncompleted_required_role(
+            required_roles,
+            completed_roles=completed_roles,
+            route=route,
+        )
+        if proposed == "director":
+            if next_required:
+                return (
+                    None,
+                    "handoff_to 总工程师 before required role "
+                    f"{RELAY_ROLE_DISPLAY_NAMES.get(next_required, next_required)} completed",
+                )
+            return "director", ""
+        if proposed not in required_roles:
+            if not explicit and not next_required:
+                return "director", ""
+            return (
+                None,
+                f"handoff_to {RELAY_ROLE_DISPLAY_NAMES.get(proposed, proposed)} is not in routing_decision.required_roles",
+            )
+        if next_required and proposed != next_required:
+            return (
+                None,
+                f"handoff_to {RELAY_ROLE_DISPLAY_NAMES.get(proposed, proposed)} before required role "
+                f"{RELAY_ROLE_DISPLAY_NAMES.get(next_required, next_required)} completed",
+            )
+        return proposed, ""
+
+    def _block_role_with_error(
+        self,
+        task_id: int,
+        role: str,
+        reason: str,
+        *,
+        output: str = "",
+    ) -> None:
+        self._store.save_artifact(
+            task_id,
+            role,
+            "role_error",
+            {
+                "error": reason,
+                "output": output,
+            },
+            summary=reason,
+        )
+        self._store.update_role_status(task_id, role, "blocked")
+        self._store.update_task_status(task_id, "blocked")
+        self._events.emit(
+            task_id,
+            "role.status",
+            role=role,
+            payload={"status": "blocked", "error": reason},
+        )
 
     async def handle_role_completion_event(
         self,
@@ -564,7 +938,7 @@ class RelayService:
             return None
         if not self._is_runtime_completion(runtime_event):
             return None
-        text = _runtime_event_text(runtime_event)
+        text = self._runtime_completion_text(runtime_event)
         if not text.strip():
             return None
         try:
@@ -691,10 +1065,37 @@ class RelayService:
 
     @staticmethod
     def _is_runtime_completion(runtime_event: Any) -> bool:
+        if _is_turn_completed_activity(runtime_event):
+            return True
         return _runtime_event_type(runtime_event) in {
             "model.message.completed",
             "model_message_completed",
         }
+
+    def _runtime_completion_text(self, runtime_event: Any) -> str:
+        text = _runtime_event_text(runtime_event)
+        if text.strip():
+            return text
+        if not _is_turn_completed_activity(runtime_event):
+            return ""
+        agent_run_id = getattr(runtime_event, "agent_run_id", None)
+        if agent_run_id is None:
+            return ""
+        event_id = int(getattr(runtime_event, "id", 0) or 0)
+        runtime_store = RuntimeEventStore(self._store._ledger._conn)
+        if event_id > 0:
+            events = runtime_store.list_by_agent_run_before(
+                int(agent_run_id),
+                before_id=event_id,
+                limit=5000,
+            )
+        else:
+            events = runtime_store.list_by_agent_run_tail(int(agent_run_id), limit=5000)
+        return "".join(
+            _runtime_event_text(event)
+            for event in events
+            if _is_runtime_model_text_delta(event)
+        )
 
 
 def _is_runtime_delta(runtime_event: Any) -> bool:
@@ -706,6 +1107,103 @@ def _is_runtime_delta(runtime_event: Any) -> bool:
         "model_reasoning_delta",
         "command_output_delta",
     }
+
+
+def _clean_string_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(value).strip() for value in values if str(value).strip()]
+
+
+def _clean_required_roles(values: Any) -> list[str]:
+    roles = []
+    for value in _clean_string_list(values):
+        if value not in RELAY_ROLE_IDS:
+            continue
+        if value not in roles:
+            roles.append(value)
+    return roles
+
+
+def _first_required_role_after_director(
+    required_roles: list[str],
+    *,
+    route: str,
+) -> str | None:
+    if route == "audit_first" and "auditor" in required_roles:
+        return "auditor"
+    for relay_role in RELAY_ROLE_IDS:
+        if relay_role != "director" and relay_role in required_roles:
+            return relay_role
+    return None
+
+
+def _ordered_required_roles(required_roles: list[str], *, route: str) -> list[str]:
+    ordered = [role for role in RELAY_ROLE_IDS if role in required_roles]
+    if route == "audit_first" and "auditor" in ordered:
+        ordered = [role for role in ordered if role != "auditor"]
+        insert_at = 1 if "director" in ordered else 0
+        ordered.insert(insert_at, "auditor")
+    return ordered
+
+
+def _completed_required_roles(
+    detail: RelayTaskDetail,
+    *,
+    current_role: str,
+) -> set[str]:
+    completed = {
+        str(job.role)
+        for job in detail.role_jobs
+        if str(job.status) in {"passed", "completed"}
+    }
+    if current_role:
+        completed.add(current_role)
+    return completed
+
+
+def _next_uncompleted_required_role(
+    required_roles: list[str],
+    *,
+    completed_roles: set[str],
+    route: str,
+) -> str | None:
+    for role in _ordered_required_roles(required_roles, route=route):
+        if role == "director":
+            continue
+        if role not in completed_roles:
+            return role
+    return None
+
+
+def _user_requested_full_relay(prompt: str) -> bool:
+    lowered = prompt.lower()
+    return any(keyword.lower() in lowered for keyword in _FULL_RELAY_INTENT_KEYWORDS)
+
+
+def _prompt_looks_high_risk(prompt: str) -> bool:
+    lowered = prompt.lower()
+    return any(keyword.lower() in lowered for keyword in _HIGH_RISK_INTENT_KEYWORDS)
+
+
+def _is_runtime_model_text_delta(runtime_event: Any) -> bool:
+    return _runtime_event_type(runtime_event) in {
+        "model.text.delta",
+        "model_text_delta",
+    }
+
+
+def _is_turn_completed_activity(runtime_event: Any) -> bool:
+    if _runtime_event_type(runtime_event) not in {
+        "agent.run.activity",
+        "agent_run_activity",
+    }:
+        return False
+    payload = dict(getattr(runtime_event, "payload", {}) or {})
+    return (
+        str(payload.get("action") or "").strip() == "turn_completed"
+        and str(payload.get("status") or "completed").strip() == "completed"
+    )
 
 
 def _runtime_event_type(runtime_event: Any) -> str:

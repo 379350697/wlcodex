@@ -69,3 +69,27 @@ def test_latest_user_input_wins_over_stale_handoff_summaries() -> None:
     assert packet.handoff_summaries == ["Old permission: deploy automatically"]
     assert "Latest user input has priority" in " ".join(packet.constraints)
     assert "No role inherits old permissions" in " ".join(packet.constraints)
+
+
+def test_director_first_context_requires_routing_decision() -> None:
+    board = build_relay_board(
+        _task(),
+        latest_user_input="测试接力流程：删除一个文件",
+    )
+
+    packet = build_role_context_packet(
+        task=_task(),
+        role="director",
+        board=board,
+        handoffs=[],
+        artifacts=[],
+    )
+
+    constraints = " ".join(packet.constraints)
+    assert "Director first action must be a routing_decision" in constraints
+    assert "Do not inspect, edit, delete, test, commit, or deploy" in constraints
+    assert packet.expected_output_envelope["artifact_type"] == "routing_decision"
+    assert packet.expected_output_envelope["route"] == (
+        "director_only|core_relay|full_relay|audit_first|waiting_user|blocked"
+    )
+    assert packet.expected_output_envelope["required_roles"] == ["director"]

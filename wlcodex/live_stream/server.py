@@ -3301,6 +3301,7 @@ def _relay_config_page(
   </main>
   <script>
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
+    const RELAY_HISTORY_HREF = {json.dumps(back_href)};
     const statusNode = document.getElementById("relay-config-status");
     document.getElementById("save-relay-config")?.addEventListener("click", async () => {{
       const assignments = {{}};
@@ -3318,6 +3319,7 @@ def _relay_config_page(
         return;
       }}
       statusNode.textContent = "配置已保存";
+      window.location.href = RELAY_HISTORY_HREF;
     }});
   </script>
 </body>
@@ -3550,6 +3552,26 @@ def _relay_role_status_label(status: str) -> str:
     }.get(status, status or "未知")
 
 
+def _relay_routing_route_label(route: str) -> str:
+    return {
+        "director_only": "总工程师直接完成",
+        "core_relay": "核心接力",
+        "full_relay": "完整五角色接力",
+        "audit_first": "审计优先",
+        "waiting_user": "等待用户确认",
+        "blocked": "已阻塞",
+    }.get(route, route or "等待总工程师判断")
+
+
+def _relay_routing_risk_label(risk: str) -> str:
+    return {
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "critical": "关键",
+    }.get(risk, risk or "待判断")
+
+
 def _relay_phase_label(phase: str) -> str:
     return {
         "director": "总工程师接收",
@@ -3567,11 +3589,189 @@ def _relay_activity_label(value: str) -> str:
     return f"最近活动 {value}"
 
 
+def _relay_current_dispatch_label(board: Any) -> str:
+    current = str(
+        getattr(board, "current_dispatch", "") or getattr(board, "phase", "") or "director"
+    )
+    return _relay_role_label(current) if current in RELAY_ROLE_IDS else _relay_phase_label(current)
+
+
+def _relay_role_progress_html(role_jobs: list[Any]) -> str:
+    jobs_by_role = {str(job.role): job for job in role_jobs}
+    rows = []
+    for role in RELAY_ROLE_IDS:
+        status = str(getattr(jobs_by_role.get(role), "status", "idle") or "idle")
+        rows.append(
+            f"""
+            <div class="relay-progress-step" data-progress-role="{escape(role)}" data-progress-status="{escape(status)}">
+              <span class="relay-progress-dot" aria-hidden="true"></span>
+              <div>
+                <strong>{escape(_relay_role_label(role))}</strong>
+                <span class="relay-progress-status">{escape(_relay_role_status_label(status))}</span>
+              </div>
+            </div>
+            """
+        )
+    return "\n".join(rows)
+
+
+def _relay_initial_activity_html(detail: Any) -> str:
+    items = [f"任务已创建，等待总工程师接收：{detail.task.title}"]
+    decision = getattr(detail, "routing_decision", None) or {}
+    if decision:
+        items.append(
+            "总工程师调度决策："
+            f"{_relay_routing_route_label(str(decision.get('route') or ''))}"
+            f" · 风险{_relay_routing_risk_label(str(decision.get('risk') or ''))}"
+        )
+    for job in detail.role_jobs:
+        status = str(job.status or "idle")
+        if status == "idle":
+            continue
+        provider = _native_provider_display_name(str(job.provider or detail.task.provider))
+        items.append(f"{job.display_name} · {_relay_role_status_label(status)} · {provider}")
+        if job.latest_handoff_summary:
+            items.append(f"{job.display_name}交接摘要：{job.latest_handoff_summary}")
+        if job.fallback_reason:
+            items.append(f"{job.display_name}调度降级：{job.fallback_reason}")
+        if getattr(job, "error_message", ""):
+            items.append(f"{job.display_name}执行问题：{job.error_message}")
+    if getattr(detail, "latest_handoff", None):
+        handoff = detail.latest_handoff
+        items.append(
+            f"{_relay_role_label(handoff.from_role)} 已交接给 "
+            f"{_relay_role_label(handoff.to_role)}：{handoff.summary}"
+        )
+    return "\n".join(
+        '<li><span class="relay-activity-dot" aria-hidden="true"></span>'
+        f"<span>{escape(item)}</span></li>"
+        for item in items
+    )
+
+
+def _relay_routing_decision_html(detail: Any) -> str:
+    decision = getattr(detail, "routing_decision", None) or {}
+    if not decision:
+        decision = _relay_missing_routing_decision(detail)
+    required_roles = [
+        _relay_role_label(str(role))
+        for role in decision.get("required_roles", [])
+        if str(role)
+    ]
+    acceptance = [
+        str(item)
+        for item in decision.get("acceptance_criteria", [])
+        if str(item).strip()
+    ]
+    stop_conditions = [
+        str(item)
+        for item in decision.get("stop_conditions", [])
+        if str(item).strip()
+    ]
+    required_text = "、".join(required_roles) or "等待总工程师判断"
+    acceptance_text = "、".join(acceptance) or "等待总工程师给出验收依据"
+    stop_text = "、".join(stop_conditions) or "暂无额外停止条件"
+    approval_text = "需要用户确认" if bool(decision.get("requires_user_approval")) else "无需额外确认"
+    route = str(decision.get("route") or "")
+    summary = str(decision.get("summary") or "等待总工程师接收任务并形成调度决策。")
+    return f"""
+    <section class="relay-routing" aria-label="调度决策" data-routing-card>
+      <div class="relay-board-head">
+        <div>
+          <h2>调度决策</h2>
+          <p class="relay-muted" data-routing-summary>{escape(summary)}</p>
+        </div>
+        <span class="relay-status-badge" data-routing-route>{escape(_relay_routing_route_label(route))}</span>
+      </div>
+      <div class="relay-board-grid">
+        <div class="relay-board-item"><strong>任务难度</strong><p data-routing-complexity>{escape(str(decision.get("complexity") or "待判断"))}</p></div>
+        <div class="relay-board-item"><strong>风险等级</strong><p data-routing-risk>{escape(_relay_routing_risk_label(str(decision.get("risk") or "")))}</p></div>
+        <div class="relay-board-item"><strong>执行路径</strong><p data-routing-path>{escape(_relay_routing_route_label(route))}</p></div>
+        <div class="relay-board-item"><strong>本轮角色</strong><p data-routing-roles>{escape(required_text)}</p></div>
+        <div class="relay-board-item"><strong>验收依据</strong><p data-routing-acceptance>{escape(acceptance_text)}</p></div>
+        <div class="relay-board-item"><strong>停止条件</strong><p data-routing-stops>{escape(stop_text)} · {escape(approval_text)}</p></div>
+      </div>
+    </section>
+    """
+
+
+def _relay_missing_routing_decision(detail: Any) -> dict[str, Any]:
+    task_status = str(getattr(getattr(detail, "task", None), "status", "") or "")
+    director_error = next(
+        (
+            str(getattr(job, "error_message", "") or "").strip()
+            for job in getattr(detail, "role_jobs", [])
+            if str(getattr(job, "role", "") or "") == "director"
+            and str(getattr(job, "error_message", "") or "").strip()
+        ),
+        "",
+    )
+    if task_status == "blocked":
+        summary = "调度决策未生成。"
+        if director_error:
+            summary = f"调度决策未生成。总工程师输出协议错误：{director_error}"
+        return {
+            "summary": summary,
+            "complexity": "未生成",
+            "risk": "high",
+            "route": "blocked",
+            "required_roles": [],
+            "acceptance_criteria": [],
+            "stop_conditions": ["需要重新发起或补充后生成调度决策"],
+            "requires_user_approval": True,
+        }
+    if task_status == "waiting_user":
+        return {
+            "summary": "等待用户补充后形成调度决策。",
+            "complexity": "待判断",
+            "risk": "",
+            "route": "waiting_user",
+            "required_roles": [],
+            "acceptance_criteria": [],
+            "stop_conditions": [],
+            "requires_user_approval": True,
+        }
+    return {
+        "summary": "等待总工程师接收任务并形成调度决策。",
+        "complexity": "待判断",
+        "risk": "",
+        "route": "",
+        "required_roles": [],
+        "acceptance_criteria": [],
+        "stop_conditions": [],
+        "requires_user_approval": False,
+    }
+
+
 def _relay_task_detail_page(detail: Any, *, access_token: str = "") -> str:
     token_suffix = _token_suffix(access_token)
     role_panels = "\n".join(_relay_role_panel_html(job) for job in detail.role_jobs)
+    progress_html = _relay_role_progress_html(detail.role_jobs)
+    activity_html = _relay_initial_activity_html(detail)
+    routing_html = _relay_routing_decision_html(detail)
     board = detail.board
     task = detail.task
+    back_href = _relay_workspace_href(str(task.workspace or ""), access_token)
+    task_status_label = _relay_task_status_label(str(task.status or ""))
+    phase_label = _relay_phase_label(str(board.phase or task.phase or "director"))
+    current_dispatch_label = _relay_current_dispatch_label(board)
+    director_summary = next(
+        (
+            str(job.output).strip()
+            for job in detail.role_jobs
+            if str(job.role) == "director" and str(job.output).strip()
+        ),
+        "",
+    )
+    if not director_summary:
+        director_summary = next(
+            (
+                f"执行问题：{str(job.error_message).strip()}"
+                for job in detail.role_jobs
+                if str(job.role) == "director" and str(getattr(job, "error_message", "")).strip()
+            ),
+            "等待总工程师接收并形成决策摘要",
+        )
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -3585,85 +3785,282 @@ def _relay_task_detail_page(detail: Any, *, access_token: str = "") -> str:
     header {{ position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 48px 1fr auto; gap: 12px; align-items: center; padding: 12px 18px; background: rgba(5,5,8,.88); border-bottom: 1px solid var(--border-header); }}
     h1, h2, h3 {{ margin: 0; letter-spacing: 0; }}
     h1 {{ font-size: 20px; overflow-wrap: anywhere; }}
-    main {{ width: min(1220px, 100%); margin: 0 auto; padding: 18px; box-sizing: border-box; display: grid; gap: 14px; padding-bottom: 112px; }}
-    .relay-board, .role-lane, .relay-composer {{ border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 14px; min-width: 0; overflow-wrap: anywhere; }}
+    main {{ width: min(1220px, 100%); margin: 0 auto; padding: 18px; box-sizing: border-box; display: grid; gap: 14px; padding-bottom: 132px; }}
+    .relay-board, .relay-routing, .role-lane, .relay-composer, .relay-activity {{ border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 14px; min-width: 0; overflow-wrap: anywhere; }}
+    .relay-page-status {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
+    .relay-status-badge {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 9px; color: var(--text-primary); font-size: 12px; background: rgba(255,255,255,.04); }}
+    .relay-board-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: start; flex-wrap: wrap; margin-bottom: 12px; }}
     .relay-board-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
-    .relay-board-grid div {{ min-width: 0; }}
+    .relay-board-item {{ border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px; min-width: 0; background: rgba(255,255,255,.025); }}
+    .relay-board-item strong {{ display: block; margin-bottom: 6px; font-size: 13px; color: var(--text-primary); }}
+    .relay-board-item p {{ margin: 0; color: var(--text-muted); line-height: 1.55; }}
+    .relay-progress {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }}
+    .relay-progress-step {{ display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 9px; min-width: 0; }}
+    .relay-progress-dot {{ width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted); margin-top: 4px; }}
+    .relay-progress-step[data-progress-status="queued"] .relay-progress-dot,
+    .relay-progress-step[data-progress-status="streaming"] .relay-progress-dot {{ background: var(--color-link); box-shadow: 0 0 0 4px rgba(88,166,255,.12); }}
+    .relay-progress-step[data-progress-status="passed"] .relay-progress-dot {{ background: #56d364; }}
+    .relay-progress-step[data-progress-status="blocked"] .relay-progress-dot,
+    .relay-progress-step[data-progress-status="failed"] .relay-progress-dot {{ background: #ff7b72; }}
+    .relay-progress-step strong, .relay-progress-step span {{ display: block; min-width: 0; overflow-wrap: anywhere; }}
+    .relay-progress-step span {{ color: var(--text-muted); font-size: 12px; margin-top: 2px; }}
     .relay-muted {{ color: var(--text-muted); font-size: 13px; }}
     .role-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: stretch; }}
     .role-lane[data-role="director"] {{ grid-column: 1 / -1; }}
     .role-lane {{ display: grid; gap: 10px; }}
     .role-head {{ display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }}
-    .role-status {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; }}
-    .role-output {{ min-height: 92px; white-space: pre-wrap; border-top: 1px solid var(--border-subtle); padding-top: 10px; }}
+    .role-meta {{ display: flex; gap: 6px; flex-wrap: wrap; }}
+    .role-status, .role-provider {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; }}
+    .role-status[data-status="streaming"], .role-status[data-status="queued"] {{ border-color: var(--color-link); color: var(--text-primary); background: rgba(88,166,255,.1); }}
+    .role-output {{ min-height: 116px; max-height: 360px; overflow: auto; white-space: pre-wrap; border-top: 1px solid var(--border-subtle); padding-top: 10px; line-height: 1.55; }}
+    .role-output.is-idle {{ color: var(--text-muted); }}
+    .role-notes {{ display: grid; gap: 6px; border-top: 1px solid var(--border-subtle); padding-top: 10px; }}
+    .role-link {{ color: var(--color-link); text-decoration: none; }}
+    .relay-activity {{ display: grid; gap: 10px; }}
+    .relay-activity-log {{ list-style: none; display: grid; gap: 8px; margin: 0; padding: 0; }}
+    .relay-activity-log li {{ display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 8px; align-items: start; color: var(--text-muted); line-height: 1.45; }}
+    .relay-activity-dot {{ width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--color-link); opacity: .85; }}
     .relay-composer {{ position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(760px, calc(100% - 24px)); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }}
     .relay-composer textarea {{ min-height: 44px; max-height: 120px; resize: vertical; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px; background: rgba(255,255,255,.04); color: var(--text-primary); }}
     .relay-composer button, .relay-action {{ min-height: 42px; border-radius: 6px; border: 1px solid var(--color-link); background: transparent; color: var(--text-primary); padding: 0 12px; }}
-    @media (max-width: 760px) {{ .role-grid, .relay-board-grid, header {{ grid-template-columns: 1fr; }} .role-lane[data-role="director"] {{ grid-column: auto; }} main {{ padding: 12px; padding-bottom: 132px; }} .relay-composer {{ grid-template-columns: 1fr; }} }}
+    @media (max-width: 900px) {{ .relay-progress {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
+    @media (max-width: 760px) {{ .role-grid, .relay-board-grid, header {{ grid-template-columns: 1fr; }} .role-lane[data-role="director"] {{ grid-column: auto; }} main {{ padding: 12px; padding-bottom: 152px; }} .relay-composer {{ grid-template-columns: 1fr; }} .relay-progress {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
 <body>
   <header>
-    <a class="circle" href="/native/workflows/relay{token_suffix}" aria-label="back">‹</a>
+    <a class="circle" href="{escape(back_href)}" aria-label="back">‹</a>
     <div>
       <h1>{escape(task.title)}</h1>
-      <div class="relay-muted">{escape(task.workspace)} · {escape(task.status)} · {escape(task.provider)}</div>
+      <div class="relay-page-status">
+        <span class="relay-muted">{escape(task.workspace)}</span>
+        <span class="relay-status-badge" data-task-status>{escape(task_status_label)}</span>
+        <span class="relay-muted">{escape(_native_provider_display_name(str(task.provider)))}</span>
+      </div>
     </div>
-    <button class="relay-action" data-interrupt-url="/api/relay/tasks/{task.id}/interrupt">interrupt</button>
+    <button class="relay-action" data-interrupt-url="/api/relay/tasks/{task.id}/interrupt">中断任务</button>
   </header>
   <main>
-    <section class="relay-board">
-      <h2>RelayBoard</h2>
+    {routing_html}
+    <section class="relay-board" aria-label="任务进度">
+      <div class="relay-board-head">
+        <div>
+          <h2>任务进度</h2>
+          <p class="relay-muted">验收面板会随着总工程师调度和角色交接实时更新。</p>
+        </div>
+        <span class="relay-status-badge">{escape(task_status_label)}</span>
+      </div>
       <div class="relay-board-grid">
-        <div><strong>current goal</strong><p>{escape(board.current_goal)}</p></div>
-        <div><strong>phase</strong><p>{escape(board.phase)}</p></div>
-        <div><strong>latest user input</strong><p>{escape(board.latest_user_input)}</p></div>
-        <div><strong>next step</strong><p>{escape(board.next_step)}</p></div>
+        <div class="relay-board-item"><strong>任务目标</strong><p data-board-current-goal>{escape(board.current_goal)}</p></div>
+        <div class="relay-board-item"><strong>当前阶段</strong><p data-board-phase>{escape(phase_label)}</p></div>
+        <div class="relay-board-item"><strong>当前负责角色</strong><p data-board-dispatch>{escape(current_dispatch_label)}</p></div>
+        <div class="relay-board-item"><strong>下一步</strong><p data-board-next-step>{escape(board.next_step or "等待总工程师拆解任务")}</p></div>
+        <div class="relay-board-item"><strong>最近用户补充</strong><p data-board-latest-user>{escape(board.latest_user_input or "暂无补充")}</p></div>
+        <div class="relay-board-item"><strong>总工程师决策</strong><p data-board-director-summary>{escape(director_summary)}</p></div>
+      </div>
+      <div class="relay-progress" aria-label="五角色进度">
+        {progress_html}
       </div>
     </section>
     <section class="role-grid" data-task-id="{task.id}">
       {role_panels}
     </section>
+    <section class="relay-activity" aria-label="推进日志">
+      <h2>推进日志</h2>
+      <ol class="relay-activity-log" data-activity-log>
+        {activity_html}
+      </ol>
+    </section>
   </main>
   <form class="relay-composer" method="post" action="/api/relay/tasks/{task.id}/message">
-    <textarea name="text" placeholder="发送给总工程师"></textarea>
-    <button type="submit">send</button>
+    <textarea name="text" placeholder="继续补充给总工程师"></textarea>
+    <button type="submit">发送补充</button>
   </form>
   <script>
     const TASK_ID = {json.dumps(str(task.id))};
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
+    const ROLE_LABELS = {json.dumps({role: _relay_role_label(role) for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
+    const STATUS_LABELS = {json.dumps({
+        "idle": "未调度",
+        "queued": "排队中",
+        "streaming": "执行中",
+        "waiting": "等待中",
+        "passed": "已完成",
+        "failed": "失败",
+        "blocked": "阻塞",
+        "interrupted": "已中断",
+        "completed": "已完成",
+    }, ensure_ascii=False)};
+    const TASK_STATUS_LABELS = {json.dumps({
+        "queued": "排队中",
+        "running": "进行中",
+        "waiting_user": "等待你",
+        "blocked": "已阻塞",
+        "failed": "失败",
+        "completed": "已完成",
+        "interrupted": "已中断",
+    }, ensure_ascii=False)};
     const roleOutputs = {{}};
     document.querySelectorAll("[data-role-output]").forEach((node) => {{
       roleOutputs[node.dataset.roleOutput] = node;
     }});
+    function labelForRole(role) {{
+      return ROLE_LABELS[role] || role || "角色";
+    }}
+    function labelForStatus(status) {{
+      return STATUS_LABELS[status] || status || "未知";
+    }}
+    function setRoleStatus(role, status) {{
+      const lane = document.querySelector(`[data-role="${{role}}"]`);
+      const statusNode = lane?.querySelector(".role-status");
+      if (statusNode && status) {{
+        statusNode.textContent = labelForStatus(status);
+        statusNode.dataset.status = status;
+      }}
+      const progress = document.querySelector(`[data-progress-role="${{role}}"]`);
+      if (progress && status) {{
+        progress.dataset.progressStatus = status;
+        const textNode = progress.querySelector(".relay-progress-status");
+        if (textNode) textNode.textContent = labelForStatus(status);
+      }}
+      const output = roleOutputs[role];
+      if (output && status && status !== "idle") output.classList.remove("is-idle");
+    }}
+    function appendActivity(text) {{
+      const log = document.querySelector("[data-activity-log]");
+      if (!log || !text) return;
+      const item = document.createElement("li");
+      item.innerHTML = '<span class="relay-activity-dot" aria-hidden="true"></span><span></span>';
+      item.querySelector("span:last-child").textContent = text;
+      log.prepend(item);
+    }}
+    function updateTaskStatus(status) {{
+      if (!status) return;
+      document.querySelectorAll("[data-task-status]").forEach((node) => {{
+        node.textContent = TASK_STATUS_LABELS[status] || status;
+      }});
+    }}
+    function updateNativeLink(role, provider, nativeSessionId) {{
+      const lane = document.querySelector(`[data-role="${{role}}"]`);
+      const linkWrap = lane?.querySelector("[data-native-link]");
+      if (!linkWrap || !provider || !nativeSessionId) return;
+      const separator = TOKEN_SUFFIX ? `&${{TOKEN_SUFFIX.slice(1)}}` : "";
+      linkWrap.innerHTML = `<a class="role-link" href="/native/${{encodeURIComponent(provider)}}?native_thread_id=${{encodeURIComponent(nativeSessionId)}}${{separator}}">打开原生会话</a>`;
+    }}
     const source = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{TOKEN_SUFFIX}}`);
+    source.addEventListener("role.queued", (event) => {{
+      const payload = JSON.parse(event.data || "{{}}");
+      setRoleStatus(payload.role, "queued");
+      appendActivity(`${{labelForRole(payload.role)}} 已进入队列，等待启动。`);
+    }});
+    source.addEventListener("role.streaming", (event) => {{
+      const payload = JSON.parse(event.data || "{{}}");
+      setRoleStatus(payload.role, "streaming");
+      updateNativeLink(payload.role, payload.provider, payload.native_session_id);
+      appendActivity(`${{labelForRole(payload.role)}} 开始执行。`);
+    }});
+    source.addEventListener("dispatch.verified", (event) => {{
+      const payload = JSON.parse(event.data || "{{}}");
+      setRoleStatus(payload.role, "streaming");
+      updateNativeLink(payload.role, payload.provider, payload.native_session_id);
+      appendActivity(`${{labelForRole(payload.role)}} 的原生会话已启动。`);
+    }});
+    source.addEventListener("dispatch.fallback", (event) => {{
+      const payload = JSON.parse(event.data || "{{}}");
+      appendActivity(`${{labelForRole(payload.role)}} 调度降级：${{payload.reason || "使用可用 provider 继续"}}`);
+    }});
     source.addEventListener("role.output_delta", (event) => {{
       const payload = JSON.parse(event.data || "{{}}");
       const output = roleOutputs[payload.role];
-      if (output) output.textContent += payload.delta || payload.text || "";
+      if (output) {{
+        output.classList.remove("is-idle");
+        output.textContent += payload.delta || payload.text || "";
+        output.scrollTop = output.scrollHeight;
+      }}
+      setRoleStatus(payload.role, "streaming");
+    }});
+    source.addEventListener("routing.decision", (event) => {{
+      const payload = JSON.parse(event.data || "{{}}");
+      const routeLabels = {{
+        director_only: "总工程师直接完成",
+        core_relay: "核心接力",
+        full_relay: "完整五角色接力",
+        audit_first: "审计优先",
+        waiting_user: "等待用户确认",
+        blocked: "已阻塞",
+      }};
+      const riskLabels = {{ low: "低", medium: "中", high: "高", critical: "关键" }};
+      const routeText = routeLabels[payload.route] || payload.route || "等待总工程师判断";
+      const stops = (payload.stop_conditions || []).join("、") || "暂无额外停止条件";
+      document.querySelector("[data-routing-summary]").textContent = payload.summary || "总工程师已形成调度决策。";
+      document.querySelector("[data-routing-route]").textContent = routeText;
+      document.querySelector("[data-routing-complexity]").textContent = payload.complexity || "待判断";
+      document.querySelector("[data-routing-risk]").textContent = riskLabels[payload.risk] || payload.risk || "待判断";
+      document.querySelector("[data-routing-path]").textContent = routeText;
+      document.querySelector("[data-routing-roles]").textContent = (payload.required_roles || []).map(labelForRole).join("、") || "等待总工程师判断";
+      document.querySelector("[data-routing-acceptance]").textContent = (payload.acceptance_criteria || []).join("、") || "等待总工程师给出验收依据";
+      document.querySelector("[data-routing-stops]").textContent = `${{stops}} · ${{payload.requires_user_approval ? "需要用户确认" : "无需额外确认"}}`;
+      appendActivity(`总工程师调度决策：${{routeText}}。`);
+    }});
+    source.addEventListener("role.envelope", (event) => {{
+      const payload = JSON.parse(event.data || "{{}}");
+      const envelope = payload.envelope || payload;
+      const role = payload.role || envelope.role;
+      if (envelope.summary) {{
+        appendActivity(`${{labelForRole(role)}} 产出摘要：${{envelope.summary}}`);
+        if (role === "director") {{
+          const summary = document.querySelector("[data-board-director-summary]");
+          if (summary) summary.textContent = envelope.summary;
+        }}
+      }}
+      if (envelope.next_action) {{
+        const next = document.querySelector("[data-board-next-step]");
+        if (next) next.textContent = envelope.next_action;
+      }}
+      if (envelope.status) setRoleStatus(role, envelope.status);
+    }});
+    source.addEventListener("handoff.created", (event) => {{
+      const payload = JSON.parse(event.data || "{{}}");
+      const toRole = payload.to_role || payload.handoff_to;
+      if (toRole) setRoleStatus(toRole, "queued");
+      appendActivity(`${{labelForRole(payload.from_role)}} 已交接给 ${{labelForRole(toRole)}}：${{payload.summary || "等待下一角色处理"}}`);
     }});
     source.addEventListener("role.status", (event) => {{
       const payload = JSON.parse(event.data || "{{}}");
-      const lane = document.querySelector(`[data-role="${{payload.role}}"]`);
-      const status = lane?.querySelector(".role-status");
-      if (status && payload.status) status.textContent = payload.status;
+      setRoleStatus(payload.role, payload.status);
+      appendActivity(`${{labelForRole(payload.role)}} 状态更新为 ${{labelForStatus(payload.status)}}。`);
+    }});
+    source.addEventListener("task.completed", () => {{
+      updateTaskStatus("completed");
+      appendActivity("任务已完成，可以继续补充给总工程师进行追问或追加验收。");
+    }});
+    source.addEventListener("task.interrupted", () => {{
+      updateTaskStatus("interrupted");
+      appendActivity("任务已中断。");
     }});
     document.querySelector(".relay-composer")?.addEventListener("submit", async (event) => {{
       event.preventDefault();
       const form = event.currentTarget;
       const data = Object.fromEntries(new FormData(form).entries());
       if (!data.text) return;
-      await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/message${{TOKEN_SUFFIX}}`, {{
+      appendActivity("你已补充需求，已发送给总工程师。");
+      const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/message${{TOKEN_SUFFIX}}`, {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
         body: JSON.stringify(data),
       }});
+      if (!response.ok) appendActivity("补充发送失败，请稍后重试。");
       form.reset();
     }});
     document.querySelector("[data-interrupt-url]")?.addEventListener("click", async (event) => {{
       const target = event.currentTarget;
-      await fetch(`${{target.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{ method: "POST" }});
-      window.location.reload();
+      const response = await fetch(`${{target.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{ method: "POST" }});
+      if (response.ok) {{
+        updateTaskStatus("interrupted");
+        appendActivity("你已中断任务。");
+      }} else {{
+        appendActivity("中断失败，请稍后重试。");
+      }}
     }});
   </script>
 </body>
@@ -3672,29 +4069,49 @@ def _relay_task_detail_page(detail: Any, *, access_token: str = "") -> str:
 
 def _relay_role_panel_html(job: Any) -> str:
     link = (
-        f'<a href="{escape(_native_session_path(job.provider, job.native_session_id))}">open native session</a>'
+        f'<a class="role-link" href="{escape(_native_session_path(job.provider, job.native_session_id))}">打开原生会话</a>'
         if job.provider and job.native_session_id
-        else '<span class="relay-muted">未启动 native session</span>'
+        else '<span class="relay-muted">原生会话未启动</span>'
     )
     fallback = (
-        f'<div class="relay-muted">fallback: {escape(job.fallback_reason)}</div>'
+        f'<div class="relay-muted">调度降级：{escape(job.fallback_reason)}</div>'
         if job.fallback_reason
         else ""
     )
-    questions = ", ".join(str(item) for item in job.open_questions) or "无"
+    error_message = str(getattr(job, "error_message", "") or "")
+    error_html = (
+        f'<div class="relay-muted relay-error">执行问题：{escape(error_message)}</div>'
+        if error_message
+        else ""
+    )
+    questions = "、".join(str(item) for item in job.open_questions) or "无"
+    status = str(job.status or "idle")
+    provider = _native_provider_display_name(str(job.provider or ""))
+    output = str(job.output or "").strip()
+    idle_output = "未调度，等待总工程师分配或上一角色交接。"
+    if getattr(job, "idle_reason", ""):
+        idle_output = f"未调度，{job.idle_reason}。"
+    output_text = output or (idle_output if status == "idle" else "已启动，等待角色输出。")
+    output_class = "role-output is-idle" if not output and status == "idle" else "role-output"
+    handoff = str(job.latest_handoff_summary or "暂无交接摘要")
     return f"""
       <article class="role-lane" data-role="{escape(job.role)}">
         <div class="role-head">
           <h3>{escape(job.display_name)}</h3>
-          <span class="role-status">{escape(job.status)}</span>
+          <span class="role-status" data-status="{escape(status)}">{escape(_relay_role_status_label(status))}</span>
         </div>
-        <div class="relay-muted">provider/model: {escape(job.provider or "idle")} {escape(job.model)}</div>
-        <div class="relay-muted">native_session_id: {escape(job.native_session_id or "idle")}</div>
+        <div class="role-meta">
+          <span class="role-provider">Provider：{escape(provider or "未配置")}</span>
+          <span class="relay-muted">{escape(job.model or "默认模型")}</span>
+        </div>
         {fallback}
-        <div class="role-output" data-role-output="{escape(job.role)}">{escape(job.output or ("idle" if job.status == "idle" else ""))}</div>
-        <div class="relay-muted">latest handoff: {escape(job.latest_handoff_summary or "暂无")}</div>
-        <div class="relay-muted">open questions: {escape(questions)}</div>
-        {link}
+        {error_html}
+        <div class="{output_class}" data-role-output="{escape(job.role)}">{escape(output_text)}</div>
+        <div class="role-notes">
+          <div class="relay-muted">交接摘要：{escape(handoff)}</div>
+          <div class="relay-muted">待确认问题：{escape(questions)}</div>
+          <div data-native-link>{link}</div>
+        </div>
       </article>
     """
 

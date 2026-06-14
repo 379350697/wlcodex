@@ -271,6 +271,8 @@ async def test_relay_config_has_dedicated_page(tmp_path: Path) -> None:
     assert "gitnexus-impact-analysis" in response
     assert "test-driven-development" in response
     assert "保存配置" in response
+    assert 'const RELAY_HISTORY_HREF = "/native/workflows/relay?token=secret&workspace=/repo";' in response
+    assert "window.location.href = RELAY_HISTORY_HREF;" in response
     assert "任务历史" not in response
     assert "新接力任务" not in response
 
@@ -286,6 +288,57 @@ async def test_relay_task_detail_renders_five_role_lanes_and_idle_roles(
         workspace="/repo",
         provider="claude",
     )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="claude",
+        model="sonnet",
+        native_session_id="native-director-1",
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "streaming")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "relay_role": "director",
+            "status": "passed",
+            "reason": "low risk explanation",
+            "role": "director",
+            "summary": "本任务判定无需派发，由总工程师直接完成。",
+            "complexity": "simple",
+            "risk": "low",
+            "route": "director_only",
+            "required_roles": ["director"],
+            "acceptance_criteria": ["给出清晰说明"],
+            "stop_conditions": [],
+            "requires_user_approval": False,
+        },
+        summary="本任务判定无需派发，由总工程师直接完成。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "summary": "总工程师已接收，正在拆解任务。",
+            "output": "总工程师已接收，正在拆解任务。",
+            "open_questions": ["请确认验收标准"],
+        },
+        summary="总工程师已接收",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "relay_role": "director",
+            "error": "invalid json: Expecting value",
+        },
+        summary="invalid json: Expecting value",
+    )
     await server.start()
     try:
         response = await _read_response(
@@ -298,11 +351,102 @@ async def test_relay_task_detail_renders_five_role_lanes_and_idle_roles(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert "RelayBoard" in response
+    assert "任务进度" in response
+    assert "调度决策" in response
+    assert "任务难度" in response
+    assert "风险等级" in response
+    assert "执行路径" in response
+    assert "simple" in response
+    assert "低" in response
+    assert "总工程师直接完成" in response
+    assert "验收依据" in response
+    assert "给出清晰说明" in response
+    assert "验收面板" in response
+    assert "推进日志" in response
+    assert "当前阶段" in response
+    assert "当前负责角色" in response
+    assert "下一步" in response
+    assert "最近用户补充" in response
+    assert "总工程师决策" in response
+    assert "RelayBoard" not in response
+    assert "current goal" not in response
+    assert "latest user input" not in response
+    assert "native_session_id:" not in response
+    assert "provider/model:" not in response
+    assert "open native session" not in response
+    assert ">interrupt<" not in response
+    assert ">send<" not in response
     for display_name in ["总工程师", "架构工程师", "开发工程师", "测试工程师", "审计工程师"]:
         assert display_name in response
     assert 'data-role="director"' in response
     assert 'data-role="architect"' in response
-    assert "idle" in response
+    assert "未纳入本轮路线" in response
+    assert "继续补充给总工程师" in response
+    assert "中断任务" in response
+    assert "发送补充" in response
+    assert "打开原生会话" in response
+    assert "native_thread_id=native-director-1" in response
+    assert "/sessions/native-director-1" not in response
+    assert "总工程师已接收，正在拆解任务。" in response
+    assert "请确认验收标准" in response
+    assert "执行问题：invalid json: Expecting value" in response
+    assert "等待总工程师接收并形成决策摘要" not in response
     assert f"/api/relay/tasks/{task.id}/message" in response
     assert "relay-board-grid" in response
+    assert "relay-progress" in response
+    assert "relay-progress-status" in response
+    assert "relay-activity-log" in response
+    for event_name in [
+        "role.queued",
+        "role.streaming",
+        "dispatch.verified",
+        "dispatch.fallback",
+        "role.output_delta",
+        "role.envelope",
+        "handoff.created",
+        "role.status",
+        "task.completed",
+        "task.interrupted",
+    ]:
+        assert event_name in response
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_uses_role_error_as_director_summary(
+    tmp_path: Path,
+) -> None:
+    server, service = _server(tmp_path)
+    task = service.create_task(
+        title="Blocked detail task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_role_status(task.id, "director", "blocked")
+    service._store.update_task_status(task.id, "blocked")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "relay_role": "director",
+            "error": "invalid json: Expecting value",
+        },
+        summary="invalid json: Expecting value",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "执行问题：invalid json: Expecting value" in response
+    assert "等待总工程师接收并形成决策摘要" not in response
+    assert "调度决策未生成" in response
+    assert "总工程师输出协议错误：invalid json: Expecting value" in response
+    assert "等待总工程师接收任务并形成调度决策" not in response

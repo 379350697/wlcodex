@@ -122,6 +122,7 @@ class RelayStore:
         artifacts = self._relay_artifacts(task_id)
         board = self._latest_board(task, artifacts)
         latest_handoff = self._latest_handoff(artifacts)
+        routing_decision = _latest_routing_decision(artifacts)
         role_jobs = self._role_jobs(task_id, artifacts=artifacts)
         return RelayTaskDetail(
             task=task,
@@ -139,6 +140,7 @@ class RelayStore:
                 for job in role_jobs
                 if job.provider and job.native_session_id
             ],
+            routing_decision=routing_decision,
         )
 
     def save_context_packet(
@@ -255,7 +257,7 @@ class RelayStore:
         self.save_artifact(
             task_id,
             role,
-            "routing_decision",
+            "role_dispatch_metadata",
             {
                 "relay_role": role,
                 "provider": provider,
@@ -309,11 +311,14 @@ class RelayStore:
         metadata_by_role = _latest_role_metadata(artifacts)
         output_by_role = _latest_output_by_role(artifacts)
         latest_handoff_by_role = _latest_handoff_by_role(artifacts)
+        latest_error_by_role = _latest_error_by_role(artifacts)
+        routing_decision = _latest_routing_decision(artifacts)
         jobs = []
         for job in self._ledger.list_team_agent_jobs(task_id):
             metadata = metadata_by_role.get(job.role, {})
             output_payload = output_by_role.get(job.role, {})
             handoff = latest_handoff_by_role.get(job.role, {})
+            error_payload = latest_error_by_role.get(job.role, {})
             jobs.append(
                 RelayRoleJob(
                     id=job.id,
@@ -333,6 +338,12 @@ class RelayStore:
                     output=str(output_payload.get("output") or ""),
                     latest_handoff_summary=str(handoff.get("summary") or ""),
                     open_questions=list(output_payload.get("open_questions") or []),
+                    error_message=str(
+                        error_payload.get("error")
+                        or error_payload.get("summary")
+                        or ""
+                    ),
+                    idle_reason=_role_idle_reason(job.role, routing_decision),
                     updated_at=job.updated_at.isoformat(),
                 )
             )
@@ -477,6 +488,11 @@ def _packet_prompt(packet: RoleContextPacket) -> str:
                 ensure_ascii=False,
                 sort_keys=True,
             ),
+            "output_contract:",
+            "- Return only valid JSON, with no Markdown fences or prose before/after.",
+            "- Prefer the expected_output_envelope fields at the top level.",
+            "- A single top-level role_envelope wrapper is allowed, but no other wrapper is allowed.",
+            "- evidence_refs and open_questions must be JSON arrays.",
         ]
     )
 
@@ -491,11 +507,45 @@ def _latest_summary(artifacts: list[dict[str, Any]], artifact_type: str) -> str:
 def _latest_role_metadata(artifacts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     metadata: dict[str, dict[str, Any]] = {}
     for artifact in artifacts:
-        if artifact.get("artifact_type") == "routing_decision":
+        artifact_type = artifact.get("artifact_type")
+        is_legacy_dispatch_metadata = (
+            artifact_type == "routing_decision" and "dispatch_verified" in artifact
+        )
+        if artifact_type == "role_dispatch_metadata" or is_legacy_dispatch_metadata:
             role = str(artifact.get("relay_role") or "")
             if role:
                 metadata[role] = artifact
     return metadata
+
+
+def _latest_routing_decision(artifacts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for artifact in reversed(artifacts):
+        if artifact.get("artifact_type") != "routing_decision":
+            continue
+        if "dispatch_verified" in artifact:
+            continue
+        return artifact
+    return None
+
+
+def _role_idle_reason(role: str, decision: dict[str, Any] | None) -> str:
+    if not decision:
+        return "等待总工程师分配或上一角色交接"
+    route = str(decision.get("route") or "")
+    if route == "waiting_user":
+        return "等待用户补充后再调度"
+    if route == "blocked":
+        return "被风险门禁阻塞"
+    required_roles = {
+        str(item)
+        for item in decision.get("required_roles", [])
+        if str(item).strip()
+    }
+    if role in required_roles:
+        if role == "director" and route == "director_only":
+            return "总工程师直接完成"
+        return "等待上一角色交接"
+    return "未纳入本轮路线"
 
 
 def _latest_output_by_role(artifacts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -511,6 +561,15 @@ def _latest_output_by_role(artifacts: list[dict[str, Any]]) -> dict[str, dict[st
         }:
             output[role] = artifact
     return output
+
+
+def _latest_error_by_role(artifacts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    errors: dict[str, dict[str, Any]] = {}
+    for artifact in artifacts:
+        role = str(artifact.get("relay_role") or "")
+        if role and artifact.get("artifact_type") == "role_error":
+            errors[role] = artifact
+    return errors
 
 
 def _latest_handoff_by_role(

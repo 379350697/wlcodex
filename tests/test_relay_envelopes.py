@@ -35,6 +35,29 @@ def test_parse_role_envelope_validates_required_fields() -> None:
     assert result.envelope.handoff_to == "tester"
 
 
+def test_parse_role_envelope_accepts_role_envelope_wrapper() -> None:
+    result = parse_role_envelope(
+        {
+            "role_envelope": {
+                "status": "passed",
+                "reason": "implemented",
+                "role": "implementer",
+                "artifact_type": "implementation_report",
+                "handoff_to": "tester",
+                "summary": "Implementation ready",
+                "evidence_refs": ["x"],
+                "open_questions": [],
+                "next_action": "test",
+            }
+        }
+    )
+
+    assert result.ok is True
+    assert result.envelope is not None
+    assert result.envelope.summary == "Implementation ready"
+    assert result.next_role == "tester"
+
+
 def test_invalid_role_envelope_returns_validation_error_without_advancement() -> None:
     result = parse_role_envelope('{"status": "passed", "role": "implementer"}')
 

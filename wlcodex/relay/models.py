@@ -42,6 +42,7 @@ RELAY_ROLE_JOB_STATUSES = (
 RELAY_ARTIFACT_TYPES = (
     "relay_board",
     "routing_decision",
+    "role_dispatch_metadata",
     "architecture_plan",
     "implementation_report",
     "test_report",
@@ -93,6 +94,8 @@ class RelayRoleJob:
     output: str = ""
     latest_handoff_summary: str = ""
     open_questions: list[str] = field(default_factory=list)
+    error_message: str = ""
+    idle_reason: str = ""
     updated_at: str = ""
 
     @property
@@ -256,6 +259,7 @@ class RelayTaskDetail:
     artifacts: list[dict[str, Any]]
     latest_handoff: HandoffPacket | None
     session_links: list[RelaySessionLink]
+    routing_decision: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -267,6 +271,7 @@ class RelayTaskDetail:
                 self.latest_handoff.to_json_dict() if self.latest_handoff else None
             ),
             "session_links": [link.to_dict() for link in self.session_links],
+            "routing_decision": self.routing_decision,
         }
 
 
@@ -276,3 +281,4 @@ class EnvelopeParseResult:
     envelope: RoleEnvelope | None = None
     next_role: str | None = None
     error: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)

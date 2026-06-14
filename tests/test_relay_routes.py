@@ -526,6 +526,31 @@ async def test_relay_sse_snapshot_does_not_advance_role_completion(
         workspace="/repo",
         provider="claude",
     )
+    await service.handle_role_output(
+        task.id,
+        "director",
+        """
+        {
+          "status": "passed",
+          "reason": "implementation and testing required",
+          "role": "director",
+          "artifact_type": "routing_decision",
+          "handoff_to": "",
+          "summary": "Core relay.",
+          "evidence_refs": [],
+          "open_questions": [],
+          "next_action": "implement",
+          "complexity": "medium",
+          "risk": "medium",
+          "route": "core_relay",
+          "required_roles": ["director", "implementer", "tester"],
+          "acceptance_criteria": ["implemented", "tested"],
+          "stop_conditions": [],
+          "requires_user_approval": false
+        }
+        """,
+        dispatch_next=False,
+    )
     await service.dispatch_role(task.id, "implementer")
     runtime_store = RuntimeEventStore(service._store._ledger._conn)
     runtime_store.append(
@@ -581,6 +606,31 @@ async def test_relay_events_include_dynamic_next_role_lane_after_handoff(
         prompt="Prompt",
         workspace="/repo",
         provider="claude",
+    )
+    await service.handle_role_output(
+        task.id,
+        "director",
+        """
+        {
+          "status": "passed",
+          "reason": "implementation and testing required",
+          "role": "director",
+          "artifact_type": "routing_decision",
+          "handoff_to": "",
+          "summary": "Core relay.",
+          "evidence_refs": [],
+          "open_questions": [],
+          "next_action": "implement",
+          "complexity": "medium",
+          "risk": "medium",
+          "route": "core_relay",
+          "required_roles": ["director", "implementer", "tester"],
+          "acceptance_criteria": ["implemented", "tested"],
+          "stop_conditions": [],
+          "requires_user_approval": false
+        }
+        """,
+        dispatch_next=False,
     )
     await service.dispatch_role(task.id, "implementer")
     await service.handle_role_output(
