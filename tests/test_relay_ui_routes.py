@@ -83,7 +83,7 @@ async def _request(tmp_path: Path, request: str, relay_service: RelayService | N
 
 
 @pytest.mark.asyncio
-async def test_native_index_shows_workflow_card_and_preserves_token(tmp_path: Path) -> None:
+async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path) -> None:
     response, _service = await _request(
         tmp_path,
         "GET /native?token=secret HTTP/1.1\r\n"
@@ -95,8 +95,9 @@ async def test_native_index_shows_workflow_card_and_preserves_token(tmp_path: Pa
     assert "Claude" in response
     assert "Antigravity" in response
     assert "议会审核" in response
-    assert "工作流" in response
-    assert 'href="/native/workflows?token=secret"' in response
+    assert "流式接力" in response
+    assert 'href="/native/workflows/relay?token=secret"' in response
+    assert '<span>工作流</span>' not in response
 
 
 @pytest.mark.asyncio
@@ -124,8 +125,12 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     )
 
     assert "HTTP/1.1 200 OK" in response
-    assert "Relay Task 工作空间" in response
-    assert "发布大任务" in response
+    assert "流式接力" in response
+    assert "任务历史" in response
+    assert "新任务" in response
+    assert "新聊天" in response
+    assert '<section class="relay-create-panel" id="new-task-panel" hidden>' in response
+    assert "发布大任务" not in response
     assert "running" in response
     assert "waiting_user" in response
     assert "blocked" in response
@@ -133,6 +138,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "interrupted" in response
     assert 'list="relay-workspaces"' in response
     assert '<datalist id="relay-workspaces">' in response
+    assert 'aria-label="relay task history"' in response
     assert "native session list" not in response.lower()
 
     task = service.create_task(

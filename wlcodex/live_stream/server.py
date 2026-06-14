@@ -2825,9 +2825,9 @@ def _native_provider_index_html(
         <span>议会审核</span>
         <small>提交方案并运行五席审核</small>
       </a>
-      <a class="provider workflow" href="/native/workflows__TOKEN_SUFFIX__">
-        <span>工作流</span>
-        <small>多角色接力、议会、Dev Flow 类流程</small>
+      <a class="provider relay" href="/native/workflows/relay__TOKEN_SUFFIX__">
+        <span>流式接力</span>
+        <small>任务历史与五角色接力工作空间</small>
       </a>
     """.replace("__TOKEN_SUFFIX__", token_suffix)
     if providers:
@@ -2939,23 +2939,25 @@ def _relay_task_list_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Relay Task 工作空间</title>
+  <title>流式接力</title>
   <link rel="stylesheet" href="/static/base.css">
   <style>
     html {{ background: var(--bg-canvas); }}
     body {{ margin: 0; color: var(--text-primary); background: transparent; }}
-    header {{ position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 48px 1fr; gap: 12px; align-items: center; padding: 12px 18px; background: rgba(5,5,8,.88); border-bottom: 1px solid var(--border-header); }}
+    header {{ position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 48px 1fr auto; gap: 12px; align-items: center; padding: 12px 18px; background: rgba(5,5,8,.88); border-bottom: 1px solid var(--border-header); }}
     h1, h2, h3 {{ margin: 0; letter-spacing: 0; }}
     h1 {{ font-size: 22px; }}
     main {{ display: grid; gap: 18px; width: min(1120px, 100%); margin: 0 auto; padding: 18px; box-sizing: border-box; }}
-    .relay-shell {{ display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); gap: 18px; align-items: start; }}
-    .relay-panel {{ border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 14px; min-width: 0; }}
+    .relay-shell {{ display: grid; gap: 18px; align-items: start; }}
+    .relay-create-panel {{ border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 14px; min-width: 0; }}
+    .relay-toolbar {{ display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }}
     .relay-form {{ display: grid; gap: 10px; }}
     .relay-form label {{ display: grid; gap: 6px; color: var(--text-muted); font-size: 13px; }}
     .relay-form input, .relay-form textarea, .relay-form select {{ width: 100%; box-sizing: border-box; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px; background: rgba(255,255,255,.04); color: var(--text-primary); }}
     .relay-form textarea {{ min-height: 130px; resize: vertical; }}
-    .relay-form button, .relay-open {{ min-height: 38px; border: 1px solid var(--color-link); border-radius: 6px; background: transparent; color: var(--text-primary); text-decoration: none; display: inline-grid; place-items: center; padding: 0 12px; }}
-    .relay-groups {{ display: grid; gap: 14px; min-width: 0; }}
+    .relay-form button, .relay-open, .relay-new-task {{ min-height: 38px; border: 1px solid var(--color-link); border-radius: 6px; background: transparent; color: var(--text-primary); text-decoration: none; display: inline-grid; place-items: center; padding: 0 12px; }}
+    .relay-history-list {{ display: grid; gap: 14px; min-width: 0; }}
+    .relay-history-head {{ display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }}
     .relay-group {{ display: grid; gap: 10px; min-width: 0; }}
     .relay-group h2 {{ font-size: 15px; color: var(--text-muted); }}
     .relay-card {{ display: grid; gap: 10px; border: 1px solid var(--border-card); border-radius: 8px; padding: 14px; background: var(--bg-surface); min-width: 0; overflow-wrap: anywhere; }}
@@ -2965,18 +2967,22 @@ def _relay_task_list_page(
     .relay-role-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
     .relay-chip {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; white-space: nowrap; }}
     .relay-empty {{ color: var(--text-muted); border: 1px dashed var(--border-subtle); border-radius: 8px; padding: 14px; }}
-    @media (max-width: 760px) {{ .relay-shell {{ grid-template-columns: 1fr; }} main {{ padding: 12px; }} }}
+    @media (max-width: 760px) {{ header {{ grid-template-columns: 48px 1fr; }} .relay-toolbar {{ grid-column: 1 / -1; justify-content: stretch; }} .relay-new-task {{ width: 100%; }} main {{ padding: 12px; }} }}
   </style>
 </head>
 <body>
   <header>
-    <a class="circle" href="/native/workflows{token_suffix}" aria-label="back">‹</a>
-    <h1>Relay Task 工作空间</h1>
+    <a class="circle" href="/native{token_suffix}" aria-label="back">‹</a>
+    <h1>流式接力</h1>
+    <div class="relay-toolbar">
+      <button class="relay-new-task" id="new-task-button" type="button">新任务</button>
+      <button class="relay-new-task" id="new-chat-button" type="button">新聊天</button>
+    </div>
   </header>
   <main>
     <div class="relay-shell">
-      <section class="relay-panel">
-        <h2>发布大任务</h2>
+      <section class="relay-create-panel" id="new-task-panel" hidden>
+        <h2>新任务</h2>
         <form class="relay-form" method="post" action="/api/relay/tasks{token_suffix}">
           <label>title<input name="title" placeholder="任务标题"></label>
           <label>task prompt<textarea name="prompt" placeholder="描述要接力完成的大任务"></textarea></label>
@@ -2986,13 +2992,27 @@ def _relay_task_list_page(
           <button type="submit">submit</button>
         </form>
       </section>
-      <section class="relay-groups" aria-label="relay task groups">
-        {group_html}
+      <section class="relay-history-list" aria-label="relay task history">
+        <div class="relay-history-head">
+          <h2>任务历史</h2>
+          <span class="relay-muted">像会话列表一样继续、查看或新建接力任务</span>
+        </div>
+        <div class="relay-groups" aria-label="relay task groups">
+          {group_html}
+        </div>
       </section>
     </div>
   </main>
   <script>
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
+    const panel = document.getElementById("new-task-panel");
+    function openNewTaskPanel() {{
+      if (!panel) return;
+      panel.hidden = false;
+      panel.querySelector("input, textarea, select")?.focus();
+    }}
+    document.getElementById("new-task-button")?.addEventListener("click", openNewTaskPanel);
+    document.getElementById("new-chat-button")?.addEventListener("click", openNewTaskPanel);
     const form = document.querySelector(".relay-form");
     form?.addEventListener("submit", async (event) => {{
       event.preventDefault();
