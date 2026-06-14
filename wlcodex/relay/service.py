@@ -283,13 +283,20 @@ class RelayService:
             task_id,
             "role.streaming",
             role=role,
-            payload={"role": role, "native_session_id": native_session_id},
+            payload={
+                "role": role,
+                "provider": provider_name,
+                "native_session_id": native_session_id,
+            },
         )
         self._events.emit(
             task_id,
             "dispatch.verified",
             role=role,
-            payload={"native_session_id": native_session_id},
+            payload={
+                "provider": provider_name,
+                "native_session_id": native_session_id,
+            },
         )
 
     def _available_providers(self) -> set[str]:

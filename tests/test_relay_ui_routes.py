@@ -278,7 +278,7 @@ async def test_relay_config_has_dedicated_page(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_relay_task_detail_renders_five_role_lanes_and_idle_roles(
+async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     tmp_path: Path,
 ) -> None:
     server, service = _server(tmp_path)
@@ -351,6 +351,23 @@ async def test_relay_task_detail_renders_five_role_lanes_and_idle_roles(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
+    assert 'data-relay-view="conversation"' in response
+    assert 'data-view-tab="conversation" data-view-active="true"' in response
+    assert 'data-view-tab="board" data-view-active="false"' in response
+    assert "会话流" in response
+    assert "任务状态" in response
+    assert (
+        f'href="/native/workflows/relay/tasks/{task.id}?token=secret&amp;view=conversation"'
+        in response
+    )
+    assert (
+        f'href="/native/workflows/relay/tasks/{task.id}?token=secret&amp;view=board"'
+        in response
+    )
+    assert 'class="relay-conversation"' in response
+    assert 'data-conversation-timeline' in response
+    assert 'data-view-panel="conversation"' in response
+    assert 'data-view-panel="board"' in response
     assert "任务进度" in response
     assert "调度决策" in response
     assert "任务难度" in response
@@ -396,6 +413,13 @@ async def test_relay_task_detail_renders_five_role_lanes_and_idle_roles(
     assert "relay-progress" in response
     assert "relay-progress-status" in response
     assert "relay-activity-log" in response
+    assert 'const EVENTS_SUFFIX = "?token=secret&after=3";' in response
+    assert "function normalizeRelayPayload(raw)" in response
+    assert "const payload = parseRelayEvent(event);" in response
+    assert "events${EVENTS_SUFFIX}" in response
+    assert "appendConversationDelta(payload.role" in response
+    assert "activeConversationRole !== role" in response
+    assert "appendConversationUser(String(data.text" in response
     for event_name in [
         "role.queued",
         "role.streaming",
@@ -409,6 +433,48 @@ async def test_relay_task_detail_renders_five_role_lanes_and_idle_roles(
         "task.interrupted",
     ]:
         assert event_name in response
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_board_view_activates_status_cards(
+    tmp_path: Path,
+) -> None:
+    server, service = _server(tmp_path)
+    task = service.create_task(
+        title="Board detail task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret&view=board HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'data-relay-view="board"' in response
+    assert 'data-view-tab="conversation" data-view-active="false"' in response
+    assert 'data-view-tab="board" data-view-active="true"' in response
+    assert "任务状态" in response
+    assert "任务进度" in response
+    assert "五角色进度" in response
+    assert "交接摘要" in response
+    assert "待确认问题" in response
+    assert "原生会话" in response
+    assert (
+        f'href="/native/workflows/relay/tasks/{task.id}?token=secret&amp;view=conversation"'
+        in response
+    )
+    assert (
+        f'href="/native/workflows/relay/tasks/{task.id}?token=secret&amp;view=board"'
+        in response
+    )
 
 
 @pytest.mark.asyncio
