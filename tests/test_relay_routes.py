@@ -372,6 +372,24 @@ async def test_create_relay_task_accepts_form_encoded_ui_submit(
 
 
 @pytest.mark.asyncio
+async def test_create_relay_task_rejects_empty_workspace(tmp_path: Path) -> None:
+    body = json.dumps({"title": "No workspace", "prompt": "Missing cwd"})
+
+    response = await _request_relay(
+        tmp_path,
+        "POST /api/relay/tasks HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+    )
+
+    assert "HTTP/1.1 400 Bad Request" in response
+    assert _json_body(response) == {"error": "relay task workspace is required"}
+
+
+@pytest.mark.asyncio
 async def test_relay_run_aliases_match_task_routes(tmp_path: Path) -> None:
     service = _relay_service(tmp_path)
     task = service.create_task(

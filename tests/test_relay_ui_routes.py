@@ -126,21 +126,51 @@ async def test_workflow_directory_links_to_relay_council_and_dev_flow(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> None:
-    response, service = await _request(
-        tmp_path,
-        "GET /native/workflows/relay?token=secret HTTP/1.1\r\n"
-        "Host: test\r\nConnection: close\r\n\r\n",
+    server, service = _server(tmp_path)
+    default_workspace = "/Users/wl/projects/wlcodex"
+    task = service.create_task(
+        title="Default workspace relay",
+        prompt="Prompt",
+        workspace=default_workspace,
+        provider="claude",
     )
+    other = service.create_task(
+        title="Other workspace relay",
+        prompt="Prompt",
+        workspace="/other",
+        provider="claude",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/workflows/relay?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
     assert "流式接力" in response
     assert "任务历史" in response
-    assert "新接力任务" in response
+    assert response.count('data-open-new-task>新接力任务</button>') == 1
     assert "配置" in response
+    assert '<a class="relay-secondary" href="/native/workflows/relay/config' not in response
+    assert (
+        '<a class="relay-open" href="/native/workflows/relay/config?token=secret&amp;'
+        'workspace=/Users/wl/projects/wlcodex">配置</a>'
+    ) in response
+    assert 'href="/native/workflows/relay/config?token=secret&amp;workspace=/Users/wl/projects/wlcodex"' in response
     assert "新聊天" not in response
-    assert '<section class="relay-create-panel" id="new-task-panel" hidden>' in response
+    assert "relay-create-panel" not in response
+    assert '<section class="relay-create-modal" id="new-task-modal" hidden role="dialog"' in response
+    assert 'aria-label="new relay task"' in response
+    assert 'data-close-new-task aria-label="关闭新接力任务"' in response
+    assert '<h2>新接力任务</h2>' in response
+    assert "当前工作区" in response
+    assert "将快照以下五角色 provider 配置" in response
     assert "发布大任务" not in response
-    assert "还没有接力任务" in response
     assert "暂无任务" not in response
     assert "relay-group" not in response
     assert 'data-filter="running"' in response
@@ -148,32 +178,45 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert 'data-filter="blocked"' in response
     assert 'data-filter="completed"' in response
     assert 'data-filter="interrupted"' in response
-    assert "全部工作区" in response
-    assert 'data-workspace-value=""' in response
+    assert "全部工作区" not in response
+    assert 'data-workspace-value=""' not in response
     assert "wlcodex" in response
-    assert "工作区（可选）" in response
-    assert '<option value="">不指定工作区</option>' in response
-    assert 'name="workspace"' in response
-    assert "角色配置" in response
+    assert "工作区（可选）" not in response
+    assert '<option value="">不指定工作区</option>' not in response
+    assert f'<input type="hidden" name="workspace" value="{default_workspace}">' in response
+    assert 'aria-label="relay role provider configuration"' not in response
     assert "Provider 应用于全部角色" not in response
-    assert "Codex" in response
-    assert "Claude" in response
-    assert "Antigravity" in response
-    assert "gitnexus-impact-analysis" in response
-    assert "test-driven-development" in response
+    assert "默认角色配置" in response
+    assert "总工程师 ·" in response
+    assert "开发工程师 ·" in response
+    assert "gitnexus-impact-analysis" not in response
+    assert "test-driven-development" not in response
     assert 'aria-label="relay task history"' in response
     assert "native session list" not in response.lower()
+    assert "Default workspace relay" in response
+    assert "Other workspace relay" not in response
+    assert 'class="relay-task-card"' in response
+    assert 'class="relay-status-badge"' in response
+    assert "等待总工程师接收" in response
+    assert "打开任务" in response
+    assert "open task" not in response
+    assert f'/native/workflows/relay/tasks/{task.id}?token=secret' in response
+    assert f'/native/workflows/relay/tasks/{other.id}?token=secret' not in response
 
-    task = service.create_task(
+    populated, _ = await _request(
+        tmp_path,
+        "GET /native/workflows/relay?token=secret&workspace=%2Frepo HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        relay_service=service,
+    )
+    assert '<input type="hidden" name="workspace" value="/repo">' in populated
+    assert "Default workspace relay" not in populated
+    assert "Other workspace relay" not in populated
+
+    repo_task = service.create_task(
         title="Long relay title wraps without overlap",
         prompt="Prompt",
         workspace="/repo",
-        provider="claude",
-    )
-    other = service.create_task(
-        title="Other workspace relay",
-        prompt="Prompt",
-        workspace="/other",
         provider="claude",
     )
     populated, _ = await _request(
@@ -184,7 +227,6 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     )
     assert "Long relay title wraps without overlap" in populated
     assert "Other workspace relay" not in populated
-    assert 'value="/repo" selected' in populated
     assert 'class="relay-task-card"' in populated
     assert 'class="relay-status-badge"' in populated
     assert "总工程师" in populated
@@ -195,8 +237,42 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "等待总工程师接收" in populated
     assert "打开任务" in populated
     assert "open task" not in populated
-    assert f'/native/workflows/relay/tasks/{task.id}?token=secret' in populated
+    assert f'/native/workflows/relay/tasks/{repo_task.id}?token=secret' in populated
     assert f'/native/workflows/relay/tasks/{other.id}?token=secret' not in populated
+
+
+@pytest.mark.asyncio
+async def test_relay_config_has_dedicated_page(tmp_path: Path) -> None:
+    response, _service = await _request(
+        tmp_path,
+        "GET /native/workflows/relay/config?token=secret&workspace=%2Frepo HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "<title>流式接力配置</title>" in response
+    assert "<h1>流式接力</h1>" in response
+    assert "<h1>流式接力配置</h1>" not in response
+    assert "返回任务" not in response
+    assert "角色配置" in response
+    assert 'href="/native/workflows/relay?token=secret&amp;workspace=/repo"' in response
+    assert "总工程师" in response
+    assert "架构工程师" in response
+    assert "开发工程师" in response
+    assert "测试工程师" in response
+    assert "审计工程师" in response
+    assert "Codex" in response
+    assert "Claude" in response
+    assert "Antigravity" in response
+    assert 'class="relay-provider-select"' in response
+    assert "color-scheme: dark" in response
+    assert ".relay-provider-select option" in response
+    assert "当前：Claude" in response
+    assert "gitnexus-impact-analysis" in response
+    assert "test-driven-development" in response
+    assert "保存配置" in response
+    assert "任务历史" not in response
+    assert "新接力任务" not in response
 
 
 @pytest.mark.asyncio
