@@ -41,7 +41,7 @@ from wlcodex.live_stream.collapse import (
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.jsonrpc import JsonRpcError, JsonRpcTimeout
-from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES
+from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
 
 
 _REQUEST_TIMEOUT_SECONDS = 30.0
@@ -2947,6 +2947,7 @@ def _relay_task_list_page(
           <section class="relay-empty-state">
             <h2>还没有接力任务</h2>
             <p>创建一个大任务后，总工程师会先接收并调度架构、开发、测试和审计角色。</p>
+            <p>角色 v1 固定五角色；Provider 在新建任务里选择，并应用到全部角色。</p>
             <button class="relay-primary" type="button" data-open-new-task>新接力任务</button>
           </section>
         """
@@ -2956,13 +2957,23 @@ def _relay_task_list_page(
         for summary in sorted_summaries
         if str(getattr(summary, "status", "") or "") in {"running", "waiting_user", "blocked"}
     )
+    project_workspaces = {
+        str(project.get("cwd", "") or "")
+        for project in _council_projects_payload().get("projects", [])
+        if str(project.get("cwd", "") or "")
+    }
     workspace_options = sorted(
         {str(getattr(summary, "workspace", "") or "") for summary in sorted_summaries if getattr(summary, "workspace", "")}
+        | project_workspaces
         | {"/Users/wl/projects/wlcodex"}
     )
-    workspace_datalist = "\n".join(
-        f'<option value="{escape(workspace)}"></option>'
+    workspace_select_options = '<option value="">不指定工作区</option>\n' + "\n".join(
+        f'<option value="{escape(workspace)}">{escape(Path(workspace).name or workspace)}</option>'
         for workspace in workspace_options
+    )
+    role_config_html = "\n".join(
+        f'<span class="relay-chip">{escape(_relay_role_label(role))}</span>'
+        for role in RELAY_ROLE_IDS
     )
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
@@ -2986,6 +2997,9 @@ def _relay_task_list_page(
     .relay-form input, .relay-form textarea, .relay-form select {{ width: 100%; box-sizing: border-box; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px; background: rgba(255,255,255,.04); color: var(--text-primary); }}
     .relay-form textarea {{ min-height: 130px; resize: vertical; }}
     .relay-form button, .relay-open, .relay-primary {{ min-height: 38px; border: 1px solid var(--color-link); border-radius: 6px; background: transparent; color: var(--text-primary); text-decoration: none; display: inline-grid; place-items: center; padding: 0 12px; }}
+    .relay-form-section {{ display: grid; gap: 8px; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 12px; }}
+    .relay-form-section h3 {{ font-size: 14px; }}
+    .relay-config-copy {{ margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.5; }}
     .relay-primary {{ background: rgba(88, 166, 255, .12); font-weight: var(--weight-bold); }}
     .relay-primary:hover, .relay-open:hover, .relay-filter-chip:hover {{ background: rgba(255,255,255,.07); }}
     .relay-history-list {{ display: grid; gap: 14px; min-width: 0; }}
@@ -3025,9 +3039,13 @@ def _relay_task_list_page(
         <form class="relay-form" method="post" action="/api/relay/tasks{token_suffix}">
           <label>任务标题<input name="title" placeholder="例如：修复流式接力历史页"></label>
           <label>任务目标<textarea name="prompt" placeholder="描述要接力完成的大任务、验收标准和限制"></textarea></label>
-          <label>工作目录<input name="workspace" list="relay-workspaces" placeholder="/Users/wl/projects/wlcodex"></label>
-          <datalist id="relay-workspaces">{workspace_datalist}</datalist>
-          <label>执行模型 / Provider<select name="provider">{provider_options}</select></label>
+          <label>工作区（可选）<select name="workspace">{workspace_select_options}</select></label>
+          <label>执行 Provider（应用到全部角色）<select name="provider">{provider_options}</select></label>
+          <section class="relay-form-section" aria-label="relay role configuration">
+            <h3>角色配置</h3>
+            <p class="relay-config-copy">v1 固定五角色，当前 Provider 应用于全部角色。</p>
+            <div class="relay-role-chips">{role_config_html}</div>
+          </section>
           <button type="submit">开始接力</button>
         </form>
       </section>

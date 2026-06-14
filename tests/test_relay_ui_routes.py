@@ -139,8 +139,12 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert 'data-filter="blocked"' in response
     assert 'data-filter="completed"' in response
     assert 'data-filter="interrupted"' in response
-    assert 'list="relay-workspaces"' in response
-    assert '<datalist id="relay-workspaces">' in response
+    assert "工作区（可选）" in response
+    assert '<option value="">不指定工作区</option>' in response
+    assert 'name="workspace"' in response
+    assert "角色配置" in response
+    assert "v1 固定五角色" in response
+    assert "当前 Provider 应用于全部角色" in response
     assert 'aria-label="relay task history"' in response
     assert "native session list" not in response.lower()
 
@@ -157,7 +161,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         relay_service=service,
     )
     assert "Long relay title wraps without overlap" in populated
-    assert '<option value="/repo"></option>' in populated
+    assert '<option value="/repo">repo</option>' in populated
     assert 'class="relay-task-card"' in populated
     assert 'class="relay-status-badge"' in populated
     assert "总工程师" in populated
