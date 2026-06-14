@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+from typing import Any
+
+from wlcodex.relay.models import (
+    HandoffPacket,
+    RelayBoard,
+    RelayTask,
+    RoleContextPacket,
+)
+
+
+_RELAY_CONTEXT_CONSTRAINTS = [
+    "Latest user input has priority over stale handoff summaries.",
+    "Old handoff information is advisory background only.",
+    "No role inherits old permissions from another role.",
+    "No role inherits old execution state from another role.",
+    "Do not auto commit or auto deploy in relay v1.",
+    "Return a role_envelope JSON object with the required fields.",
+]
+
+
+def build_relay_board(
+    task: RelayTask,
+    *,
+    latest_user_input: str = "",
+    confirmed_facts: list[str] | None = None,
+    open_questions: list[str] | None = None,
+    risks: list[str] | None = None,
+    current_dispatch: str = "",
+    next_step: str = "",
+    handoffs: list[HandoffPacket] | None = None,
+    artifacts: list[dict[str, Any]] | None = None,
+    transcript: list[dict[str, Any]] | None = None,
+) -> RelayBoard:
+    del artifacts, transcript
+    handoff = handoffs[-1] if handoffs else None
+    return RelayBoard(
+        task_id=task.id,
+        current_goal=task.prompt or task.title,
+        phase=task.phase,
+        latest_user_input=latest_user_input or task.prompt,
+        confirmed_facts=list(confirmed_facts or []),
+        open_questions=list(open_questions or []),
+        risks=list(risks or []),
+        current_dispatch=current_dispatch or task.phase,
+        next_step=next_step or (handoff.next_action if handoff else "director review"),
+    )
+
+
+def build_role_context_packet(
+    *,
+    task: RelayTask,
+    role: str,
+    board: RelayBoard,
+    handoffs: list[HandoffPacket],
+    artifacts: list[dict[str, Any]],
+    transcript: list[dict[str, Any]] | None = None,
+) -> RoleContextPacket:
+    del transcript
+    role_artifacts = [
+        _artifact_summary(artifact)
+        for artifact in artifacts
+        if _artifact_is_relevant(artifact, role)
+    ]
+    return RoleContextPacket(
+        task_id=task.id,
+        role=role,
+        workspace=task.workspace,
+        current_goal=board.current_goal,
+        phase=board.phase,
+        latest_user_input=board.latest_user_input,
+        confirmed_facts=list(board.confirmed_facts),
+        role_relevant_artifacts=role_artifacts,
+        handoff_summaries=[
+            handoff.summary for handoff in handoffs if handoff.to_role in (role, "")
+        ],
+        constraints=list(_RELAY_CONTEXT_CONSTRAINTS),
+        expected_output_envelope={
+            "status": "passed|failed|blocked|waiting",
+            "reason": "brief reason",
+            "role": role,
+            "artifact_type": "relay artifact type",
+            "handoff_to": "next role or empty string",
+            "summary": "compact result summary",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "what should happen next",
+        },
+    )
+
+
+def _artifact_is_relevant(artifact: dict[str, Any], role: str) -> bool:
+    relay_role = str(artifact.get("relay_role") or artifact.get("role") or "")
+    artifact_type = str(artifact.get("artifact_type") or artifact.get("type") or "")
+    if artifact_type == "relay_board":
+        return False
+    return not relay_role or relay_role == role or artifact_type == "handoff_packet"
+
+
+def _artifact_summary(artifact: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "artifact_type": str(artifact.get("artifact_type") or artifact.get("type") or ""),
+        "relay_role": str(artifact.get("relay_role") or artifact.get("role") or ""),
+        "summary": str(artifact.get("safe_summary") or artifact.get("summary") or "")[:300],
+        "evidence_refs": list(artifact.get("evidence_refs") or []),
+    }

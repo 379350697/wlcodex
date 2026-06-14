@@ -83,6 +83,31 @@ async def test_claude_send_with_fake_echo(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_claude_streaming_reports_missing_workspace_separately_from_binary(
+    tmp_path: Path,
+) -> None:
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\necho 'Fake Claude output'\n")
+    fake_claude.chmod(0o755)
+
+    backend = ClaudeBackend(ClaudeConfig(enabled=True, binary=str(fake_claude)))
+    events = [
+        event
+        async for event in backend.send_streaming(
+            AgentRequest(
+                prompt="hello",
+                workspace_path=str(tmp_path / "missing-workspace"),
+            )
+        )
+    ]
+
+    assert len(events) == 1
+    assert events[0].event_type == "error"
+    assert "Workspace path not found" in events[0].delta
+    assert "Claude binary not found" not in events[0].delta
+
+
+@pytest.mark.asyncio
 async def test_claude_send_passes_current_permission_mode(tmp_path: Path) -> None:
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")

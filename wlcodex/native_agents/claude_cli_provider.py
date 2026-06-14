@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -41,6 +44,14 @@ _CLAUDE_REASONING_EFFORTS = [
     {"reasoningEffort": "xhigh", "description": "极深"},
     {"reasoningEffort": "max", "description": "最大"},
 ]
+
+_IMAGE_EXTENSIONS_BY_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+}
 
 
 class ClaudeCliLocalProvider:
@@ -165,6 +176,7 @@ class ClaudeCliLocalProvider:
             resume_session_id="",
             session_id=native_session_id,
             permission_mode=str(kwargs.get("permission_mode") or ""),
+            images=_safe_images(kwargs.get("images")),
         )
         return _control_result(
             session,
@@ -228,6 +240,7 @@ class ClaudeCliLocalProvider:
             resume_session_id=_claude_session_id(session),
             session_id=_session_id_for_new_cli_run(session),
             permission_mode=str(kwargs.get("permission_mode") or ""),
+            images=_safe_images(kwargs.get("images")),
         )
         return _control_result(
             session,
@@ -271,6 +284,7 @@ class ClaudeCliLocalProvider:
         session: NativeAgentSession | None = None,
         native_turn_id: str = "",
         permission_mode: str = "",
+        images: list[dict[str, Any]] | None = None,
     ) -> _RunOutcome:
         latest_session_id = resume_session_id
         error = ""
@@ -282,7 +296,14 @@ class ClaudeCliLocalProvider:
             extra["resume_session_id"] = resume_session_id
         elif session_id:
             extra["session_id"] = session_id
-        request = AgentRequest(prompt=prompt, workspace_path=cwd, extra=extra)
+        prompt_for_cli, materialized_images = _materialize_image_attachments(
+            cwd,
+            prompt,
+            images,
+        )
+        if materialized_images:
+            extra["images"] = materialized_images
+        request = AgentRequest(prompt=prompt_for_cli, workspace_path=cwd, extra=extra)
         async for event in self._engine.send_streaming(request):
             event_type = str(getattr(event, "event_type", "") or "")
             event_session_id = str(getattr(event, "session_id", "") or "")
@@ -492,6 +513,7 @@ class ClaudeCliLocalProvider:
         resume_session_id: str,
         session_id: str = "",
         permission_mode: str = "",
+        images: list[dict[str, Any]] | None = None,
     ) -> None:
         emitter = self._emitter()
         if emitter is not None:
@@ -505,6 +527,7 @@ class ClaudeCliLocalProvider:
                 resume_session_id=resume_session_id,
                 session_id=session_id,
                 permission_mode=permission_mode,
+                images=images,
             )
         )
         self._background_tasks.add(task)
@@ -519,6 +542,7 @@ class ClaudeCliLocalProvider:
         resume_session_id: str,
         session_id: str = "",
         permission_mode: str = "",
+        images: list[dict[str, Any]] | None = None,
     ) -> None:
         done_event = asyncio.Event()
         heartbeat_task = self._heartbeat_task(
@@ -535,6 +559,7 @@ class ClaudeCliLocalProvider:
                 session=session,
                 native_turn_id=native_turn_id,
                 permission_mode=permission_mode,
+                images=images,
             )
         except Exception as exc:  # pragma: no cover - defensive task boundary
             outcome = _RunOutcome(
@@ -620,6 +645,89 @@ class ClaudeCliLocalProvider:
         emitter = self._emitter()
         if emitter is not None:
             emitter.text_delta(session, native_turn_id=native_turn_id, delta=delta)
+
+
+def _safe_images(value: object) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    images = [dict(item) for item in value if isinstance(item, dict)]
+    return images or None
+
+
+def _materialize_image_attachments(
+    cwd: str,
+    prompt: str,
+    images: list[dict[str, Any]] | None,
+) -> tuple[str, list[dict[str, str]]]:
+    if not images:
+        return prompt, []
+    cwd_path = Path(cwd).expanduser()
+    if not cwd_path.is_dir():
+        return prompt, []
+    attachment_dir = cwd_path / "runtime" / "native-attachments" / "claude"
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+
+    materialized: list[dict[str, str]] = []
+    for image in images:
+        data_url = str(image.get("url") or image.get("data_url") or "")
+        payload = _decode_image_data_url(data_url)
+        if payload is None:
+            continue
+        mime_type = _image_mime_type(image, data_url)
+        filename = _safe_image_filename(str(image.get("filename") or ""), mime_type)
+        path = attachment_dir / f"{uuid4().hex}-{filename}"
+        path.write_bytes(payload)
+        relative_path = path.relative_to(cwd_path).as_posix()
+        materialized.append(
+            {
+                "path": str(path),
+                "relative_path": relative_path,
+                "filename": filename,
+                "mime_type": mime_type,
+            }
+        )
+
+    if not materialized:
+        return prompt, []
+    attachment_lines = ["Attached images:"]
+    for image in materialized:
+        attachment_lines.append(
+            f"- {image['filename']}: {image['relative_path']} ({image['mime_type']})"
+        )
+    attachment_lines.append("Please inspect these local image files when answering.")
+    if prompt.strip():
+        return prompt.rstrip() + "\n\n" + "\n".join(attachment_lines), materialized
+    return "\n".join(attachment_lines), materialized
+
+
+def _decode_image_data_url(data_url: str) -> bytes | None:
+    if not data_url.startswith("data:image/") or "," not in data_url:
+        return None
+    header, encoded = data_url.split(",", 1)
+    if ";base64" not in header:
+        return None
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _image_mime_type(image: dict[str, Any], data_url: str) -> str:
+    explicit = str(image.get("mime_type") or image.get("mimeType") or "")
+    if explicit.startswith("image/"):
+        return explicit
+    header = data_url.split(",", 1)[0]
+    return header.removeprefix("data:").split(";", 1)[0] or "image/png"
+
+
+def _safe_image_filename(filename: str, mime_type: str) -> str:
+    extension = _IMAGE_EXTENSIONS_BY_MIME.get(mime_type, ".img")
+    stem = Path(filename).stem if filename else "image"
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in stem)
+    safe = safe.strip("-_") or "image"
+    if not safe.lower().endswith(extension.lower()):
+        return f"{safe[:80]}{extension}"
+    return safe[:80]
 
 
 def _control_result(

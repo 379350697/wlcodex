@@ -12,6 +12,7 @@ __pycache__/
 build/
 runtime/*.sqlite3*
 runtime/tasks/
+runtime/native-attachments/
 runtime/worktrees/
 runtime/*.log
 config/wlcodex.toml

@@ -104,6 +104,11 @@ class ClaudeBackend:
                 text=self._binary_not_found_message(),
                 exit_code=1,
             )
+        if request.workspace_path and not Path(request.workspace_path).is_dir():
+            return AgentResult(
+                text=_workspace_not_found_message(request.workspace_path),
+                exit_code=1,
+            )
         resume_session_id = str(request.extra.get("resume_session_id", "") or "")
         session_id = str(request.extra.get("session_id", "") or "")
 
@@ -190,6 +195,20 @@ class ClaudeBackend:
             )
             yield AgentStreamEvent(
                 delta=self._binary_not_found_message(),
+                event_type="error",
+            )
+            return
+        if request.workspace_path and not Path(request.workspace_path).is_dir():
+            _emit_runtime_lifecycle(
+                self._runtime_source,
+                EventType.AGENT_RUN_FAILED,
+                payload={
+                    "reason": "workspace_not_found",
+                    "workspace_path": request.workspace_path,
+                },
+            )
+            yield AgentStreamEvent(
+                delta=_workspace_not_found_message(request.workspace_path),
                 event_type="error",
             )
             return
@@ -642,6 +661,13 @@ class ClaudeBackend:
             f"Claude binary not found: {self._config.binary}\n"
             "Set WLCODEX_CLAUDE_BINARY or install Claude Code CLI."
         )
+
+
+def _workspace_not_found_message(workspace_path: str) -> str:
+    return (
+        f"Workspace path not found: {workspace_path}\n"
+        "Update the selected workspace path before starting Claude Code."
+    )
 
 
 def _emit_runtime(runtime_source: object | None, parsed: ClaudeStreamEvent) -> None:

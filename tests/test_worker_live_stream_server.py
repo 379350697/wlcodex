@@ -123,7 +123,7 @@ async def test_static_css_endpoint_serves_package_asset(tmp_path: Path) -> None:
     headers, body = response.split("\r\n\r\n", 1)
     assert "HTTP/1.1 200 OK" in headers
     assert "Content-Type: text/css; charset=utf-8" in headers
-    assert "Cache-Control: no-cache" in headers
+    assert "Cache-Control: public, max-age=300, stale-while-revalidate=60" in headers
     assert ".provider-index" in body
 
 
@@ -149,7 +149,7 @@ async def test_static_base_css_endpoint_serves_design_tokens(tmp_path: Path) -> 
     headers, body = response.split("\r\n\r\n", 1)
     assert "HTTP/1.1 200 OK" in headers
     assert "Content-Type: text/css; charset=utf-8" in headers
-    assert "Cache-Control: no-cache" in headers
+    assert "Cache-Control: public, max-age=300, stale-while-revalidate=60" in headers
     assert "--bg-root" in body
     assert "--color-link" in body
     assert "--ease-default" in body
@@ -216,7 +216,7 @@ async def test_snapshot_endpoint_can_return_tail_with_previous_count(
 
 
 @pytest.mark.asyncio
-async def test_snapshot_endpoint_syncs_native_transcript_before_tail(
+async def test_snapshot_endpoint_schedules_native_transcript_sync_before_tail(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -255,13 +255,16 @@ async def test_snapshot_endpoint_syncs_native_transcript_before_tail(
             "GET /api/workers/42/events?tail=10&native_thread_id=thread-jsonl HTTP/1.1\r\n"
             "Host: test\r\nConnection: close\r\n\r\n",
         )
+        await asyncio.sleep(0.1)
     finally:
         await server.stop()
 
     body = response.split("\r\n\r\n", 1)[1]
     payload = json.loads(body)
     assert mirror.calls == ["thread-jsonl"]
-    assert payload["events"][0]["payload"]["text"] == "jsonl latest"
+    assert payload["events"] == []
+    assert payload["native_sync_error"] == ""
+    assert payload["native_sync_pending"] is True
 
 
 @pytest.mark.asyncio
@@ -364,7 +367,8 @@ async def test_live_page_endpoint(tmp_path: Path) -> None:
     assert ".transcript-item.user .transcript-body" in response
     assert "function isMirroredTranscriptEvent(event)" in response
     assert "const mirroredTranscript = isMirroredTranscriptEvent(event);" in response
-    assert "if (options.historical || mirroredTranscript) return;" in response
+    assert "if (options.historical) return;" in response
+    assert "} else if (mirroredTranscript) {" in response
 
 
 def test_server_rejects_non_loopback_host(tmp_path: Path) -> None:

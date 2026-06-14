@@ -191,6 +191,11 @@ def _replace_html_icons(html: str) -> str:
     return result
 
 
+def _token_suffix(access_token: str = "") -> str:
+    token = str(access_token or "")
+    return f"?token={quote(token, safe='')}" if token else ""
+
+
 class RequestBodyTooLarge(ValueError):
     pass
 
@@ -210,6 +215,7 @@ class WorkerLiveStreamServer:
         turn_summary_client: DigestClient | None = None,
         native_transcript_mirror: Any = None,
         workflow_service: Any = None,
+        relay_service: Any = None,
         native_sync_timeout_seconds: float = 3.0,
         native_sessions_timeout_seconds: float = 3.0,
     ) -> None:
@@ -226,6 +232,7 @@ class WorkerLiveStreamServer:
         self._turn_summary_client = turn_summary_client
         self._native_transcript_mirror = native_transcript_mirror
         self._workflow_service = workflow_service
+        self._relay_service = relay_service
         self._native_sync_timeout_seconds = max(0.1, float(native_sync_timeout_seconds))
         self._native_sessions_timeout_seconds = max(
             0.1,
@@ -254,8 +261,6 @@ class WorkerLiveStreamServer:
         if self._server is None:
             return
         self._server.close()
-        await self._server.wait_closed()
-        self._server = None
         tasks = [task for task in self._client_tasks if task is not asyncio.current_task()]
         tasks.extend(
             task
@@ -271,6 +276,8 @@ class WorkerLiveStreamServer:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self._server.wait_closed()
+        self._server = None
 
     async def _handle_client(
         self,
@@ -415,6 +422,18 @@ class WorkerLiveStreamServer:
                 await self._send_native_page(writer, "codex", headers, query)
                 return
 
+            if parsed.path in ("/native/workflows", "/native/workflows/relay") or (
+                parsed.path.startswith("/native/workflows/relay/tasks/")
+            ):
+                await self._handle_relay_ui_route(
+                    writer,
+                    method,
+                    parsed.path,
+                    headers,
+                    query,
+                )
+                return
+
             native_provider = _native_page_provider_from_path(parsed.path)
             if native_provider:
                 if method != "GET":
@@ -425,6 +444,17 @@ class WorkerLiveStreamServer:
 
             if parsed.path.startswith("/api/native/workflows/"):
                 await self._handle_workflow_route(
+                    reader,
+                    writer,
+                    method,
+                    parsed.path,
+                    headers,
+                    query,
+                )
+                return
+
+            if parsed.path.startswith("/api/relay/"):
+                await self._handle_relay_route(
                     reader,
                     writer,
                     method,
@@ -686,27 +716,30 @@ class WorkerLiveStreamServer:
         reader: asyncio.StreamReader,
         headers: dict[str, str],
     ) -> dict[str, Any]:
-        if _uses_chunked_transfer(headers):
-            raw = await _read_chunked_body(reader)
-            if not raw:
-                return {}
-            parsed = json.loads(raw.decode("utf-8"))
-            if not isinstance(parsed, dict):
-                raise ValueError("JSON body must be an object")
-            return parsed
-        content_length = _safe_int(headers.get("content-length", "0"), default=0)
-        if content_length == 0:
+        raw = await self._read_request_body_bytes(reader, headers)
+        if not raw:
             return {}
-        if content_length > _MAX_BODY_BYTES:
-            raise RequestBodyTooLarge("request body too large")
-        raw = await asyncio.wait_for(
-            reader.readexactly(content_length),
-            timeout=_REQUEST_TIMEOUT_SECONDS,
-        )
         parsed = json.loads(raw.decode("utf-8"))
         if not isinstance(parsed, dict):
             raise ValueError("JSON body must be an object")
         return parsed
+
+    async def _read_request_body_bytes(
+        self,
+        reader: asyncio.StreamReader,
+        headers: dict[str, str],
+    ) -> bytes:
+        if _uses_chunked_transfer(headers):
+            return await _read_chunked_body(reader)
+        content_length = _safe_int(headers.get("content-length", "0"), default=0)
+        if content_length == 0:
+            return b""
+        if content_length > _MAX_BODY_BYTES:
+            raise RequestBodyTooLarge("request body too large")
+        return await asyncio.wait_for(
+            reader.readexactly(content_length),
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
 
     async def _list_native_sessions(
         self,
@@ -795,6 +828,215 @@ class WorkerLiveStreamServer:
         task = asyncio.create_task(sync())
         self._native_background_tasks[key] = task
         return True
+
+    async def _handle_relay_ui_route(
+        self,
+        writer: asyncio.StreamWriter,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        query: dict[str, list[str]],
+    ) -> None:
+        if method != "GET":
+            await self._send_json(writer, 405, {"error": "method not allowed"})
+            return
+        if not self._is_authorized(
+            writer,
+            headers,
+            query,
+            require_token=(
+                self._native_registry is not None
+                or self._native_controller is not None
+                or self._relay_service is not None
+            ),
+        ):
+            await self._send_html(writer, 401, _native_token_entry_page(path))
+            return
+        token = str((query.get("token") or [""])[0] or "")
+        if path == "/native/workflows":
+            await self._send_html(writer, 200, _native_workflows_page(access_token=token))
+            return
+        if path == "/native/workflows/relay":
+            summaries = (
+                self._relay_service.list_tasks() if self._relay_service is not None else []
+            )
+            providers = (
+                self._native_registry.list_provider_summaries()
+                if self._native_registry is not None
+                else []
+            )
+            await self._send_html(
+                writer,
+                200,
+                _relay_task_list_page(
+                    summaries,
+                    providers=providers,
+                    access_token=token,
+                ),
+            )
+            return
+        task_id = _relay_task_id_from_ui_path(path)
+        if task_id is None:
+            await self._send_json(writer, 404, {"error": "not found"})
+            return
+        if self._relay_service is None:
+            await self._send_json(writer, 503, {"error": "relay service unavailable"})
+            return
+        try:
+            detail = self._relay_service.get_task(task_id)
+        except KeyError:
+            await self._send_json(writer, 404, {"error": "relay task not found"})
+            return
+        await self._send_html(
+            writer,
+            200,
+            _relay_task_detail_page(detail, access_token=token),
+        )
+
+    async def _handle_relay_route(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        query: dict[str, list[str]],
+    ) -> None:
+        if self._relay_service is None:
+            await self._send_json(writer, 503, {"error": "relay service unavailable"})
+            return
+        if not self._is_authorized(
+            writer,
+            headers,
+            query,
+            require_token=self._relay_service is not None,
+        ):
+            await self._send_json(writer, 401, {"error": "unauthorized"})
+            return
+        normalized_path = _normalize_relay_api_path(path)
+        try:
+            if normalized_path == "/api/relay/tasks":
+                if method == "GET":
+                    summaries = self._relay_service.list_tasks(
+                        workspace=_optional_nonempty_string(
+                            (query.get("workspace") or [""])[0]
+                        ),
+                        status=_optional_nonempty_string(
+                            (query.get("status") or [""])[0]
+                        ),
+                    )
+                    await self._send_json(
+                        writer,
+                        200,
+                        {"tasks": [summary.to_dict() for summary in summaries]},
+                    )
+                    return
+                if method == "POST":
+                    body = await self._read_request_json(writer, reader, headers)
+                    if body is None:
+                        return
+                    task = self._relay_service.create_task(
+                        title=str(body.get("title") or body.get("prompt") or "Relay Task"),
+                        prompt=str(body.get("prompt") or ""),
+                        workspace=str(body.get("workspace") or ""),
+                        provider=str(body.get("provider") or ""),
+                    )
+                    await self._relay_service.dispatch_role(task.id, "director")
+                    await self._send_json(
+                        writer,
+                        200,
+                        {"task": self._relay_service.get_task(task.id).task.to_dict()},
+                    )
+                    return
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
+
+            task_id, suffix = _relay_task_api_parts(normalized_path)
+            if task_id is None:
+                await self._send_json(writer, 404, {"error": "not found"})
+                return
+
+            if suffix == "":
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                detail = self._relay_service.get_task(task_id)
+                await self._send_json(writer, 200, detail.to_dict())
+                return
+            if suffix == "/events":
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                after = _safe_int(query.get("after", ["0"])[0], default=0)
+                live = "text/event-stream" in headers.get("accept", "").lower()
+                relay_event_queue = (
+                    self._relay_service.subscribe_events(task_id) if live else None
+                )
+                try:
+                    events = self._relay_service.events_for_task(task_id, after=after)
+                    detail = self._relay_service.get_task(task_id)
+                except Exception:
+                    if relay_event_queue is not None:
+                        self._relay_service.unsubscribe_events(task_id, relay_event_queue)
+                    raise
+                await _send_relay_sse(
+                    writer,
+                    events,
+                    detail=detail,
+                    hub=self._hub,
+                    relay_service=self._relay_service,
+                    relay_event_queue=relay_event_queue,
+                    live=live,
+                )
+                return
+            if suffix == "/sessions":
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                detail = self._relay_service.get_task(task_id)
+                await self._send_json(
+                    writer,
+                    200,
+                    {"sessions": [link.to_dict() for link in detail.session_links]},
+                )
+                return
+            if suffix == "/message":
+                if method != "POST":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                body = await self._read_request_json(writer, reader, headers)
+                if body is None:
+                    return
+                await self._relay_service.add_user_message(
+                    task_id,
+                    str(body.get("text") or body.get("prompt") or ""),
+                )
+                await self._send_json(
+                    writer,
+                    200,
+                    self._relay_service.get_task(task_id).to_dict(),
+                )
+                return
+            if suffix == "/interrupt":
+                if method != "POST":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                body = await self._read_request_json(writer, reader, headers)
+                if body is None:
+                    return
+                await self._relay_service.interrupt(
+                    task_id,
+                    role=_optional_nonempty_string(body.get("role")),
+                )
+                await self._send_json(
+                    writer,
+                    200,
+                    self._relay_service.get_task(task_id).to_dict(),
+                )
+                return
+            await self._send_json(writer, 404, {"error": "not found"})
+        except KeyError:
+            await self._send_json(writer, 404, {"error": "relay task not found"})
 
     async def _handle_native_agent_route(
         self,
@@ -1564,6 +1806,14 @@ class WorkerLiveStreamServer:
         headers: dict[str, str],
     ) -> dict[str, Any] | None:
         try:
+            content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type == "application/x-www-form-urlencoded":
+                raw = await self._read_request_body_bytes(reader, headers)
+                parsed = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+                return {
+                    key: values[-1] if values else ""
+                    for key, values in parsed.items()
+                }
             return await self._read_json_body(reader, headers)
         except RequestBodyTooLarge:
             await self._send_json(writer, 413, {"error": "request body too large"})
@@ -1777,6 +2027,251 @@ async def _write_sse(writer: asyncio.StreamWriter, event: WorkerStreamEvent) -> 
     await writer.drain()
 
 
+async def _send_relay_sse(
+    writer: asyncio.StreamWriter,
+    events: list[Any],
+    *,
+    detail: Any | None = None,
+    hub: WorkerLiveStreamHub | None = None,
+    relay_service: Any | None = None,
+    relay_event_queue: asyncio.Queue[Any] | None = None,
+    live: bool = False,
+) -> None:
+    header = (
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream; charset=utf-8\r\n"
+        "Cache-Control: no-cache\r\n"
+        "X-Accel-Buffering: no\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    )
+    writer.write(header.encode("utf-8"))
+    writer.write(b": connected\n\n")
+    seen_relay_sequences: set[int] = set()
+    seen_worker_events: set[tuple[str, int, str]] = set()
+    for event in events:
+        payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+        sequence = int(payload.get("sequence") or 0)
+        if sequence:
+            seen_relay_sequences.add(sequence)
+        event_type = str(payload.get("event_type") or "message")
+        event_payload = dict(payload.get("payload") or {})
+        runtime_event_id = int(event_payload.get("runtime_event_id") or 0)
+        if runtime_event_id > 0:
+            seen_worker_events.add(
+                (
+                    str(payload.get("role") or event_payload.get("role") or ""),
+                    runtime_event_id,
+                    event_type,
+                )
+            )
+        await _write_relay_sse_payload(
+            writer,
+            event_id=str(sequence),
+            event_type=event_type,
+            payload=payload,
+        )
+    role_jobs = [
+        job
+        for job in getattr(detail, "role_jobs", [])
+        if getattr(job, "agent_run_id", None) is not None
+    ]
+    task_id = int(getattr(getattr(detail, "task", None), "id", 0) or 0)
+    latest_by_agent: dict[int, int] = {}
+    if hub is not None:
+        for job in role_jobs:
+            agent_run_id = int(job.agent_run_id)
+            latest_by_agent[agent_run_id] = 0
+            for worker_event in hub.snapshot(agent_run_id=agent_run_id, after_id=0):
+                latest_by_agent[agent_run_id] = max(
+                    latest_by_agent[agent_run_id],
+                    int(worker_event.id),
+                )
+                relay_event = _relay_worker_payload(
+                    int(detail.task.id),
+                    str(job.role),
+                    worker_event,
+                )
+                if relay_event is None:
+                    continue
+                event_type, payload = relay_event
+                if (
+                    str(job.role),
+                    int(worker_event.id),
+                    event_type,
+                ) in seen_worker_events:
+                    continue
+                await _write_relay_sse_payload(
+                    writer,
+                    event_id=f"native-{worker_event.id}",
+                    event_type=event_type,
+                    payload=payload,
+                )
+    if live and relay_service is not None and task_id:
+        queue = relay_event_queue or relay_service.subscribe_events(task_id)
+        pending = asyncio.create_task(queue.get())
+        try:
+            while not writer.is_closing():
+                done, _pending = await asyncio.wait(
+                    {pending},
+                    timeout=15,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    writer.write(b": keepalive\n\n")
+                    await writer.drain()
+                    continue
+                event = pending.result()
+                payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+                sequence = int(payload.get("sequence") or 0)
+                if sequence in seen_relay_sequences:
+                    pending = asyncio.create_task(queue.get())
+                    continue
+                if sequence:
+                    seen_relay_sequences.add(sequence)
+                await _write_relay_sse_payload(
+                    writer,
+                    event_id=str(sequence or ""),
+                    event_type=str(payload.get("event_type") or "message"),
+                    payload=payload,
+                )
+                pending = asyncio.create_task(queue.get())
+        finally:
+            pending.cancel()
+            relay_service.unsubscribe_events(task_id, queue)
+    elif live and hub is not None and role_jobs:
+        subscriptions: list[tuple[Any, asyncio.Queue[WorkerStreamEvent]]] = []
+        pending: dict[asyncio.Task[WorkerStreamEvent], tuple[Any, asyncio.Queue[WorkerStreamEvent]]] = {}
+        for job in role_jobs:
+            queue = hub.subscribe(agent_run_id=int(job.agent_run_id))
+            subscriptions.append((job, queue))
+            pending[asyncio.create_task(queue.get())] = (job, queue)
+        try:
+            while not writer.is_closing():
+                done, _pending = await asyncio.wait(
+                    pending,
+                    timeout=15,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    writer.write(b": keepalive\n\n")
+                    await writer.drain()
+                    continue
+                for task in done:
+                    job, queue = pending.pop(task)
+                    worker_event = task.result()
+                    agent_run_id = int(job.agent_run_id)
+                    if worker_event.id > latest_by_agent.get(agent_run_id, 0):
+                        latest_by_agent[agent_run_id] = int(worker_event.id)
+                        await _write_relay_worker_event(
+                            writer,
+                            task_id=int(detail.task.id),
+                            role=str(job.role),
+                            worker_event=worker_event,
+                        )
+                    pending[asyncio.create_task(queue.get())] = (job, queue)
+        finally:
+            for task in pending:
+                task.cancel()
+            for job, queue in subscriptions:
+                hub.unsubscribe(agent_run_id=int(job.agent_run_id), queue=queue)
+    try:
+        await writer.drain()
+    except (ConnectionError, RuntimeError):
+        pass
+    writer.close()
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout=0.5)
+    except (asyncio.TimeoutError, ConnectionError, RuntimeError):
+        pass
+
+
+async def _write_relay_sse_payload(
+    writer: asyncio.StreamWriter,
+    *,
+    event_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    writer.write(f"id: {event_id}\n".encode("utf-8"))
+    writer.write(f"event: {event_type}\n".encode("utf-8"))
+    writer.write(
+        ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode(
+            "utf-8"
+        )
+    )
+    await writer.drain()
+
+
+async def _write_relay_worker_event(
+    writer: asyncio.StreamWriter,
+    *,
+    task_id: int,
+    role: str,
+    worker_event: WorkerStreamEvent,
+) -> None:
+    relay_event = _relay_worker_payload(task_id, role, worker_event)
+    if relay_event is None:
+        return
+    event_type, payload = relay_event
+    await _write_relay_sse_payload(
+        writer,
+        event_id=f"native-{worker_event.id}",
+        event_type=event_type,
+        payload=payload,
+    )
+
+
+def _relay_worker_payload(
+    task_id: int,
+    role: str,
+    worker_event: WorkerStreamEvent,
+) -> tuple[str, dict[str, Any]] | None:
+    payload = dict(worker_event.payload)
+    base = {
+        "task_id": task_id,
+        "role": role,
+        "runtime_event_id": worker_event.id,
+        "agent_run_id": worker_event.agent_run_id,
+        "kind": worker_event.kind,
+        "payload": payload,
+    }
+    if worker_event.kind in {"text_delta", "reasoning_delta", "command_output"}:
+        delta = (
+            payload.get("delta")
+            or payload.get("text")
+            or payload.get("output")
+            or payload.get("chunk")
+            or ""
+        )
+        return "role.output_delta", {
+            **base,
+            "event_type": "role.output_delta",
+            "delta": str(delta),
+        }
+    if worker_event.kind == "message_completed":
+        text = (
+            payload.get("text")
+            or payload.get("message")
+            or payload.get("content")
+            or payload.get("delta")
+            or ""
+        )
+        return "role.message_completed", {
+            **base,
+            "event_type": "role.message_completed",
+            "text": str(text),
+        }
+    if worker_event.kind in {"failed", "completed"}:
+        status = "failed" if worker_event.kind == "failed" else "completed"
+        return "role.status", {
+            **base,
+            "event_type": "role.status",
+            "status": status,
+        }
+    return None
+
+
 def _uses_chunked_transfer(headers: dict[str, str]) -> bool:
     transfer_encoding = headers.get("transfer-encoding", "")
     return any(
@@ -1846,6 +2341,35 @@ def _agent_id_from_path(path: str, *, prefix: str, suffix: str) -> int | None:
     if not raw.isdigit():
         return None
     return int(raw)
+
+
+def _relay_task_id_from_ui_path(path: str) -> int | None:
+    prefix = "/native/workflows/relay/tasks/"
+    if not path.startswith(prefix):
+        return None
+    raw = path.removeprefix(prefix).strip("/")
+    return int(raw) if raw.isdigit() else None
+
+
+def _normalize_relay_api_path(path: str) -> str:
+    if path == "/api/relay/runs":
+        return "/api/relay/tasks"
+    prefix = "/api/relay/runs/"
+    if path.startswith(prefix):
+        return "/api/relay/tasks/" + path.removeprefix(prefix)
+    return path
+
+
+def _relay_task_api_parts(path: str) -> tuple[int | None, str]:
+    prefix = "/api/relay/tasks/"
+    if not path.startswith(prefix):
+        return None, ""
+    raw = path.removeprefix(prefix)
+    task_raw, _, suffix_raw = raw.partition("/")
+    if not task_raw.isdigit():
+        return None, ""
+    suffix = f"/{suffix_raw}" if suffix_raw else ""
+    return int(task_raw), suffix
 
 
 def _native_provider_route_parts(path: str) -> tuple[str, str]:
@@ -2295,13 +2819,15 @@ def _native_provider_index_html(
     *,
     access_token: str = "",
 ) -> str:
-    token_suffix = (
-        f"?token={quote(str(access_token), safe='')}" if str(access_token or "") else ""
-    )
+    token_suffix = _token_suffix(access_token)
     council_links = """
       <a class="provider council" href="/council__TOKEN_SUFFIX__">
         <span>议会审核</span>
         <small>提交方案并运行五席审核</small>
+      </a>
+      <a class="provider workflow" href="/native/workflows__TOKEN_SUFFIX__">
+        <span>工作流</span>
+        <small>多角色接力、议会、Dev Flow 类流程</small>
       </a>
     """.replace("__TOKEN_SUFFIX__", token_suffix)
     if providers:
@@ -2340,6 +2866,316 @@ def _native_provider_index_html(
   </main>
 </body>
 </html>""")
+
+
+def _native_workflows_page(*, access_token: str = "") -> str:
+    token_suffix = _token_suffix(access_token)
+    return _replace_html_icons(f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工作流</title>
+  <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/animations.css">
+  <link rel="stylesheet" href="/static/effects.css">
+  <link rel="stylesheet" href="/static/native_index.css">
+</head>
+<body class="aurora-bg noise-overlay">
+  <main>
+    <div class="native-index-topbar">
+      <a class="circle native-back" href="/native{token_suffix}" aria-label="back">‹</a>
+      <h1>工作流</h1>
+      <span class="native-back-spacer" aria-hidden="true"></span>
+    </div>
+    <a class="provider workflow" href="/native/workflows/relay{token_suffix}">
+      <span>流式接力模式</span>
+      <small>总工程师调度，多角色实时协作。</small>
+    </a>
+    <a class="provider council" href="/council{token_suffix}">
+      <span>议会审核</span>
+      <small>沿用现有五席审核入口。</small>
+    </a>
+    <div class="provider">
+      <span>Dev Flow</span>
+      <small>工作流类入口预留，稳定 UI 接入后开放。</small>
+    </div>
+  </main>
+</body>
+</html>""")
+
+
+def _relay_task_list_page(
+    summaries: list[Any],
+    *,
+    providers: list[dict[str, str]],
+    access_token: str = "",
+) -> str:
+    token_suffix = _token_suffix(access_token)
+    provider_options = "\n".join(
+        f'<option value="{escape(str(provider.get("provider", "")))}">'
+        f'{escape(_native_provider_display_name(str(provider.get("provider", ""))))}'
+        "</option>"
+        for provider in providers
+    ) or '<option value="codex">Codex</option>'
+    groups = ["running", "waiting_user", "blocked", "completed", "interrupted"]
+    grouped = {status: [] for status in groups}
+    for summary in summaries:
+        grouped.setdefault(summary.status, []).append(summary)
+    group_html = "\n".join(
+        _relay_task_group_html(status, grouped.get(status, []), token_suffix)
+        for status in groups
+    )
+    workspace_options = sorted(
+        {str(getattr(summary, "workspace", "") or "") for summary in summaries if getattr(summary, "workspace", "")}
+        | {"/Users/wl/projects/wlcodex"}
+    )
+    workspace_datalist = "\n".join(
+        f'<option value="{escape(workspace)}"></option>'
+        for workspace in workspace_options
+    )
+    return _replace_html_icons(f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relay Task 工作空间</title>
+  <link rel="stylesheet" href="/static/base.css">
+  <style>
+    html {{ background: var(--bg-canvas); }}
+    body {{ margin: 0; color: var(--text-primary); background: transparent; }}
+    header {{ position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 48px 1fr; gap: 12px; align-items: center; padding: 12px 18px; background: rgba(5,5,8,.88); border-bottom: 1px solid var(--border-header); }}
+    h1, h2, h3 {{ margin: 0; letter-spacing: 0; }}
+    h1 {{ font-size: 22px; }}
+    main {{ display: grid; gap: 18px; width: min(1120px, 100%); margin: 0 auto; padding: 18px; box-sizing: border-box; }}
+    .relay-shell {{ display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); gap: 18px; align-items: start; }}
+    .relay-panel {{ border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 14px; min-width: 0; }}
+    .relay-form {{ display: grid; gap: 10px; }}
+    .relay-form label {{ display: grid; gap: 6px; color: var(--text-muted); font-size: 13px; }}
+    .relay-form input, .relay-form textarea, .relay-form select {{ width: 100%; box-sizing: border-box; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px; background: rgba(255,255,255,.04); color: var(--text-primary); }}
+    .relay-form textarea {{ min-height: 130px; resize: vertical; }}
+    .relay-form button, .relay-open {{ min-height: 38px; border: 1px solid var(--color-link); border-radius: 6px; background: transparent; color: var(--text-primary); text-decoration: none; display: inline-grid; place-items: center; padding: 0 12px; }}
+    .relay-groups {{ display: grid; gap: 14px; min-width: 0; }}
+    .relay-group {{ display: grid; gap: 10px; min-width: 0; }}
+    .relay-group h2 {{ font-size: 15px; color: var(--text-muted); }}
+    .relay-card {{ display: grid; gap: 10px; border: 1px solid var(--border-card); border-radius: 8px; padding: 14px; background: var(--bg-surface); min-width: 0; overflow-wrap: anywhere; }}
+    .relay-card-head {{ display: flex; justify-content: space-between; gap: 10px; align-items: start; flex-wrap: wrap; }}
+    .relay-title {{ font-size: 17px; font-weight: var(--weight-bold); }}
+    .relay-muted {{ color: var(--text-muted); font-size: 13px; }}
+    .relay-role-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+    .relay-chip {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; white-space: nowrap; }}
+    .relay-empty {{ color: var(--text-muted); border: 1px dashed var(--border-subtle); border-radius: 8px; padding: 14px; }}
+    @media (max-width: 760px) {{ .relay-shell {{ grid-template-columns: 1fr; }} main {{ padding: 12px; }} }}
+  </style>
+</head>
+<body>
+  <header>
+    <a class="circle" href="/native/workflows{token_suffix}" aria-label="back">‹</a>
+    <h1>Relay Task 工作空间</h1>
+  </header>
+  <main>
+    <div class="relay-shell">
+      <section class="relay-panel">
+        <h2>发布大任务</h2>
+        <form class="relay-form" method="post" action="/api/relay/tasks{token_suffix}">
+          <label>title<input name="title" placeholder="任务标题"></label>
+          <label>task prompt<textarea name="prompt" placeholder="描述要接力完成的大任务"></textarea></label>
+          <label>workspace<input name="workspace" list="relay-workspaces" placeholder="/Users/wl/projects/wlcodex"></label>
+          <datalist id="relay-workspaces">{workspace_datalist}</datalist>
+          <label>provider<select name="provider">{provider_options}</select></label>
+          <button type="submit">submit</button>
+        </form>
+      </section>
+      <section class="relay-groups" aria-label="relay task groups">
+        {group_html}
+      </section>
+    </div>
+  </main>
+  <script>
+    const TOKEN_SUFFIX = {json.dumps(token_suffix)};
+    const form = document.querySelector(".relay-form");
+    form?.addEventListener("submit", async (event) => {{
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(form).entries());
+      const response = await fetch(`/api/relay/tasks${{TOKEN_SUFFIX}}`, {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify(data),
+      }});
+      const payload = await response.json();
+      if (payload?.task?.id) {{
+        window.location.href = `/native/workflows/relay/tasks/${{encodeURIComponent(payload.task.id)}}${{TOKEN_SUFFIX}}`;
+      }}
+    }});
+  </script>
+</body>
+</html>""")
+
+
+def _relay_task_group_html(
+    status: str,
+    summaries: list[Any],
+    token_suffix: str,
+) -> str:
+    if not summaries:
+        cards = '<div class="relay-empty">暂无任务</div>'
+    else:
+        cards = "\n".join(_relay_task_card_html(summary, token_suffix) for summary in summaries)
+    return f'<section class="relay-group" data-status="{escape(status)}"><h2>{escape(status)}</h2>{cards}</section>'
+
+
+def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
+    chips = "\n".join(
+        f'<span class="relay-chip">{escape(str(role))}: {escape(str(status))}</span>'
+        for role, status in summary.role_statuses.items()
+    )
+    return f"""
+      <article class="relay-card">
+        <div class="relay-card-head">
+          <div>
+            <div class="relay-title">{escape(summary.title)}</div>
+            <div class="relay-muted">{escape(summary.workspace)} · phase {escape(summary.phase)}</div>
+          </div>
+          <a class="relay-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">open task</a>
+        </div>
+        <div class="relay-muted">director decision: {escape(summary.director_decision_summary or "等待总工程师决策")}</div>
+        <div class="relay-role-chips">{chips}</div>
+        <div class="relay-muted">latest handoff: {escape(summary.latest_handoff_summary or "暂无接棒")}</div>
+        <div class="relay-muted">last activity: {escape(summary.last_activity_at)}</div>
+      </article>
+    """
+
+
+def _relay_task_detail_page(detail: Any, *, access_token: str = "") -> str:
+    token_suffix = _token_suffix(access_token)
+    role_panels = "\n".join(_relay_role_panel_html(job) for job in detail.role_jobs)
+    board = detail.board
+    task = detail.task
+    return _replace_html_icons(f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(task.title)} · Relay</title>
+  <link rel="stylesheet" href="/static/base.css">
+  <style>
+    html {{ background: var(--bg-canvas); }}
+    body {{ margin: 0; color: var(--text-primary); background: transparent; }}
+    header {{ position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 48px 1fr auto; gap: 12px; align-items: center; padding: 12px 18px; background: rgba(5,5,8,.88); border-bottom: 1px solid var(--border-header); }}
+    h1, h2, h3 {{ margin: 0; letter-spacing: 0; }}
+    h1 {{ font-size: 20px; overflow-wrap: anywhere; }}
+    main {{ width: min(1220px, 100%); margin: 0 auto; padding: 18px; box-sizing: border-box; display: grid; gap: 14px; padding-bottom: 112px; }}
+    .relay-board, .role-lane, .relay-composer {{ border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 14px; min-width: 0; overflow-wrap: anywhere; }}
+    .relay-board-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
+    .relay-board-grid div {{ min-width: 0; }}
+    .relay-muted {{ color: var(--text-muted); font-size: 13px; }}
+    .role-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: stretch; }}
+    .role-lane[data-role="director"] {{ grid-column: 1 / -1; }}
+    .role-lane {{ display: grid; gap: 10px; }}
+    .role-head {{ display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }}
+    .role-status {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; }}
+    .role-output {{ min-height: 92px; white-space: pre-wrap; border-top: 1px solid var(--border-subtle); padding-top: 10px; }}
+    .relay-composer {{ position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(760px, calc(100% - 24px)); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }}
+    .relay-composer textarea {{ min-height: 44px; max-height: 120px; resize: vertical; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px; background: rgba(255,255,255,.04); color: var(--text-primary); }}
+    .relay-composer button, .relay-action {{ min-height: 42px; border-radius: 6px; border: 1px solid var(--color-link); background: transparent; color: var(--text-primary); padding: 0 12px; }}
+    @media (max-width: 760px) {{ .role-grid, .relay-board-grid, header {{ grid-template-columns: 1fr; }} .role-lane[data-role="director"] {{ grid-column: auto; }} main {{ padding: 12px; padding-bottom: 132px; }} .relay-composer {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <header>
+    <a class="circle" href="/native/workflows/relay{token_suffix}" aria-label="back">‹</a>
+    <div>
+      <h1>{escape(task.title)}</h1>
+      <div class="relay-muted">{escape(task.workspace)} · {escape(task.status)} · {escape(task.provider)}</div>
+    </div>
+    <button class="relay-action" data-interrupt-url="/api/relay/tasks/{task.id}/interrupt">interrupt</button>
+  </header>
+  <main>
+    <section class="relay-board">
+      <h2>RelayBoard</h2>
+      <div class="relay-board-grid">
+        <div><strong>current goal</strong><p>{escape(board.current_goal)}</p></div>
+        <div><strong>phase</strong><p>{escape(board.phase)}</p></div>
+        <div><strong>latest user input</strong><p>{escape(board.latest_user_input)}</p></div>
+        <div><strong>next step</strong><p>{escape(board.next_step)}</p></div>
+      </div>
+    </section>
+    <section class="role-grid" data-task-id="{task.id}">
+      {role_panels}
+    </section>
+  </main>
+  <form class="relay-composer" method="post" action="/api/relay/tasks/{task.id}/message">
+    <textarea name="text" placeholder="发送给总工程师"></textarea>
+    <button type="submit">send</button>
+  </form>
+  <script>
+    const TASK_ID = {json.dumps(str(task.id))};
+    const TOKEN_SUFFIX = {json.dumps(token_suffix)};
+    const roleOutputs = {{}};
+    document.querySelectorAll("[data-role-output]").forEach((node) => {{
+      roleOutputs[node.dataset.roleOutput] = node;
+    }});
+    const source = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{TOKEN_SUFFIX}}`);
+    source.addEventListener("role.output_delta", (event) => {{
+      const payload = JSON.parse(event.data || "{{}}");
+      const output = roleOutputs[payload.role];
+      if (output) output.textContent += payload.delta || payload.text || "";
+    }});
+    source.addEventListener("role.status", (event) => {{
+      const payload = JSON.parse(event.data || "{{}}");
+      const lane = document.querySelector(`[data-role="${{payload.role}}"]`);
+      const status = lane?.querySelector(".role-status");
+      if (status && payload.status) status.textContent = payload.status;
+    }});
+    document.querySelector(".relay-composer")?.addEventListener("submit", async (event) => {{
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = Object.fromEntries(new FormData(form).entries());
+      if (!data.text) return;
+      await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/message${{TOKEN_SUFFIX}}`, {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify(data),
+      }});
+      form.reset();
+    }});
+    document.querySelector("[data-interrupt-url]")?.addEventListener("click", async (event) => {{
+      const target = event.currentTarget;
+      await fetch(`${{target.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{ method: "POST" }});
+      window.location.reload();
+    }});
+  </script>
+</body>
+</html>""")
+
+
+def _relay_role_panel_html(job: Any) -> str:
+    link = (
+        f'<a href="{escape(_native_session_path(job.provider, job.native_session_id))}">open native session</a>'
+        if job.provider and job.native_session_id
+        else '<span class="relay-muted">未启动 native session</span>'
+    )
+    fallback = (
+        f'<div class="relay-muted">fallback: {escape(job.fallback_reason)}</div>'
+        if job.fallback_reason
+        else ""
+    )
+    questions = ", ".join(str(item) for item in job.open_questions) or "无"
+    return f"""
+      <article class="role-lane" data-role="{escape(job.role)}">
+        <div class="role-head">
+          <h3>{escape(job.display_name)}</h3>
+          <span class="role-status">{escape(job.status)}</span>
+        </div>
+        <div class="relay-muted">provider/model: {escape(job.provider or "idle")} {escape(job.model)}</div>
+        <div class="relay-muted">native_session_id: {escape(job.native_session_id or "idle")}</div>
+        {fallback}
+        <div class="role-output" data-role-output="{escape(job.role)}">{escape(job.output or ("idle" if job.status == "idle" else ""))}</div>
+        <div class="relay-muted">latest handoff: {escape(job.latest_handoff_summary or "暂无")}</div>
+        <div class="relay-muted">open questions: {escape(questions)}</div>
+        {link}
+      </article>
+    """
 
 
 def _council_review_page() -> str:
@@ -3155,6 +3991,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     <div class="topbar">
       <button class="circle" id="back" aria-label="back">‹</button>
       <div class="title-stack">
+        <template><h1>__PROVIDER_LABEL__</h1></template>
         <h1 id="pageTitle">__PROVIDER_LABEL__</h1>
         <div class="page-subtitle" id="pageSubtitle" hidden></div>
       </div>
@@ -5160,6 +5997,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     <header id="header">
       <button class="circle" id="back" aria-label="返回">‹</button>
       <div class="screen-title">
+        <template><h1>__PROVIDER_LABEL_TEXT__</h1></template>
+        <template>连接 __PROVIDER_LABEL_TEXT__ 会话</template>
+        <template>输入消息开始 __PROVIDER_LABEL_TEXT__ 会话</template>
         <h1></h1>
         <div class="subtitle"><span class="status-dot"></span><span id="state">connecting</span></div>
       </div>
@@ -5334,7 +6174,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         <button class="choice-action" id="queueChoice" type="button">排队</button>
       </div>
       <div class="dock-row">
-        <input id="prompt" placeholder="继续会话">
+        <input id="prompt" placeholder="继续 __PROVIDER_LABEL_TEXT__ 会话">
         <button class="primary-action" id="continue" aria-label="发送">↑</button>
       </div>
       <div class="dock-actions" hidden>

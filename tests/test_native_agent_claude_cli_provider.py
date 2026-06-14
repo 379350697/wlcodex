@@ -298,6 +298,36 @@ async def test_claude_cli_provider_starts_session_and_records_agent_run(
 
 
 @pytest.mark.asyncio
+async def test_claude_cli_provider_materializes_image_attachments_for_cli(
+    tmp_path: Path,
+) -> None:
+    provider, _store, engine, _runtime_store = _provider(tmp_path)
+
+    result = await provider.start_session(
+        str(tmp_path),
+        "describe this",
+        images=[
+            {
+                "url": "data:image/png;base64,aW1hZ2UtYnl0ZXM=",
+                "filename": "screen shot.png",
+                "mime_type": "image/png",
+            }
+        ],
+    )
+    await provider.wait_for_background_tasks()
+
+    assert result.status == "started"
+    request = engine.requests[0]
+    assert request.prompt.startswith("describe this")
+    assert "Attached images:" in request.prompt
+    assert "runtime/native-attachments/claude/" in request.prompt
+    assert request.extra["images"][0]["mime_type"] == "image/png"
+    materialized_path = Path(request.extra["images"][0]["path"])
+    assert materialized_path.is_file()
+    assert materialized_path.read_bytes() == b"image-bytes"
+
+
+@pytest.mark.asyncio
 async def test_claude_cli_provider_marks_silent_cli_run_failed(
     tmp_path: Path,
 ) -> None:

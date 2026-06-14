@@ -120,6 +120,10 @@ h1 {
   border-bottom-color: var(--border-council);
 }
 
+.provider.workflow {
+  border-bottom-color: var(--color-link);
+}
+
 .provider span {
   font-size: 20px;
   font-weight: var(--weight-extrabold);

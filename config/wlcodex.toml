@@ -151,7 +151,7 @@ register_bot_commands = true
 
 [workspace_discovery]
 enabled = true
-root = "/media/wl/新加卷/codex"
+root = "/Users/wl/projects"
 include_git_only = true
 allow_write = true
 exclude = []
@@ -170,5 +170,5 @@ exclude = []
 
 [[workspaces]]
 alias = "wlcodex"
-path = "/media/wl/新加卷/codex/wlcodex"
+path = "/Users/wl/projects/wlcodex"
 allow_write = true
