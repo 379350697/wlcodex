@@ -942,6 +942,7 @@ class WorkerLiveStreamServer:
                 access_token=token,
                 view=detail_view,
                 events=events,
+                hub=self._hub,
             ),
         )
 
@@ -2326,48 +2327,16 @@ def _relay_worker_payload(
     worker_event: WorkerStreamEvent,
 ) -> tuple[str, dict[str, Any]] | None:
     payload = dict(worker_event.payload)
-    base = {
+    return "role.native_event", {
+        "event_type": "role.native_event",
         "task_id": task_id,
         "role": role,
         "runtime_event_id": worker_event.id,
         "agent_run_id": worker_event.agent_run_id,
         "kind": worker_event.kind,
         "payload": payload,
+        "native_event": worker_event.to_json_dict(),
     }
-    if worker_event.kind in {"text_delta", "reasoning_delta", "command_output"}:
-        delta = (
-            payload.get("delta")
-            or payload.get("text")
-            or payload.get("output")
-            or payload.get("chunk")
-            or ""
-        )
-        return "role.output_delta", {
-            **base,
-            "event_type": "role.output_delta",
-            "delta": str(delta),
-        }
-    if worker_event.kind == "message_completed":
-        text = (
-            payload.get("text")
-            or payload.get("message")
-            or payload.get("content")
-            or payload.get("delta")
-            or ""
-        )
-        return "role.message_completed", {
-            **base,
-            "event_type": "role.message_completed",
-            "text": str(text),
-        }
-    if worker_event.kind in {"failed", "completed"}:
-        status = "failed" if worker_event.kind == "failed" else "completed"
-        return "role.status", {
-            **base,
-            "event_type": "role.status",
-            "status": status,
-        }
-    return None
 
 
 def _uses_chunked_transfer(headers: dict[str, str]) -> bool:
@@ -4010,6 +3979,7 @@ def _relay_task_detail_page(
     access_token: str = "",
     view: str = "conversation",
     events: list[Any] | tuple[Any, ...] | None = None,
+    hub: WorkerLiveStreamHub | None = None,
 ) -> str:
     view = _relay_task_detail_view(view)
     token_suffix = _token_suffix(access_token)
@@ -4017,9 +3987,12 @@ def _relay_task_detail_page(
     event_after = _relay_latest_event_sequence(event_history)
     events_suffix = _relay_task_events_suffix(access_token, event_after)
     role_panels = "\n".join(_relay_role_panel_html(job) for job in detail.role_jobs)
+    native_conversation_html = _relay_native_conversation_html(
+        detail.role_jobs,
+        hub=hub,
+    )
     progress_html = _relay_role_progress_html(detail.role_jobs)
     activity_html = _relay_initial_activity_html(detail)
-    conversation_html = _relay_initial_conversation_html(detail, events=event_history)
     routing_html = _relay_routing_decision_html(detail)
     board = detail.board
     task = detail.task
@@ -4073,16 +4046,17 @@ def _relay_task_detail_page(
     .relay-view {{ min-width: 0; display: grid; gap: 14px; }}
     .relay-conversation {{ min-height: 420px; max-height: calc(100vh - 240px); overflow: auto; display: grid; align-content: start; gap: 12px; }}
     .relay-message {{ border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px 12px; display: grid; gap: 7px; max-width: min(820px, 100%); background: rgba(255,255,255,.035); }}
-    .relay-message[data-conversation-role="director"] {{ background: rgba(88,166,255,.12); border-color: rgba(88,166,255,.32); }}
-    .relay-message[data-conversation-role="architect"] {{ background: rgba(126,231,135,.10); border-color: rgba(126,231,135,.28); }}
-    .relay-message[data-conversation-role="developer"] {{ background: rgba(255,193,7,.10); border-color: rgba(255,193,7,.30); }}
-    .relay-message[data-conversation-role="tester"] {{ background: rgba(196,167,231,.11); border-color: rgba(196,167,231,.30); }}
-    .relay-message[data-conversation-role="reviewer"] {{ background: rgba(255,123,114,.10); border-color: rgba(255,123,114,.30); }}
-    .relay-message[data-conversation-role="user"] {{ justify-self: end; background: rgba(255,255,255,.075); border-color: rgba(255,255,255,.18); }}
-    .relay-message[data-conversation-kind="event"] {{ justify-self: center; max-width: min(720px, 100%); color: var(--text-muted); background: rgba(255,255,255,.025); }}
+    .relay-message[data-native-kind="user_message"] {{ justify-self: end; background: rgba(255,255,255,.075); border-color: rgba(255,255,255,.18); }}
+    .relay-message[data-native-kind="status"], .relay-message[data-native-kind="reasoning_delta"], .relay-message[data-native-kind="activity"], .relay-message[data-native-kind="lifecycle"] {{ justify-self: center; max-width: min(720px, 100%); color: var(--text-muted); background: rgba(255,255,255,.025); }}
+    .relay-message[data-native-role="director"] {{ border-color: rgba(88,166,255,.32); }}
+    .relay-message[data-native-role="architect"] {{ border-color: rgba(126,231,135,.28); }}
+    .relay-message[data-native-role="developer"] {{ border-color: rgba(255,193,7,.30); }}
+    .relay-message[data-native-role="tester"] {{ border-color: rgba(196,167,231,.30); }}
+    .relay-message[data-native-role="reviewer"] {{ border-color: rgba(255,123,114,.30); }}
     .relay-message-head {{ display: flex; gap: 8px; justify-content: space-between; align-items: baseline; flex-wrap: wrap; }}
     .relay-message-meta {{ color: var(--text-muted); font-size: 12px; }}
     .relay-message-body {{ white-space: pre-wrap; line-height: 1.58; }}
+    .relay-message-body pre {{ margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }}
     .relay-board-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: start; flex-wrap: wrap; margin-bottom: 12px; }}
     .relay-board-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
     .relay-board-item {{ border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px; min-width: 0; background: rgba(255,255,255,.025); }}
@@ -4140,8 +4114,8 @@ def _relay_task_detail_page(
       <a class="relay-view-tab" data-view-tab="board" data-view-active="{board_active}" href="{escape(board_href)}">任务状态</a>
     </nav>
     <section class="relay-view relay-conversation-panel" data-view-panel="conversation" aria-label="会话流">
-      <div class="relay-conversation" data-conversation-timeline>
-        {conversation_html}
+      <div class="relay-conversation" data-native-conversation-timeline>
+        {native_conversation_html}
       </div>
     </section>
     <section class="relay-view relay-board-panel" data-view-panel="board" aria-label="任务状态">
@@ -4231,65 +4205,131 @@ def _relay_task_detail_page(
     function parseRelayEvent(event) {{
       return normalizeRelayPayload(JSON.parse(event.data || "{{}}"));
     }}
-    const conversationTimeline = document.querySelector("[data-conversation-timeline]");
-    let activeConversationBlock = null;
-    let activeConversationRole = "";
-    function scrollConversationToEnd() {{
+    const conversationTimeline = document.querySelector("[data-native-conversation-timeline]");
+    const nativeTranscriptNodes = new Map();
+    function scrollNativeConversationToEnd() {{
       if (conversationTimeline) conversationTimeline.scrollTop = conversationTimeline.scrollHeight;
     }}
-    function createConversationMessage(role, kind = "role", speaker = "") {{
+    function nativeEventPayload(nativeEvent) {{
+      return nativeEvent && nativeEvent.payload && typeof nativeEvent.payload === "object" ? nativeEvent.payload : {{}};
+    }}
+    function nativeEventText(nativeEvent) {{
+      const payload = nativeEventPayload(nativeEvent);
+      const value = payload.text ?? payload.delta ?? payload.summary ?? payload.content ?? payload.message ?? payload.output ?? payload.chunk ?? "";
+      return String(value || "");
+    }}
+    function nativeMessageKey(role, nativeEvent, bucket = "") {{
+      const payload = nativeEventPayload(nativeEvent);
+      const stable = payload.itemId || payload.item_id || payload.message_id || payload.native_message_id || payload.native_turn_id || payload.turnId || nativeEvent?.id || `${{Date.now()}}:${{Math.random()}}`;
+      return `${{bucket}}:${{role || ""}}:${{stable}}`;
+    }}
+    function nativeCommandTitle(nativeEvent) {{
+      const payload = nativeEventPayload(nativeEvent);
+      const command = payload.command || payload.cmd || payload.name || payload.tool || "";
+      return command ? `命令 · ${{command}}` : "命令";
+    }}
+    function nativeStatusTitle(kind) {{
+      const labels = {{
+        reasoning_delta: "思考中",
+        command_started: "命令开始",
+        command_output: "命令输出",
+        command_completed: "命令完成",
+        command_failed: "命令失败",
+        file_changed: "文件变更",
+        diff_updated: "Diff 更新",
+        approval_requested: "请求审批",
+        approval_resolved: "审批已处理",
+        lifecycle: "会话状态",
+        activity: "会话活动",
+        completed: "会话完成",
+        failed: "会话失败",
+      }};
+      return labels[kind] || "系统";
+    }}
+    function setNativeBodyText(node, text, append = false) {{
+      const body = node?.querySelector("[data-native-message-body]");
+      if (!body) return;
+      if (append) body.textContent += text;
+      else body.textContent = text;
+      scrollNativeConversationToEnd();
+    }}
+    function createNativeMessage(role, kind, speaker, meta, key) {{
       if (!conversationTimeline) return null;
+      const empty = conversationTimeline.querySelector("[data-native-empty]");
+      if (empty) empty.remove();
       const block = document.createElement("article");
       block.className = "relay-message";
-      block.dataset.conversationKind = kind;
-      block.dataset.conversationRole = role || "system";
+      block.dataset.nativeRole = role || "system";
+      block.dataset.nativeKind = kind || "status";
+      if (key) block.dataset.nativeKey = key;
       const head = document.createElement("div");
       head.className = "relay-message-head";
       const title = document.createElement("strong");
-      title.textContent = speaker || (kind === "user" ? "你" : labelForRole(role));
+      title.textContent = speaker || labelForRole(role);
       head.appendChild(title);
+      if (meta) {{
+        const metaNode = document.createElement("span");
+        metaNode.className = "relay-message-meta";
+        metaNode.textContent = meta;
+        head.appendChild(metaNode);
+      }}
       const body = document.createElement("div");
       body.className = "relay-message-body";
-      body.dataset.conversationBody = "";
+      body.dataset.nativeMessageBody = "";
       block.appendChild(head);
       block.appendChild(body);
       conversationTimeline.appendChild(block);
-      scrollConversationToEnd();
+      scrollNativeConversationToEnd();
       return block;
     }}
-    function appendConversationEvent(text, role = "system") {{
-      const value = String(text || "");
-      if (!value) return;
-      activeConversationBlock = null;
-      activeConversationRole = "";
-      const block = createConversationMessage(role, "event", "系统");
-      const body = block?.querySelector("[data-conversation-body]");
-      if (body) body.textContent = value;
-      scrollConversationToEnd();
-    }}
-    function appendConversationDelta(role, text) {{
-      const delta = String(text || "");
-      if (!delta) return;
-      if (!activeConversationBlock || activeConversationRole !== role) {{
-        activeConversationBlock = createConversationMessage(role, "role", labelForRole(role));
-        activeConversationRole = role || "";
+    function renderRelayNativeEvent(role, nativeEvent) {{
+      if (!conversationTimeline || !nativeEvent) return;
+      const kind = nativeEvent.kind || "event";
+      const payload = nativeEventPayload(nativeEvent);
+      const text = nativeEventText(nativeEvent);
+      const provider = nativeEvent.source || payload.provider || "";
+      const roleLabel = labelForRole(role);
+      if (kind === "user_message") {{
+        const key = nativeMessageKey(role, nativeEvent, "user");
+        let node = nativeTranscriptNodes.get(key);
+        if (!node) {{
+          node = createNativeMessage(role, "user_message", "你", roleLabel, key);
+          nativeTranscriptNodes.set(key, node);
+        }}
+        setNativeBodyText(node, text);
+        return;
       }}
-      const body = activeConversationBlock?.querySelector("[data-conversation-body]");
-      if (body) {{
-        body.textContent += delta;
-        scrollConversationToEnd();
+      if (kind === "text_delta" || kind === "message_completed") {{
+        const key = nativeMessageKey(role, nativeEvent, "assistant");
+        let node = nativeTranscriptNodes.get(key);
+        if (!node) {{
+          node = createNativeMessage(role, kind, roleLabel, provider, key);
+          nativeTranscriptNodes.set(key, node);
+        }}
+        node.dataset.nativeKind = kind;
+        setNativeBodyText(node, text, kind === "text_delta");
+        setRoleStatus(role, "streaming");
+        return;
       }}
+      if (kind === "command_started" || kind === "command_output" || kind === "command_completed" || kind === "command_failed") {{
+        const key = nativeMessageKey(role, nativeEvent, "command");
+        let node = nativeTranscriptNodes.get(key);
+        if (!node) {{
+          node = createNativeMessage(role, kind, nativeCommandTitle(nativeEvent), roleLabel, key);
+          nativeTranscriptNodes.set(key, node);
+        }}
+        node.dataset.nativeKind = kind;
+        setNativeBodyText(node, text || payload.command || payload.status || "", kind === "command_output");
+        return;
+      }}
+      const statusText = text || payload.status || payload.action || payload.error || nativeStatusTitle(kind);
+      if (!statusText) return;
+      const node = createNativeMessage(role, kind, nativeStatusTitle(kind), roleLabel, nativeMessageKey(role, nativeEvent, "status"));
+      setNativeBodyText(node, statusText);
     }}
-    function appendConversationUser(text) {{
-      const value = String(text || "").trim();
-      if (!value) return;
-      activeConversationBlock = null;
-      activeConversationRole = "";
-      const block = createConversationMessage("user", "user", "你");
-      const body = block?.querySelector("[data-conversation-body]");
-      if (body) body.textContent = value;
-      scrollConversationToEnd();
-    }}
+    document.querySelectorAll("[data-native-key]").forEach((node) => {{
+      if (node.dataset.nativeKey) nativeTranscriptNodes.set(node.dataset.nativeKey, node);
+    }});
     function setRoleStatus(role, status) {{
       const lane = document.querySelector(`[data-role="${{role}}"]`);
       const statusNode = lane?.querySelector(".role-status");
@@ -4333,26 +4373,26 @@ def _relay_task_detail_page(
       const payload = parseRelayEvent(event);
       setRoleStatus(payload.role, "queued");
       appendActivity(`${{labelForRole(payload.role)}} 已进入队列，等待启动。`);
-      appendConversationEvent(`${{labelForRole(payload.role)}} 已进入队列，等待启动。`, payload.role);
     }});
     source.addEventListener("role.streaming", (event) => {{
       const payload = parseRelayEvent(event);
       setRoleStatus(payload.role, "streaming");
       updateNativeLink(payload.role, payload.provider, payload.native_session_id);
       appendActivity(`${{labelForRole(payload.role)}} 开始执行。`);
-      appendConversationEvent(`${{labelForRole(payload.role)}} 开始执行。`, payload.role);
     }});
     source.addEventListener("dispatch.verified", (event) => {{
       const payload = parseRelayEvent(event);
       setRoleStatus(payload.role, "streaming");
       updateNativeLink(payload.role, payload.provider, payload.native_session_id);
       appendActivity(`${{labelForRole(payload.role)}} 的原生会话已启动。`);
-      appendConversationEvent(`${{labelForRole(payload.role)}} 的原生会话已启动。`, payload.role);
     }});
     source.addEventListener("dispatch.fallback", (event) => {{
       const payload = parseRelayEvent(event);
       appendActivity(`${{labelForRole(payload.role)}} 调度降级：${{payload.reason || "使用可用 provider 继续"}}`);
-      appendConversationEvent(`${{labelForRole(payload.role)}} 调度降级：${{payload.reason || "使用可用 provider 继续"}}`, payload.role);
+    }});
+    source.addEventListener("role.native_event", (event) => {{
+      const payload = parseRelayEvent(event);
+      renderRelayNativeEvent(payload.role, payload.native_event || payload);
     }});
     source.addEventListener("role.output_delta", (event) => {{
       const payload = parseRelayEvent(event);
@@ -4362,7 +4402,6 @@ def _relay_task_detail_page(
         output.textContent += payload.delta || payload.text || "";
         output.scrollTop = output.scrollHeight;
       }}
-      appendConversationDelta(payload.role, payload.delta || payload.text || "");
       setRoleStatus(payload.role, "streaming");
     }});
     source.addEventListener("routing.decision", (event) => {{
@@ -4387,7 +4426,6 @@ def _relay_task_detail_page(
       document.querySelector("[data-routing-acceptance]").textContent = (payload.acceptance_criteria || []).join("、") || "等待总工程师给出验收依据";
       document.querySelector("[data-routing-stops]").textContent = `${{stops}} · ${{payload.requires_user_approval ? "需要用户确认" : "无需额外确认"}}`;
       appendActivity(`总工程师调度决策：${{routeText}}。`);
-      appendConversationEvent(`总工程师调度决策：${{routeText}}。${{payload.summary || ""}}`, "director");
     }});
     source.addEventListener("role.envelope", (event) => {{
       const payload = parseRelayEvent(event);
@@ -4395,7 +4433,6 @@ def _relay_task_detail_page(
       const role = payload.role || envelope.role;
       if (envelope.summary) {{
         appendActivity(`${{labelForRole(role)}} 产出摘要：${{envelope.summary}}`);
-        appendConversationEvent(`${{labelForRole(role)}} 产出摘要：${{envelope.summary}}`, role);
         if (role === "director") {{
           const summary = document.querySelector("[data-board-director-summary]");
           if (summary) summary.textContent = envelope.summary;
@@ -4412,23 +4449,19 @@ def _relay_task_detail_page(
       const toRole = payload.to_role || payload.handoff_to;
       if (toRole) setRoleStatus(toRole, "queued");
       appendActivity(`${{labelForRole(payload.from_role)}} 已交接给 ${{labelForRole(toRole)}}：${{payload.summary || "等待下一角色处理"}}`);
-      appendConversationEvent(`${{labelForRole(payload.from_role)}} 已交接给 ${{labelForRole(toRole)}}：${{payload.summary || "等待下一角色处理"}}`, toRole || payload.from_role);
     }});
     source.addEventListener("role.status", (event) => {{
       const payload = parseRelayEvent(event);
       setRoleStatus(payload.role, payload.status);
       appendActivity(`${{labelForRole(payload.role)}} 状态更新为 ${{labelForStatus(payload.status)}}。`);
-      appendConversationEvent(`${{labelForRole(payload.role)}} 状态更新为 ${{labelForStatus(payload.status)}}。`, payload.role);
     }});
     source.addEventListener("task.completed", () => {{
       updateTaskStatus("completed");
       appendActivity("任务已完成，可以继续补充给总工程师进行追问或追加验收。");
-      appendConversationEvent("任务已完成，可以继续补充给总工程师进行追问或追加验收。");
     }});
     source.addEventListener("task.interrupted", () => {{
       updateTaskStatus("interrupted");
       appendActivity("任务已中断。");
-      appendConversationEvent("任务已中断。");
     }});
     document.querySelector(".relay-composer")?.addEventListener("submit", async (event) => {{
       event.preventDefault();
@@ -4436,7 +4469,6 @@ def _relay_task_detail_page(
       const data = Object.fromEntries(new FormData(form).entries());
       if (!data.text) return;
       appendActivity("你已补充需求，已发送给总工程师。");
-      appendConversationUser(String(data.text || ""));
       const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/message${{TOKEN_SUFFIX}}`, {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
@@ -4451,10 +4483,8 @@ def _relay_task_detail_page(
       if (response.ok) {{
         updateTaskStatus("interrupted");
         appendActivity("你已中断任务。");
-        appendConversationEvent("你已中断任务。");
       }} else {{
         appendActivity("中断失败，请稍后重试。");
-        appendConversationEvent("中断失败，请稍后重试。");
       }}
     }});
   </script>
@@ -4509,6 +4539,249 @@ def _relay_role_panel_html(job: Any) -> str:
         </div>
       </article>
     """
+
+
+def _relay_native_conversation_html(
+    role_jobs: list[Any],
+    *,
+    hub: WorkerLiveStreamHub | None,
+) -> str:
+    events: list[tuple[str, int, str, str, WorkerStreamEvent]] = []
+    if hub is not None:
+        for job in role_jobs:
+            agent_run_id = getattr(job, "agent_run_id", None)
+            if agent_run_id is None:
+                continue
+            role = str(getattr(job, "role", "") or "")
+            display_name = str(
+                getattr(job, "display_name", "") or _relay_role_label(role)
+            )
+            for worker_event in hub.snapshot(
+                agent_run_id=int(agent_run_id),
+                after_id=0,
+                limit=500,
+            ):
+                events.append(
+                    (
+                        str(worker_event.occurred_at or ""),
+                        int(worker_event.id),
+                        role,
+                        display_name,
+                        worker_event,
+                    )
+                )
+    if not events:
+        return _relay_native_empty_conversation_html()
+
+    events.sort(key=lambda item: (item[0], item[1]))
+    completed_keys = {
+        _relay_native_message_key(role, worker_event, bucket="assistant")
+        for _occurred_at, _event_id, role, _display_name, worker_event in events
+        if worker_event.kind == "message_completed"
+        and _relay_native_event_text(worker_event).strip()
+    }
+    rows: list[dict[str, str]] = []
+    row_by_key: dict[str, dict[str, str]] = {}
+    for _occurred_at, _event_id, role, display_name, worker_event in events:
+        kind = str(worker_event.kind or "event")
+        text = _relay_native_event_text(worker_event)
+        if kind == "text_delta":
+            key = _relay_native_message_key(
+                role,
+                worker_event,
+                bucket="assistant",
+            )
+            if key in completed_keys:
+                continue
+            if key not in row_by_key:
+                row = {
+                    "role": role,
+                    "kind": kind,
+                    "speaker": display_name,
+                    "meta": str(worker_event.source or ""),
+                    "body": "",
+                    "key": key,
+                }
+                rows.append(row)
+                row_by_key[key] = row
+            row_by_key[key]["body"] += text
+            continue
+        row = _relay_native_event_row(role, display_name, worker_event)
+        if row is not None:
+            rows.append(row)
+    if not rows:
+        return _relay_native_empty_conversation_html()
+    return "\n".join(_relay_native_message_html(row) for row in rows)
+
+
+def _relay_native_empty_conversation_html() -> str:
+    return """
+      <article class="relay-message" data-native-role="system" data-native-kind="status" data-native-empty>
+        <div class="relay-message-head"><strong>系统</strong></div>
+        <div class="relay-message-body" data-native-message-body>等待原生会话输出。</div>
+      </article>
+    """
+
+
+def _relay_native_event_row(
+    role: str,
+    display_name: str,
+    worker_event: WorkerStreamEvent,
+) -> dict[str, str] | None:
+    kind = str(worker_event.kind or "event")
+    text = _relay_native_event_text(worker_event)
+    payload = dict(worker_event.payload or {})
+    if kind == "user_message":
+        return {
+            "role": role,
+            "kind": kind,
+            "speaker": "你",
+            "meta": display_name,
+            "body": text,
+            "key": _relay_native_message_key(role, worker_event, bucket="user"),
+        }
+    if kind == "message_completed":
+        return {
+            "role": role,
+            "kind": kind,
+            "speaker": display_name,
+            "meta": str(worker_event.source or ""),
+            "body": text,
+            "key": _relay_native_message_key(role, worker_event, bucket="assistant"),
+        }
+    if kind in {
+        "command_started",
+        "command_output",
+        "command_completed",
+        "command_failed",
+    }:
+        body = text or str(payload.get("command") or payload.get("status") or "")
+        return {
+            "role": role,
+            "kind": kind,
+            "speaker": _relay_native_command_title(worker_event),
+            "meta": display_name,
+            "body": body,
+            "key": _relay_native_message_key(role, worker_event, bucket="command"),
+        }
+    if kind in {
+        "reasoning_delta",
+        "activity",
+        "lifecycle",
+        "file_changed",
+        "diff_updated",
+        "approval_requested",
+        "approval_resolved",
+        "completed",
+        "failed",
+        "event",
+    }:
+        body = (
+            text
+            or str(payload.get("status") or "")
+            or str(payload.get("action") or "")
+            or str(payload.get("error") or "")
+            or _relay_native_status_title(kind)
+        )
+        if not body:
+            return None
+        return {
+            "role": role,
+            "kind": kind,
+            "speaker": _relay_native_status_title(kind),
+            "meta": display_name,
+            "body": body,
+            "key": _relay_native_message_key(role, worker_event, bucket="status"),
+        }
+    if not text:
+        return None
+    return {
+        "role": role,
+        "kind": kind,
+        "speaker": display_name,
+        "meta": str(worker_event.source or ""),
+        "body": text,
+        "key": _relay_native_message_key(role, worker_event, bucket="event"),
+    }
+
+
+def _relay_native_message_html(row: dict[str, str]) -> str:
+    meta = str(row.get("meta") or "")
+    meta_html = (
+        f'<span class="relay-message-meta">{escape(meta)}</span>' if meta else ""
+    )
+    return f"""
+      <article class="relay-message" data-native-role="{escape(row.get("role", "") or "system")}" data-native-kind="{escape(row.get("kind", "") or "event")}" data-native-key="{escape(row.get("key", "") or "")}">
+        <div class="relay-message-head">
+          <strong>{escape(row.get("speaker", "") or "系统")}</strong>
+          {meta_html}
+        </div>
+        <div class="relay-message-body" data-native-message-body>{escape(row.get("body", "") or "")}</div>
+      </article>
+    """
+
+
+def _relay_native_event_text(worker_event: WorkerStreamEvent) -> str:
+    payload = dict(worker_event.payload or {})
+    return str(
+        payload.get("text")
+        or payload.get("delta")
+        or payload.get("summary")
+        or payload.get("content")
+        or payload.get("message")
+        or payload.get("output")
+        or payload.get("chunk")
+        or ""
+    )
+
+
+def _relay_native_message_key(
+    role: str,
+    worker_event: WorkerStreamEvent,
+    *,
+    bucket: str,
+) -> str:
+    payload = dict(worker_event.payload or {})
+    stable = (
+        payload.get("itemId")
+        or payload.get("item_id")
+        or payload.get("message_id")
+        or payload.get("native_message_id")
+        or payload.get("native_turn_id")
+        or payload.get("turnId")
+        or worker_event.id
+    )
+    return f"{bucket}:{role}:{stable}"
+
+
+def _relay_native_command_title(worker_event: WorkerStreamEvent) -> str:
+    payload = dict(worker_event.payload or {})
+    command = str(
+        payload.get("command")
+        or payload.get("cmd")
+        or payload.get("name")
+        or payload.get("tool")
+        or ""
+    ).strip()
+    return f"命令 · {command}" if command else "命令"
+
+
+def _relay_native_status_title(kind: str) -> str:
+    return {
+        "reasoning_delta": "思考中",
+        "command_started": "命令开始",
+        "command_output": "命令输出",
+        "command_completed": "命令完成",
+        "command_failed": "命令失败",
+        "file_changed": "文件变更",
+        "diff_updated": "Diff 更新",
+        "approval_requested": "请求审批",
+        "approval_resolved": "审批已处理",
+        "lifecycle": "会话状态",
+        "activity": "会话活动",
+        "completed": "会话完成",
+        "failed": "会话失败",
+    }.get(kind, "系统")
 
 
 def _council_review_page() -> str:

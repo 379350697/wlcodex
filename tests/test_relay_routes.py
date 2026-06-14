@@ -434,7 +434,7 @@ async def test_relay_events_stream_includes_lane_metadata(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_relay_events_stream_maps_native_runtime_delta_to_role_lane(
+async def test_relay_events_stream_maps_native_runtime_delta_to_native_role_event(
     tmp_path: Path,
 ) -> None:
     service = _relay_service(tmp_path)
@@ -469,8 +469,9 @@ async def test_relay_events_stream_maps_native_runtime_delta_to_role_lane(
         relay_service=service,
     )
 
-    assert "event: role.output_delta" in response
+    assert "event: role.native_event" in response
     assert '"role": "director"' in response
+    assert '"kind": "text_delta"' in response
     assert '"delta": "director says hi"' in response
 
 
@@ -512,6 +513,7 @@ async def test_relay_events_snapshot_does_not_duplicate_projected_runtime_delta(
     )
 
     assert response.count("event: role.output_delta") == 1
+    assert response.count("event: role.native_event") == 1
     assert '"delta": "single visible delta"' in response
 
 
@@ -590,7 +592,8 @@ async def test_relay_sse_snapshot_does_not_advance_role_completion(
         relay_service=service,
     )
 
-    assert "event: role.message_completed" in response
+    assert "event: role.native_event" in response
+    assert '"kind": "message_completed"' in response
     jobs = {job.role: job for job in service.get_task(task.id).role_jobs}
     assert jobs["implementer"].status == "streaming"
     assert jobs["tester"].status == "idle"
@@ -676,7 +679,9 @@ async def test_relay_events_include_dynamic_next_role_lane_after_handoff(
 
     assert "event: handoff.created" in response
     assert "event: role.output_delta" in response
+    assert "event: role.native_event" in response
     assert '"role": "tester"' in response
+    assert '"kind": "text_delta"' in response
     assert '"delta": "tester is verifying"' in response
 
 

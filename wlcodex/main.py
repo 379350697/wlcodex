@@ -416,19 +416,28 @@ def _create_live_stream_components(
                 relay_provider_defaults_from_team_config,
             )
 
+            relay_default_provider = native_providers[0].provider if native_providers else "codex"
+            relay_available_providers = {
+                str(provider.provider) for provider in native_providers if str(provider.provider)
+            }
+            relay_role_provider_defaults = relay_provider_defaults_from_team_config(
+                config.adaptive_team.assignments,
+                config.adaptive_team.model_profiles,
+                fallback_provider=relay_default_provider,
+            )
+            relay_role_provider_defaults = {
+                role: (
+                    provider
+                    if provider in relay_available_providers
+                    else relay_default_provider
+                )
+                for role, provider in relay_role_provider_defaults.items()
+            }
             relay_service = RelayService(
                 store=RelayStore(ledger),
                 registry=native_registry,
-                default_provider=(
-                    native_providers[0].provider if native_providers else "codex"
-                ),
-                role_provider_defaults=relay_provider_defaults_from_team_config(
-                    config.adaptive_team.assignments,
-                    config.adaptive_team.model_profiles,
-                    fallback_provider=(
-                        native_providers[0].provider if native_providers else "codex"
-                    ),
-                ),
+                default_provider=relay_default_provider,
+                role_provider_defaults=relay_role_provider_defaults,
                 role_skills=config.adaptive_team.role_skills,
                 role_capabilities=config.adaptive_team.role_capabilities,
             )

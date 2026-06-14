@@ -14,6 +14,13 @@ from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.relay.service import RelayService
 from wlcodex.relay.store import RelayStore
 from wlcodex.runtime_event_store import RuntimeEventStore
+from wlcodex.runtime_events import (
+    AggregateType,
+    EventSource,
+    EventType,
+    RuntimeEvent,
+    Visibility,
+)
 
 
 class FakeProvider:
@@ -69,25 +76,51 @@ def _server(tmp_path: Path, relay_service: RelayService | None = None):
             "implementer": ("write", "tests"),
         },
     )
+    runtime_store = RuntimeEventStore(ledger._conn)
     return WorkerLiveStreamServer(
         host="127.0.0.1",
         port=0,
-        hub=WorkerLiveStreamHub(RuntimeEventStore(ledger._conn)),
+        hub=WorkerLiveStreamHub(runtime_store),
         native_registry=NativeAgentRegistry(providers),
         relay_service=service,
         access_token="secret",
         allow_unauthenticated_loopback=False,
-    ), service
+    ), service, runtime_store
 
 
 async def _request(tmp_path: Path, request: str, relay_service: RelayService | None = None):
-    server, service = _server(tmp_path, relay_service)
+    server, service, _runtime_store = _server(tmp_path, relay_service)
     await server.start()
     try:
         response = await _read_response(server.host, server.port, request)
     finally:
         await server.stop()
     return response, service
+
+
+def _append_runtime_event(
+    runtime_store: RuntimeEventStore,
+    *,
+    agent_run_id: int,
+    event_type: str,
+    payload: dict[str, Any],
+    occurred_at: str,
+):
+    return runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=event_type,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id=str(agent_run_id),
+            correlation_id=f"agent:{agent_run_id}",
+            source=EventSource.CLAUDE,
+            actor="claude_native",
+            visibility=Visibility.USER,
+            payload=payload,
+            occurred_at=occurred_at,
+            agent_run_id=agent_run_id,
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -126,7 +159,7 @@ async def test_workflow_directory_links_to_relay_council_and_dev_flow(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> None:
-    server, service = _server(tmp_path)
+    server, service, _runtime_store = _server(tmp_path)
     default_workspace = "/Users/wl/projects/wlcodex"
     task = service.create_task(
         title="Default workspace relay",
@@ -281,7 +314,7 @@ async def test_relay_config_has_dedicated_page(tmp_path: Path) -> None:
 async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     tmp_path: Path,
 ) -> None:
-    server, service = _server(tmp_path)
+    server, service, runtime_store = _server(tmp_path)
     task = service.create_task(
         title="Detail task",
         prompt="Prompt",
@@ -294,9 +327,68 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
         provider="claude",
         model="sonnet",
         native_session_id="native-director-1",
+        agent_run_id=101,
         dispatch_verified=True,
     )
     service._store.update_role_status(task.id, "director", "streaming")
+    service._store.update_role_metadata(
+        task.id,
+        "architect",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-architect-1",
+        agent_run_id=102,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "architect", "streaming")
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=101,
+        event_type=EventType.USER_MESSAGE_RECEIVED,
+        payload={
+            "text": "让审计工程师确认一下",
+            "native_thread_id": "native-director-1",
+            "native_turn_id": "turn-director-1",
+            "itemId": "director-user-1",
+        },
+        occurred_at="2026-06-14T12:00:01+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=101,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": "我会先确认风险。",
+            "native_thread_id": "native-director-1",
+            "native_turn_id": "turn-director-1",
+            "itemId": "director-assistant-1",
+        },
+        occurred_at="2026-06-14T12:00:02+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=101,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "我会先确认风险。",
+            "native_thread_id": "native-director-1",
+            "native_turn_id": "turn-director-1",
+            "itemId": "director-assistant-1",
+        },
+        occurred_at="2026-06-14T12:00:03+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=102,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "架构侧继续补齐影响面。",
+            "native_thread_id": "native-architect-1",
+            "native_turn_id": "turn-architect-1",
+            "itemId": "architect-assistant-1",
+        },
+        occurred_at="2026-06-14T12:00:04+00:00",
+    )
     service._store.save_artifact(
         task.id,
         "director",
@@ -365,7 +457,19 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
         in response
     )
     assert 'class="relay-conversation"' in response
-    assert 'data-conversation-timeline' in response
+    assert 'data-native-conversation-timeline' in response
+    assert 'class="relay-native-stack"' not in response
+    assert 'data-native-session-stack' not in response
+    assert 'class="relay-native-stream"' not in response
+    assert 'class="relay-native-frame"' not in response
+    assert "<iframe" not in response
+    assert "让审计工程师确认一下" in response
+    assert "我会先确认风险。" in response
+    assert "架构侧继续补齐影响面。" in response
+    assert response.index("让审计工程师确认一下") < response.index("我会先确认风险。")
+    assert response.index("我会先确认风险。") < response.index("架构侧继续补齐影响面。")
+    assert 'data-native-role="director"' in response
+    assert 'data-native-role="architect"' in response
     assert 'data-view-panel="conversation"' in response
     assert 'data-view-panel="board"' in response
     assert "任务进度" in response
@@ -416,15 +520,20 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'const EVENTS_SUFFIX = "?token=secret&after=3";' in response
     assert "function normalizeRelayPayload(raw)" in response
     assert "const payload = parseRelayEvent(event);" in response
+    assert "function renderRelayNativeEvent" in response
+    assert 'source.addEventListener("role.native_event"' in response
+    assert 'document.querySelectorAll("[data-native-key]")' in response
+    assert "nativeTranscriptNodes.set(node.dataset.nativeKey" in response
     assert "events${EVENTS_SUFFIX}" in response
-    assert "appendConversationDelta(payload.role" in response
-    assert "activeConversationRole !== role" in response
-    assert "appendConversationUser(String(data.text" in response
+    assert "appendConversationDelta(" not in response
+    assert "activeConversationRole" not in response
+    assert "appendConversationUser(" not in response
     for event_name in [
         "role.queued",
         "role.streaming",
         "dispatch.verified",
         "dispatch.fallback",
+        "role.native_event",
         "role.output_delta",
         "role.envelope",
         "handoff.created",
@@ -439,7 +548,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
 async def test_relay_task_detail_board_view_activates_status_cards(
     tmp_path: Path,
 ) -> None:
-    server, service = _server(tmp_path)
+    server, service, _runtime_store = _server(tmp_path)
     task = service.create_task(
         title="Board detail task",
         prompt="Prompt",
@@ -481,7 +590,7 @@ async def test_relay_task_detail_board_view_activates_status_cards(
 async def test_relay_task_detail_uses_role_error_as_director_summary(
     tmp_path: Path,
 ) -> None:
-    server, service = _server(tmp_path)
+    server, service, _runtime_store = _server(tmp_path)
     task = service.create_task(
         title="Blocked detail task",
         prompt="Prompt",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from wlcodex.live_stream.models import stream_event_from_runtime
 from wlcodex.relay.context import build_role_context_packet
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.events import RelayEvent, RelayEventBus
@@ -919,6 +920,7 @@ class RelayService:
         await self.dispatch_role(task_id, "director")
 
     def project_runtime_event(self, runtime_event: Any) -> None:
+        self._project_native_event(runtime_event)
         if self._project_runtime_delta(runtime_event):
             return
         if not self._is_runtime_completion(runtime_event):
@@ -1038,6 +1040,37 @@ class RelayService:
         if not callable(interrupt):
             return
         await interrupt(job.native_session_id)
+
+    def _project_native_event(
+        self,
+        runtime_event: Any,
+        *,
+        task_id: int | None = None,
+        role: str = "",
+    ) -> bool:
+        agent_run_id = getattr(runtime_event, "agent_run_id", None)
+        if task_id is None:
+            if agent_run_id is None:
+                return False
+            mapping = self._store.find_role_by_agent_run_id(int(agent_run_id))
+            if mapping is None:
+                return False
+            task_id, role = mapping
+        stream_event = stream_event_from_runtime(runtime_event)
+        self._events.emit(
+            int(task_id),
+            "role.native_event",
+            role=role,
+            payload={
+                "role": role,
+                "agent_run_id": agent_run_id,
+                "runtime_event_id": int(getattr(runtime_event, "id", 0) or 0),
+                "kind": stream_event.kind,
+                "native_event": stream_event.to_json_dict(),
+                "payload": stream_event.payload,
+            },
+        )
+        return True
 
     def _project_runtime_delta(
         self,
