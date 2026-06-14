@@ -127,15 +127,18 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "HTTP/1.1 200 OK" in response
     assert "流式接力" in response
     assert "任务历史" in response
-    assert "新任务" in response
-    assert "新聊天" in response
+    assert "新接力任务" in response
+    assert "新聊天" not in response
     assert '<section class="relay-create-panel" id="new-task-panel" hidden>' in response
     assert "发布大任务" not in response
-    assert "running" in response
-    assert "waiting_user" in response
-    assert "blocked" in response
-    assert "completed" in response
-    assert "interrupted" in response
+    assert "还没有接力任务" in response
+    assert "暂无任务" not in response
+    assert "relay-group" not in response
+    assert 'data-filter="running"' in response
+    assert 'data-filter="waiting_user"' in response
+    assert 'data-filter="blocked"' in response
+    assert 'data-filter="completed"' in response
+    assert 'data-filter="interrupted"' in response
     assert 'list="relay-workspaces"' in response
     assert '<datalist id="relay-workspaces">' in response
     assert 'aria-label="relay task history"' in response
@@ -155,6 +158,16 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     )
     assert "Long relay title wraps without overlap" in populated
     assert '<option value="/repo"></option>' in populated
+    assert 'class="relay-task-card"' in populated
+    assert 'class="relay-status-badge"' in populated
+    assert "总工程师" in populated
+    assert "架构工程师" in populated
+    assert "开发工程师" in populated
+    assert "测试工程师" in populated
+    assert "审计工程师" in populated
+    assert "等待总工程师接收" in populated
+    assert "打开任务" in populated
+    assert "open task" not in populated
     assert f'/native/workflows/relay/tasks/{task.id}?token=secret' in populated
 
 

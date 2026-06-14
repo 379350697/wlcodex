@@ -41,6 +41,7 @@ from wlcodex.live_stream.collapse import (
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.jsonrpc import JsonRpcError, JsonRpcTimeout
+from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES
 
 
 _REQUEST_TIMEOUT_SECONDS = 30.0
@@ -2912,22 +2913,51 @@ def _relay_task_list_page(
     access_token: str = "",
 ) -> str:
     token_suffix = _token_suffix(access_token)
+    sorted_summaries = sorted(
+        summaries,
+        key=lambda summary: str(getattr(summary, "last_activity_at", "") or ""),
+        reverse=True,
+    )
     provider_options = "\n".join(
         f'<option value="{escape(str(provider.get("provider", "")))}">'
         f'{escape(_native_provider_display_name(str(provider.get("provider", ""))))}'
         "</option>"
         for provider in providers
     ) or '<option value="codex">Codex</option>'
-    groups = ["running", "waiting_user", "blocked", "completed", "interrupted"]
-    grouped = {status: [] for status in groups}
-    for summary in summaries:
-        grouped.setdefault(summary.status, []).append(summary)
-    group_html = "\n".join(
-        _relay_task_group_html(status, grouped.get(status, []), token_suffix)
-        for status in groups
+    filters = ["running", "waiting_user", "blocked", "completed", "interrupted"]
+    counts = {status: 0 for status in filters}
+    for summary in sorted_summaries:
+        status = str(getattr(summary, "status", "") or "")
+        if status in counts:
+            counts[status] += 1
+    filter_html = "\n".join(
+        '<button class="relay-filter-chip" type="button" '
+        f'data-filter="{escape(status)}">'
+        f"{escape(_relay_task_status_label(status))} "
+        f'<span>{counts.get(status, 0)}</span></button>'
+        for status in filters
+    )
+    if sorted_summaries:
+        task_list_html = "\n".join(
+            _relay_task_card_html(summary, token_suffix)
+            for summary in sorted_summaries
+        )
+    else:
+        task_list_html = """
+          <section class="relay-empty-state">
+            <h2>还没有接力任务</h2>
+            <p>创建一个大任务后，总工程师会先接收并调度架构、开发、测试和审计角色。</p>
+            <button class="relay-primary" type="button" data-open-new-task>新接力任务</button>
+          </section>
+        """
+    task_count = len(sorted_summaries)
+    active_count = sum(
+        1
+        for summary in sorted_summaries
+        if str(getattr(summary, "status", "") or "") in {"running", "waiting_user", "blocked"}
     )
     workspace_options = sorted(
-        {str(getattr(summary, "workspace", "") or "") for summary in summaries if getattr(summary, "workspace", "")}
+        {str(getattr(summary, "workspace", "") or "") for summary in sorted_summaries if getattr(summary, "workspace", "")}
         | {"/Users/wl/projects/wlcodex"}
     )
     workspace_datalist = "\n".join(
@@ -2955,19 +2985,29 @@ def _relay_task_list_page(
     .relay-form label {{ display: grid; gap: 6px; color: var(--text-muted); font-size: 13px; }}
     .relay-form input, .relay-form textarea, .relay-form select {{ width: 100%; box-sizing: border-box; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px; background: rgba(255,255,255,.04); color: var(--text-primary); }}
     .relay-form textarea {{ min-height: 130px; resize: vertical; }}
-    .relay-form button, .relay-open, .relay-new-task {{ min-height: 38px; border: 1px solid var(--color-link); border-radius: 6px; background: transparent; color: var(--text-primary); text-decoration: none; display: inline-grid; place-items: center; padding: 0 12px; }}
+    .relay-form button, .relay-open, .relay-primary {{ min-height: 38px; border: 1px solid var(--color-link); border-radius: 6px; background: transparent; color: var(--text-primary); text-decoration: none; display: inline-grid; place-items: center; padding: 0 12px; }}
+    .relay-primary {{ background: rgba(88, 166, 255, .12); font-weight: var(--weight-bold); }}
+    .relay-primary:hover, .relay-open:hover, .relay-filter-chip:hover {{ background: rgba(255,255,255,.07); }}
     .relay-history-list {{ display: grid; gap: 14px; min-width: 0; }}
     .relay-history-head {{ display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }}
-    .relay-group {{ display: grid; gap: 10px; min-width: 0; }}
-    .relay-group h2 {{ font-size: 15px; color: var(--text-muted); }}
-    .relay-card {{ display: grid; gap: 10px; border: 1px solid var(--border-card); border-radius: 8px; padding: 14px; background: var(--bg-surface); min-width: 0; overflow-wrap: anywhere; }}
-    .relay-card-head {{ display: flex; justify-content: space-between; gap: 10px; align-items: start; flex-wrap: wrap; }}
+    .relay-history-title {{ display: grid; gap: 4px; min-width: 0; }}
+    .relay-filter-row {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+    .relay-filter-chip {{ min-height: 32px; border: 1px solid var(--border-subtle); border-radius: 999px; background: transparent; color: var(--text-muted); padding: 0 10px; }}
+    .relay-filter-chip.active {{ border-color: var(--color-link); color: var(--text-primary); background: rgba(88, 166, 255, .1); }}
+    .relay-task-list {{ display: grid; gap: 10px; min-width: 0; }}
+    .relay-task-card {{ display: grid; gap: 10px; border: 1px solid var(--border-card); border-radius: 8px; padding: 14px; background: var(--bg-surface); min-width: 0; overflow-wrap: anywhere; }}
+    .relay-card-head {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }}
+    .relay-card-meta {{ display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }}
     .relay-title {{ font-size: 17px; font-weight: var(--weight-bold); }}
     .relay-muted {{ color: var(--text-muted); font-size: 13px; }}
+    .relay-summary {{ color: var(--text-primary); font-size: 14px; line-height: 1.45; }}
+    .relay-status-badge {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: var(--text-primary); background: rgba(255,255,255,.05); white-space: nowrap; }}
     .relay-role-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
-    .relay-chip {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; white-space: nowrap; }}
-    .relay-empty {{ color: var(--text-muted); border: 1px dashed var(--border-subtle); border-radius: 8px; padding: 14px; }}
-    @media (max-width: 760px) {{ header {{ grid-template-columns: 48px 1fr; }} .relay-toolbar {{ grid-column: 1 / -1; justify-content: stretch; }} .relay-new-task {{ width: 100%; }} main {{ padding: 12px; }} }}
+    .relay-chip {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; white-space: nowrap; color: var(--text-muted); }}
+    .relay-empty-state {{ display: grid; justify-items: start; gap: 10px; border: 1px dashed var(--border-subtle); border-radius: 8px; padding: 18px; color: var(--text-muted); }}
+    .relay-empty-state h2 {{ color: var(--text-primary); font-size: 18px; }}
+    .relay-empty-state p {{ margin: 0; max-width: 58ch; line-height: 1.55; }}
+    @media (max-width: 760px) {{ header {{ grid-template-columns: 48px 1fr; }} .relay-toolbar {{ grid-column: 1 / -1; justify-content: stretch; }} .relay-primary {{ width: 100%; }} .relay-card-head {{ grid-template-columns: 1fr; }} .relay-card-meta {{ justify-content: flex-start; }} main {{ padding: 12px; }} }}
   </style>
 </head>
 <body>
@@ -2975,30 +3015,35 @@ def _relay_task_list_page(
     <a class="circle" href="/native{token_suffix}" aria-label="back">‹</a>
     <h1>流式接力</h1>
     <div class="relay-toolbar">
-      <button class="relay-new-task" id="new-task-button" type="button">新任务</button>
-      <button class="relay-new-task" id="new-chat-button" type="button">新聊天</button>
+      <button class="relay-primary" id="new-task-button" type="button" data-open-new-task>新接力任务</button>
     </div>
   </header>
   <main>
     <div class="relay-shell">
       <section class="relay-create-panel" id="new-task-panel" hidden>
-        <h2>新任务</h2>
+        <h2>新接力任务</h2>
         <form class="relay-form" method="post" action="/api/relay/tasks{token_suffix}">
-          <label>title<input name="title" placeholder="任务标题"></label>
-          <label>task prompt<textarea name="prompt" placeholder="描述要接力完成的大任务"></textarea></label>
-          <label>workspace<input name="workspace" list="relay-workspaces" placeholder="/Users/wl/projects/wlcodex"></label>
+          <label>任务标题<input name="title" placeholder="例如：修复流式接力历史页"></label>
+          <label>任务目标<textarea name="prompt" placeholder="描述要接力完成的大任务、验收标准和限制"></textarea></label>
+          <label>工作目录<input name="workspace" list="relay-workspaces" placeholder="/Users/wl/projects/wlcodex"></label>
           <datalist id="relay-workspaces">{workspace_datalist}</datalist>
-          <label>provider<select name="provider">{provider_options}</select></label>
-          <button type="submit">submit</button>
+          <label>执行模型 / Provider<select name="provider">{provider_options}</select></label>
+          <button type="submit">开始接力</button>
         </form>
       </section>
       <section class="relay-history-list" aria-label="relay task history">
         <div class="relay-history-head">
-          <h2>任务历史</h2>
-          <span class="relay-muted">像会话列表一样继续、查看或新建接力任务</span>
+          <div class="relay-history-title">
+            <h2>任务历史</h2>
+            <span class="relay-muted">共 {task_count} 个任务，{active_count} 个需要跟进</span>
+          </div>
+          <div class="relay-filter-row" aria-label="relay task status filters">
+            <button class="relay-filter-chip active" type="button" data-filter="all">全部 <span>{task_count}</span></button>
+            {filter_html}
+          </div>
         </div>
-        <div class="relay-groups" aria-label="relay task groups">
-          {group_html}
+        <div class="relay-task-list" aria-label="relay tasks">
+          {task_list_html}
         </div>
       </section>
     </div>
@@ -3011,8 +3056,18 @@ def _relay_task_list_page(
       panel.hidden = false;
       panel.querySelector("input, textarea, select")?.focus();
     }}
-    document.getElementById("new-task-button")?.addEventListener("click", openNewTaskPanel);
-    document.getElementById("new-chat-button")?.addEventListener("click", openNewTaskPanel);
+    document.querySelectorAll("[data-open-new-task]").forEach((button) => {{
+      button.addEventListener("click", openNewTaskPanel);
+    }});
+    document.querySelectorAll("[data-filter]").forEach((button) => {{
+      button.addEventListener("click", () => {{
+        const filter = button.dataset.filter || "all";
+        document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("active", item === button));
+        document.querySelectorAll(".relay-task-card").forEach((card) => {{
+          card.hidden = filter !== "all" && card.dataset.status !== filter;
+        }});
+      }});
+    }});
     const form = document.querySelector(".relay-form");
     form?.addEventListener("submit", async (event) => {{
       event.preventDefault();
@@ -3032,38 +3087,88 @@ def _relay_task_list_page(
 </html>""")
 
 
-def _relay_task_group_html(
-    status: str,
-    summaries: list[Any],
-    token_suffix: str,
-) -> str:
-    if not summaries:
-        cards = '<div class="relay-empty">暂无任务</div>'
-    else:
-        cards = "\n".join(_relay_task_card_html(summary, token_suffix) for summary in summaries)
-    return f'<section class="relay-group" data-status="{escape(status)}"><h2>{escape(status)}</h2>{cards}</section>'
-
-
 def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
     chips = "\n".join(
-        f'<span class="relay-chip">{escape(str(role))}: {escape(str(status))}</span>'
+        f'<span class="relay-chip">{escape(_relay_role_label(str(role)))}: '
+        f'{escape(_relay_role_status_label(str(status)))}</span>'
         for role, status in summary.role_statuses.items()
     )
+    status = str(summary.status)
+    status_label = _relay_task_status_label(status)
+    activity = _relay_activity_label(str(summary.last_activity_at))
+    workspace = str(summary.workspace or "未指定工作目录")
+    phase = _relay_phase_label(str(summary.phase or "director"))
+    decision = summary.director_decision_summary or "等待总工程师接收"
+    handoff = summary.latest_handoff_summary or ""
+    handoff_html = (
+        f'<div class="relay-muted">最近接棒：{escape(handoff)}</div>'
+        if handoff
+        else ""
+    )
     return f"""
-      <article class="relay-card">
+      <article class="relay-task-card" data-status="{escape(status)}">
         <div class="relay-card-head">
           <div>
             <div class="relay-title">{escape(summary.title)}</div>
-            <div class="relay-muted">{escape(summary.workspace)} · phase {escape(summary.phase)}</div>
+            <div class="relay-muted">{escape(workspace)} · 当前阶段：{escape(phase)}</div>
           </div>
-          <a class="relay-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">open task</a>
+          <div class="relay-card-meta">
+            <span class="relay-status-badge">{escape(status_label)}</span>
+            <span class="relay-muted">{escape(activity)}</span>
+            <a class="relay-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">打开任务</a>
+          </div>
         </div>
-        <div class="relay-muted">director decision: {escape(summary.director_decision_summary or "等待总工程师决策")}</div>
+        <div class="relay-summary">总工程师：{escape(decision)}</div>
         <div class="relay-role-chips">{chips}</div>
-        <div class="relay-muted">latest handoff: {escape(summary.latest_handoff_summary or "暂无接棒")}</div>
-        <div class="relay-muted">last activity: {escape(summary.last_activity_at)}</div>
+        {handoff_html}
       </article>
     """
+
+
+def _relay_task_status_label(status: str) -> str:
+    return {
+        "queued": "排队中",
+        "running": "进行中",
+        "waiting_user": "等待你",
+        "blocked": "已阻塞",
+        "failed": "失败",
+        "completed": "已完成",
+        "interrupted": "已中断",
+    }.get(status, status or "未知")
+
+
+def _relay_role_label(role: str) -> str:
+    return RELAY_ROLE_DISPLAY_NAMES.get(role, role)
+
+
+def _relay_role_status_label(status: str) -> str:
+    return {
+        "idle": "未调度",
+        "queued": "待启动",
+        "streaming": "输出中",
+        "waiting": "等待",
+        "passed": "已完成",
+        "failed": "失败",
+        "blocked": "阻塞",
+        "interrupted": "中断",
+    }.get(status, status or "未知")
+
+
+def _relay_phase_label(phase: str) -> str:
+    return {
+        "director": "总工程师接收",
+        "architect": "架构设计",
+        "implementer": "开发实现",
+        "tester": "测试验证",
+        "auditor": "审计复核",
+        "complete": "完成总结",
+    }.get(phase, phase or "总工程师接收")
+
+
+def _relay_activity_label(value: str) -> str:
+    if not value:
+        return "暂无活动"
+    return f"最近活动 {value}"
 
 
 def _relay_task_detail_page(detail: Any, *, access_token: str = "") -> str:
