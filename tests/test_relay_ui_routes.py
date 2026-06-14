@@ -654,6 +654,68 @@ async def test_relay_task_detail_hides_native_activity_from_conversation(
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_humanizes_internal_user_prompt(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Internal prompt task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-internal",
+        agent_run_id=251,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "streaming")
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=251,
+        event_type=EventType.USER_MESSAGE_RECEIVED,
+        payload={
+            "text": (
+                "task_id: 99\n"
+                "role: director\n"
+                "workspace: /repo\n"
+                "goal: 删除测试接力文件\n"
+                "latest_user_input: 删除之前测试接力流程生成的md文件\n"
+                "handoff_summaries:\n"
+                "constraints:\n"
+                "- Return only one strict JSON object.\n"
+                "expected_output_envelope:\n"
+                '{"acceptance_criteria":["observable acceptance criterion"]}'
+            ),
+            "native_turn_id": "turn-internal-1",
+            "itemId": "internal-user-1",
+        },
+        occurred_at="2026-06-14T12:15:01+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "删除之前测试接力流程生成的md文件" in response
+    assert "task_id: 99" not in response
+    assert "Return only one strict JSON object" not in response
+    assert "observable acceptance criterion" not in response
+    assert "{&quot;acceptance_criteria" not in response
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_humanizes_malformed_role_envelope(
     tmp_path: Path,
 ) -> None:

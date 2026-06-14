@@ -4219,6 +4219,30 @@ def _relay_task_detail_page(
       const value = payload.text ?? payload.delta ?? payload.summary ?? payload.content ?? payload.message ?? payload.output ?? payload.chunk ?? "";
       return String(value || "");
     }}
+    function relayExtractContextField(text, field) {{
+      const prefix = `${{field}}:`;
+      const lines = String(text || "").split(/\\r?\\n/);
+      const labels = ["task_id:", "role:", "workspace:", "goal:", "latest_user_input:", "handoff_summaries:", "constraints:", "expected_output_envelope:"];
+      for (let index = 0; index < lines.length; index += 1) {{
+        const line = lines[index].trimEnd();
+        if (!line.startsWith(prefix)) continue;
+        const inline = line.slice(prefix.length).trim();
+        if (inline) return inline;
+        const collected = [];
+        for (const nextLine of lines.slice(index + 1)) {{
+          const trimmed = nextLine.trim();
+          if (labels.some((label) => trimmed.startsWith(label))) break;
+          if (trimmed) collected.push(trimmed);
+        }}
+        return collected.join("\\n").trim();
+      }}
+      return "";
+    }}
+    function relayHumanizeUserMessage(text) {{
+      const value = String(text || "");
+      if (!value.includes("latest_user_input:") && !value.includes("expected_output_envelope:")) return value;
+      return relayExtractContextField(value, "latest_user_input") || relayExtractContextField(value, "goal") || value;
+    }}
     function relayTextLooksLikeEnvelope(text) {{
       const value = String(text || "").trim();
       if (!value.startsWith("{{")) return false;
@@ -4347,7 +4371,7 @@ def _relay_task_detail_page(
           node = createNativeMessage(role, "user_message", "你", roleLabel, key);
           nativeTranscriptNodes.set(key, node);
         }}
-        setNativeBodyText(node, text);
+        setNativeBodyText(node, relayHumanizeUserMessage(text));
         return;
       }}
       if (kind === "text_delta" || kind === "message_completed") {{
@@ -4728,7 +4752,7 @@ def _relay_project_native_conversation_row(
 ) -> dict[str, str] | None:
     kind = str(row.get("kind") or "")
     if kind == "user_message":
-        return row
+        return {**row, "body": _relay_humanize_user_message(str(row.get("body") or ""))}
     if kind not in {"text_delta", "message_completed"}:
         return None
     body = str(row.get("body") or "").strip()
@@ -4785,6 +4809,47 @@ def _relay_text_looks_like_role_envelope(text: str) -> bool:
         "next_action",
     )
     return any(marker in stripped for marker in markers)
+
+
+def _relay_humanize_user_message(text: str) -> str:
+    if "latest_user_input:" not in text and "expected_output_envelope:" not in text:
+        return text
+    return (
+        _relay_extract_context_field(text, "latest_user_input")
+        or _relay_extract_context_field(text, "goal")
+        or text
+    )
+
+
+def _relay_extract_context_field(text: str, field: str) -> str:
+    prefix = f"{field}:"
+    labels = (
+        "task_id:",
+        "role:",
+        "workspace:",
+        "goal:",
+        "latest_user_input:",
+        "handoff_summaries:",
+        "constraints:",
+        "expected_output_envelope:",
+    )
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.rstrip()
+        if not stripped.startswith(prefix):
+            continue
+        inline = stripped[len(prefix) :].strip()
+        if inline:
+            return inline
+        collected: list[str] = []
+        for next_line in lines[index + 1 :]:
+            next_stripped = next_line.strip()
+            if any(next_stripped.startswith(label) for label in labels):
+                break
+            if next_stripped:
+                collected.append(next_stripped)
+        return "\n".join(collected).strip()
+    return ""
 
 
 def _relay_dict_looks_like_role_envelope(payload: dict[str, Any]) -> bool:
