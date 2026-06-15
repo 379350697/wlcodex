@@ -74,6 +74,18 @@ def test_session_metadata_is_persisted_and_merged(tmp_path: Path) -> None:
     assert store.get_by_thread_id("thread_meta").metadata == updated.metadata
 
 
+def test_session_metadata_drops_exception_name_model_values(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    created = store.get_or_create_session(
+        native_thread_id="thread_bad_model",
+        metadata={"model": "FileNotFoundError", "effort": "xhigh"},
+    )
+
+    assert created.metadata == {"effort": "xhigh"}
+    assert store.get_by_thread_id("thread_bad_model").metadata == {"effort": "xhigh"}
+
+
 def test_list_recent_returns_newest_first(tmp_path: Path) -> None:
     store = _store(tmp_path)
     first = store.get_or_create_session(native_thread_id="thread_1")

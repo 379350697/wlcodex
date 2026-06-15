@@ -341,6 +341,40 @@ async def test_controller_lists_and_maps_sessions(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_controller_does_not_project_exception_names_as_model_metadata(
+    tmp_path: Path,
+) -> None:
+    controller, client, session_store, _runtime_store = _controller(tmp_path)
+    client.sessions[0]["model"] = "FileNotFoundError"
+
+    sessions = await controller.list_sessions(limit=5)
+
+    assert sessions[0].metadata == {}
+    stored = session_store.get_by_thread_id("thread-1")
+    assert stored is not None
+    assert stored.metadata == {}
+
+
+@pytest.mark.asyncio
+async def test_controller_clears_cached_exception_name_model_metadata(
+    tmp_path: Path,
+) -> None:
+    controller, client, session_store, _runtime_store = _controller(tmp_path)
+    session_store.get_or_create_session(
+        native_thread_id="thread-1",
+        title="Cached task",
+        metadata={"model": "FileNotFoundError"},
+    )
+    client.sessions[0]["model"] = "FileNotFoundError"
+
+    await controller.list_sessions(limit=5)
+
+    stored = session_store.get_by_thread_id("thread-1")
+    assert stored is not None
+    assert stored.metadata == {}
+
+
+@pytest.mark.asyncio
 async def test_native_recent_sessions_sort_by_official_activity_time(
     tmp_path: Path,
 ) -> None:

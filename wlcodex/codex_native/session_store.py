@@ -245,7 +245,7 @@ def _row_metadata(row: sqlite3.Row) -> dict[str, Any]:
         data = json.loads(str(raw))
     except json.JSONDecodeError:
         return {}
-    return data if isinstance(data, dict) else {}
+    return _normalized_metadata(data) if isinstance(data, dict) else {}
 
 
 def _merged_metadata(
@@ -253,11 +253,30 @@ def _merged_metadata(
     metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if metadata is None:
-        return dict(existing)
+        return _normalized_metadata(existing)
     merged = dict(existing)
     merged.update(metadata)
-    return merged
+    return _normalized_metadata(merged)
 
 
 def _metadata_json(metadata: dict[str, Any]) -> str:
-    return json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    return json.dumps(_normalized_metadata(metadata), ensure_ascii=False, sort_keys=True)
+
+
+def _normalized_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(metadata)
+    for key in ("model", "effort", "service_tier"):
+        if normalized.get(key) == "":
+            normalized.pop(key, None)
+    model = normalized.get("model")
+    if isinstance(model, str) and _looks_like_exception_metadata_model(model):
+        normalized.pop("model", None)
+    return normalized
+
+
+def _looks_like_exception_metadata_model(value: str) -> bool:
+    return (
+        value.endswith(("Error", "Exception"))
+        and value[:1].isupper()
+        and value.replace("_", "").isidentifier()
+    )

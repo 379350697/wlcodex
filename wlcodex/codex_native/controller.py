@@ -769,12 +769,14 @@ def _thread_activity_at(raw: dict[str, Any]) -> str:
 
 
 def _thread_model_settings_metadata(raw: dict[str, Any]) -> dict[str, Any]:
-    return _model_settings_metadata(
-        model=(
-            _string_value(raw, "model")
-            or _string_value(raw, "modelId")
-            or _string_value(raw, "model_id")
-        ),
+    raw_model = (
+        _string_value(raw, "model")
+        or _string_value(raw, "modelId")
+        or _string_value(raw, "model_id")
+    )
+    model = _valid_model_metadata_value(raw_model)
+    metadata = _model_settings_metadata(
+        model=model,
         effort=(
             _string_value(raw, "effort")
             or _string_value(raw, "reasoningEffort")
@@ -784,6 +786,24 @@ def _thread_model_settings_metadata(raw: dict[str, Any]) -> dict[str, Any]:
             _string_value(raw, "serviceTier")
             or _string_value(raw, "service_tier")
         ),
+    )
+    if raw_model and not model:
+        metadata["model"] = ""
+    return metadata
+
+
+def _valid_model_metadata_value(value: str) -> str:
+    value = value.strip()
+    if _looks_like_exception_name(value):
+        return ""
+    return value
+
+
+def _looks_like_exception_name(value: str) -> bool:
+    return (
+        value.endswith(("Error", "Exception"))
+        and value[:1].isupper()
+        and value.replace("_", "").isidentifier()
     )
 
 
