@@ -150,6 +150,16 @@ def _relay_view_panel_html(response: str, view: str) -> str:
     return response.split(start_marker, 1)[1].split(end_marker, 1)[0]
 
 
+def _relay_message_bodies_html(panel_html: str) -> str:
+    return "\n".join(
+        re.findall(
+            r'<div class="relay-message-body" data-native-message-body>(.*?)</div>',
+            panel_html,
+            flags=re.DOTALL,
+        )
+    )
+
+
 @pytest.mark.asyncio
 async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path) -> None:
     response, _service = await _request(
@@ -962,6 +972,115 @@ async def test_relay_task_detail_uses_canonical_envelope_when_output_has_bad_pre
     assert "验收依据：会话流不显示污染前缀" in visible_html
     assert "&quot;artifact_type&quot;: &quot;final_summary&quot;" in visible_html
     assert "模型先说了一段废话" not in visible_html
+
+
+@pytest.mark.asyncio
+async def test_relay_conversation_role_replies_are_humanized_to_chinese(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="English role output task",
+        prompt="请按五角色接力给出中文结果。",
+        workspace="/repo",
+        provider="codex",
+    )
+    role_payloads = {
+        "director": (
+            "routing_decision",
+            "Route to full relay for read-only browser verification.",
+            "Hand off to architect for planning.",
+            "All role replies are readable in Chinese.",
+        ),
+        "architect": (
+            "architecture_plan",
+            "Formulated read-only browser re-testing architecture plan.",
+            "Hand off to implementer for implementation notes.",
+            "Architecture summary is available to the user.",
+        ),
+        "implementer": (
+            "implementation_report",
+            "Confirmed no code changes are required for this verification pass.",
+            "Hand off to tester for validation.",
+            "Implementation report is readable.",
+        ),
+        "tester": (
+            "test_report",
+            "Validated browser conversation timeline and board separation.",
+            "Hand off to auditor for final review.",
+            "Test evidence is understandable.",
+        ),
+        "auditor": (
+            "audit_report",
+            "Reviewed completed transcript authority and delta filtering risks.",
+            "Return to director for final summary.",
+            "Audit result is clear.",
+        ),
+    }
+    for index, (role, (artifact_type, summary, next_action, acceptance)) in enumerate(
+        role_payloads.items(),
+        start=1,
+    ):
+        service._store.update_role_metadata(
+            task.id,
+            role,
+            provider="codex",
+            model="gpt-5",
+            native_session_id=f"native-{role}-english",
+            agent_run_id=500 + index,
+            dispatch_verified=True,
+        )
+        service._store.update_role_status(task.id, role, "passed")
+        service._store.save_artifact(
+            task.id,
+            role,
+            artifact_type,
+            {
+                "status": "passed",
+                "reason": "completed",
+                "role": role,
+                "relay_role": role,
+                "artifact_type": artifact_type,
+                "handoff_to": "",
+                "summary": summary,
+                "evidence_refs": ["browser verification"],
+                "open_questions": [],
+                "next_action": next_action,
+                "acceptance_criteria": [acceptance],
+            },
+            summary=summary,
+        )
+    service._store.update_task_status(task.id, "completed")
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    message_bodies = _relay_message_bodies_html(conversation_html)
+    assert conversation_html.count('data-conversation-role-final="') == 5
+    assert conversation_html.count('data-role-canonical-json="') == 5
+    for english_phrase in (
+        "Route to full relay",
+        "Formulated read-only browser",
+        "Confirmed no code changes",
+        "Validated browser conversation",
+        "Reviewed completed transcript",
+        "Hand off to",
+        "Return to director",
+        "All role replies are readable in Chinese",
+    ):
+        assert english_phrase not in message_bodies
+    assert "该角色已返回结构化结果，详情见结构化数据。" in message_bodies
+    assert "下一步：下一步见结构化数据。" in message_bodies
+    assert "验收依据：验收依据见结构化数据。" in message_bodies
 
 
 @pytest.mark.asyncio

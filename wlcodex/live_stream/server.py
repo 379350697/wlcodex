@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hmac
 import json
+import re
 import secrets
 import time
 from html import escape
@@ -3634,7 +3635,7 @@ def _relay_routing_route_label(route: str) -> str:
     }.get(route, route or "等待总工程师判断")
 
 
-def _relay_humanize_display_text(text: str) -> str:
+def _relay_humanize_display_text(text: str, *, english_fallback: str = "") -> str:
     value = str(text or "")
     replacements = (
         ("路由为director_only", "由总工程师直接处理"),
@@ -3650,7 +3651,20 @@ def _relay_humanize_display_text(text: str) -> str:
     )
     for source, target in replacements:
         value = value.replace(source, target)
+    if english_fallback and _relay_text_needs_chinese_fallback(value):
+        return english_fallback
     return value
+
+
+def _relay_text_needs_chinese_fallback(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    if not re.search(r"[A-Za-z]{3,}", value):
+        return False
+    if not re.search(r"[\u4e00-\u9fff]", value):
+        return True
+    return bool(re.search(r"[A-Za-z]{3,}(?:[ -]+[A-Za-z]{2,}){1,}", value))
 
 
 def _relay_routing_risk_label(risk: str) -> str:
@@ -4431,7 +4445,13 @@ def _relay_task_detail_page(
       }};
       return labels[route] || route || "";
     }}
-    function relayHumanizeDisplayText(text) {{
+    function relayTextNeedsChineseFallback(text) {{
+      const value = String(text || "").trim();
+      if (!/[A-Za-z]{{3,}}/.test(value)) return false;
+      if (!/[一-龥]/.test(value)) return true;
+      return /[A-Za-z]{{3,}}(?:[ -]+[A-Za-z]{{2,}}){{1,}}/.test(value);
+    }}
+    function relayHumanizeDisplayText(text, englishFallback = "") {{
       let value = String(text || "");
       const replacements = [
         [/路由为director_only/g, "由总工程师直接处理"],
@@ -4448,6 +4468,7 @@ def _relay_task_detail_page(
       replacements.forEach(([pattern, label]) => {{
         value = value.replace(pattern, label);
       }});
+      if (englishFallback && relayTextNeedsChineseFallback(value)) return englishFallback;
       return value;
     }}
     function relaySanitizeProtocolLeakText(role, text) {{
@@ -4466,11 +4487,20 @@ def _relay_task_detail_page(
     }}
     function relayHumanizeEnvelope(envelope) {{
       const lines = [];
-      const summary = relayHumanizeDisplayText(envelope.summary || envelope.output || envelope.reason || "").trim();
+      const summary = relayHumanizeDisplayText(
+        envelope.summary || envelope.output || envelope.reason || "",
+        "该角色已返回结构化结果，详情见结构化数据。"
+      ).trim();
       if (summary) lines.push(`结论：${{summary}}`);
-      const nextAction = relayHumanizeDisplayText(envelope.next_action || "").trim();
+      const nextAction = relayHumanizeDisplayText(
+        envelope.next_action || "",
+        "下一步见结构化数据。"
+      ).trim();
       if (nextAction) lines.push(`下一步：${{nextAction}}`);
-      const questions = relayHumanizeDisplayText(relayJoinTextList(envelope.open_questions));
+      const questions = relayHumanizeDisplayText(
+        relayJoinTextList(envelope.open_questions),
+        "待确认内容见结构化数据。"
+      );
       if (questions) lines.push(`待确认：${{questions}}`);
       const route = String(envelope.route || "").trim();
       const risk = String(envelope.risk || "").trim();
@@ -4480,7 +4510,10 @@ def _relay_task_detail_page(
         if (risk) parts.push(`风险：${{relayRiskLabel(risk)}}`);
         lines.push(parts.join(" · "));
       }}
-      const acceptance = relayHumanizeDisplayText(relayJoinTextList(envelope.acceptance_criteria));
+      const acceptance = relayHumanizeDisplayText(
+        relayJoinTextList(envelope.acceptance_criteria),
+        "验收依据见结构化数据。"
+      );
       if (acceptance) lines.push(`验收依据：${{acceptance}}`);
       return lines.length ? lines.join("\\n") : "角色已返回结构化结果。";
     }}
@@ -4628,7 +4661,7 @@ def _relay_task_detail_page(
         details = document.createElement("details");
         details.className = "role-canonical-json";
         const summary = document.createElement("summary");
-        summary.textContent = "查看 JSON";
+        summary.textContent = "查看结构化数据";
         const pre = document.createElement("pre");
         pre.dataset.roleCanonicalJson = role;
         details.append(summary, pre);
@@ -4863,7 +4896,7 @@ def _relay_role_panel_html(
     canonical_json = str(display.get("canonical_json") or "")
     canonical_html = (
         '<details class="role-canonical-json">'
-        "<summary>查看 JSON</summary>"
+        "<summary>查看结构化数据</summary>"
         f'<pre data-role-canonical-json="{escape(job.role)}">{escape(canonical_json)}</pre>'
         "</details>"
         if canonical_json
@@ -5269,15 +5302,24 @@ def _relay_humanize_role_envelope(payload: dict[str, Any]) -> str:
         payload.get("summary") or payload.get("output") or payload.get("reason") or ""
     ).strip()
     if summary:
-        summary = _relay_humanize_display_text(summary)
+        summary = _relay_humanize_display_text(
+            summary,
+            english_fallback="该角色已返回结构化结果，详情见结构化数据。",
+        )
         lines.append(f"结论：{summary}")
     next_action = str(payload.get("next_action") or "").strip()
     if next_action:
-        next_action = _relay_humanize_display_text(next_action)
+        next_action = _relay_humanize_display_text(
+            next_action,
+            english_fallback="下一步见结构化数据。",
+        )
         lines.append(f"下一步：{next_action}")
     questions = _relay_join_text_list(payload.get("open_questions"))
     if questions:
-        questions = _relay_humanize_display_text(questions)
+        questions = _relay_humanize_display_text(
+            questions,
+            english_fallback="待确认内容见结构化数据。",
+        )
         lines.append(f"待确认：{questions}")
     route = str(payload.get("route") or "").strip()
     risk = str(payload.get("risk") or "").strip()
@@ -5290,7 +5332,10 @@ def _relay_humanize_role_envelope(payload: dict[str, Any]) -> str:
         lines.append(" · ".join(parts))
     acceptance = _relay_join_text_list(payload.get("acceptance_criteria"))
     if acceptance:
-        acceptance = _relay_humanize_display_text(acceptance)
+        acceptance = _relay_humanize_display_text(
+            acceptance,
+            english_fallback="验收依据见结构化数据。",
+        )
         lines.append(f"验收依据：{acceptance}")
     if not lines:
         lines.append("角色已返回结构化结果。")
@@ -5337,7 +5382,7 @@ def _relay_native_message_html(row: dict[str, str]) -> str:
     canonical_json = str(row.get("canonical_json") or "")
     canonical_html = (
         '<details class="role-canonical-json">'
-        "<summary>查看 JSON</summary>"
+        "<summary>查看结构化数据</summary>"
         f'<pre data-role-canonical-json="{escape(role)}">{escape(canonical_json)}</pre>'
         "</details>"
         if canonical_json
