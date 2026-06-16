@@ -3846,6 +3846,16 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert 'eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true})' in response
     assert "function syncNativeTranscript" in response
     assert '`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`' in response
+    assert "let nativeSyncInFlight = false;" in response
+    assert "function startNativeTranscriptSyncLoop()" in response
+    assert "setInterval(syncNativeTranscriptAndPoll, 2500)" in response
+    assert "async function syncNativeTranscriptAndPoll()" in response
+    assert "if (document.hidden) return;" in response
+    assert "if (nativeSyncInFlight) return;" in response
+    assert "await syncNativeTranscript();" in response
+    assert "await pollEvents();" in response
+    assert 'document.addEventListener("visibilitychange", () => {' in response
+    assert "syncNativeTranscriptAndPoll();" in response
     assert "function refreshNativeControlInBackground()" in response
     assert "refreshNativeControlInBackground();" in response
     assert "loadNativeSessionInfo().catch(() => {});" in response
@@ -3863,6 +3873,7 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "function loadOlderEvents" in response
     assert "function pollEvents" in response
     assert "setInterval(pollEvents, 1000)" in response
+    assert "startNativeTranscriptSyncLoop();" in response
     assert "function eventsPath(params, options = {})" in response
     assert 'if (nativeThreadId) search.set("native_thread_id", nativeThreadId);' in response
     assert "eventsPath(`after=${latestEventId}&limit=100`)" in response

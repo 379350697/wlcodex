@@ -8116,6 +8116,8 @@ __ICONS_JS__
     let previousEventCount = 0;
     let source = null;
     let pollInFlight = false;
+    let nativeSyncInFlight = false;
+    let nativeTranscriptSyncTimer = null;
     const terminalTranscriptSyncTurns = new Set();
     const authHeaders = token ? {"Authorization": "Bearer " + token} : {};
     const promptInput = document.getElementById("prompt");
@@ -10182,6 +10184,25 @@ __ICONS_JS__
         renderStatus("native_sync_failed", error.message || String(error));
       }
     }
+    function startNativeTranscriptSyncLoop() {
+      if (nativeTranscriptSyncTimer) return;
+      nativeTranscriptSyncTimer = setInterval(syncNativeTranscriptAndPoll, 2500);
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) syncNativeTranscriptAndPoll();
+      });
+    }
+    async function syncNativeTranscriptAndPoll() {
+      if (document.hidden) return;
+      if (!nativeThreadId || invalidNativeThreadId) return;
+      if (nativeSyncInFlight) return;
+      nativeSyncInFlight = true;
+      try {
+        await syncNativeTranscript();
+        await pollEvents();
+      } finally {
+        nativeSyncInFlight = false;
+      }
+    }
     function scheduleTerminalTranscriptSync(event) {
       if (!shouldSyncNativeTranscriptAfterTerminalEvent(event)) return;
       const key = eventFoldTurnId(event) || String((event && event.id) || "");
@@ -10211,6 +10232,7 @@ __ICONS_JS__
       renderStatus("load_recent_failed", error.message || String(error));
     }).then(() => {
       setInterval(pollEvents, 1000);
+      startNativeTranscriptSyncLoop();
     });
     function refreshNativeControlInBackground() {
       attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).catch(error => {
