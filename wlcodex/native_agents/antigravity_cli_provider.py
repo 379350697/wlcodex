@@ -4,7 +4,7 @@ import asyncio
 import re
 import shutil
 import tempfile
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -399,6 +399,7 @@ class AntigravityCliLocalProvider:
 
     async def read_session(self, native_session_id: str) -> dict[str, Any]:
         session = self._lookup_session(native_session_id, import_local=True)
+        session = self._sync_local_transcript(session)
         return {"thread": session.to_json_dict(), "turns": self._runtime_turns(session)}
 
     async def attach_session(self, native_session_id: str) -> NativeAgentControlResult:
@@ -407,6 +408,7 @@ class AntigravityCliLocalProvider:
 
     async def sync_session(self, native_session_id: str) -> NativeAgentControlResult:
         session = self._lookup_session(native_session_id, import_local=True)
+        session = self._sync_local_transcript(session)
         return _control_result(session, status="synced")
 
     async def continue_session(
@@ -745,6 +747,10 @@ class AntigravityCliLocalProvider:
             )
             if local_session is not None:
                 updated = self._import_local_session(local_session)
+        updated = self._sync_local_transcript(
+            updated,
+            native_turn_id=native_turn_id,
+        )
         emitter = self._emitter()
         if emitter is None:
             return
@@ -911,6 +917,106 @@ class AntigravityCliLocalProvider:
                 return session
         return matches[0] if matches else None
 
+    def _sync_local_transcript(
+        self,
+        session: NativeAgentSession,
+        *,
+        native_turn_id: str = "",
+    ) -> NativeAgentSession:
+        if self._runtime_store is None:
+            return session
+        conversation_id = _antigravity_conversation_id(session)
+        if not conversation_id:
+            return session
+        read_transcript = getattr(self._local_session_index, "read_transcript", None)
+        if read_transcript is None:
+            return self._mark_transcript_authority(
+                session,
+                authority="unavailable",
+                error="read_transcript_not_supported",
+            )
+        result = read_transcript(conversation_id)
+        entries = tuple(getattr(result, "entries", ()) or ())
+        authority = str(getattr(result, "authority", "") or "unavailable")
+        error = str(getattr(result, "error", "") or "")
+        if authority != "local":
+            return self._mark_transcript_authority(
+                session,
+                authority="unavailable",
+                error=error or "transcript_unavailable",
+            )
+        synced_count = int(session.metadata.get("antigravity_synced_message_count") or 0)
+        if synced_count >= len(entries):
+            return self._mark_transcript_authority(session, authority="local", error="")
+        emitter = self._emitter()
+        if emitter is None:
+            return session
+        base_turn_id = session.last_turn_id or f"cli-local-history-{conversation_id}"
+        existing_counts = self._existing_transcript_event_counts(session)
+        for index, entry in enumerate(entries[synced_count:], start=synced_count):
+            role = str(getattr(entry, "role", "") or "")
+            text = str(getattr(entry, "text", "") or "")
+            if not role or not text:
+                continue
+            entry_key = (role, text.strip())
+            if entry_key[1] and existing_counts[entry_key] > 0:
+                existing_counts[entry_key] -= 1
+                continue
+            entry_turn_id = native_turn_id or f"{base_turn_id}-{index}"
+            if role == "user":
+                emitter.user_message(session, native_turn_id=entry_turn_id, text=text)
+            elif role == "assistant":
+                emitter.message_completed(
+                    session,
+                    native_turn_id=entry_turn_id,
+                    text=text,
+                    item_id=f"antigravity-local-assistant-final:{entry_turn_id}",
+                )
+        metadata = dict(session.metadata)
+        metadata["antigravity_transcript_authority"] = "local"
+        metadata["antigravity_synced_message_count"] = len(entries)
+        metadata.pop("antigravity_transcript_error", None)
+        return self._session_store.update_session(session.id, metadata=metadata)
+
+    def _mark_transcript_authority(
+        self,
+        session: NativeAgentSession,
+        *,
+        authority: str,
+        error: str,
+    ) -> NativeAgentSession:
+        metadata = dict(session.metadata)
+        metadata["antigravity_transcript_authority"] = authority
+        if error:
+            metadata["antigravity_transcript_error"] = error
+        else:
+            metadata.pop("antigravity_transcript_error", None)
+        return self._session_store.update_session(session.id, metadata=metadata)
+
+    def _existing_transcript_event_counts(
+        self,
+        session: NativeAgentSession,
+    ) -> Counter[tuple[str, str]]:
+        if self._runtime_store is None or session.agent_run_id <= 0:
+            return Counter()
+        counts: Counter[tuple[str, str]] = Counter()
+        for event in self._runtime_store.list_by_agent_run(
+            session.agent_run_id,
+            limit=1000,
+        ):
+            payload = event.payload
+            if str(payload.get("native_thread_id") or "") != session.native_session_id:
+                continue
+            if event.event_type == EventType.USER_MESSAGE_RECEIVED:
+                text = str(payload.get("text") or "").strip()
+                if text:
+                    counts[("user", text)] += 1
+            elif event.event_type == EventType.MODEL_MESSAGE_COMPLETED:
+                text = str(payload.get("text") or payload.get("summary") or "").strip()
+                if text:
+                    counts[("assistant", text)] += 1
+        return counts
+
     def _runtime_turns(self, session: NativeAgentSession) -> list[dict[str, str]]:
         if self._runtime_store is None:
             return []
@@ -950,6 +1056,29 @@ class AntigravityCliLocalProvider:
                     assistant_by_key[key] = item
                     turns.append(item)
                 item["text"] += str(payload.get("delta") or payload.get("text") or "")
+            elif event.event_type == EventType.MODEL_MESSAGE_COMPLETED:
+                text = str(payload.get("text") or payload.get("summary") or "")
+                if text:
+                    turns = [
+                        turn
+                        for turn in turns
+                        if not (
+                            turn["role"] == "assistant"
+                            and turn["native_turn_id"] == native_turn_id
+                        )
+                    ]
+                    assistant_by_key = OrderedDict(
+                        (key, turn)
+                        for key, turn in assistant_by_key.items()
+                        if turn["native_turn_id"] != native_turn_id
+                    )
+                    turns.append(
+                        {
+                            "role": "assistant",
+                            "text": text,
+                            "native_turn_id": native_turn_id,
+                        }
+                    )
         return [turn for turn in turns if turn["text"]]
 
     def _ensure_enabled(self) -> None:

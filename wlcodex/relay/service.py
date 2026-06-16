@@ -1241,27 +1241,6 @@ class RelayService:
                     runtime_store,
                     int(job.agent_run_id),
                 )
-                if await self._complete_stale_native_delta_if_ready(
-                    runtime_store,
-                    task_id=task_detail.task.id,
-                    role=job.role,
-                    agent_run_id=int(job.agent_run_id),
-                    after_id=0,
-                ):
-                    changed += 1
-                    continue
-                completion_error = self._stale_native_completion_error(
-                    runtime_store,
-                    int(job.agent_run_id),
-                )
-                if completion_error:
-                    self._block_role_with_error(
-                        task_detail.task.id,
-                        job.role,
-                        completion_error,
-                    )
-                    changed += 1
-                    continue
                 await self._sync_stale_native_role(job)
                 await asyncio.sleep(0)
                 refreshed = self._store.get_task_detail(task_detail.task.id)
@@ -1283,7 +1262,9 @@ class RelayService:
                     task_id=task_detail.task.id,
                     role=job.role,
                     agent_run_id=int(job.agent_run_id),
-                    after_id=last_event_id,
+                    after_id=0,
+                    provider_name=job.provider,
+                    native_session_id=job.native_session_id,
                 ):
                     changed += 1
                     continue
@@ -1483,6 +1464,9 @@ class RelayService:
             )
         else:
             events = runtime_store.list_by_agent_run_tail(int(agent_run_id), limit=5000)
+        completed = _completed_role_envelope_text(events)
+        if completed is not None:
+            return completed
         return "".join(
             _runtime_event_text(event)
             for event in events
@@ -1497,6 +1481,8 @@ class RelayService:
         role: str,
         agent_run_id: int,
         after_id: int,
+        provider_name: str = "",
+        native_session_id: str = "",
     ) -> bool:
         if after_id > 0:
             events = runtime_store.list_by_agent_run_after(
@@ -1506,6 +1492,27 @@ class RelayService:
             )
         else:
             events = runtime_store.list_by_agent_run_tail(agent_run_id, limit=5000)
+        completed = _completed_role_envelope_event(events)
+        if completed is not None:
+            await self.handle_role_completion_event(
+                task_id,
+                role,
+                runtime_event_id=int(getattr(completed, "id", 0) or 0),
+                output=_runtime_event_text(completed),
+            )
+            return True
+        read_session_output = await self._read_native_session_role_envelope(
+            provider_name=provider_name,
+            native_session_id=native_session_id,
+        )
+        if read_session_output:
+            await self.handle_role_completion_event(
+                task_id,
+                role,
+                runtime_event_id=0,
+                output=read_session_output,
+            )
+            return True
         delta_events = [event for event in events if _is_runtime_model_text_delta(event)]
         if not delta_events:
             return False
@@ -1564,6 +1571,27 @@ class RelayService:
             await sync_session(job.native_session_id)
         except Exception:
             return
+
+    async def _read_native_session_role_envelope(
+        self,
+        *,
+        provider_name: str,
+        native_session_id: str,
+    ) -> str:
+        if not provider_name or not native_session_id:
+            return ""
+        try:
+            provider = self._registry.get(provider_name)
+        except KeyError:
+            return ""
+        read_session = getattr(provider, "read_session", None)
+        if read_session is None:
+            return ""
+        try:
+            payload = await read_session(native_session_id)
+        except Exception:
+            return ""
+        return _session_assistant_role_envelope_text(payload)
 
     @staticmethod
     def _last_native_role_activity_at(
@@ -1818,6 +1846,30 @@ def _is_runtime_model_text_delta(runtime_event: Any) -> bool:
     }
 
 
+def _is_runtime_model_message_completed(runtime_event: Any) -> bool:
+    return _runtime_event_type(runtime_event) in {
+        "model.message.completed",
+        "model_message_completed",
+    }
+
+
+def _completed_role_envelope_event(events: list[Any]) -> Any | None:
+    for event in reversed(events):
+        if not _is_runtime_model_message_completed(event):
+            continue
+        text = _runtime_event_text(event)
+        if text.strip() and parse_role_envelope(text).ok:
+            return event
+    return None
+
+
+def _completed_role_envelope_text(events: list[Any]) -> str | None:
+    event = _completed_role_envelope_event(events)
+    if event is None:
+        return None
+    return _runtime_event_text(event)
+
+
 def _is_turn_completed_activity(runtime_event: Any) -> bool:
     if _runtime_event_type(runtime_event) not in {
         "agent.run.activity",
@@ -1888,6 +1940,29 @@ def _runtime_event_text(runtime_event: Any) -> str:
         or payload.get("chunk")
         or ""
     )
+
+
+def _session_assistant_role_envelope_text(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    turns = payload.get("turns")
+    if not isinstance(turns, list):
+        return ""
+    for turn in reversed(turns):
+        if not isinstance(turn, dict):
+            continue
+        if str(turn.get("role") or "").strip().lower() != "assistant":
+            continue
+        text = str(
+            turn.get("text")
+            or turn.get("message")
+            or turn.get("content")
+            or turn.get("output")
+            or ""
+        )
+        if text.strip() and parse_role_envelope(text).ok:
+            return text
+    return ""
 
 
 def _result_agent_run_id(result: Any) -> int | None:

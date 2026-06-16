@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -983,6 +984,100 @@ async def test_cli_provider_imports_local_db_history(
     assert imported[0].cwd == str(workspace)
     assert imported[0].metadata["antigravity_source_path"] == str(
         conversations / "db-conv.db"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_read_session_projects_readable_local_db_transcript(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = tmp_path / "antigravity-cli"
+    conversations = root / "conversations"
+    cache = root / "cache"
+    conversations.mkdir(parents=True)
+    cache.mkdir(parents=True)
+    db_path = conversations / "db-transcript.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("create table messages (role text, content text)")
+    conn.execute("insert into messages values (?, ?)", ("user", "plan"))
+    conn.execute("insert into messages values (?, ?)", ("assistant", "complete answer"))
+    conn.commit()
+    conn.close()
+    (cache / "last_conversations.json").write_text(
+        json.dumps({str(workspace): "db-transcript"}),
+        encoding="utf-8",
+    )
+    local_index = AntigravityLocalSessionIndex(roots=(root,))
+    provider, store, runtime_store, _runner = _provider(
+        tmp_path,
+        local_session_index=local_index,
+    )
+
+    payload = await provider.read_session("db-transcript")
+
+    assert payload["thread"]["metadata"]["antigravity_transcript_authority"] == "local"
+    assert payload["turns"] == [
+        {
+            "role": "user",
+            "text": "plan",
+            "native_turn_id": "cli-local-history-db-transcript-0",
+        },
+        {
+            "role": "assistant",
+            "text": "complete answer",
+            "native_turn_id": "cli-local-history-db-transcript-1",
+        },
+    ]
+    session = store.get_by_native_session_id(
+        provider="antigravity",
+        provider_engine="cli-local",
+        native_session_id="db-transcript",
+    )
+    assert session is not None
+    assert session.metadata["antigravity_synced_message_count"] == 2
+    events = runtime_store.list_by_agent_run(session.agent_run_id)
+    assert [
+        (event.event_type, event.payload.get("text") or event.payload.get("summary"))
+        for event in events
+    ] == [
+        (EventType.USER_MESSAGE_RECEIVED, "plan"),
+        (EventType.MODEL_MESSAGE_COMPLETED, "complete answer"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_marks_unreadable_local_transcript_unavailable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = tmp_path / "antigravity-cli"
+    conversations = root / "conversations"
+    cache = root / "cache"
+    conversations.mkdir(parents=True)
+    cache.mkdir(parents=True)
+    (conversations / "pb-transcript.pb").write_bytes(b"\x08\x01")
+    (cache / "last_conversations.json").write_text(
+        json.dumps({str(workspace): "pb-transcript"}),
+        encoding="utf-8",
+    )
+    local_index = AntigravityLocalSessionIndex(roots=(root,))
+    provider, _store, _runtime_store, _runner = _provider(
+        tmp_path,
+        local_session_index=local_index,
+    )
+
+    payload = await provider.read_session("pb-transcript")
+
+    assert payload["turns"] == []
+    assert (
+        payload["thread"]["metadata"]["antigravity_transcript_authority"]
+        == "unavailable"
+    )
+    assert payload["thread"]["metadata"]["antigravity_transcript_error"] == (
+        "unsupported_pb"
     )
 
 

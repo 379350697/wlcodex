@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,19 @@ class AntigravityLocalSession:
     source_path: str
     brain_path: str = ""
     source_root: str = ""
+
+
+@dataclass(frozen=True)
+class AntigravityTranscriptEntry:
+    role: str
+    text: str
+
+
+@dataclass(frozen=True)
+class AntigravityTranscriptReadResult:
+    entries: tuple[AntigravityTranscriptEntry, ...] = ()
+    authority: str = "unavailable"
+    error: str = ""
 
 
 class AntigravityLocalSessionIndex:
@@ -58,6 +73,12 @@ class AntigravityLocalSessionIndex:
                 return session
         return None
 
+    def read_transcript(self, session_id: str) -> AntigravityTranscriptReadResult:
+        session = self.get(session_id)
+        if session is None:
+            return AntigravityTranscriptReadResult(error="session_not_found")
+        return _read_transcript_file(Path(session.source_path))
+
 
 def _conversation_files(root: Path) -> list[Path]:
     conversations = root / "conversations"
@@ -67,6 +88,137 @@ def _conversation_files(root: Path) -> list[Path]:
     for suffix in ("*.pb", "*.db"):
         files.extend(path for path in conversations.glob(suffix) if path.is_file())
     return files
+
+
+def _read_transcript_file(path: Path) -> AntigravityTranscriptReadResult:
+    if path.suffix == ".db":
+        return _read_sqlite_transcript(path)
+    return AntigravityTranscriptReadResult(error=f"unsupported_{path.suffix.lstrip('.')}")
+
+
+def _read_sqlite_transcript(path: Path) -> AntigravityTranscriptReadResult:
+    entries: list[AntigravityTranscriptEntry] = []
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return AntigravityTranscriptReadResult(error=f"sqlite_open_failed:{exc}")
+    try:
+        conn.row_factory = sqlite3.Row
+        tables = [
+            str(row["name"])
+            for row in conn.execute(
+                "select name from sqlite_schema where type='table' order by name"
+            )
+        ]
+        for table in tables:
+            columns = [str(row["name"]) for row in conn.execute(f"pragma table_info({_quote_identifier(table)})")]
+            if not columns:
+                continue
+            selected = ", ".join(_quote_identifier(column) for column in columns)
+            for row in conn.execute(
+                f"select {selected} from {_quote_identifier(table)} limit 1000"
+            ):
+                values = {column: row[column] for column in columns}
+                role = _transcript_role(values)
+                text = _transcript_text(values)
+                if role and text:
+                    entries.append(AntigravityTranscriptEntry(role=role, text=text))
+    except sqlite3.Error as exc:
+        return AntigravityTranscriptReadResult(error=f"sqlite_read_failed:{exc}")
+    finally:
+        conn.close()
+    if not entries:
+        return AntigravityTranscriptReadResult(error="no_transcript_rows")
+    return AntigravityTranscriptReadResult(entries=tuple(entries), authority="local")
+
+
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _transcript_role(values: dict[str, Any]) -> str:
+    for key in ("role", "author", "sender", "speaker"):
+        if key not in values:
+            continue
+        role = _normalize_transcript_role(_text_value(values[key]))
+        if role:
+            return role
+    for value in values.values():
+        role = _role_from_jsonish(value)
+        if role:
+            return role
+    return ""
+
+
+def _role_from_jsonish(value: Any) -> str:
+    parsed = _parse_jsonish(value)
+    if isinstance(parsed, dict):
+        for key in ("role", "author", "sender", "speaker"):
+            role = _normalize_transcript_role(_text_value(parsed.get(key)))
+            if role:
+                return role
+    return ""
+
+
+def _normalize_transcript_role(value: str) -> str:
+    lowered = value.strip().lower()
+    if lowered in {"assistant", "model", "agent", "ai"}:
+        return "assistant"
+    if lowered in {"user", "human"}:
+        return "user"
+    return ""
+
+
+def _transcript_text(values: dict[str, Any]) -> str:
+    for key in ("text", "content", "message", "output", "response", "prompt"):
+        if key not in values:
+            continue
+        text = _text_value(values[key])
+        if text:
+            return text
+    for value in values.values():
+        text = _text_from_jsonish(value)
+        if text:
+            return text
+    return ""
+
+
+def _text_from_jsonish(value: Any) -> str:
+    parsed = _parse_jsonish(value)
+    return _text_value(parsed)
+
+
+def _parse_jsonish(value: Any) -> Any:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return value
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return value
+
+
+def _text_value(value: Any) -> str:
+    value = _parse_jsonish(value)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, list):
+        parts = [_text_value(item) for item in value]
+        return "".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in ("text", "content", "message", "output", "response"):
+            text = _text_value(value.get(key))
+            if text:
+                return text
+    return ""
 
 
 def _cwd_by_session(root: Path) -> dict[str, str]:

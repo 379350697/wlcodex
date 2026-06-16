@@ -942,6 +942,206 @@ def test_scan_stale_native_role_completes_synced_role_envelope_delta(
     ]
 
 
+def test_scan_stale_native_role_prefers_synced_completed_message_over_bad_delta(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    now = datetime(2026, 6, 16, 8, 0, 0, tzinfo=timezone.utc)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"delta": '{"artifact_type":"routing_decision","role"'},
+            occurred_at=(now - timedelta(seconds=302)).isoformat(),
+            agent_run_id=101,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.INTERNAL,
+            payload={"activity": "turn_started"},
+            occurred_at=(now - timedelta(seconds=301)).isoformat(),
+            agent_run_id=101,
+        )
+    )
+
+    async def sync_session(native_session_id: str):
+        provider.calls.append(("sync_session", native_session_id))
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.MODEL_MESSAGE_COMPLETED,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id="101",
+                correlation_id="corr-101",
+                source=EventSource.CLAUDE,
+                actor="claude",
+                visibility=Visibility.USER,
+                payload={
+                    "text": """
+                    {
+                      "status": "passed",
+                      "reason": "implementation and testing required",
+                      "role": "director",
+                      "artifact_type": "routing_decision",
+                      "handoff_to": "",
+                      "summary": "Use completed transcript.",
+                      "evidence_refs": ["model.message.completed"],
+                      "open_questions": [],
+                      "next_action": "implement",
+                      "complexity": "medium",
+                      "risk": "medium",
+                      "route": "core_relay",
+                      "required_roles": ["director", "implementer", "tester"],
+                      "acceptance_criteria": ["implemented", "tested"],
+                      "stop_conditions": [],
+                      "requires_user_approval": false
+                    }
+                    """,
+                    "native_thread_id": native_session_id,
+                    "native_turn_id": "turn-1",
+                },
+                occurred_at=now.isoformat(),
+                agent_run_id=101,
+            )
+        )
+        return NativeAgentControlResult(
+            provider=provider.provider,
+            provider_engine=provider.provider_engine,
+            native_session_id=native_session_id,
+            agent_run_id=101,
+            status="synced",
+        )
+
+    provider.sync_session = sync_session
+
+    changed = asyncio.run(
+        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert changed == 1
+    assert ("sync_session", "native-1") in provider.calls
+    assert detail.task.status == "running"
+    assert jobs["director"].status == "passed"
+    assert jobs["director"].error_message == ""
+    assert jobs["implementer"].status == "streaming"
+    routing = service.get_task(task.id).routing_decision
+    assert routing is not None
+    assert routing["summary"] == "Use completed transcript."
+
+
+def test_scan_stale_native_role_uses_provider_read_session_before_bad_delta(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    now = datetime(2026, 6, 16, 8, 0, 0, tzinfo=timezone.utc)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"delta": '{"artifact_type":"routing_decision","role"'},
+            occurred_at=(now - timedelta(seconds=302)).isoformat(),
+            agent_run_id=101,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.INTERNAL,
+            payload={"activity": "turn_started"},
+            occurred_at=(now - timedelta(seconds=301)).isoformat(),
+            agent_run_id=101,
+        )
+    )
+    completed_text = """
+    {
+      "status": "passed",
+      "reason": "implementation and testing required",
+      "role": "director",
+      "artifact_type": "routing_decision",
+      "handoff_to": "",
+      "summary": "Use provider read_session transcript.",
+      "evidence_refs": ["provider.read_session"],
+      "open_questions": [],
+      "next_action": "implement",
+      "complexity": "medium",
+      "risk": "medium",
+      "route": "core_relay",
+      "required_roles": ["director", "implementer", "tester"],
+      "acceptance_criteria": ["implemented", "tested"],
+      "stop_conditions": [],
+      "requires_user_approval": false
+    }
+    """
+
+    async def read_session(native_session_id: str):
+        provider.calls.append(("read_session", native_session_id))
+        return {
+            "thread": {"native_session_id": native_session_id},
+            "turns": [
+                {"role": "assistant", "text": completed_text, "native_turn_id": "turn-1"}
+            ],
+        }
+
+    provider.read_session = read_session
+
+    changed = asyncio.run(
+        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert changed == 1
+    assert ("sync_session", "native-1") in provider.calls
+    assert ("read_session", "native-1") in provider.calls
+    assert jobs["director"].status == "passed"
+    assert detail.routing_decision is not None
+    assert detail.routing_decision["summary"] == "Use provider read_session transcript."
+
+
 def test_scan_stale_native_role_blocks_completed_invalid_output(
     tmp_path,
 ) -> None:
