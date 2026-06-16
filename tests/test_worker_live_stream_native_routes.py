@@ -2101,6 +2101,17 @@ async def test_live_page_shell_is_not_cacheable(
 def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() -> None:
     response = _live_page(42, native_provider="codex")
 
+    assert (
+        '<meta name="viewport" content="width=device-width, initial-scale=1, '
+        'maximum-scale=1, user-scalable=no, viewport-fit=cover">'
+        in response
+    )
+    assert (
+        "html, body, .native-mobile-shell, .codex-run-shell, .codex-transcript, "
+        ".transcript-body, .codex-input-dock, input { -webkit-text-size-adjust: 100%; "
+        "text-size-adjust: 100%; }"
+        in response
+    )
     assert ".session-float { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
     assert ".header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
@@ -2120,6 +2131,19 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert "function updateHeaderRunIndicator(tone)" in response
     assert 'headerRunIndicator.className = "header-run-indicator " + visual;' in response
     assert "updateHeaderRunIndicator(tone || \"neutral\");" in response
+
+
+def test_worker_live_page_exposes_viewport_debug_diagnostics() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert 'const debugViewport = params.get("debug_viewport") === "1";' in response
+    assert 'id="viewportDebug"' in response
+    assert "function collectViewportDebugMetrics()" in response
+    assert "visualViewport: window.visualViewport ? {" in response
+    assert "computedCircleSize: computedSize(document.querySelector(\".circle\"))" in response
+    assert "computedTranscriptSize: computedSize(document.querySelector(\".transcript-body\"))" in response
+    assert "computedDockSize: computedSize(inputDock)" in response
+    assert "window.visualViewport.addEventListener(\"resize\", updateViewportDebug);" in response
 
 
 def test_worker_live_page_exposes_header_context_and_session_actions() -> None:

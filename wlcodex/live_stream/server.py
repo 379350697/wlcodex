@@ -7467,7 +7467,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>__SAFE_TITLE__</title>
   <link rel="stylesheet" href="/static/base.css">
   <link rel="stylesheet" href="/static/animations.css">
@@ -7475,12 +7475,15 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
   <link rel="stylesheet" href="/static/components.css">
   <style>
     :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; }
+    html, body, .native-mobile-shell, .codex-run-shell, .codex-transcript, .transcript-body, .codex-input-dock, input { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     body { background: #000; }
     body { scrollbar-width: none; }
     body::-webkit-scrollbar { display: none; }
     .aurora-bg { background: #000 !important; }
     .noise-overlay::before { display: none !important; }
     .native-mobile-shell, .codex-run-shell { min-height: 100vh; background: #000; }
+    .viewport-debug { position: fixed; left: 12px; right: 12px; bottom: calc(var(--codex-dock-height, 150px) + 14px + env(safe-area-inset-bottom)); z-index: 40; max-height: 34vh; margin: 0; padding: 10px 12px; overflow: auto; border: 1px solid rgba(88,166,255,.55); border-radius: 12px; background: rgba(0,0,0,.88); color: #dbeafe; font: 11px/1.45 var(--font-mono); white-space: pre-wrap; box-shadow: 0 14px 36px rgba(0,0,0,.5); }
+    .viewport-debug[hidden] { display: none; }
     header { position: sticky; top: 0; z-index: 3; display: grid; grid-template-columns: 54px 1fr 54px; align-items: center; gap: 8px; min-height: 72px; padding: 10px 20px 8px; background: #000; border-bottom: 0; }
     .circle { width: 54px; min-height: 54px; border-radius: 50%; border-color: #343434; background: #202022; color: #f5f5f5; font-size: 34px; }
     .session-float { position: fixed; top: calc(24px + env(safe-area-inset-top)); left: 90px; right: 146px; z-index: 5; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; min-height: 50px; padding: 0 15px; border: 1px solid #343434; border-radius: 25px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
@@ -7965,6 +7968,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
         <button class="warn" id="interrupt">中断</button>
       </div>
     </section>
+    <pre class="viewport-debug" id="viewportDebug" hidden></pre>
   </div>
   <div class="plan-page-backdrop" id="planPage" role="dialog" aria-modal="true" aria-label="计划" hidden>
     <div class="plan-page-shell">
@@ -8016,6 +8020,8 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     const composerActivity = document.getElementById("composerActivity");
     const inputDock = document.querySelector(".codex-input-dock");
     const params = new URLSearchParams(location.search);
+    const viewportDebug = document.getElementById("viewportDebug");
+    const debugViewport = params.get("debug_viewport") === "1";
     const token = params.get("token") || "";
     const PROVIDER = __PROVIDER_JSON__;
 __ICONS_JS__
@@ -8086,6 +8092,52 @@ __ICONS_JS__
       dockResizeObserver.observe(inputDock);
     }
     window.addEventListener("resize", syncDockHeight);
+    function computedSize(element) {
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      const styles = getComputedStyle(element);
+      return {
+        width: Math.round(rect.width * 100) / 100,
+        height: Math.round(rect.height * 100) / 100,
+        fontSize: styles.fontSize,
+        lineHeight: styles.lineHeight,
+        webkitTextSizeAdjust: styles.webkitTextSizeAdjust || styles.textSizeAdjust || ""
+      };
+    }
+    function collectViewportDebugMetrics() {
+      return {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        clientWidth: document.documentElement.clientWidth,
+        clientHeight: document.documentElement.clientHeight,
+        devicePixelRatio: window.devicePixelRatio,
+        visualViewport: window.visualViewport ? {
+          width: Math.round(window.visualViewport.width * 100) / 100,
+          height: Math.round(window.visualViewport.height * 100) / 100,
+          scale: window.visualViewport.scale,
+          offsetLeft: Math.round(window.visualViewport.offsetLeft * 100) / 100,
+          offsetTop: Math.round(window.visualViewport.offsetTop * 100) / 100
+        } : null,
+        computedCircleSize: computedSize(document.querySelector(".circle")),
+        computedTranscriptSize: computedSize(document.querySelector(".transcript-body")),
+        computedDockSize: computedSize(inputDock)
+      };
+    }
+    function updateViewportDebug() {
+      if (!debugViewport || !viewportDebug) return;
+      const metrics = collectViewportDebugMetrics();
+      viewportDebug.hidden = false;
+      viewportDebug.textContent = JSON.stringify(metrics, null, 2);
+      console.info("wlcodex viewport debug", metrics);
+    }
+    if (debugViewport) {
+      updateViewportDebug();
+      window.addEventListener("resize", updateViewportDebug);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", updateViewportDebug);
+        window.visualViewport.addEventListener("scroll", updateViewportDebug);
+      }
+    }
     const sendStatus = document.getElementById("sendStatus");
     const composerActionMenu = document.getElementById("composerActionMenu");
     const menuUploadPhoto = document.getElementById("menuUploadPhoto");
