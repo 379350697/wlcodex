@@ -319,6 +319,8 @@ class RelayStore:
             output_payload = output_by_role.get(job.role, {})
             handoff = latest_handoff_by_role.get(job.role, {})
             error_payload = latest_error_by_role.get(job.role, {})
+            if str(job.status) in {"passed", "completed"}:
+                error_payload = {}
             jobs.append(
                 RelayRoleJob(
                     id=job.id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 import tempfile
 from collections import OrderedDict
@@ -50,15 +51,32 @@ class _RunOutcome:
     status: str
     antigravity_conversation_id: str = ""
     error: str = ""
+    failure_kind: str = ""
+    failure_evidence_source: str = ""
     emitted_text: bool = False
     model: str = ""
     fallback_from_model: str = ""
     fallback_reason: str = ""
 
 
+class AntigravityCliError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "cli_error",
+        evidence_source: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.evidence_source = evidence_source
+
+
 _EXECUTION_CWD_METADATA_KEY = "antigravity_execution_cwd"
 _RUNTIME_TURN_EVENT_LIMIT = 50_000
 _REPLAY_MATCH_MIN_CHARS = 8
+_PRINT_TIMEOUT_GRACE_SECONDS = 30.0
+_GO_DURATION_PART_RE = re.compile(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))([hms])")
 
 
 class AntigravityCliRunner:
@@ -115,7 +133,7 @@ class AntigravityCliRunner:
             async for chunk in _iter_stdout_chunks_until_complete(
                 communicate_task,
                 stdout_queue,
-                timeout=self._config.request_timeout_seconds,
+                timeout=_runner_timeout_seconds(self._config),
             ):
                 streamed_stdout = True
                 text = chunk.decode("utf-8", errors="replace")
@@ -130,26 +148,52 @@ class AntigravityCliRunner:
             if proc is not None:
                 proc.kill()
                 await proc.wait()
-            raise RuntimeError("Antigravity CLI print mode timed out") from exc
+            raise AntigravityCliError(
+                "Antigravity CLI print mode timed out",
+                kind="timeout",
+                evidence_source="process",
+            ) from exc
         except FileNotFoundError as exc:
-            raise RuntimeError(_binary_error(self.binary)) from exc
+            raise AntigravityCliError(
+                _binary_error(self.binary),
+                kind="setup",
+                evidence_source="binary",
+            ) from exc
 
         text = stdout.decode("utf-8", errors="replace") if stdout else ""
         error_text = stderr.decode("utf-8", errors="replace") if stderr else ""
         log_text = _read_text_file(log_file)
         auth_error = _authentication_error_message(f"{text}\n{error_text}")
         if auth_error:
-            raise RuntimeError(auth_error)
-        quota_error = _quota_or_limit_error_message(
-            "\n".join(value for value in (error_text, text, log_text) if value)
+            raise AntigravityCliError(
+                auth_error,
+                kind="authentication",
+                evidence_source="stdout_stderr",
+            )
+        quota_error, quota_source = _quota_or_limit_error_from_sources(
+            stderr=error_text,
+            stdout=text,
+            log=log_text,
         )
         if quota_error:
-            raise RuntimeError(quota_error)
+            raise AntigravityCliError(
+                quota_error,
+                kind="quota_limit",
+                evidence_source=quota_source,
+            )
         cli_error = _cli_error_message(error_text or text)
         if cli_error:
-            raise RuntimeError(cli_error)
+            raise AntigravityCliError(
+                cli_error,
+                kind="cli_error",
+                evidence_source="stderr" if error_text else "stdout",
+            )
         if proc.returncode not in (0, None):
-            raise RuntimeError((error_text or text or "Antigravity CLI failed").strip())
+            raise AntigravityCliError(
+                (error_text or text or "Antigravity CLI failed").strip(),
+                kind="cli_error",
+                evidence_source="returncode",
+            )
         if text and not streamed_stdout:
             yield {
                 "type": "assistant",
@@ -443,6 +487,8 @@ class AntigravityCliLocalProvider:
             status=fallback.status,
             antigravity_conversation_id=fallback.antigravity_conversation_id,
             error=fallback.error,
+            failure_kind=outcome.failure_kind,
+            failure_evidence_source=outcome.failure_evidence_source,
             emitted_text=fallback.emitted_text,
             model=fallback.model,
             fallback_from_model=selected_model,
@@ -492,11 +538,22 @@ class AntigravityCliLocalProvider:
                         native_turn_id=native_turn_id,
                         delta=text,
                     )
+        except AntigravityCliError as exc:
+            return _RunOutcome(
+                status="failed",
+                antigravity_conversation_id=latest_conversation_id,
+                error=str(exc),
+                failure_kind=exc.kind,
+                failure_evidence_source=exc.evidence_source,
+                emitted_text=emitted_text,
+                model=model,
+            )
         except Exception as exc:
             return _RunOutcome(
                 status="failed",
                 antigravity_conversation_id=latest_conversation_id,
                 error=str(exc),
+                failure_kind="unknown",
                 emitted_text=emitted_text,
                 model=model,
             )
@@ -517,6 +574,8 @@ class AntigravityCliLocalProvider:
                     "assistant text; investigate Antigravity print-mode/model "
                     "behavior instead of treating this as login/setup."
                 ),
+                failure_kind="empty_output",
+                failure_evidence_source="no_assistant_text",
                 model=model,
             )
         return _RunOutcome(
@@ -655,13 +714,26 @@ class AntigravityCliLocalProvider:
         if outcome.fallback_from_model:
             metadata["antigravity_model_fallback_from"] = outcome.fallback_from_model
             metadata["antigravity_model_fallback_reason"] = outcome.fallback_reason
+            if outcome.failure_evidence_source:
+                metadata["antigravity_model_fallback_evidence_source"] = (
+                    outcome.failure_evidence_source
+                )
         else:
             metadata.pop("antigravity_model_fallback_from", None)
             metadata.pop("antigravity_model_fallback_reason", None)
+            metadata.pop("antigravity_model_fallback_evidence_source", None)
         if outcome.error:
             metadata["error"] = outcome.error
+            if outcome.failure_kind:
+                metadata["antigravity_failure_kind"] = outcome.failure_kind
+            if outcome.failure_evidence_source:
+                metadata["antigravity_failure_evidence_source"] = (
+                    outcome.failure_evidence_source
+                )
         else:
             metadata.pop("error", None)
+            metadata.pop("antigravity_failure_kind", None)
+            metadata.pop("antigravity_failure_evidence_source", None)
         return self._session_store.update_session(
             session.id,
             status=outcome.status,
@@ -993,6 +1065,34 @@ def _timestamp_seconds(value: str) -> float:
         return 0.0
 
 
+def _runner_timeout_seconds(config: AntigravityCliConfig) -> float:
+    configured = max(float(config.request_timeout_seconds), 0.0)
+    print_timeout = _parse_go_duration_seconds(config.print_timeout)
+    if print_timeout is None:
+        return configured
+    capped = max(print_timeout, 0.0) + _PRINT_TIMEOUT_GRACE_SECONDS
+    if configured <= 0:
+        return capped
+    return min(configured, capped)
+
+
+def _parse_go_duration_seconds(value: str) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    position = 0
+    total = 0.0
+    units = {"h": 3600.0, "m": 60.0, "s": 1.0}
+    for match in _GO_DURATION_PART_RE.finditer(text):
+        if match.start() != position:
+            return None
+        total += float(match.group(1)) * units[match.group(2)]
+        position = match.end()
+    if position != len(text) or position == 0:
+        return None
+    return total
+
+
 async def _iter_stdout_chunks_until_complete(
     communicate_task: asyncio.Task[tuple[bytes, bytes]],
     stdout_queue: asyncio.Queue[bytes],
@@ -1138,6 +1238,23 @@ def _quota_or_limit_error_message(text: str) -> str:
     return text.strip()
 
 
+def _quota_or_limit_error_from_sources(
+    *,
+    stderr: str,
+    stdout: str,
+    log: str,
+) -> tuple[str, str]:
+    for source, text in (
+        ("stderr", stderr),
+        ("stdout", stdout),
+        ("log", log),
+    ):
+        message = _quota_or_limit_error_message(text)
+        if message:
+            return message, source
+    return "", ""
+
+
 def _clean_antigravity_log_line(line: str) -> str:
     stripped = line.strip()
     marker = "RESOURCE_EXHAUSTED"
@@ -1156,7 +1273,7 @@ def _should_fallback_for_antigravity_quota(
         return False
     if outcome.status != "failed" or outcome.emitted_text:
         return False
-    return _is_antigravity_quota_or_limit_error(outcome.error)
+    return outcome.failure_kind == "quota_limit"
 
 
 def _is_antigravity_quota_or_limit_error(error: str) -> bool:

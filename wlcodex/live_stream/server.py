@@ -4547,7 +4547,20 @@ def _relay_task_detail_page(
     document.querySelectorAll("[data-native-key]").forEach((node) => {{
       if (node.dataset.nativeKey) nativeTranscriptNodes.set(node.dataset.nativeKey, node);
     }});
+    const TERMINAL_ROLE_STATUSES = new Set(["passed", "completed", "blocked", "failed", "interrupted"]);
+    function currentRoleStatus(role) {{
+      const lane = document.querySelector(`[data-role="${{role}}"]`);
+      const statusNode = lane?.querySelector(".role-status");
+      return statusNode?.dataset.status || "";
+    }}
+    function canApplyRoleStatus(role, status) {{
+      if (!status) return false;
+      const currentStatus = currentRoleStatus(role);
+      if (TERMINAL_ROLE_STATUSES.has(currentStatus) && !TERMINAL_ROLE_STATUSES.has(status)) return false;
+      return true;
+    }}
     function setRoleStatus(role, status) {{
+      if (!canApplyRoleStatus(role, status)) return;
       const lane = document.querySelector(`[data-role="${{role}}"]`);
       const statusNode = lane?.querySelector(".role-status");
       if (statusNode && status) {{

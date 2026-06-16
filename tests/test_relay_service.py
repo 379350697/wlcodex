@@ -173,6 +173,48 @@ def test_create_task_records_board_and_queues_director(tmp_path) -> None:
     ]
 
 
+def test_passed_role_does_not_surface_stale_role_error(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Recovered director",
+        prompt="Run full relay",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "relay_role": "director",
+            "error": "invalid json: Expecting value",
+        },
+        summary="invalid json: Expecting value",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "relay_role": "director",
+            "artifact_type": "routing_decision",
+            "status": "passed",
+            "role": "director",
+            "route": "full_relay",
+            "required_roles": ["director", "architect"],
+            "summary": "恢复为完整接力。",
+        },
+        summary="恢复为完整接力。",
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+
+    detail = service.get_task(task.id)
+    director = next(job for job in detail.role_jobs if job.role == "director")
+
+    assert director.status == "passed"
+    assert director.error_message == ""
+
+
 def test_dispatch_role_uses_native_agent_registry_provider(tmp_path) -> None:
     service, provider = _service(tmp_path)
     task = service.create_task(
@@ -853,6 +895,136 @@ def test_codex_native_empty_turn_completed_waits_for_text(
     assert detail.task.status == "running"
     assert jobs["director"].status == "streaming"
     assert "role.status" not in event_types
+
+
+def test_agent_run_completed_folds_text_deltas_into_role_completion(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "full relay required",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "",
+              "summary": "Use full relay.",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "architect plan",
+              "complexity": "complex",
+              "risk": "medium",
+              "route": "full_relay",
+              "required_roles": ["director", "architect", "implementer"],
+              "acceptance_criteria": ["roles pass"],
+              "stop_conditions": [],
+              "requires_user_approval": false
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+    asyncio.run(service.dispatch_role(task.id, "architect"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    for delta in (
+        '{"status":"passed","reason":"architecture checked",',
+        '"role":"architect","artifact_type":"architecture_plan",',
+        '"handoff_to":"implementer","summary":"Architecture ready",',
+        '"evidence_refs":["runtime_events"],"open_questions":[],',
+        '"next_action":"implement"}',
+    ):
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.MODEL_TEXT_DELTA,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id="101",
+                correlation_id="corr-101",
+                source=EventSource.ANTIGRAVITY,
+                actor="antigravity_cli_local",
+                visibility=Visibility.USER,
+                payload={"delta": delta},
+                occurred_at=now_iso(),
+                agent_run_id=101,
+            )
+        )
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.ANTIGRAVITY,
+            actor="antigravity_cli_local",
+            visibility=Visibility.USER,
+            payload={"status": "completed"},
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    event_types = [event.event_type for event in service.events_for_task(task.id)]
+    assert jobs["architect"].status == "passed"
+    assert jobs["implementer"].status == "streaming"
+    assert [call[0] for call in provider.calls] == ["start_session", "start_session"]
+    assert "handoff.created" in event_types
+
+
+def test_agent_run_completed_without_text_blocks_streaming_role(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "architect"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.ANTIGRAVITY,
+            actor="antigravity_cli_local",
+            visibility=Visibility.USER,
+            payload={"status": "completed"},
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.task.status == "blocked"
+    assert jobs["architect"].status == "blocked"
+    assert jobs["architect"].error_message == (
+        "native provider completed without assistant output"
+    )
+    assert any(
+        artifact.get("artifact_type") == "role_error"
+        and artifact.get("summary") == "native provider completed without assistant output"
+        for artifact in detail.artifacts
+    )
 
 
 def test_runtime_agent_run_failed_blocks_streaming_role(tmp_path) -> None:

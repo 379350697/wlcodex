@@ -684,6 +684,8 @@ async def test_cli_provider_forwards_explicit_model_to_runner(
 async def test_cli_provider_falls_back_to_gemini_high_for_opus_quota_error(
     tmp_path: Path,
 ) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import AntigravityCliError
+
     class QuotaThenGeminiRunner(FakeAntigravityCliRunner):
         async def run(
             self,
@@ -708,7 +710,11 @@ async def test_cli_provider_falls_back_to_gemini_high_for_opus_quota_error(
                 }
             )
             if model == "Claude Opus 4.6 (Thinking)":
-                raise RuntimeError("Quota exceeded for Claude Opus 4.6")
+                raise AntigravityCliError(
+                    "Quota exceeded for Claude Opus 4.6",
+                    kind="quota_limit",
+                    evidence_source="stderr",
+                )
             yield {
                 "type": "assistant",
                 "text": "fallback ok",
@@ -963,7 +969,7 @@ async def test_cli_provider_ignores_stale_latest_local_cwd(
 
 
 @pytest.mark.asyncio
-async def test_cli_provider_empty_output_failure_does_not_fallback_to_gemini(
+async def test_cli_provider_empty_output_without_limit_evidence_does_not_fallback(
     tmp_path: Path,
 ) -> None:
     class EmptyRunner(FakeAntigravityCliRunner):
@@ -1010,8 +1016,7 @@ async def test_cli_provider_empty_output_failure_does_not_fallback_to_gemini(
     assert len(runner.calls) == 1
     assert runner.calls[0]["model"] == "Claude Opus 4.6 (Thinking)"
     assert "completed without assistant output" in session.metadata["error"]
-    assert "quota" not in session.metadata["error"].lower()
-    assert "Run agy" not in session.metadata["error"]
+    assert "antigravity_model_fallback_from" not in session.metadata
 
 
 @pytest.mark.asyncio
@@ -1195,6 +1200,7 @@ async def test_cli_runner_raises_quota_error_from_silent_print_log(
     tmp_path: Path,
 ) -> None:
     from wlcodex.native_agents.antigravity_cli_provider import (
+        AntigravityCliError,
         AntigravityCliConfig,
         AntigravityCliRunner,
     )
@@ -1227,7 +1233,7 @@ async def test_cli_runner_raises_quota_error_from_silent_print_log(
     fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
     runner = AntigravityCliRunner(AntigravityCliConfig(binary=str(fake_binary)))
 
-    with pytest.raises(RuntimeError, match="Individual quota reached"):
+    with pytest.raises(AntigravityCliError, match="Individual quota reached") as caught:
         _events = [
             event
             async for event in runner.run(
@@ -1235,6 +1241,8 @@ async def test_cli_runner_raises_quota_error_from_silent_print_log(
                 cwd=str(tmp_path),
             )
         ]
+    assert caught.value.kind == "quota_limit"
+    assert caught.value.evidence_source == "log"
 
 
 @pytest.mark.asyncio
@@ -1360,6 +1368,84 @@ async def test_cli_runner_rejects_cli_error_text_as_failure(
 
     with pytest.raises(RuntimeError, match="timed out waiting for response"):
         await _collect_runner_events(runner, tmp_path)
+
+
+def test_cli_runner_caps_request_timeout_to_print_timeout_grace() -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        AntigravityCliConfig,
+        _runner_timeout_seconds,
+    )
+
+    timeout = _runner_timeout_seconds(
+        AntigravityCliConfig(
+            print_timeout="5m0s",
+            request_timeout_seconds=3600.0,
+        )
+    )
+
+    assert timeout == pytest.approx(330.0)
+
+
+@pytest.mark.asyncio
+async def test_cli_runner_hard_times_out_when_agy_process_does_not_exit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import wlcodex.native_agents.antigravity_cli_provider as antigravity_cli_provider
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        AntigravityCliConfig,
+        AntigravityCliRunner,
+    )
+
+    class FakeStream:
+        async def readline(self):
+            await asyncio.sleep(0)
+            return b""
+
+    class FakeProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.stdout = FakeStream()
+            self.stderr = FakeStream()
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            while self.returncode is None:
+                await asyncio.sleep(0.01)
+            return self.returncode
+
+    fake_process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return fake_process
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(antigravity_cli_provider, "_PRINT_TIMEOUT_GRACE_SECONDS", 0.01)
+    fake_binary = tmp_path / "agy"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = AntigravityCliRunner(
+        AntigravityCliConfig(
+            binary=str(fake_binary),
+            print_timeout="0.01s",
+            request_timeout_seconds=3600.0,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="print mode timed out"):
+        await asyncio.wait_for(
+            _collect_runner_events(runner, tmp_path),
+            timeout=0.2,
+        )
+    assert fake_process.killed is True
 
 
 @pytest.mark.asyncio

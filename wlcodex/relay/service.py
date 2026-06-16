@@ -1102,6 +1102,12 @@ class RelayService:
             return None
         text = self._runtime_completion_text(runtime_event)
         if not text.strip():
+            if _is_agent_run_completed_event(runtime_event):
+                self._block_role_with_error(
+                    task_id,
+                    role,
+                    "native provider completed without assistant output",
+                )
             return None
         try:
             return await self.handle_role_completion_event(
@@ -1260,6 +1266,8 @@ class RelayService:
     def _is_runtime_completion(runtime_event: Any) -> bool:
         if _is_turn_completed_activity(runtime_event):
             return True
+        if _is_agent_run_completed_event(runtime_event):
+            return True
         return _runtime_event_type(runtime_event) in {
             "model.message.completed",
             "model_message_completed",
@@ -1269,7 +1277,10 @@ class RelayService:
         text = _runtime_event_text(runtime_event)
         if text.strip():
             return text
-        if not _is_turn_completed_activity(runtime_event):
+        if not (
+            _is_turn_completed_activity(runtime_event)
+            or _is_agent_run_completed_event(runtime_event)
+        ):
             return ""
         agent_run_id = getattr(runtime_event, "agent_run_id", None)
         if agent_run_id is None:
@@ -1500,6 +1511,13 @@ def _is_turn_completed_activity(runtime_event: Any) -> bool:
         str(payload.get("action") or "").strip() == "turn_completed"
         and str(payload.get("status") or "completed").strip() == "completed"
     )
+
+
+def _is_agent_run_completed_event(runtime_event: Any) -> bool:
+    return _runtime_event_type(runtime_event) in {
+        "agent.run.completed",
+        "agent_run_completed",
+    }
 
 
 def _is_runtime_failure(runtime_event: Any) -> bool:
