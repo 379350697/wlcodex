@@ -181,6 +181,17 @@ class AntigravityCliRunner:
                 kind="quota_limit",
                 evidence_source=quota_source,
             )
+        model_error, model_error_source = _model_unavailable_error_from_sources(
+            stderr=error_text,
+            stdout=text,
+            log=log_text,
+        )
+        if model_error:
+            raise AntigravityCliError(
+                model_error,
+                kind="model_unavailable",
+                evidence_source=model_error_source,
+            )
         cli_error = _cli_error_message(error_text or text)
         if cli_error:
             raise AntigravityCliError(
@@ -1255,12 +1266,41 @@ def _quota_or_limit_error_from_sources(
     return "", ""
 
 
+def _model_unavailable_error_message(text: str) -> str:
+    if not _is_antigravity_model_unavailable_error(text):
+        return ""
+    for line in text.splitlines():
+        if _is_antigravity_model_unavailable_error(line):
+            return _clean_antigravity_log_line(line)
+    return text.strip()
+
+
+def _model_unavailable_error_from_sources(
+    *,
+    stderr: str,
+    stdout: str,
+    log: str,
+) -> tuple[str, str]:
+    for source, text in (
+        ("stderr", stderr),
+        ("stdout", stdout),
+        ("log", log),
+    ):
+        message = _model_unavailable_error_message(text)
+        if message:
+            return message, source
+    return "", ""
+
+
 def _clean_antigravity_log_line(line: str) -> str:
     stripped = line.strip()
     marker = "RESOURCE_EXHAUSTED"
     marker_index = stripped.find(marker)
     if marker_index >= 0:
         return stripped[marker_index:]
+    severity_index = re.search(r"\]\s+", stripped)
+    if severity_index:
+        return stripped[severity_index.end() :]
     return stripped
 
 
@@ -1294,6 +1334,17 @@ def _is_antigravity_quota_or_limit_error(error: str) -> bool:
         "billing limit",
     )
     return any(marker in lowered for marker in quota_markers)
+
+
+def _is_antigravity_model_unavailable_error(error: str) -> bool:
+    lowered = error.lower()
+    model_markers = (
+        "not recognized as a known model or custom model",
+        "neither planmodel nor requestedmodel specified",
+        "you must specify a valid model",
+        "failed to resolve model flag",
+    )
+    return any(marker in lowered for marker in model_markers)
 
 
 def _new_antigravity_cli_log_file() -> str:

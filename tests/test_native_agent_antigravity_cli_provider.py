@@ -1020,6 +1020,64 @@ async def test_cli_provider_empty_output_without_limit_evidence_does_not_fallbac
 
 
 @pytest.mark.asyncio
+async def test_cli_provider_model_unavailable_does_not_quota_fallback(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import AntigravityCliError
+
+    class ModelUnavailableRunner(FakeAntigravityCliRunner):
+        async def run(
+            self,
+            *,
+            prompt: str,
+            cwd: str,
+            conversation_id: str = "",
+            model: str = "",
+            extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
+        ):
+            self.calls.append(
+                {
+                    "prompt": prompt,
+                    "cwd": cwd,
+                    "conversation_id": conversation_id,
+                    "model": model,
+                    "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
+                }
+            )
+            raise AntigravityCliError(
+                "Antigravity model is unavailable: Claude Opus 4.6 (Thinking)",
+                kind="model_unavailable",
+                evidence_source="log",
+            )
+            if False:
+                yield {}
+
+    provider, store, _runtime_store, runner = _provider(
+        tmp_path,
+        runner=ModelUnavailableRunner(),
+    )
+
+    result = await provider.start_session(str(tmp_path), "first")
+    await provider.wait_for_background_tasks()
+
+    session = store.get_by_native_session_id(
+        provider="antigravity",
+        provider_engine="cli-local",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    assert session.status == "failed"
+    assert len(runner.calls) == 1
+    assert session.metadata["antigravity_failure_kind"] == "model_unavailable"
+    assert session.metadata["antigravity_failure_evidence_source"] == "log"
+    assert "antigravity_model_fallback_from" not in session.metadata
+
+
+@pytest.mark.asyncio
 async def test_cli_provider_hides_local_duplicate_after_created_session_claims_pb(
     tmp_path: Path,
 ) -> None:
@@ -1242,6 +1300,61 @@ async def test_cli_runner_raises_quota_error_from_silent_print_log(
             )
         ]
     assert caught.value.kind == "quota_limit"
+    assert caught.value.evidence_source == "log"
+
+
+@pytest.mark.asyncio
+async def test_cli_runner_raises_model_unavailable_from_silent_print_log(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        AntigravityCliError,
+        AntigravityCliConfig,
+        AntigravityCliRunner,
+    )
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, log_file: str) -> None:
+            self.log_file = log_file
+
+        async def communicate(self):
+            Path(self.log_file).write_text(
+                "E0616 model.go:113] Failed to resolve model flag "
+                "Claude Opus 4.6 (Thinking): model Claude Opus 4.6 "
+                "(Thinking) is not recognized as a known model or custom "
+                "model in settings\n"
+                "E0616 agy.go:143] failed to construct executor: neither "
+                "PlanModel nor RequestedModel specified. You must specify a "
+                "valid model.\n",
+                encoding="utf-8",
+            )
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        log_file = args[args.index("--log-file") + 1]
+        return FakeProcess(str(log_file))
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    fake_binary = tmp_path / "agy"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = AntigravityCliRunner(AntigravityCliConfig(binary=str(fake_binary)))
+
+    with pytest.raises(AntigravityCliError, match="not recognized") as caught:
+        _events = [
+            event
+            async for event in runner.run(
+                prompt="hello",
+                cwd=str(tmp_path),
+            )
+        ]
+    assert caught.value.kind == "model_unavailable"
     assert caught.value.evidence_source == "log"
 
 
