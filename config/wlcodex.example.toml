@@ -52,6 +52,7 @@ max_queued_seconds = 1800
 max_waiting_approval_seconds = 3600
 watchdog_interval_seconds = 60
 backend_dead_grace_seconds = 120
+relay_native_idle_timeout_seconds = 300
 
 # Live Telegram smoke env vars (for real acceptance gate):
 #   WLCODEX_RUN_TELEGRAM_LIVE=1
@@ -213,6 +214,7 @@ engine = "cli-local"
 [native_agents.antigravity.cli_local]
 binary = "auto"
 print_timeout = "5m0s"
+default_model = "Gemini 3.5 Flash (High)"
 dangerously_skip_permissions = false
 sandbox = false
 

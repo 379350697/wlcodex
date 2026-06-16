@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from wlcodex.db import Ledger
-from wlcodex.native_agents.antigravity_cli_provider import AntigravityCliLocalProvider
+from wlcodex.native_agents.antigravity_cli_provider import (
+    AntigravityCliConfig,
+    AntigravityCliLocalProvider,
+)
 from wlcodex.native_agents.antigravity_local_sessions import (
     AntigravityLocalSession,
     AntigravityLocalSessionIndex,
@@ -175,7 +178,7 @@ def _provider(
 
 
 @pytest.mark.asyncio
-async def test_cli_provider_lists_antigravity_model_catalog_with_opus_default(
+async def test_cli_provider_lists_antigravity_model_catalog_with_gemini_high_default(
     tmp_path: Path,
 ) -> None:
     provider, _store, _runtime_store, _runner = _provider(tmp_path)
@@ -187,7 +190,7 @@ async def test_cli_provider_lists_antigravity_model_catalog_with_opus_default(
             "id": "Claude Opus 4.6 (Thinking)",
             "model": "Claude Opus 4.6 (Thinking)",
             "displayName": "Claude Opus 4.6 (Thinking)",
-            "isDefault": True,
+            "isDefault": False,
         },
         {
             "id": "Claude Sonnet 4.6 (Thinking)",
@@ -205,7 +208,7 @@ async def test_cli_provider_lists_antigravity_model_catalog_with_opus_default(
             "id": "Gemini 3.5 Flash (High)",
             "model": "Gemini 3.5 Flash (High)",
             "displayName": "Gemini 3.5 Flash (High)",
-            "isDefault": False,
+            "isDefault": True,
         },
         {
             "id": "Gemini 3.5 Flash (Low)",
@@ -722,6 +725,9 @@ async def test_cli_provider_falls_back_to_gemini_high_for_opus_quota_error(
             }
 
     runner = QuotaThenGeminiRunner()
+    runner._config = AntigravityCliConfig(
+        default_model="Claude Opus 4.6 (Thinking)"
+    )
     provider, store, _runtime_store, _runner = _provider(tmp_path, runner=runner)
 
     result = await provider.start_session(str(tmp_path), "quota fallback")
@@ -744,6 +750,160 @@ async def test_cli_provider_falls_back_to_gemini_high_for_opus_quota_error(
     )
     assert session.metadata["antigravity_model_fallback_reason"] == (
         "Quota exceeded for Claude Opus 4.6"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_retries_auto_when_gemini_high_model_flag_fails(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        _ANTIGRAVITY_AUTO_MODEL,
+        AntigravityCliError,
+    )
+
+    class HighUnavailableThenAutoRunner(FakeAntigravityCliRunner):
+        async def run(
+            self,
+            *,
+            prompt: str,
+            cwd: str,
+            conversation_id: str = "",
+            model: str = "",
+            extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
+        ):
+            self.calls.append(
+                {
+                    "prompt": prompt,
+                    "cwd": cwd,
+                    "conversation_id": conversation_id,
+                    "model": model,
+                    "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
+                }
+            )
+            if model == "Gemini 3.5 Flash (High)":
+                raise AntigravityCliError(
+                    "Failed to resolve model flag Gemini 3.5 Flash (High)",
+                    kind="model_unavailable",
+                    evidence_source="log",
+                )
+            yield {
+                "type": "assistant",
+                "text": "auto ok",
+                "conversation_id": conversation_id or "ag-conv-auto",
+            }
+
+    provider, store, _runtime_store, runner = _provider(
+        tmp_path,
+        runner=HighUnavailableThenAutoRunner(),
+    )
+
+    result = await provider.start_session(str(tmp_path), "high fallback")
+    await provider.wait_for_background_tasks()
+
+    assert [call["model"] for call in runner.calls] == [
+        "Gemini 3.5 Flash (High)",
+        _ANTIGRAVITY_AUTO_MODEL,
+    ]
+    session = store.get_by_native_session_id(
+        provider="antigravity",
+        provider_engine="cli-local",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    assert session.status == "done"
+    assert session.metadata["antigravity_model"] == "auto"
+    assert session.metadata["antigravity_model_fallback_from"] == (
+        "Gemini 3.5 Flash (High)"
+    )
+    assert session.metadata["antigravity_model_fallback_reason"] == (
+        "Failed to resolve model flag Gemini 3.5 Flash (High)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_opus_quota_retries_auto_when_gemini_high_unavailable(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        _ANTIGRAVITY_AUTO_MODEL,
+        AntigravityCliError,
+    )
+
+    class OpusQuotaHighUnavailableThenAutoRunner(FakeAntigravityCliRunner):
+        async def run(
+            self,
+            *,
+            prompt: str,
+            cwd: str,
+            conversation_id: str = "",
+            model: str = "",
+            extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
+        ):
+            self.calls.append(
+                {
+                    "prompt": prompt,
+                    "cwd": cwd,
+                    "conversation_id": conversation_id,
+                    "model": model,
+                    "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
+                }
+            )
+            if model == "Claude Opus 4.6 (Thinking)":
+                raise AntigravityCliError(
+                    "Quota exceeded for Claude Opus 4.6",
+                    kind="quota_limit",
+                    evidence_source="log",
+                )
+            if model == "Gemini 3.5 Flash (High)":
+                raise AntigravityCliError(
+                    "Failed to resolve model flag Gemini 3.5 Flash (High)",
+                    kind="model_unavailable",
+                    evidence_source="log",
+                )
+            yield {
+                "type": "assistant",
+                "text": "auto ok",
+                "conversation_id": conversation_id or "ag-conv-auto",
+            }
+
+    runner = OpusQuotaHighUnavailableThenAutoRunner()
+    runner._config = AntigravityCliConfig(
+        default_model="Claude Opus 4.6 (Thinking)"
+    )
+    provider, store, _runtime_store, _runner = _provider(tmp_path, runner=runner)
+
+    result = await provider.start_session(str(tmp_path), "quota fallback")
+    await provider.wait_for_background_tasks()
+
+    assert [call["model"] for call in runner.calls] == [
+        "Claude Opus 4.6 (Thinking)",
+        "Gemini 3.5 Flash (High)",
+        _ANTIGRAVITY_AUTO_MODEL,
+    ]
+    session = store.get_by_native_session_id(
+        provider="antigravity",
+        provider_engine="cli-local",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    assert session.status == "done"
+    assert session.metadata["antigravity_model"] == "auto"
+    assert session.metadata["antigravity_model_fallback_from"] == (
+        "Claude Opus 4.6 (Thinking)"
+    )
+    assert session.metadata["antigravity_model_fallback_reason"] == (
+        "Quota exceeded for Claude Opus 4.6; fallback model Gemini 3.5 "
+        "Flash (High) failed: Failed to resolve model flag Gemini 3.5 "
+        "Flash (High)"
     )
 
 
@@ -1014,7 +1174,7 @@ async def test_cli_provider_empty_output_without_limit_evidence_does_not_fallbac
     assert session is not None
     assert session.status == "failed"
     assert len(runner.calls) == 1
-    assert runner.calls[0]["model"] == "Claude Opus 4.6 (Thinking)"
+    assert runner.calls[0]["model"] == "Gemini 3.5 Flash (High)"
     assert "completed without assistant output" in session.metadata["error"]
     assert "antigravity_model_fallback_from" not in session.metadata
 
@@ -1242,7 +1402,7 @@ async def test_cli_runner_builds_agy_print_command(monkeypatch, tmp_path: Path) 
         "--dangerously-skip-permissions",
         "--sandbox",
         "--model",
-        "Claude Opus 4.6 (Thinking)",
+        "Gemini 3.5 Flash (High)",
         "--print",
         "hello",
     )
@@ -1250,6 +1410,33 @@ async def test_cli_runner_builds_agy_print_command(monkeypatch, tmp_path: Path) 
     assert events == [
         {"type": "assistant", "text": "hello\n", "conversation_id": "conv-1"}
     ]
+
+
+def test_cli_runner_auto_model_sentinel_omits_model_argument(tmp_path: Path) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        _ANTIGRAVITY_AUTO_MODEL,
+        AntigravityCliConfig,
+        AntigravityCliRunner,
+    )
+
+    fake_binary = tmp_path / "agy"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = AntigravityCliRunner(
+        AntigravityCliConfig(
+            binary=str(fake_binary),
+            default_model="Gemini 3.5 Flash (High)",
+        )
+    )
+
+    args = runner._args(
+        prompt="hello",
+        cwd=str(tmp_path),
+        conversation_id="",
+        model=_ANTIGRAVITY_AUTO_MODEL,
+        extra_dirs=(),
+    )
+
+    assert "--model" not in args
 
 
 @pytest.mark.asyncio
@@ -1356,6 +1543,53 @@ async def test_cli_runner_raises_model_unavailable_from_silent_print_log(
         ]
     assert caught.value.kind == "model_unavailable"
     assert caught.value.evidence_source == "log"
+
+
+@pytest.mark.asyncio
+async def test_cli_runner_ignores_model_resolution_warning_when_output_exists(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        AntigravityCliConfig,
+        AntigravityCliRunner,
+    )
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, log_file: str) -> None:
+            self.log_file = log_file
+
+        async def communicate(self):
+            Path(self.log_file).write_text(
+                "W0616 model_config_manager.go:54] Failed to resolve model flag "
+                "Gemini 3.5 Flash (High): model Gemini 3.5 Flash (High) is "
+                "not recognized as a known model or custom model in settings\n"
+                "I0616 model_config_manager.go:157] Propagating selected model "
+                "override to backend: label=\"Gemini 3.5 Flash (Medium)\"\n",
+                encoding="utf-8",
+            )
+            return b"OK\n", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        log_file = args[args.index("--log-file") + 1]
+        return FakeProcess(str(log_file))
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    fake_binary = tmp_path / "agy"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = AntigravityCliRunner(AntigravityCliConfig(binary=str(fake_binary)))
+
+    events = await _collect_runner_events(runner, tmp_path)
+
+    assert events == [
+        {"type": "assistant", "text": "OK\n", "conversation_id": ""}
+    ]
 
 
 @pytest.mark.asyncio

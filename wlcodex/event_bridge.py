@@ -532,6 +532,7 @@ class EventBridge:
         edit_telegram: EditTelegram,
         approval_service: object,
         task_watchdog: object | None = None,
+        relay_watchdog: object | None = None,
         watchdog_interval_seconds: int = TASK_WATCHDOG_INTERVAL_SECONDS,
         interaction_renderer: object | None = None,
         runtime_event_store: object | None = None,
@@ -545,6 +546,7 @@ class EventBridge:
         self._edit_telegram = edit_telegram
         self._approval_service = approval_service
         self._task_watchdog = task_watchdog
+        self._relay_watchdog = relay_watchdog
         self._watchdog_interval = watchdog_interval_seconds
         self._interaction_renderer = interaction_renderer
         self._runtime_store = runtime_event_store
@@ -573,7 +575,7 @@ class EventBridge:
             self._expiry_loop(), name="approval-expiry-scan"
         )
         watchdog_task: asyncio.Task[None] | None = None
-        if self._task_watchdog is not None:
+        if self._task_watchdog is not None or self._relay_watchdog is not None:
             watchdog_task = asyncio.create_task(
                 self._task_watchdog_loop(), name="task-liveness-watchdog"
             )
@@ -605,7 +607,11 @@ class EventBridge:
         while True:
             await asyncio.sleep(self._watchdog_interval)
             try:
-                changed = self._task_watchdog.scan_once()
+                changed = 0
+                if self._task_watchdog is not None:
+                    changed += self._task_watchdog.scan_once()
+                if self._relay_watchdog is not None:
+                    changed += await self._relay_watchdog.scan_once()
                 if changed > 0:
                     for ws_alias in list(self._service._workspaces):
                         await drain_workspace(self._service, self._backend, ws_alias)
@@ -1022,9 +1028,7 @@ class EventBridge:
             AUTO_COLLECTING_CONTEXT,
             AUTO_DRAFT_READY,
             AUTO_CLAUDE_DONE,
-            AUTO_VERIFYING,
             AUTO_RETRY_READY,
-            AUTO_CODEX_TAKEOVER_RUNNING,
             AUTO_COMPLETED,
             ROLE_AUTO_ANALYSIS,
             ROLE_AUTO_CONTEXT_SUPPLEMENT,
@@ -1067,7 +1071,6 @@ class EventBridge:
         if auto_run is None:
             return None
 
-        current_step = auto_run.current_step
         new_step: str | None = None
 
         # Advance based on agent role and completion

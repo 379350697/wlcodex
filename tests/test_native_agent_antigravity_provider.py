@@ -272,8 +272,11 @@ async def test_sdk_provider_lists_antigravity_model_catalog(tmp_path: Path) -> N
         "id": "Claude Opus 4.6 (Thinking)",
         "model": "Claude Opus 4.6 (Thinking)",
         "displayName": "Claude Opus 4.6 (Thinking)",
-        "isDefault": True,
+        "isDefault": False,
     }
+    assert next(
+        model for model in models if model["model"] == "Gemini 3.5 Flash (High)"
+    )["isDefault"] is True
     assert {model["model"] for model in models} == {
         "Claude Opus 4.6 (Thinking)",
         "Claude Sonnet 4.6 (Thinking)",

@@ -27,6 +27,7 @@ from wlcodex.inspection import TaskInspector
 from wlcodex.menu import build_bot_commands
 from wlcodex.orchestration_runner import OrchestrationRunner
 from wlcodex.recovery_notifications import notify_recovery_paused_tasks
+from wlcodex.relay.service import RelayNativeRunWatchdog, RelayRuntimeEventProjector
 from wlcodex.runtime_diagnostics import (
     append_startup_recovery_events,
     append_recovery_events,
@@ -375,6 +376,7 @@ def _create_live_stream_components(
                                 AntigravityCliConfig(
                                     binary=cli_config.binary,
                                     print_timeout=cli_config.print_timeout,
+                                    default_model=cli_config.default_model,
                                     dangerously_skip_permissions=(
                                         cli_config.dangerously_skip_permissions
                                     ),
@@ -491,12 +493,63 @@ def _should_run_web_entry_only(
     )
 
 
-async def _run_web_entry_only(live_stream_components: SimpleNamespace) -> None:
+async def _run_relay_watchdog_loop(
+    relay_watchdog: object,
+    *,
+    watchdog_interval_seconds: int,
+) -> None:
+    while True:
+        await asyncio.sleep(watchdog_interval_seconds)
+        try:
+            await relay_watchdog.scan_once()
+        except Exception as exc:
+            logger.warning("Relay native watchdog scan failed: %s", exc)
+
+
+async def _run_relay_runtime_projector_loop(
+    relay_runtime_projector: object,
+    *,
+    poll_interval_seconds: float,
+) -> None:
+    while True:
+        await asyncio.sleep(poll_interval_seconds)
+        try:
+            await relay_runtime_projector.scan_once()
+        except Exception as exc:
+            logger.warning("Relay runtime projector scan failed: %s", exc)
+
+
+async def _run_web_entry_only(
+    live_stream_components: SimpleNamespace,
+    *,
+    relay_watchdog: object | None = None,
+    relay_runtime_projector: object | None = None,
+    watchdog_interval_seconds: int = 60,
+    runtime_projector_interval_seconds: float = 1.0,
+) -> None:
     """Run the formal native web entry without Telegram polling."""
     live_stream_server = live_stream_components.server
+    relay_watchdog_task: asyncio.Task[None] | None = None
+    relay_runtime_projector_task: asyncio.Task[None] | None = None
     logger.info("WLCodex starting in web entry mode. Telegram polling disabled.")
     try:
         await live_stream_server.start()
+        if relay_watchdog is not None:
+            relay_watchdog_task = asyncio.create_task(
+                _run_relay_watchdog_loop(
+                    relay_watchdog,
+                    watchdog_interval_seconds=watchdog_interval_seconds,
+                ),
+                name="relay-native-watchdog",
+            )
+        if relay_runtime_projector is not None:
+            relay_runtime_projector_task = asyncio.create_task(
+                _run_relay_runtime_projector_loop(
+                    relay_runtime_projector,
+                    poll_interval_seconds=runtime_projector_interval_seconds,
+                ),
+                name="relay-runtime-projector",
+            )
         logger.info(
             "Worker live stream listening at http://%s:%s",
             live_stream_server.host,
@@ -505,6 +558,18 @@ async def _run_web_entry_only(live_stream_components: SimpleNamespace) -> None:
         while True:
             await asyncio.sleep(3600)
     finally:
+        if relay_watchdog_task is not None:
+            relay_watchdog_task.cancel()
+            try:
+                await relay_watchdog_task
+            except asyncio.CancelledError:
+                pass
+        if relay_runtime_projector_task is not None:
+            relay_runtime_projector_task.cancel()
+            try:
+                await relay_runtime_projector_task
+            except asyncio.CancelledError:
+                pass
         await live_stream_server.stop()
         native_client = getattr(live_stream_components, "native_client", None)
         if native_client is not None and hasattr(native_client, "close"):
@@ -548,6 +613,24 @@ def main() -> None:
         runtime_store,
         ledger,
     )
+    relay_service = (
+        getattr(live_stream_components, "relay_service", None)
+        if live_stream_components is not None
+        else None
+    )
+    relay_watchdog = (
+        RelayNativeRunWatchdog(
+            relay_service,
+            max_idle_seconds=config.task.relay_native_idle_timeout_seconds,
+        )
+        if relay_service is not None
+        else None
+    )
+    relay_runtime_projector = (
+        RelayRuntimeEventProjector(relay_service, runtime_store)
+        if relay_service is not None
+        else None
+    )
     if _should_run_web_entry_only(
         config,
         token=token,
@@ -561,7 +644,14 @@ def main() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(_run_web_entry_only(live_stream_components))
+            loop.run_until_complete(
+                _run_web_entry_only(
+                    live_stream_components,
+                    relay_watchdog=relay_watchdog,
+                    relay_runtime_projector=relay_runtime_projector,
+                    watchdog_interval_seconds=config.task.watchdog_interval_seconds,
+                )
+            )
         except KeyboardInterrupt:
             logger.info("Shutting down.")
         finally:
@@ -878,6 +968,7 @@ def main() -> None:
         edit_telegram=handlers.edit_telegram,
         approval_service=approval_service,
         task_watchdog=task_watchdog,
+        relay_watchdog=relay_watchdog,
         watchdog_interval_seconds=config.task.watchdog_interval_seconds,
         interaction_renderer=interaction_renderer,
         runtime_event_store=runtime_store,

@@ -3,14 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 
-DEFAULT_ANTIGRAVITY_MODEL = "Claude Opus 4.6 (Thinking)"
+ANTIGRAVITY_OPUS_MODEL = "Claude Opus 4.6 (Thinking)"
 ANTIGRAVITY_QUOTA_FALLBACK_MODEL = "Gemini 3.5 Flash (High)"
+DEFAULT_ANTIGRAVITY_MODEL = ANTIGRAVITY_QUOTA_FALLBACK_MODEL
 
 _ANTIGRAVITY_MODELS = (
-    "Claude Opus 4.6 (Thinking)",
+    ANTIGRAVITY_OPUS_MODEL,
     "Claude Sonnet 4.6 (Thinking)",
     "Gemini 3.5 Flash (Medium)",
-    "Gemini 3.5 Flash (High)",
+    ANTIGRAVITY_QUOTA_FALLBACK_MODEL,
     "Gemini 3.5 Flash (Low)",
     "Gemini 3.1 Pro (High)",
     "Gemini 3.1 Pro (Low)",

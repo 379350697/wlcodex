@@ -1,5 +1,6 @@
 """Main composition tests — verify runtime wiring without Telegram polling."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -194,6 +195,99 @@ def test_web_only_entry_is_selected_when_live_stream_exists() -> None:
         token=None,
         live_stream_components=SimpleNamespace(server=object()),
     ) is True
+
+
+class _FakeLiveStreamServer:
+    host = "127.0.0.1"
+    port = 18731
+
+    def __init__(self) -> None:
+        self.started = False
+        self.stopped = False
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+class _FakeRelayWatchdog:
+    def __init__(self) -> None:
+        self.scan_count = 0
+        self.scanned = asyncio.Event()
+
+    async def scan_once(self) -> int:
+        self.scan_count += 1
+        self.scanned.set()
+        return 0
+
+
+class _FakeRelayRuntimeProjector:
+    def __init__(self) -> None:
+        self.scan_count = 0
+        self.scanned = asyncio.Event()
+
+    async def scan_once(self) -> int:
+        self.scan_count += 1
+        self.scanned.set()
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_web_only_entry_runs_relay_watchdog_scan() -> None:
+    from types import SimpleNamespace
+
+    from wlcodex.main import _run_web_entry_only
+
+    server = _FakeLiveStreamServer()
+    watchdog = _FakeRelayWatchdog()
+    task = asyncio.create_task(
+        _run_web_entry_only(
+            SimpleNamespace(server=server),
+            relay_watchdog=watchdog,
+            watchdog_interval_seconds=0.01,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(watchdog.scanned.wait(), timeout=1)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert server.started is True
+    assert server.stopped is True
+    assert watchdog.scan_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_web_only_entry_runs_relay_runtime_projector_scan() -> None:
+    from types import SimpleNamespace
+
+    from wlcodex.main import _run_web_entry_only
+
+    server = _FakeLiveStreamServer()
+    projector = _FakeRelayRuntimeProjector()
+    task = asyncio.create_task(
+        _run_web_entry_only(
+            SimpleNamespace(server=server),
+            relay_runtime_projector=projector,
+            runtime_projector_interval_seconds=0.01,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(projector.scanned.wait(), timeout=1)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert server.started is True
+    assert server.stopped is True
+    assert projector.scan_count >= 1
 
 
 class _FakeUpdater:
@@ -908,6 +1002,7 @@ def test_create_live_stream_components_wires_antigravity_cli_engine(
                 cli_local=NativeAgentsAntigravityCliLocalConfig(
                     binary="/tmp/agy",
                     print_timeout="7m0s",
+                    default_model="Gemini 3.5 Flash (High)",
                     dangerously_skip_permissions=True,
                     sandbox=True,
                 ),
@@ -923,6 +1018,7 @@ def test_create_live_stream_components_wires_antigravity_cli_engine(
     assert provider.provider_engine == "cli-local"
     assert provider._runtime_store is runtime_store
     assert provider._runner._config.binary == "/tmp/agy"
+    assert provider._runner._config.default_model == "Gemini 3.5 Flash (High)"
     assert provider._runner._config.dangerously_skip_permissions is True
     assert components.native_registry.maybe_get("codex") is None
     assert components.server._native_registry is components.native_registry

@@ -42,6 +42,9 @@ permission_mode = "bypassPermissions"
 callback_timeout_seconds = 3600
 allow_session_approval = true
 
+[task]
+relay_native_idle_timeout_seconds = 300
+
 [conversation]
 enabled = true
 default_mode = "chief_engineer"
@@ -134,6 +137,9 @@ engine = "cli-local"
 [native_agents.antigravity]
 enabled = true
 engine = "cli-local"
+
+[native_agents.antigravity.cli_local]
+default_model = "Gemini 3.5 Flash (High)"
 
 [telegram_output]
 preview_enabled = true

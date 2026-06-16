@@ -155,6 +155,7 @@ engine = "cli-local"
 [native_agents.antigravity.cli_local]
 binary = "/Users/wl/.local/bin/agy"
 print_timeout = "9m0s"
+default_model = "Gemini 3.5 Flash (High)"
 dangerously_skip_permissions = true
 sandbox = true
 """,
@@ -165,6 +166,10 @@ sandbox = true
     assert config.native_agents.antigravity.engine == "cli-local"
     assert config.native_agents.antigravity.cli_local.binary == "/Users/wl/.local/bin/agy"
     assert config.native_agents.antigravity.cli_local.print_timeout == "9m0s"
+    assert (
+        config.native_agents.antigravity.cli_local.default_model
+        == "Gemini 3.5 Flash (High)"
+    )
     assert config.native_agents.antigravity.cli_local.dangerously_skip_permissions is True
     assert config.native_agents.antigravity.cli_local.sandbox is True
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from wlcodex.relay.models import (
@@ -36,12 +37,29 @@ def default_handoff_target(role: str) -> str | None:
 
 
 def parse_role_envelope(text: str | dict[str, Any]) -> EnvelopeParseResult:
-    payload = text
+    payloads: list[Any] = [text]
+    direct_json_error = ""
     if isinstance(text, str):
         try:
-            payload = json.loads(text)
+            payloads = [json.loads(text)]
         except json.JSONDecodeError as exc:
-            return EnvelopeParseResult(ok=False, error=f"invalid json: {exc.msg}")
+            direct_json_error = f"invalid json: {exc.msg}"
+            payloads = _extract_json_payloads(text)
+            if not payloads:
+                return EnvelopeParseResult(ok=False, error=direct_json_error)
+    last_error = direct_json_error
+    for payload in payloads:
+        result = _parse_role_envelope_payload(payload)
+        if result.ok:
+            return result
+        last_error = result.error or last_error
+    return EnvelopeParseResult(
+        ok=False,
+        error=last_error or "role envelope must be a JSON object",
+    )
+
+
+def _parse_role_envelope_payload(payload: Any) -> EnvelopeParseResult:
     if not isinstance(payload, dict):
         return EnvelopeParseResult(ok=False, error="role envelope must be a JSON object")
     if isinstance(payload.get("role_envelope"), dict):
@@ -84,3 +102,30 @@ def parse_role_envelope(text: str | dict[str, Any]) -> EnvelopeParseResult:
         next_role=next_role,
         payload=dict(payload),
     )
+
+
+def _extract_json_payloads(text: str) -> list[Any]:
+    payloads: list[Any] = []
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL):
+        payload = _load_json_payload(match.group(1).strip())
+        if payload is not None:
+            payloads.append(payload)
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            payload, _end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if payload not in payloads:
+            payloads.append(payload)
+    return payloads
+
+
+def _load_json_payload(text: str) -> Any | None:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None

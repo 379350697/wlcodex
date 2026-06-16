@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from wlcodex.claude_binary import sanitized_claude_env
 from wlcodex.native_agents.antigravity_models import (
+    ANTIGRAVITY_OPUS_MODEL,
     ANTIGRAVITY_QUOTA_FALLBACK_MODEL,
     DEFAULT_ANTIGRAVITY_MODEL,
     antigravity_model_catalog,
@@ -73,6 +74,8 @@ class AntigravityCliError(RuntimeError):
 
 
 _EXECUTION_CWD_METADATA_KEY = "antigravity_execution_cwd"
+_ANTIGRAVITY_AUTO_MODEL = "__wlcodex_antigravity_auto__"
+_ANTIGRAVITY_AUTO_MODEL_LABEL = "auto"
 _RUNTIME_TURN_EVENT_LIMIT = 50_000
 _REPLAY_MATCH_MIN_CHARS = 8
 _PRINT_TIMEOUT_GRACE_SECONDS = 30.0
@@ -181,17 +184,18 @@ class AntigravityCliRunner:
                 kind="quota_limit",
                 evidence_source=quota_source,
             )
-        model_error, model_error_source = _model_unavailable_error_from_sources(
-            stderr=error_text,
-            stdout=text,
-            log=log_text,
-        )
-        if model_error:
-            raise AntigravityCliError(
-                model_error,
-                kind="model_unavailable",
-                evidence_source=model_error_source,
+        if not text.strip():
+            model_error, model_error_source = _model_unavailable_error_from_sources(
+                stderr=error_text,
+                stdout=text,
+                log=log_text,
             )
+            if model_error:
+                raise AntigravityCliError(
+                    model_error,
+                    kind="model_unavailable",
+                    evidence_source=model_error_source,
+                )
         cli_error = _cli_error_message(error_text or text)
         if cli_error:
             raise AntigravityCliError(
@@ -239,7 +243,10 @@ class AntigravityCliRunner:
             args.append("--dangerously-skip-permissions")
         if sandbox or self._config.sandbox:
             args.append("--sandbox")
-        selected_model = model or self._config.default_model
+        if model == _ANTIGRAVITY_AUTO_MODEL:
+            selected_model = ""
+        else:
+            selected_model = model or self._config.default_model
         if selected_model:
             args.extend(["--model", selected_model])
         args.extend(["--print", prompt])
@@ -480,6 +487,21 @@ class AntigravityCliLocalProvider:
             dangerously_skip_permissions=dangerously_skip_permissions,
             sandbox=sandbox,
         )
+        if _should_retry_with_antigravity_auto_model(
+            model=selected_model,
+            outcome=outcome,
+        ):
+            return await self._run_prompt_with_auto_model(
+                session=session,
+                prompt=prompt,
+                native_turn_id=native_turn_id,
+                conversation_id=conversation_id,
+                dangerously_skip_permissions=dangerously_skip_permissions,
+                sandbox=sandbox,
+                fallback_from_model=selected_model,
+                fallback_reason=outcome.error,
+                failure_evidence_source=outcome.failure_evidence_source,
+            )
         if not _should_fallback_for_antigravity_quota(
             model=selected_model,
             outcome=outcome,
@@ -494,16 +516,75 @@ class AntigravityCliLocalProvider:
             dangerously_skip_permissions=dangerously_skip_permissions,
             sandbox=sandbox,
         )
+        if _should_retry_with_antigravity_auto_model(
+            model=ANTIGRAVITY_QUOTA_FALLBACK_MODEL,
+            outcome=fallback,
+        ):
+            return await self._run_prompt_with_auto_model(
+                session=session,
+                prompt=prompt,
+                native_turn_id=native_turn_id,
+                conversation_id=conversation_id,
+                dangerously_skip_permissions=dangerously_skip_permissions,
+                sandbox=sandbox,
+                fallback_from_model=selected_model,
+                fallback_reason=(
+                    f"{outcome.error}; fallback model "
+                    f"{ANTIGRAVITY_QUOTA_FALLBACK_MODEL} failed: {fallback.error}"
+                ),
+                failure_evidence_source=(
+                    outcome.failure_evidence_source or fallback.failure_evidence_source
+                ),
+            )
         return _RunOutcome(
             status=fallback.status,
             antigravity_conversation_id=fallback.antigravity_conversation_id,
             error=fallback.error,
-            failure_kind=outcome.failure_kind,
-            failure_evidence_source=outcome.failure_evidence_source,
+            failure_kind=fallback.failure_kind if fallback.error else outcome.failure_kind,
+            failure_evidence_source=(
+                fallback.failure_evidence_source
+                if fallback.error
+                else outcome.failure_evidence_source
+            ),
             emitted_text=fallback.emitted_text,
             model=fallback.model,
             fallback_from_model=selected_model,
             fallback_reason=outcome.error,
+        )
+
+    async def _run_prompt_with_auto_model(
+        self,
+        *,
+        session: NativeAgentSession,
+        prompt: str,
+        native_turn_id: str,
+        conversation_id: str,
+        dangerously_skip_permissions: bool = False,
+        sandbox: bool = False,
+        fallback_from_model: str,
+        fallback_reason: str,
+        failure_evidence_source: str = "",
+    ) -> _RunOutcome:
+        fallback = await self._run_prompt_once(
+            session=session,
+            prompt=prompt,
+            native_turn_id=native_turn_id,
+            conversation_id=conversation_id,
+            model=_ANTIGRAVITY_AUTO_MODEL,
+            dangerously_skip_permissions=dangerously_skip_permissions,
+            sandbox=sandbox,
+        )
+        return _RunOutcome(
+            status=fallback.status,
+            antigravity_conversation_id=fallback.antigravity_conversation_id,
+            error=fallback.error,
+            failure_kind=fallback.failure_kind,
+            failure_evidence_source=fallback.failure_evidence_source
+            or failure_evidence_source,
+            emitted_text=fallback.emitted_text,
+            model=fallback.model,
+            fallback_from_model=fallback_from_model,
+            fallback_reason=fallback_reason,
         )
 
     async def _run_prompt_once(
@@ -557,7 +638,7 @@ class AntigravityCliLocalProvider:
                 failure_kind=exc.kind,
                 failure_evidence_source=exc.evidence_source,
                 emitted_text=emitted_text,
-                model=model,
+                model=_display_antigravity_model(model),
             )
         except Exception as exc:
             return _RunOutcome(
@@ -566,7 +647,7 @@ class AntigravityCliLocalProvider:
                 error=str(exc),
                 failure_kind="unknown",
                 emitted_text=emitted_text,
-                model=model,
+                model=_display_antigravity_model(model),
             )
         if not latest_conversation_id:
             latest = self._local_session_index.latest_for_cwd(execution_cwd)
@@ -587,13 +668,13 @@ class AntigravityCliLocalProvider:
                 ),
                 failure_kind="empty_output",
                 failure_evidence_source="no_assistant_text",
-                model=model,
+                model=_display_antigravity_model(model),
             )
         return _RunOutcome(
             status="done",
             antigravity_conversation_id=latest_conversation_id,
             emitted_text=emitted_text,
-            model=model,
+            model=_display_antigravity_model(model),
         )
 
     def _start_background_prompt(
@@ -1309,11 +1390,33 @@ def _should_fallback_for_antigravity_quota(
     model: str,
     outcome: _RunOutcome,
 ) -> bool:
-    if model != DEFAULT_ANTIGRAVITY_MODEL:
+    if model != ANTIGRAVITY_OPUS_MODEL:
+        return False
+    if model == ANTIGRAVITY_QUOTA_FALLBACK_MODEL:
         return False
     if outcome.status != "failed" or outcome.emitted_text:
         return False
     return outcome.failure_kind == "quota_limit"
+
+
+def _should_retry_with_antigravity_auto_model(
+    *,
+    model: str,
+    outcome: _RunOutcome,
+) -> bool:
+    if model.strip() != ANTIGRAVITY_QUOTA_FALLBACK_MODEL:
+        return False
+    if outcome.status != "failed" or outcome.emitted_text:
+        return False
+    if outcome.failure_kind != "model_unavailable":
+        return False
+    return ANTIGRAVITY_QUOTA_FALLBACK_MODEL.lower() in outcome.error.lower()
+
+
+def _display_antigravity_model(model: str) -> str:
+    if model == _ANTIGRAVITY_AUTO_MODEL:
+        return _ANTIGRAVITY_AUTO_MODEL_LABEL
+    return model
 
 
 def _is_antigravity_quota_or_limit_error(error: str) -> bool:

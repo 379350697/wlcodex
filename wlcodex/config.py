@@ -73,6 +73,7 @@ class TaskConfig:
     max_waiting_approval_seconds: int
     watchdog_interval_seconds: int
     backend_dead_grace_seconds: int
+    relay_native_idle_timeout_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -281,6 +282,7 @@ class NativeAgentsClaudeConfig:
 class NativeAgentsAntigravityCliLocalConfig:
     binary: str = "auto"
     print_timeout: str = "5m0s"
+    default_model: str = ""
     dangerously_skip_permissions: bool = False
     sandbox: bool = False
 
@@ -489,6 +491,9 @@ def load_config(path: Path) -> AppConfig:
             ),
             watchdog_interval_seconds=int(task_raw.get("watchdog_interval_seconds", 60)),
             backend_dead_grace_seconds=int(task_raw.get("backend_dead_grace_seconds", 120)),
+            relay_native_idle_timeout_seconds=int(
+                task_raw.get("relay_native_idle_timeout_seconds", 300)
+            ),
         ),
         workspaces=workspaces,
         conversation=ConversationConfig(
@@ -748,6 +753,9 @@ def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
                 print_timeout=str(
                     antigravity_cli_raw.get("print_timeout", "5m0s")
                 ),
+                default_model=str(
+                    antigravity_cli_raw.get("default_model", "")
+                ).strip(),
                 dangerously_skip_permissions=bool(
                     antigravity_cli_raw.get(
                         "dangerously_skip_permissions",

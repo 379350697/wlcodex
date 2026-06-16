@@ -58,6 +58,36 @@ def test_parse_role_envelope_accepts_role_envelope_wrapper() -> None:
     assert result.next_role == "tester"
 
 
+def test_parse_role_envelope_extracts_json_from_provider_chatter() -> None:
+    text = """
+Let me inspect the relay files first.
+
+```json
+{
+  "status": "passed",
+  "reason": "implemented",
+  "role": "implementer",
+  "artifact_type": "implementation_report",
+  "handoff_to": "tester",
+  "summary": "Implementation ready",
+  "evidence_refs": ["wlcodex/relay/envelopes.py"],
+  "open_questions": [],
+  "next_action": "测试工程师继续验证"
+}
+```
+
+{"status":"passed","reason":"duplicate raw envelope","role":"implementer","artifact_type":"implementation_report","handoff_to":"tester","summary":"Duplicate raw envelope","evidence_refs":["wlcodex/relay/envelopes.py"],"open_questions":[],"next_action":"test"}
+"""
+
+    result = parse_role_envelope(text)
+
+    assert result.ok is True
+    assert result.envelope is not None
+    assert result.envelope.role == "implementer"
+    assert result.envelope.summary == "Implementation ready"
+    assert result.next_role == "tester"
+
+
 def test_invalid_role_envelope_returns_validation_error_without_advancement() -> None:
     result = parse_role_envelope('{"status": "passed", "role": "implementer"}')
 

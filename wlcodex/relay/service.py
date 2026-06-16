@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 from typing import Any
 
@@ -63,6 +64,36 @@ _HIGH_RISK_INTENT_KEYWORDS = (
 )
 
 
+class RelayNativeRunWatchdog:
+    def __init__(self, service: "RelayService", *, max_idle_seconds: int) -> None:
+        self._service = service
+        self._max_idle_seconds = max_idle_seconds
+
+    async def scan_once(self) -> int:
+        return await self._service.scan_stale_native_roles(
+            max_idle_seconds=self._max_idle_seconds
+        )
+
+
+class RelayRuntimeEventProjector:
+    def __init__(
+        self,
+        service: "RelayService",
+        runtime_store: RuntimeEventStore,
+        *,
+        limit: int = 500,
+    ) -> None:
+        self._service = service
+        self._runtime_store = runtime_store
+        self._limit = limit
+
+    async def scan_once(self) -> int:
+        return await self._service.scan_active_native_runtime_events(
+            self._runtime_store,
+            limit=self._limit,
+        )
+
+
 def relay_provider_defaults_from_team_config(
     assignments: dict[str, tuple[str, ...]],
     model_profiles: dict[str, str],
@@ -94,6 +125,7 @@ class RelayService:
         self._default_provider = default_provider
         self._events = events or RelayEventBus()
         self._handled_runtime_completion_ids: set[int] = set()
+        self._runtime_projection_cursors: dict[int, int] = {}
         self._runtime_tasks: set[asyncio.Task[Any]] = set()
         self._role_provider_defaults = self._normalize_assignments(
             role_provider_defaults or {},
@@ -1109,6 +1141,11 @@ class RelayService:
                     "native provider completed without assistant output",
                 )
             return None
+        if (
+            not _is_agent_run_completed_event(runtime_event)
+            and not parse_role_envelope(text).ok
+        ):
+            return None
         try:
             return await self.handle_role_completion_event(
                 task_id,
@@ -1127,6 +1164,157 @@ class RelayService:
                 payload={"status": "blocked", "error": reason},
             )
             return None
+
+    async def scan_active_native_runtime_events(
+        self,
+        runtime_store: RuntimeEventStore,
+        *,
+        limit: int = 500,
+    ) -> int:
+        if limit <= 0:
+            return 0
+        projected = 0
+        for detail in self._store.list_tasks(status="running"):
+            try:
+                task_detail = self._store.get_task_detail(detail.task_id)
+            except KeyError:
+                continue
+            for job in task_detail.role_jobs:
+                if job.status not in {"running", "streaming"} or not job.agent_run_id:
+                    continue
+                agent_run_id = int(job.agent_run_id)
+                after_id = self._runtime_projection_cursors.get(agent_run_id, 0)
+                events = runtime_store.list_by_agent_run_after(
+                    agent_run_id,
+                    after_id=after_id,
+                    limit=limit,
+                )
+                for event in events:
+                    self._runtime_projection_cursors[agent_run_id] = int(
+                        getattr(event, "id", 0) or 0
+                    )
+                    self._project_native_event(
+                        event,
+                        task_id=task_detail.task.id,
+                        role=job.role,
+                    )
+                    if self._project_runtime_delta(
+                        event,
+                        task_id=task_detail.task.id,
+                        role=job.role,
+                    ):
+                        projected += 1
+                        continue
+                    if self._is_runtime_completion(event) or _is_runtime_failure(event):
+                        await self.handle_runtime_event(event)
+                    projected += 1
+        return projected
+
+    async def scan_stale_native_roles(
+        self,
+        *,
+        max_idle_seconds: int,
+        now: datetime | None = None,
+    ) -> int:
+        if max_idle_seconds <= 0:
+            return 0
+        current = now or datetime.now(timezone.utc)
+        runtime_store = RuntimeEventStore(self._store._ledger._conn)
+        changed = 0
+        for detail in self._store.list_tasks(status="running"):
+            try:
+                task_detail = self._store.get_task_detail(detail.task_id)
+            except KeyError:
+                continue
+            for job in task_detail.role_jobs:
+                if job.status not in {"running", "streaming"} or not job.agent_run_id:
+                    continue
+                last_activity = self._last_native_role_activity_at(
+                    runtime_store,
+                    int(job.agent_run_id),
+                    fallback=job.updated_at or task_detail.task.updated_at,
+                )
+                idle_seconds = int((current - last_activity).total_seconds())
+                if idle_seconds <= max_idle_seconds:
+                    continue
+                last_event_id = self._last_native_role_event_id(
+                    runtime_store,
+                    int(job.agent_run_id),
+                )
+                if await self._complete_stale_native_delta_if_ready(
+                    runtime_store,
+                    task_id=task_detail.task.id,
+                    role=job.role,
+                    agent_run_id=int(job.agent_run_id),
+                    after_id=0,
+                ):
+                    changed += 1
+                    continue
+                completion_error = self._stale_native_completion_error(
+                    runtime_store,
+                    int(job.agent_run_id),
+                )
+                if completion_error:
+                    self._block_role_with_error(
+                        task_detail.task.id,
+                        job.role,
+                        completion_error,
+                    )
+                    changed += 1
+                    continue
+                await self._sync_stale_native_role(job)
+                await asyncio.sleep(0)
+                refreshed = self._store.get_task_detail(task_detail.task.id)
+                refreshed_job = next(
+                    (
+                        candidate
+                        for candidate in refreshed.role_jobs
+                        if candidate.role == job.role
+                    ),
+                    None,
+                )
+                if refreshed_job is None or refreshed_job.status not in {
+                    "running",
+                    "streaming",
+                }:
+                    continue
+                if await self._complete_stale_native_delta_if_ready(
+                    runtime_store,
+                    task_id=task_detail.task.id,
+                    role=job.role,
+                    agent_run_id=int(job.agent_run_id),
+                    after_id=last_event_id,
+                ):
+                    changed += 1
+                    continue
+                completion_error = self._stale_native_completion_error(
+                    runtime_store,
+                    int(job.agent_run_id),
+                )
+                if completion_error:
+                    self._block_role_with_error(
+                        task_detail.task.id,
+                        job.role,
+                        completion_error,
+                    )
+                    changed += 1
+                    continue
+                if self._sync_produced_meaningful_runtime_event(
+                    runtime_store,
+                    int(job.agent_run_id),
+                    after_id=last_event_id,
+                ):
+                    continue
+                self._block_role_with_error(
+                    task_detail.task.id,
+                    job.role,
+                    (
+                        "native provider stayed running without assistant output "
+                        f"for {idle_seconds}s (limit {max_idle_seconds}s)"
+                    ),
+                )
+                changed += 1
+        return changed
 
     def _runtime_task_done(self, task: asyncio.Task[Any]) -> None:
         self._runtime_tasks.discard(task)
@@ -1301,6 +1489,123 @@ class RelayService:
             if _is_runtime_model_text_delta(event)
         )
 
+    async def _complete_stale_native_delta_if_ready(
+        self,
+        runtime_store: RuntimeEventStore,
+        *,
+        task_id: int,
+        role: str,
+        agent_run_id: int,
+        after_id: int,
+    ) -> bool:
+        if after_id > 0:
+            events = runtime_store.list_by_agent_run_after(
+                agent_run_id,
+                after_id=after_id,
+                limit=500,
+            )
+        else:
+            events = runtime_store.list_by_agent_run_tail(agent_run_id, limit=5000)
+        delta_events = [event for event in events if _is_runtime_model_text_delta(event)]
+        if not delta_events:
+            return False
+        output = "".join(_runtime_event_text(event) for event in delta_events)
+        if not parse_role_envelope(output).ok:
+            return False
+        runtime_event_id = int(getattr(delta_events[-1], "id", 0) or 0)
+        await self.handle_role_completion_event(
+            task_id,
+            role,
+            runtime_event_id=runtime_event_id,
+            output=output,
+        )
+        return True
+
+    def _stale_native_completion_error(
+        self,
+        runtime_store: RuntimeEventStore,
+        agent_run_id: int,
+    ) -> str:
+        events = runtime_store.list_by_agent_run_tail(agent_run_id, limit=5000)
+        completion = next(
+            (
+                event
+                for event in reversed(events)
+                if self._is_runtime_completion(event) or _is_runtime_failure(event)
+            ),
+            None,
+        )
+        if completion is None:
+            return ""
+        if _is_runtime_failure(completion):
+            return _runtime_failure_reason(completion)
+        text = self._runtime_completion_text(completion)
+        if not text.strip():
+            return "native provider completed without assistant output"
+        result = parse_role_envelope(text)
+        if result.ok:
+            return ""
+        return (
+            "native provider completed without valid relay envelope: "
+            f"{result.error or 'invalid role envelope'}"
+        )
+
+    async def _sync_stale_native_role(self, job: Any) -> None:
+        if not job.provider or not job.native_session_id:
+            return
+        try:
+            provider = self._registry.get(job.provider)
+        except KeyError:
+            return
+        sync_session = getattr(provider, "sync_session", None)
+        if sync_session is None:
+            return
+        try:
+            await sync_session(job.native_session_id)
+        except Exception:
+            return
+
+    @staticmethod
+    def _last_native_role_activity_at(
+        runtime_store: RuntimeEventStore,
+        agent_run_id: int,
+        *,
+        fallback: str,
+    ) -> datetime:
+        events = runtime_store.list_by_agent_run_tail(agent_run_id, limit=1)
+        if events:
+            return _parse_runtime_datetime(events[-1].occurred_at)
+        return _parse_runtime_datetime(fallback)
+
+    @staticmethod
+    def _last_native_role_event_id(
+        runtime_store: RuntimeEventStore,
+        agent_run_id: int,
+    ) -> int:
+        events = runtime_store.list_by_agent_run_tail(agent_run_id, limit=1)
+        if not events:
+            return 0
+        return int(getattr(events[-1], "id", 0) or 0)
+
+    @staticmethod
+    def _sync_produced_meaningful_runtime_event(
+        runtime_store: RuntimeEventStore,
+        agent_run_id: int,
+        *,
+        after_id: int,
+    ) -> bool:
+        events = runtime_store.list_by_agent_run_after(
+            agent_run_id,
+            after_id=after_id,
+            limit=500,
+        )
+        for event in events:
+            if _is_runtime_failure(event) or RelayService._is_runtime_completion(event):
+                return True
+            if _is_runtime_model_text_delta(event) and _runtime_event_text(event).strip():
+                return True
+        return False
+
 
 def _is_runtime_delta(runtime_event: Any) -> bool:
     return _runtime_event_type(runtime_event) in {
@@ -1311,6 +1616,19 @@ def _is_runtime_delta(runtime_event: Any) -> bool:
         "model_reasoning_delta",
         "command_output_delta",
     }
+
+
+def _parse_runtime_datetime(value: Any) -> datetime:
+    text = str(value or "").strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _clean_string_list(values: Any) -> list[str]:
