@@ -133,6 +133,13 @@ _STATIC_CONTENT_TYPES = {
     ".js": "application/javascript; charset=utf-8",
 }
 
+_NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
+  <meta name="theme-color" content="#000000">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="WLCodex">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">"""
+
 # Inline SVG icons — 24×24 viewBox, currentColor, Lucide-style (stroke-width 2)
 _ICON_ATTRS = 'width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
 _ICON_SVG = {
@@ -345,6 +352,36 @@ class WorkerLiveStreamServer:
                     await self._send_json(writer, 405, {"error": "method not allowed"})
                     return
                 await self._send_static_asset(writer, parsed.path)
+                return
+
+            if parsed.path == "/native/manifest.webmanifest":
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                await _send_response(
+                    writer,
+                    200,
+                    "application/manifest+json; charset=utf-8",
+                    _native_app_manifest().encode("utf-8"),
+                    extra_headers={
+                        "Cache-Control": "public, max-age=300, stale-while-revalidate=60"
+                    },
+                )
+                return
+
+            if parsed.path == "/native/icon.svg":
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                await _send_response(
+                    writer,
+                    200,
+                    "image/svg+xml; charset=utf-8",
+                    _native_app_icon_svg().encode("utf-8"),
+                    extra_headers={
+                        "Cache-Control": "public, max-age=86400, stale-while-revalidate=3600"
+                    },
+                )
                 return
 
             if parsed.path in ("", "/") and (
@@ -2574,6 +2611,39 @@ def _plugin_icon_data_url(manifest: Path, icon_path: object) -> str:
     }.get(suffix, "application/octet-stream")
     encoded = base64.b64encode(data).decode("ascii")
     return f"data:{mime};base64,{encoded}"
+
+
+def _native_app_manifest() -> str:
+    payload = {
+        "name": "WLCodex Native",
+        "short_name": "WLCodex",
+        "description": "Native mobile workspace for WLCodex sessions.",
+        "start_url": "/native/codex",
+        "scope": "/",
+        "display": "standalone",
+        "display_override": ["standalone", "fullscreen", "browser"],
+        "orientation": "portrait",
+        "theme_color": "#000000",
+        "background_color": "#000000",
+        "icons": [
+            {
+                "src": "/native/icon.svg",
+                "sizes": "any",
+                "type": "image/svg+xml",
+                "purpose": "any maskable",
+            }
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ": "))
+
+
+def _native_app_icon_svg() -> str:
+    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#000000"/>
+  <rect x="72" y="76" width="368" height="360" rx="72" fill="#111214"/>
+  <path d="M312 160 216 256l96 96" fill="none" stroke="#f4f4f5" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="370" cy="136" r="24" fill="#58a6ff"/>
+</svg>"""
 
 
 def _codex_plugin_menu_items() -> list[dict[str, str]]:
@@ -5520,6 +5590,7 @@ def _native_codex_page(provider_name: str = "codex") -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>__PROVIDER_LABEL__</title>
+__NATIVE_APP_HEAD__
   <link rel="stylesheet" href="/static/base.css">
   <link rel="stylesheet" href="/static/animations.css">
   <link rel="stylesheet" href="/static/effects.css">
@@ -7412,6 +7483,7 @@ __ICONS_JS__
 </html>"""
     return _replace_html_icons(
         template.replace("__PROVIDER_LABEL__", escape(provider_label))
+        .replace("__NATIVE_APP_HEAD__", _NATIVE_APP_HEAD)
         .replace("__PROVIDER_JSON__", json.dumps(provider_name, ensure_ascii=False))
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
@@ -7469,6 +7541,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>__SAFE_TITLE__</title>
+__NATIVE_APP_HEAD__
   <link rel="stylesheet" href="/static/base.css">
   <link rel="stylesheet" href="/static/animations.css">
   <link rel="stylesheet" href="/static/effects.css">
@@ -11676,6 +11749,7 @@ __ICONS_JS__
     return _replace_html_icons(
         template
         .replace("__SAFE_TITLE__", safe_title)
+        .replace("__NATIVE_APP_HEAD__", _NATIVE_APP_HEAD)
         .replace("__PROVIDER_LABEL_TEXT__", safe_title)
         .replace("__STREAM_PATH__", stream_path)
         .replace("__AGENT_RUN_ID__", str(agent_run_id))

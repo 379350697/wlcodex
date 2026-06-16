@@ -15,6 +15,7 @@ from wlcodex.live_stream.server import (
     WorkerLiveStreamServer,
     _MAX_BODY_BYTES,
     _live_page,
+    _native_app_manifest,
     _native_codex_page,
     _plugin_icon_data_url,
 )
@@ -2112,6 +2113,11 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
         "text-size-adjust: 100%; }"
         in response
     )
+    assert '<link rel="manifest" href="/native/manifest.webmanifest">' in response
+    assert '<meta name="theme-color" content="#000000">' in response
+    assert '<meta name="mobile-web-app-capable" content="yes">' in response
+    assert '<meta name="apple-mobile-web-app-capable" content="yes">' in response
+    assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in response
     assert ".session-float { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
     assert ".header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
@@ -2144,6 +2150,74 @@ def test_worker_live_page_exposes_viewport_debug_diagnostics() -> None:
     assert "computedTranscriptSize: computedSize(document.querySelector(\".transcript-body\"))" in response
     assert "computedDockSize: computedSize(inputDock)" in response
     assert "window.visualViewport.addEventListener(\"resize\", updateViewportDebug);" in response
+
+
+def test_native_codex_page_exposes_standalone_app_metadata() -> None:
+    response = _native_codex_page("codex")
+
+    assert '<link rel="manifest" href="/native/manifest.webmanifest">' in response
+    assert '<meta name="theme-color" content="#000000">' in response
+    assert '<meta name="mobile-web-app-capable" content="yes">' in response
+    assert '<meta name="apple-mobile-web-app-capable" content="yes">' in response
+    assert '<meta name="apple-mobile-web-app-title" content="WLCodex">' in response
+
+
+def test_native_app_manifest_uses_standalone_display_and_native_start_url() -> None:
+    manifest = json.loads(_native_app_manifest())
+
+    assert manifest["name"] == "WLCodex Native"
+    assert manifest["short_name"] == "WLCodex"
+    assert manifest["start_url"] == "/native/codex"
+    assert manifest["scope"] == "/"
+    assert manifest["display"] == "standalone"
+    assert manifest["display_override"] == ["standalone", "fullscreen", "browser"]
+    assert manifest["theme_color"] == "#000000"
+    assert manifest["background_color"] == "#000000"
+    assert manifest["icons"] == [
+        {
+            "src": "/native/icon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any maskable",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_manifest_and_icon_routes_are_served(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        manifest_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/manifest.webmanifest HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        icon_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/icon.svg HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in manifest_response
+    assert "Content-Type: application/manifest+json; charset=utf-8" in manifest_response
+    assert '"display": "standalone"' in manifest_response
+    assert "HTTP/1.1 200 OK" in icon_response
+    assert "Content-Type: image/svg+xml; charset=utf-8" in icon_response
+    assert "<svg" in icon_response
 
 
 def test_worker_live_page_exposes_header_context_and_session_actions() -> None:
