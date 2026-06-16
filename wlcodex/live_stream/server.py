@@ -4323,8 +4323,16 @@ def _relay_task_detail_page(
     const conversationTimeline = document.querySelector("[data-native-conversation-timeline]");
     const nativeTranscriptNodes = new Map();
     const nativeEnvelopeBuffers = new Map();
+    const conversationUserBodies = new Set();
     function scrollNativeConversationToEnd() {{
       if (conversationTimeline) conversationTimeline.scrollTop = conversationTimeline.scrollHeight;
+    }}
+    function relayNormalizeConversationText(text) {{
+      return String(text || "").replace(/\\s+/g, " ").trim();
+    }}
+    function relayUserMessageIsRetryOrContext(text) {{
+      const value = String(text || "");
+      return value.includes("系统已要求当前角色重新输出合法结构化结果。") || value.includes("expected_output_envelope:") || value.includes("你刚才作为");
     }}
     function nativeEventPayload(nativeEvent) {{
       return nativeEvent && nativeEvent.payload && typeof nativeEvent.payload === "object" ? nativeEvent.payload : {{}};
@@ -4356,7 +4364,7 @@ def _relay_task_detail_page(
     function relayHumanizeUserMessage(text) {{
       const value = String(text || "");
       if (value.includes("你刚才作为") && value.includes("expected_output_envelope:")) {{
-        return "系统已要求当前角色重新输出合法结构化结果。";
+        return "";
       }}
       if (!value.includes("latest_user_input:") && !value.includes("expected_output_envelope:")) return value;
       return relayExtractContextField(value, "latest_user_input") || relayExtractContextField(value, "goal") || value;
@@ -4525,13 +4533,22 @@ def _relay_task_detail_page(
       const provider = nativeEvent.source || payload.provider || "";
       const roleLabel = labelForRole(role);
       if (kind === "user_message") {{
+        const body = relayHumanizeUserMessage(text);
+        const normalizedBody = relayNormalizeConversationText(body);
+        if (!normalizedBody || relayUserMessageIsRetryOrContext(body) || conversationUserBodies.has(normalizedBody)) return;
+        conversationUserBodies.add(normalizedBody);
         const key = nativeMessageKey(role, nativeEvent, "user");
         let node = nativeTranscriptNodes.get(key);
         if (!node) {{
           node = createNativeMessage(role, "user_message", "你", roleLabel, key);
           nativeTranscriptNodes.set(key, node);
         }}
-        setNativeBodyText(node, relayHumanizeUserMessage(text));
+        setNativeBodyText(node, body);
+        return;
+      }}
+      if (kind === "text_delta") {{
+        appendRolePreview(role, text);
+        setRoleStatus(role, "streaming");
         return;
       }}
       if (kind === "text_delta" || kind === "message_completed") {{
@@ -4544,42 +4561,23 @@ def _relay_task_detail_page(
           if (!envelope) {{
             if (kind === "message_completed") {{
               nativeEnvelopeBuffers.delete(key);
-              let node = nativeTranscriptNodes.get(key);
-              if (!node) {{
-                node = createNativeMessage(role, "role_error", roleLabel, provider, key);
-                nativeTranscriptNodes.set(key, node);
-              }}
-              node.dataset.nativeKind = "role_error";
-              setNativeBodyText(node, relayProtocolOutputHiddenText(role));
             }}
             return;
           }}
           nativeEnvelopeBuffers.delete(key);
-          let node = nativeTranscriptNodes.get(key);
-          if (!node) {{
-            node = createNativeMessage(role, "role_envelope", roleLabel, provider, key);
-            nativeTranscriptNodes.set(key, node);
-          }}
-          node.dataset.nativeKind = "role_envelope";
-          setNativeBodyText(node, relayHumanizeEnvelope(envelope));
+          renderRoleEnvelope(role, envelope);
           setRoleStatus(role, "streaming");
           return;
         }}
-        let node = nativeTranscriptNodes.get(key);
-        if (!node) {{
-          node = createNativeMessage(role, kind, roleLabel, provider, key);
-          nativeTranscriptNodes.set(key, node);
-        }}
-        node.dataset.nativeKind = kind;
-        const bodyNode = node.querySelector("[data-native-message-body]");
-        const existingText = kind === "text_delta" ? (bodyNode?.textContent || "") : "";
-        setNativeBodyText(node, relaySanitizeProtocolLeakText(role, existingText + text));
-        setRoleStatus(role, "streaming");
         return;
       }}
     }}
     document.querySelectorAll("[data-native-key]").forEach((node) => {{
       if (node.dataset.nativeKey) nativeTranscriptNodes.set(node.dataset.nativeKey, node);
+    }});
+    document.querySelectorAll('[data-native-kind="user_message"] [data-native-message-body]').forEach((node) => {{
+      const normalizedBody = relayNormalizeConversationText(node.textContent || "");
+      if (normalizedBody) conversationUserBodies.add(normalizedBody);
     }});
     function relayPreviewDisplayText(role, text) {{
       const value = String(text || "");
@@ -4601,6 +4599,7 @@ def _relay_task_detail_page(
         preview.scrollTop = preview.scrollHeight;
       }}
       if (!conversationTimeline) return;
+      if (conversationTimeline.querySelector(`[data-conversation-role-final="${{role}}"]`)) return;
       let node = conversationTimeline.querySelector(`[data-conversation-role-preview="${{role}}"]`);
       if (!node) {{
         node = createNativeMessage(role, "text_delta", labelForRole(role), "实时预览", `preview:${{role}}`);
@@ -4970,6 +4969,7 @@ def _relay_native_conversation_html(
             rows.append(row)
     projected_rows: list[dict[str, str]] = []
     seen_keys: set[str] = set()
+    seen_user_bodies: set[str] = set()
     for row in rows:
         projected = _relay_project_native_conversation_row(
             row,
@@ -4977,6 +4977,13 @@ def _relay_native_conversation_html(
         )
         if projected is None:
             continue
+        if _relay_conversation_row_is_task_status_noise(projected):
+            continue
+        if str(projected.get("kind") or "") == "user_message":
+            body = str(projected.get("body") or "").strip()
+            if not body or body in seen_user_bodies:
+                continue
+            seen_user_bodies.add(body)
         key = str(projected.get("key") or "")
         if key and key in seen_keys:
             continue
@@ -5002,6 +5009,18 @@ def _relay_native_conversation_html(
                 "body": _relay_humanize_role_envelope(payload),
                 "key": key,
                 "canonical_json": _relay_canonical_envelope_json(payload),
+            }
+        )
+    blocked_role = _relay_first_blocked_role(role_jobs)
+    if blocked_role:
+        projected_rows.append(
+            {
+                "role": blocked_role,
+                "kind": "status",
+                "speaker": "系统",
+                "meta": "",
+                "body": f"接力暂停在{_relay_role_label(blocked_role)}，详情见任务状态。",
+                "key": f"relay-paused:{blocked_role}",
             }
         )
     rows = projected_rows
@@ -5054,22 +5073,58 @@ def _relay_project_native_conversation_row(
 ) -> dict[str, str] | None:
     kind = str(row.get("kind") or "")
     if kind == "user_message":
-        return {**row, "body": _relay_humanize_user_message(str(row.get("body") or ""))}
+        body = _relay_humanize_user_message(str(row.get("body") or ""))
+        if not body:
+            return None
+        return {**row, "body": body}
     if kind not in {"text_delta", "message_completed"}:
         return None
     body = str(row.get("body") or "").strip()
     if not body:
         return None
     humanized = _relay_humanized_role_output_row(row, body, job=job)
-    if humanized is not None:
+    if humanized is not None and str(humanized.get("kind") or "") == "role_envelope":
         return humanized
-    return {
-        **row,
-        "body": _relay_sanitize_protocol_leak_text(
-            str(row.get("role") or ""),
-            body,
-        ),
-    }
+    return None
+
+
+def _relay_conversation_row_is_task_status_noise(row: dict[str, str]) -> bool:
+    kind = str(row.get("kind") or "")
+    body = str(row.get("body") or "")
+    if kind == "role_error":
+        return True
+    if kind == "user_message" and _relay_user_message_is_retry_or_context(body):
+        return True
+    status_markers = (
+        "输出格式异常",
+        "任务已阻塞",
+        "invalid json",
+        "请补充确认后重新调度",
+        "原始结构化输出不在主会话展示",
+    )
+    if any(marker in body for marker in status_markers):
+        return True
+    return False
+
+
+def _relay_user_message_is_retry_or_context(text: str) -> bool:
+    return (
+        "系统已要求当前角色重新输出合法结构化结果。" in text
+        or "expected_output_envelope:" in text
+        or "你刚才作为" in text
+    )
+
+
+def _relay_first_blocked_role(role_jobs: list[Any]) -> str:
+    statuses = {"blocked", "failed", "interrupted"}
+    jobs_by_role = {str(getattr(job, "role", "") or ""): job for job in role_jobs}
+    for role in RELAY_ROLE_IDS:
+        job = jobs_by_role.get(role)
+        if job is None:
+            continue
+        if str(getattr(job, "status", "") or "") in statuses:
+            return role
+    return ""
 
 
 def _relay_humanized_role_output_row(
@@ -5098,6 +5153,7 @@ def _relay_humanized_role_output_row(
             **row,
             "kind": "role_envelope",
             "body": _relay_humanize_role_envelope(parsed),
+            "canonical_json": _relay_canonical_envelope_json(parsed),
         }
 
     error = str(getattr(job, "error_message", "") or "").strip() if job else ""
@@ -5134,7 +5190,7 @@ def _relay_text_looks_like_role_envelope(text: str) -> bool:
 
 def _relay_humanize_user_message(text: str) -> str:
     if "你刚才作为" in text and "expected_output_envelope:" in text:
-        return "系统已要求当前角色重新输出合法结构化结果。"
+        return ""
     if "latest_user_input:" not in text and "expected_output_envelope:" not in text:
         return text
     return (

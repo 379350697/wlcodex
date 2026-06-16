@@ -136,6 +136,20 @@ def _native_message_kinds(response: str) -> list[str]:
     )
 
 
+def _relay_view_panel_html(response: str, view: str) -> str:
+    if view == "conversation":
+        start_marker = '<section class="relay-view relay-conversation-panel"'
+        end_marker = '<section class="relay-view relay-board-panel"'
+    elif view == "board":
+        start_marker = '<section class="relay-view relay-board-panel"'
+        end_marker = "</main>"
+    else:
+        raise AssertionError(f"unknown relay view: {view}")
+    assert start_marker in response
+    assert end_marker in response
+    return response.split(start_marker, 1)[1].split(end_marker, 1)[0]
+
+
 @pytest.mark.asyncio
 async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path) -> None:
     response, _service = await _request(
@@ -411,11 +425,16 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
             "status": "passed",
             "reason": "low risk explanation",
             "role": "director",
+            "artifact_type": "routing_decision",
+            "handoff_to": "",
             "summary": "本任务判定无需派发，由总工程师直接完成。",
             "complexity": "simple",
             "risk": "low",
             "route": "director_only",
             "required_roles": ["director"],
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "总工程师直接完成。",
             "acceptance_criteria": ["给出清晰说明"],
             "stop_conditions": [],
             "requires_user_approval": False,
@@ -476,11 +495,11 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'class="relay-native-stream"' not in response
     assert 'class="relay-native-frame"' not in response
     assert "<iframe" not in response
-    assert "让审计工程师确认一下" in response
-    assert "我会先确认风险。" in response
-    assert "架构侧继续补齐影响面。" in response
-    assert response.index("让审计工程师确认一下") < response.index("我会先确认风险。")
-    assert response.index("我会先确认风险。") < response.index("架构侧继续补齐影响面。")
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "让审计工程师确认一下" in conversation_html
+    assert "我会先确认风险。" not in conversation_html
+    assert "架构侧继续补齐影响面。" not in conversation_html
+    assert "结论：本任务判定无需派发，由总工程师直接完成。" in conversation_html
     assert 'data-native-role="director"' in response
     assert 'data-native-role="architect"' in response
     assert 'data-view-panel="conversation"' in response
@@ -521,8 +540,6 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "打开原生会话" in response
     assert "native_thread_id=native-director-1" in response
     assert "/sessions/native-director-1" not in response
-    assert "总工程师已接收，正在拆解任务。" in response
-    assert "请确认验收标准" in response
     assert "执行问题：invalid json: Expecting value" in response
     assert "等待总工程师接收并形成决策摘要" not in response
     assert f"/api/relay/tasks/{task.id}/message" in response
@@ -644,8 +661,9 @@ async def test_relay_task_detail_hides_native_activity_from_conversation(
     finally:
         await server.stop()
 
-    assert "请确认要删除哪个文件" in response
-    assert "需要你确认精确文件路径。" in response
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "请确认要删除哪个文件" in conversation_html
+    assert "需要你确认精确文件路径。" not in conversation_html
     kinds = _native_message_kinds(response)
     assert "activity" not in kinds
     assert "completed" not in kinds
@@ -775,11 +793,16 @@ async def test_relay_task_detail_humanizes_malformed_role_envelope(
     finally:
         await server.stop()
 
-    assert 'data-native-kind="role_error"' in response
-    assert "总工程师输出格式异常，任务已阻塞。" in response
-    assert "invalid json: Expecting" in response
-    assert "routing_decisioncomplexitylow" not in response
-    assert '{"acceptance_criteria"' not in response
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    board_html = _relay_view_panel_html(response, "board")
+    assert 'data-native-kind="role_error"' not in conversation_html
+    assert "总工程师输出格式异常，任务已阻塞。" not in conversation_html
+    assert "invalid json: Expecting" not in conversation_html
+    assert "接力暂停在总工程师，详情见任务状态。" in conversation_html
+    assert "routing_decisioncomplexitylow" not in conversation_html
+    assert '{"acceptance_criteria"' not in conversation_html
+    assert "总工程师执行问题" in board_html
+    assert "invalid json: Expecting" in board_html
 
 
 @pytest.mark.asyncio
@@ -942,6 +965,133 @@ async def test_relay_task_detail_uses_canonical_envelope_when_output_has_bad_pre
 
 
 @pytest.mark.asyncio
+async def test_relay_conversation_hides_blocked_error_details_and_dedupes_user_prompt(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    prompt = (
+        "请按完整五角色接力流程，只做只读验证：确认 relay 会话流只展示五角色 "
+        "canonical 摘要和 JSON，任务状态只展示进度/状态。"
+    )
+    task = service.create_task(
+        title="Blocked conversation semantics",
+        prompt=prompt,
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-blocked-ui",
+        agent_run_id=452,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "blocked")
+    service._store.update_task_status(task.id, "blocked")
+    canonical = {
+        "status": "passed",
+        "reason": "routed",
+        "role": "director",
+        "artifact_type": "routing_decision",
+        "handoff_to": "architect",
+        "summary": "路由到五角色完整接力，下一步交给架构工程师。",
+        "route": "full_relay",
+        "risk": "low",
+        "required_roles": [
+            "director",
+            "architect",
+            "implementer",
+            "tester",
+            "auditor",
+        ],
+        "evidence_refs": [],
+        "next_action": "交给架构工程师制定验证步骤。",
+        "open_questions": [],
+        "acceptance_criteria": ["会话流不展示底层错误详情"],
+    }
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {**canonical, "relay_role": "director"},
+        summary=canonical["summary"],
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "relay_role": "director",
+            "error": "invalid json: Expecting ',' delimiter",
+        },
+        summary="invalid json: Expecting ',' delimiter",
+    )
+    retry_prompt = (
+        "你刚才作为总工程师输出的接力结果不是合法 role_envelope JSON。\n"
+        "expected_output_envelope:\n"
+        '{"artifact_type":"routing_decision","handoff_to":"architect"}'
+    )
+    for item_id, text, occurred_at in (
+        ("blocked-user-1", prompt, "2026-06-14T13:00:01+00:00"),
+        ("blocked-user-2", prompt, "2026-06-14T13:00:02+00:00"),
+        ("blocked-user-retry", retry_prompt, "2026-06-14T13:00:03+00:00"),
+    ):
+        _append_runtime_event(
+            runtime_store,
+            agent_run_id=452,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            payload={
+                "text": text,
+                "native_turn_id": "turn-blocked-ui",
+                "itemId": item_id,
+            },
+            occurred_at=occurred_at,
+        )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=452,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": (
+                "总工程师输出格式异常，任务已阻塞。\n"
+                "错误：invalid json: Expecting ',' delimiter\n"
+                "请补充确认后重新调度，原始结构化输出不在主会话展示。"
+            ),
+            "native_turn_id": "turn-blocked-ui",
+            "itemId": "blocked-assistant-error",
+        },
+        occurred_at="2026-06-14T13:00:04+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    board_html = _relay_view_panel_html(response, "board")
+    assert conversation_html.count(prompt) == 1
+    assert "结论：路由到五角色完整接力，下一步交给架构工程师。" in conversation_html
+    assert "接力暂停在总工程师，详情见任务状态。" in conversation_html
+    assert "输出格式异常" not in conversation_html
+    assert "任务已阻塞" not in conversation_html
+    assert "invalid json" not in conversation_html
+    assert "请补充确认后重新调度" not in conversation_html
+    assert "expected_output_envelope" not in conversation_html
+    assert "你刚才作为总工程师" not in conversation_html
+    assert "总工程师执行问题" in board_html
+    assert "invalid json: Expecting" in board_html
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_streaming_delta_is_preview_not_final_output(
     tmp_path: Path,
 ) -> None:
@@ -1037,12 +1187,17 @@ async def test_relay_task_detail_humanizes_internal_route_terms(
         await server.stop()
 
     visible_html = response.split("<script", 1)[0]
+    message_body_html = visible_html.split('<details class="role-canonical-json">', 1)[0]
     assert 'data-native-kind="role_envelope"' in visible_html
+    assert 'data-role-canonical-json="director"' in visible_html
     assert "结论：由总工程师直接处理：直接查询并汇总今日金价。" in visible_html
     assert "下一步：由总工程师核验最新行情来源并给出结果" in visible_html
     assert "验收依据：不展示 总工程师直接处理 给用户" in visible_html
-    assert "路由为director_only" not in visible_html
-    assert "complete directly after routing by checking current market sources" not in visible_html
+    assert "路由为director_only" not in message_body_html
+    assert (
+        "complete directly after routing by checking current market sources"
+        not in message_body_html
+    )
 
 
 @pytest.mark.asyncio
@@ -1125,15 +1280,15 @@ async def test_relay_task_detail_hides_retry_prompt_and_malformed_protocol_outpu
     finally:
         await server.stop()
 
-    visible_html = response.split("<script", 1)[0]
-    assert "系统已要求当前角色重新输出合法结构化结果。" in visible_html
-    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" in visible_html
-    assert "总工程师输出格式异常，任务已阻塞。" in visible_html
-    assert "expected_output_envelope" not in visible_html
-    assert "director_only" not in visible_html
-    assert "full_relay" not in visible_html
-    assert "complete directly" not in visible_html
-    assert "routing_decisioncomplexityhigh" not in visible_html
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "系统已要求当前角色重新输出合法结构化结果。" not in conversation_html
+    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" not in conversation_html
+    assert "总工程师输出格式异常，任务已阻塞。" not in conversation_html
+    assert "expected_output_envelope" not in conversation_html
+    assert "director_only" not in conversation_html
+    assert "full_relay" not in conversation_html
+    assert "complete directly" not in conversation_html
+    assert "routing_decisioncomplexityhigh" not in conversation_html
 
 
 @pytest.mark.asyncio
