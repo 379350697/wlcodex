@@ -168,6 +168,32 @@ def test_tail_returns_latest_recorded_frames():
     assert frames[-1].text == "frame_9"
 
 
+def test_tail_page_returns_frames_before_sequence():
+    adapter = FakeTerminalAdapter()
+    manager = TerminalSessionManager(adapters={"claude": adapter})
+    ref = manager.attach(
+        conversation_id=42,
+        agent="claude",
+        strategy="stream_json",
+        external_session_id="cl_1",
+    )
+    for i in range(1, 8):
+        manager.record_frame(
+            ref,
+            TerminalFrame(
+                conversation_id=42,
+                agent="claude",
+                phase="implementation",
+                text=f"frame_{i}",
+                sequence=i,
+            ),
+        )
+
+    frames = manager.tail_page(ref, limit=3, before_sequence=6)
+
+    assert [frame.sequence for frame in frames] == [3, 4, 5]
+
+
 def test_tail_returns_empty_list_when_no_frames_recorded():
     adapter = FakeTerminalAdapter()
     manager = TerminalSessionManager(adapters={"claude": adapter})

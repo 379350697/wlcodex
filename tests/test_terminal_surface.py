@@ -7,6 +7,7 @@ from wlcodex.surfaces.terminal.renderer import render_terminal_frame
 from wlcodex.surfaces.terminal.renderer import (
     render_onsite_header,
     render_start_card,
+    render_terminal_frames_append,
     render_tail_output,
     render_pause_confirmation,
     render_resume_confirmation,
@@ -127,6 +128,19 @@ def test_render_terminal_frame_includes_text_verbatim():
     rendered = render_terminal_frame(frame)
     assert rendered.endswith(" Session ready")
     assert rendered.startswith("[system:startup]")
+
+
+def test_render_terminal_frames_append_keeps_multiple_frames():
+    frames = [
+        TerminalFrame(1, "codex", "implementer", "a", sequence=1),
+        TerminalFrame(1, "codex", "implementer", "b", sequence=2),
+    ]
+
+    rendered = render_terminal_frames_append(frames)
+
+    assert "a" in rendered
+    assert "b" in rendered
+    assert rendered.index("a") < rendered.index("b")
 
 
 # ── Task 5: Session Manager ────────────────────────────────────────────────
@@ -334,6 +348,14 @@ def test_route_terminal_detach():
 def test_route_terminal_tail():
     cmd = route_terminal_command("/terminal tail")
     assert cmd.kind == TerminalCommandKind.TAIL
+
+
+def test_route_terminal_tail_page():
+    cmd = route_terminal_command("/terminal tail before 12 5")
+
+    assert cmd.kind == TerminalCommandKind.TAIL
+    assert cmd.before_sequence == 12
+    assert cmd.limit == 5
 
 
 def test_route_terminal_pause():

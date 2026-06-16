@@ -80,12 +80,14 @@ async def summarize_turn_with_sidecar(
     events: list[WorkerStreamEvent],
     *,
     current_turn_id: str = "",
+    onsite: bool = False,
     config: LiveTurnSummaryConfig | None = None,
     client: DigestClient | None = None,
 ) -> TurnCollapseSummary:
     rule_summary = build_turn_collapse_summary(
         events,
         current_turn_id=current_turn_id,
+        onsite=onsite,
     )
     config = config or LiveTurnSummaryConfig.from_env()
     if not config.enabled or not events:
@@ -129,6 +131,7 @@ def build_turn_collapse_summary(
     events: list[WorkerStreamEvent],
     *,
     current_turn_id: str = "",
+    onsite: bool = False,
 ) -> TurnCollapseSummary:
     native_turn_id = _native_turn_id(events)
     completed = any(_is_completed_event(event) for event in events)
@@ -138,6 +141,7 @@ def build_turn_collapse_summary(
     event_count = len(events)
     should_collapse = bool(
         event_count
+        and not onsite
         and not failed
         and not has_approval
         and native_turn_id

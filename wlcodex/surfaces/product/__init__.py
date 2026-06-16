@@ -12,7 +12,10 @@ from wlcodex.surfaces.product.renderer import (
     render_cockpit_failure,
     render_cockpit_approval,
     render_cockpit_queued,
+    render_cockpit_relay_live,
     render_product_display_event,
+    render_relay_status,
+    render_streaming_log,
 )
 
 __all__ = [
@@ -25,5 +28,8 @@ __all__ = [
     "render_cockpit_failure",
     "render_cockpit_approval",
     "render_cockpit_queued",
+    "render_cockpit_relay_live",
     "render_product_display_event",
+    "render_relay_status",
+    "render_streaming_log",
 ]

@@ -15,6 +15,7 @@ from wlcodex.relay.models import (
     RoleContextPacket,
     RoleEnvelope,
 )
+from wlcodex.relay.onsite_bridge import RelayOnsiteBridge
 from wlcodex.relay.service import RelayService
 from wlcodex.relay.store import RelayStore
 
@@ -27,6 +28,7 @@ __all__ = [
     "RelayBoard",
     "RelayEvent",
     "RelayEventBus",
+    "RelayOnsiteBridge",
     "RelayRoleJob",
     "RelayService",
     "RelayStore",

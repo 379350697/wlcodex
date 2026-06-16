@@ -885,6 +885,17 @@ def main() -> None:
     terminal_manager = _create_terminal_manager(
         config, claude_backend=claude_backend, codex_backend=backend,
     )
+    relay_onsite_bridge = None
+    if relay_service is not None and terminal_manager is not None:
+        from wlcodex.relay.onsite_bridge import RelayOnsiteBridge
+
+        relay_onsite_bridge = RelayOnsiteBridge(
+            relay_service=relay_service,
+            terminal_manager=terminal_manager,
+        )
+        relay_service.add_event_projector(relay_onsite_bridge.project_relay_event)
+        runtime_store.add_projector(relay_onsite_bridge.project_runtime_event)
+        logger.info("Relay Onsite bridge enabled")
 
     # Telegram app
     app, handlers = build_application(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 
 def _now() -> str:
@@ -28,6 +28,7 @@ class RelayEventBus:
     def __init__(self) -> None:
         self._events_by_task: dict[int, list[RelayEvent]] = {}
         self._subscribers: dict[int, set[asyncio.Queue[RelayEvent]]] = {}
+        self._projectors: list[Callable[[RelayEvent], None]] = []
 
     def emit(
         self,
@@ -48,6 +49,11 @@ class RelayEventBus:
             payload=dict(payload or {}),
         )
         events.append(event)
+        for projector in list(self._projectors):
+            try:
+                projector(event)
+            except Exception:
+                pass
         for queue in list(self._subscribers.get(task_id, ())):
             self._offer(queue, event)
         return event
@@ -71,6 +77,16 @@ class RelayEventBus:
         queues.discard(queue)
         if not queues:
             self._subscribers.pop(task_id, None)
+
+    def add_projector(self, projector: Callable[[RelayEvent], None]) -> None:
+        if projector not in self._projectors:
+            self._projectors.append(projector)
+
+    def remove_projector(self, projector: Callable[[RelayEvent], None]) -> None:
+        try:
+            self._projectors.remove(projector)
+        except ValueError:
+            pass
 
     @staticmethod
     def _offer(queue: asyncio.Queue[RelayEvent], event: RelayEvent) -> None:

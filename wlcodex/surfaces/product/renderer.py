@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from wlcodex.surfaces.product.events import ProductDisplayEvent
 from wlcodex.surfaces.product.speaker import product_speaker_line
+from wlcodex.workbench.rendering import render_dual_column_view
 
 # ---------------------------------------------------------------------------
 # Phase labels (Chinese, matching RuntimeRenderer and status.py)
@@ -180,6 +181,60 @@ def render_product_display_event(event: ProductDisplayEvent) -> str:
     return product_speaker_line(event)
 
 
+def render_relay_status(relay_status: object) -> str:
+    """Render relay progress for the Cockpit pane."""
+    role_jobs = list(getattr(relay_status, "role_jobs", []) or [])
+    if not role_jobs:
+        task = getattr(relay_status, "task", relay_status)
+        status = str(getattr(task, "status", "") or "")
+        return f"接力状态：{_relay_status_label(status)}" if status else "接力状态：准备中"
+    lines = ["接力进度"]
+    for job in role_jobs:
+        role = str(getattr(job, "display_name", "") or getattr(job, "role", "") or "")
+        status = _relay_status_label(str(getattr(job, "status", "") or ""))
+        marker = _relay_status_marker(str(getattr(job, "status", "") or ""))
+        lines.append(f"{marker} {role}：{status}")
+    return "\n".join(lines)
+
+
+def render_streaming_log(events: list[object], *, limit: int = 12) -> str:
+    """Render recent native stream events for the Cockpit log pane."""
+    if not events:
+        return "现场日志暂无输出。"
+    lines: list[str] = []
+    for event in events[-limit:]:
+        kind = str(getattr(event, "kind", "") or getattr(event, "event_type", "") or "")
+        payload = dict(getattr(event, "payload", {}) or {})
+        text = _compact_line(
+            str(
+                payload.get("delta")
+                or payload.get("text")
+                or payload.get("message")
+                or payload.get("summary")
+                or payload.get("status")
+                or kind
+            ),
+            limit=140,
+        )
+        if text:
+            lines.append(f"{_stream_kind_label(kind)}：{text}")
+    return "\n".join(lines) if lines else "现场日志暂无输出。"
+
+
+def render_cockpit_relay_live(
+    *,
+    relay_status: object,
+    stream_events: list[object],
+) -> str:
+    """Render Cockpit as progress + live stream panes."""
+    return render_dual_column_view(
+        left_title="驾驶舱进度",
+        left_body=render_relay_status(relay_status),
+        right_title="现场流式",
+        right_body=render_streaming_log(stream_events),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -259,3 +314,45 @@ def _estimate_remaining(state) -> str:
             return "约1-3分钟"
         return "约1-5分钟"
     return _PHASE_ESTIMATES.get(getattr(state, "phase", ""), "")
+
+
+def _relay_status_label(status: str) -> str:
+    return {
+        "idle": "未开始",
+        "queued": "排队中",
+        "streaming": "执行中",
+        "running": "执行中",
+        "waiting": "等待用户",
+        "passed": "已完成",
+        "completed": "已完成",
+        "failed": "失败",
+        "blocked": "阻塞",
+        "interrupted": "已中断",
+    }.get(status, status or "未知")
+
+
+def _relay_status_marker(status: str) -> str:
+    if status in {"streaming", "running"}:
+        return ">"
+    if status in {"passed", "completed"}:
+        return "✓"
+    if status in {"failed", "blocked", "interrupted"}:
+        return "!"
+    return "-"
+
+
+def _stream_kind_label(kind: str) -> str:
+    return {
+        "text_delta": "模型",
+        "reasoning_delta": "推理",
+        "command_output": "命令",
+        "command_started": "命令",
+        "command_completed": "命令",
+        "tool_call_started": "工具",
+        "tool_call_progress": "工具",
+        "tool_call_completed": "工具",
+        "tool_call_failed": "工具",
+        "activity": "活动",
+        "completed": "完成",
+        "failed": "失败",
+    }.get(kind, kind or "事件")

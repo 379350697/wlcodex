@@ -200,6 +200,8 @@ class TerminalSubCommand:
 
     kind: str = "terminal_subcommand"
     subcommand: str = ""  # "tail" or "detach"
+    limit: int | None = None
+    before_sequence: int | None = None
 
 
 ParsedCommand = (
@@ -474,7 +476,7 @@ def _parse_terminal_command(text: str) -> ParsedCommand:
     /terminal detach    -> terminal_subcommand detach
     /terminal product   -> mode_switch to product
     """
-    parts = text.split(maxsplit=2)
+    parts = text.split()
     arg = parts[1].strip() if len(parts) >= 2 else ""
 
     if arg == "agent":
@@ -487,7 +489,20 @@ def _parse_terminal_command(text: str) -> ParsedCommand:
     if arg == "codex":
         return ModeSwitchCommand(mode="terminal", agent="codex")
     if arg == "tail":
-        return TerminalSubCommand(subcommand="tail")
+        limit: int | None = None
+        before_sequence: int | None = None
+        if len(parts) >= 3:
+            if parts[2] == "before" and len(parts) >= 4:
+                before_sequence = _parse_positive_int(parts[3])
+                if len(parts) >= 5:
+                    limit = _parse_positive_int(parts[4])
+            else:
+                limit = _parse_positive_int(parts[2])
+        return TerminalSubCommand(
+            subcommand="tail",
+            limit=limit,
+            before_sequence=before_sequence,
+        )
     if arg == "pause":
         return TerminalSubCommand(subcommand="pause")
     if arg == "detach":
@@ -496,6 +511,14 @@ def _parse_terminal_command(text: str) -> ParsedCommand:
         return ModeSwitchCommand(mode="product")
 
     raise ParseError("用法：/terminal [claude|codex|agent claude|agent codex|tail|pause|detach|product]")
+
+
+def _parse_positive_int(value: str) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _parse_task_id(value: str) -> int | None:

@@ -245,6 +245,30 @@ class TerminalSessionManager:
         all_frames = self._frames.get(ref.external_session_id, [])
         return all_frames[-limit:] if limit > 0 else []
 
+    def tail_page(
+        self,
+        ref: TerminalSessionRef,
+        *,
+        limit: int = 20,
+        before_sequence: int | None = None,
+    ) -> list[TerminalFrame]:
+        """Return a chronological page of frames for /terminal tail paging.
+
+        ``before_sequence`` selects frames older than that sequence.  When it
+        is omitted this is equivalent to :meth:`tail`.
+        """
+        if limit <= 0:
+            return []
+        all_frames = self._frames.get(ref.external_session_id, [])
+        if before_sequence is None:
+            return all_frames[-limit:]
+        page = [
+            frame
+            for frame in all_frames
+            if int(getattr(frame, "sequence", 0) or 0) < before_sequence
+        ]
+        return page[-limit:]
+
     # ── delivery control — pause/resume/leave without killing (Onsite) ────
 
     def pause_delivery(self, ref: TerminalSessionRef) -> None:

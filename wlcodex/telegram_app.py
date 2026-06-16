@@ -1004,7 +1004,11 @@ class WlCodexHandlers:
 
         if isinstance(command, TerminalSubCommand):
             if command.subcommand == "tail":
-                await self._handle_terminal_tail(chat_id)
+                await self._handle_terminal_tail(
+                    chat_id,
+                    limit=getattr(command, "limit", None),
+                    before_sequence=getattr(command, "before_sequence", None),
+                )
             elif command.subcommand == "pause":
                 await self._handle_terminal_pause(chat_id)
             elif command.subcommand == "detach":
@@ -1016,7 +1020,13 @@ class WlCodexHandlers:
             "未知现场命令。用法：/terminal [claude|codex|agent claude|agent codex|tail|pause|detach|product]"
         )
 
-    async def _handle_terminal_tail(self, chat_id: int) -> None:
+    async def _handle_terminal_tail(
+        self,
+        chat_id: int,
+        *,
+        limit: int | None = None,
+        before_sequence: int | None = None,
+    ) -> None:
         """Handle /terminal tail — show recent output from the attached session."""
         from wlcodex.surfaces.terminal.renderer import render_tail_output
         from wlcodex.surfaces.terminal.renderer import render_no_session_hint
@@ -1039,8 +1049,20 @@ class WlCodexHandlers:
         if self._terminal_manager.is_delivery_paused(ref):
             self._terminal_manager.resume_delivery(ref)
 
-        frames = self._terminal_manager.tail(ref)
-        text = render_tail_output(frames)
+        page_limit = min(max(int(limit or 20), 1), 100)
+        if hasattr(self._terminal_manager, "tail_page"):
+            frames = self._terminal_manager.tail_page(
+                ref,
+                limit=page_limit,
+                before_sequence=before_sequence,
+            )
+        else:
+            frames = self._terminal_manager.tail(ref, limit=page_limit)
+        has_older = bool(
+            frames
+            and int(getattr(frames[0], "sequence", 0) or 0) > 1
+        )
+        text = render_tail_output(frames, limit=page_limit, has_older=has_older)
         await self.send_telegram(chat_id, text)
 
     async def _handle_terminal_pause(self, chat_id: int) -> None:

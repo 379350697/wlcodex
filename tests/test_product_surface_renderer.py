@@ -6,8 +6,10 @@ from wlcodex.surfaces.product.renderer import (
     render_cockpit_failure,
     render_cockpit_approval,
     render_cockpit_queued,
+    render_cockpit_relay_live,
     render_product_display_event,
 )
+from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.surfaces.product.events import ProductDisplayEvent
 from wlcodex.interaction.runtime_renderer import RuntimeRunState
 
@@ -24,6 +26,36 @@ def test_cockpit_status_shows_phase_and_agent():
     text = render_cockpit_status(state)
     assert "GPT 开发工程师" in text
     assert "分析" in text
+
+
+def test_cockpit_relay_live_renders_progress_and_stream():
+    class Job:
+        display_name = "开发工程师"
+        role = "implementer"
+        status = "streaming"
+
+    class Detail:
+        role_jobs = [Job()]
+
+    event = WorkerStreamEvent(
+        id=1,
+        type="model.text.delta",
+        kind="text_delta",
+        agent_run_id=10,
+        conversation_id=1,
+        occurred_at="2026-06-17T00:00:00+00:00",
+        source="codex",
+        actor="codex_native",
+        visibility="user",
+        payload={"delta": "正在实现"},
+    )
+
+    text = render_cockpit_relay_live(relay_status=Detail(), stream_events=[event])
+
+    assert "驾驶舱进度" in text
+    assert "开发工程师" in text
+    assert "现场流式" in text
+    assert "正在实现" in text
 
 
 def test_cockpit_status_shows_current_command():

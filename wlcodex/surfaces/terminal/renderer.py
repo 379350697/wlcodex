@@ -60,6 +60,22 @@ def render_terminal_frame(
     return f"[{agent_label}:{frame.phase}] {text}"
 
 
+def render_terminal_frames_append(
+    frames: list[TerminalFrame],
+    *,
+    policy: TerminalPolicy | None = None,
+    max_total_chars: int = 3900,
+) -> str:
+    """Render frames as append-only output for Onsite live delivery."""
+    if not frames:
+        return ""
+    rendered = [render_terminal_frame(frame, policy=policy) for frame in frames]
+    output = "\n".join(rendered)
+    if len(output) <= max_total_chars:
+        return output
+    return output[-max_total_chars:]
+
+
 def render_onsite_header(agent: str, phase: str) -> str:
     """Render a concise Onsite status header in user-facing language."""
     agent_label = _AGENT_LABEL.get(agent, agent)
@@ -91,6 +107,7 @@ def render_tail_output(
     policy: TerminalPolicy | None = None,
     limit: int = 20,
     max_total_chars: int = 3900,
+    has_older: bool = False,
 ) -> str:
     """Render the most recent *limit* frames for /terminal tail.
 
@@ -136,6 +153,12 @@ def render_tail_output(
         return newest[:max_total_chars]
 
     output = "\n".join(rendered)
+    if has_older and rendered:
+        first_sequence = int(getattr(shown[0], "sequence", 0) or 0)
+        if first_sequence > 0:
+            hint = f"\n\n更早输出：/terminal tail before {first_sequence}"
+            if len(output) + len(hint) <= max_total_chars:
+                output += hint
     if len(output) <= max_total_chars:
         return output
 

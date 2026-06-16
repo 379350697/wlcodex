@@ -61,6 +61,23 @@ def test_rule_summary_collapses_completed_old_turn() -> None:
     assert summary.source == "rules"
 
 
+def test_onsite_summary_never_collapses_completed_old_turn() -> None:
+    events = [
+        _stream_event(1, "user_message", {"native_turn_id": "turn-1", "text": "继续"}),
+        _stream_event(2, "text_delta", {"native_turn_id": "turn-1", "delta": "完成"}),
+        _stream_event(3, "completed", {"native_turn_id": "turn-1"}),
+    ]
+
+    summary = build_turn_collapse_summary(
+        events,
+        current_turn_id="",
+        onsite=True,
+    )
+
+    assert summary.completed is True
+    assert summary.should_collapse is False
+
+
 def test_rule_summary_recognizes_native_turn_completed_activity() -> None:
     events = [
         _stream_event(

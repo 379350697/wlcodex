@@ -28,6 +28,8 @@ class TerminalCommand:
     kind: TerminalCommandKind
     agent: str | None = None     # set for SELECT_AGENT
     mode: str | None = None      # set for SWITCH_TO_PRODUCT
+    limit: int | None = None     # set for TAIL
+    before_sequence: int | None = None  # set for paged TAIL
 
 
 def route_terminal_command(text: str) -> TerminalCommand:
@@ -42,6 +44,8 @@ def route_terminal_command(text: str) -> TerminalCommand:
         /terminal product             -> SWITCH_TO_PRODUCT
         /terminal detach              -> DETACH
         /terminal tail                -> TAIL
+        /terminal tail 50             -> TAIL limit=50
+        /terminal tail before 120     -> TAIL before_sequence=120
         /terminal pause               -> PAUSE
         /terminal leave               -> LEAVE
     """
@@ -68,7 +72,20 @@ def route_terminal_command(text: str) -> TerminalCommand:
         return TerminalCommand(kind=TerminalCommandKind.DETACH)
 
     if sub == "tail":
-        return TerminalCommand(kind=TerminalCommandKind.TAIL)
+        limit: int | None = None
+        before_sequence: int | None = None
+        if len(parts) >= 3:
+            if parts[2] == "before" and len(parts) >= 4:
+                before_sequence = _positive_int(parts[3])
+                if len(parts) >= 5:
+                    limit = _positive_int(parts[4])
+            else:
+                limit = _positive_int(parts[2])
+        return TerminalCommand(
+            kind=TerminalCommandKind.TAIL,
+            limit=limit,
+            before_sequence=before_sequence,
+        )
 
     if sub == "pause":
         return TerminalCommand(kind=TerminalCommandKind.PAUSE)
@@ -81,3 +98,11 @@ def route_terminal_command(text: str) -> TerminalCommand:
 
     # Unknown subcommand → treat as status display
     return TerminalCommand(kind=TerminalCommandKind.SHOW_STATUS)
+
+
+def _positive_int(value: str) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None

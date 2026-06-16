@@ -40,6 +40,29 @@ def render_session_library(sessions: list[AgentSessionSummary]) -> str:
     return "\n".join(lines)
 
 
+def render_dual_column_view(
+    *,
+    left_title: str,
+    left_body: str,
+    right_title: str,
+    right_body: str,
+) -> str:
+    """Render a plain-text two-column workbench projection.
+
+    Telegram and logs are monospaced/linear, so this uses labelled panes
+    instead of fragile spacing.
+    """
+    return "\n".join(
+        [
+            f"{left_title}",
+            left_body.strip() or "暂无进度。",
+            "",
+            f"{right_title}",
+            right_body.strip() or "暂无现场输出。",
+        ]
+    )
+
+
 _RESUMABILITY_LABELS: dict[AgentSessionResumability, str] = {
     AgentSessionResumability.LIVE: "可接管",
     AgentSessionResumability.RESUMABLE: "可继续",

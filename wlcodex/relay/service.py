@@ -238,6 +238,15 @@ class RelayService:
     ) -> None:
         self._events.unsubscribe(task_id, queue)
 
+    def add_event_projector(self, projector: Any) -> None:
+        self._events.add_projector(projector)
+
+    def remove_event_projector(self, projector: Any) -> None:
+        self._events.remove_projector(projector)
+
+    def role_for_agent_run(self, agent_run_id: int) -> tuple[int, str] | None:
+        return self._store.find_role_by_agent_run_id(agent_run_id)
+
     async def dispatch_role(self, task_id: int, role: str) -> None:
         detail = self._store.get_task_detail(task_id)
         provider_name = (
@@ -895,13 +904,20 @@ class RelayService:
             task_id,
             "role.streaming",
             role=role,
-            payload={"role": role, "native_session_id": native_session_id},
+            payload={
+                "role": role,
+                "provider": job.provider,
+                "native_session_id": native_session_id,
+            },
         )
         self._events.emit(
             task_id,
             "dispatch.verified",
             role=role,
-            payload={"native_session_id": native_session_id},
+            payload={
+                "provider": job.provider,
+                "native_session_id": native_session_id,
+            },
         )
         return True
 
@@ -1090,7 +1106,10 @@ class RelayService:
                     task_id,
                     "dispatch.verified",
                     role="director",
-                    payload={"native_session_id": native_session_id},
+                    payload={
+                        "provider": director.provider,
+                        "native_session_id": native_session_id,
+                    },
                 )
                 return
         await self.dispatch_role(task_id, "director")

@@ -2247,11 +2247,24 @@ async def _send_relay_sse(
                 )
     if live and relay_service is not None and task_id:
         queue = relay_event_queue or relay_service.subscribe_events(task_id)
-        pending = asyncio.create_task(queue.get())
+        worker_subscriptions: list[tuple[Any, asyncio.Queue[WorkerStreamEvent]]] = []
+        pending: dict[asyncio.Task[Any], tuple[str, Any, Any]] = {
+            asyncio.create_task(queue.get()): ("relay", None, queue)
+        }
+        if hub is not None:
+            for job in role_jobs:
+                agent_run_id = int(job.agent_run_id)
+                worker_queue = hub.subscribe(agent_run_id=agent_run_id)
+                worker_subscriptions.append((job, worker_queue))
+                pending[asyncio.create_task(worker_queue.get())] = (
+                    "worker",
+                    job,
+                    worker_queue,
+                )
         try:
             while not writer.is_closing():
                 done, _pending = await asyncio.wait(
-                    {pending},
+                    pending,
                     timeout=15,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
@@ -2259,23 +2272,75 @@ async def _send_relay_sse(
                     writer.write(b": keepalive\n\n")
                     await writer.drain()
                     continue
-                event = pending.result()
-                payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
-                sequence = int(payload.get("sequence") or 0)
-                if sequence in seen_relay_sequences:
-                    pending = asyncio.create_task(queue.get())
-                    continue
-                if sequence:
-                    seen_relay_sequences.add(sequence)
-                await _write_relay_sse_payload(
-                    writer,
-                    event_id=str(sequence or ""),
-                    event_type=str(payload.get("event_type") or "message"),
-                    payload=payload,
-                )
-                pending = asyncio.create_task(queue.get())
+                for task in done:
+                    source_kind, job, source_queue = pending.pop(task)
+                    if source_kind == "relay":
+                        event = task.result()
+                        payload = (
+                            event.to_dict()
+                            if hasattr(event, "to_dict")
+                            else dict(event)
+                        )
+                        sequence = int(payload.get("sequence") or 0)
+                        if sequence not in seen_relay_sequences:
+                            if sequence:
+                                seen_relay_sequences.add(sequence)
+                            event_type = str(payload.get("event_type") or "message")
+                            event_payload = dict(payload.get("payload") or {})
+                            runtime_event_id = int(
+                                event_payload.get("runtime_event_id")
+                                or payload.get("runtime_event_id")
+                                or 0
+                            )
+                            if runtime_event_id > 0:
+                                seen_worker_events.add(
+                                    (
+                                        str(
+                                            payload.get("role")
+                                            or event_payload.get("role")
+                                            or ""
+                                        ),
+                                        runtime_event_id,
+                                        event_type,
+                                    )
+                                )
+                            await _write_relay_sse_payload(
+                                writer,
+                                event_id=str(sequence or ""),
+                                event_type=event_type,
+                                payload=payload,
+                            )
+                        pending[asyncio.create_task(source_queue.get())] = (
+                            "relay",
+                            None,
+                            source_queue,
+                        )
+                        continue
+                    worker_event = task.result()
+                    agent_run_id = int(job.agent_run_id)
+                    worker_key = (str(job.role), int(worker_event.id), "role.native_event")
+                    if (
+                        worker_event.id > latest_by_agent.get(agent_run_id, 0)
+                        and worker_key not in seen_worker_events
+                    ):
+                        latest_by_agent[agent_run_id] = int(worker_event.id)
+                        seen_worker_events.add(worker_key)
+                        await _write_relay_worker_event(
+                            writer,
+                            task_id=int(detail.task.id),
+                            role=str(job.role),
+                            worker_event=worker_event,
+                        )
+                    pending[asyncio.create_task(source_queue.get())] = (
+                        "worker",
+                        job,
+                        source_queue,
+                    )
         finally:
-            pending.cancel()
+            for task in pending:
+                task.cancel()
+            for job, worker_queue in worker_subscriptions:
+                hub.unsubscribe(agent_run_id=int(job.agent_run_id), queue=worker_queue)
             relay_service.unsubscribe_events(task_id, queue)
     elif live and hub is not None and role_jobs:
         subscriptions: list[tuple[Any, asyncio.Queue[WorkerStreamEvent]]] = []

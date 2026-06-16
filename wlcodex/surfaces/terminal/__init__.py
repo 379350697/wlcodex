@@ -6,6 +6,7 @@ Never imports from wlcodex.surfaces.product — isolation is enforced by design.
 from wlcodex.surfaces.terminal.models import TerminalFrame, TerminalSessionRef
 from wlcodex.surfaces.terminal.renderer import (
     render_terminal_frame,
+    render_terminal_frames_append,
     render_onsite_header,
     render_start_card,
     render_tail_output,
@@ -30,6 +31,7 @@ __all__ = [
     "TerminalFrame",
     "TerminalSessionRef",
     "render_terminal_frame",
+    "render_terminal_frames_append",
     "render_onsite_header",
     "render_start_card",
     "render_tail_output",
