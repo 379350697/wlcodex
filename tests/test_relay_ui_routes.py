@@ -850,6 +850,135 @@ async def test_relay_task_detail_humanizes_valid_role_envelope(
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_uses_canonical_envelope_when_output_has_bad_prefix(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Bad prefix envelope task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-prefix",
+        agent_run_id=451,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    canonical = {
+        "status": "passed",
+        "reason": "completed",
+        "role": "director",
+        "artifact_type": "final_summary",
+        "handoff_to": "",
+        "summary": "完成闭环修复，最终展示只使用权威完成态。",
+        "evidence_refs": ["completed transcript"],
+        "next_action": "继续观察全新复杂接力任务。",
+        "open_questions": [],
+        "acceptance_criteria": ["会话流不显示污染前缀"],
+    }
+    polluted_output = "坏前缀：模型先说了一段废话\n" + json.dumps(
+        canonical,
+        ensure_ascii=False,
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            **canonical,
+            "relay_role": "director",
+            "output": polluted_output,
+        },
+        summary=canonical["summary"],
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=451,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": "坏前缀：模型先说了一段废话\n",
+            "native_turn_id": "turn-prefix-1",
+            "itemId": "prefix-assistant-1",
+        },
+        occurred_at="2026-06-14T12:35:01+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=451,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": polluted_output,
+            "native_turn_id": "turn-prefix-1",
+            "itemId": "prefix-assistant-1",
+        },
+        occurred_at="2026-06-14T12:35:02+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    visible_html = response.split("<script", 1)[0]
+    assert 'data-conversation-role-final="director"' in visible_html
+    assert 'data-role-canonical-json="director"' in visible_html
+    assert "结论：完成闭环修复，最终展示只使用权威完成态。" in visible_html
+    assert "下一步：继续观察全新复杂接力任务。" in visible_html
+    assert "验收依据：会话流不显示污染前缀" in visible_html
+    assert "&quot;artifact_type&quot;: &quot;final_summary&quot;" in visible_html
+    assert "模型先说了一段废话" not in visible_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_streaming_delta_is_preview_not_final_output(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Preview task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert 'data-role-preview="' in response
+    assert "function appendRolePreview" in response
+    assert "function relayPreviewDisplayText" in response
+    assert "function renderRoleEnvelope" in response
+    delta_handler = response.split('source.addEventListener("role.output_delta"', 1)[1]
+    delta_handler = delta_handler.split('source.addEventListener("routing.decision"', 1)[0]
+    assert "appendRolePreview" in delta_handler
+    assert "roleOutputs[payload.role]" not in delta_handler
+    envelope_handler = response.split('source.addEventListener("role.envelope"', 1)[1]
+    envelope_handler = envelope_handler.split('source.addEventListener("handoff.created"', 1)[0]
+    assert "renderRoleEnvelope" in envelope_handler
+    assert "clearRolePreview(role);" in response
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_humanizes_internal_route_terms(
     tmp_path: Path,
 ) -> None:
