@@ -25,6 +25,11 @@ _DIRECTOR_ROUTING_DECISION_CONSTRAINTS = [
     "If the task is destructive, high risk, cross-module, deployment, credentials, permissions, or migration related, do not choose director_only.",
     "Use waiting_user when the target file/path or acceptance criteria are ambiguous.",
 ]
+_DIRECTOR_FINAL_SUMMARY_CONSTRAINTS = [
+    "A director action after an accepted routing_decision must return a final_summary artifact when no handoff is needed.",
+    "Do not invent task-specific artifact_type values such as weather_answer, code_answer, or analysis_answer.",
+    "Use final_summary.summary for the user-facing answer or closure summary.",
+]
 
 
 def build_relay_board(
@@ -81,6 +86,9 @@ def build_role_context_packet(
     if role == "director" and not has_routing_decision:
         constraints.extend(_DIRECTOR_ROUTING_DECISION_CONSTRAINTS)
         expected_output_envelope = _director_routing_decision_envelope()
+    elif role == "director" and has_routing_decision:
+        constraints.extend(_DIRECTOR_FINAL_SUMMARY_CONSTRAINTS)
+        expected_output_envelope = _director_final_summary_envelope()
     return RoleContextPacket(
         task_id=task.id,
         role=role,
@@ -130,6 +138,20 @@ def _director_routing_decision_envelope() -> dict[str, Any]:
         "acceptance_criteria": ["observable acceptance criterion"],
         "stop_conditions": ["condition that should stop or ask user"],
         "requires_user_approval": False,
+    }
+
+
+def _director_final_summary_envelope() -> dict[str, Any]:
+    return {
+        "status": "passed|failed|blocked|waiting",
+        "reason": "brief reason",
+        "role": "director",
+        "artifact_type": "final_summary",
+        "handoff_to": "",
+        "summary": "user-facing final answer or relay closure summary",
+        "evidence_refs": [],
+        "open_questions": [],
+        "next_action": "empty string or no further action",
     }
 
 

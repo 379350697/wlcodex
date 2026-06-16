@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 from wlcodex.claude_binary import sanitized_claude_env
 from wlcodex.native_agents.antigravity_models import (
+    ANTIGRAVITY_QUOTA_FALLBACK_MODEL,
     DEFAULT_ANTIGRAVITY_MODEL,
     antigravity_model_catalog,
 )
@@ -50,6 +51,9 @@ class _RunOutcome:
     antigravity_conversation_id: str = ""
     error: str = ""
     emitted_text: bool = False
+    model: str = ""
+    fallback_from_model: str = ""
+    fallback_reason: str = ""
 
 
 _EXECUTION_CWD_METADATA_KEY = "antigravity_execution_cwd"
@@ -78,12 +82,14 @@ class AntigravityCliRunner:
     ):
         if not self.available:
             raise RuntimeError(self.error)
+        log_file = _new_antigravity_cli_log_file()
         args = self._args(
             prompt=prompt,
             cwd=cwd,
             conversation_id=conversation_id,
             model=model,
             extra_dirs=extra_dirs,
+            log_file=log_file,
             dangerously_skip_permissions=dangerously_skip_permissions,
             sandbox=sandbox,
         )
@@ -130,9 +136,15 @@ class AntigravityCliRunner:
 
         text = stdout.decode("utf-8", errors="replace") if stdout else ""
         error_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+        log_text = _read_text_file(log_file)
         auth_error = _authentication_error_message(f"{text}\n{error_text}")
         if auth_error:
             raise RuntimeError(auth_error)
+        quota_error = _quota_or_limit_error_message(
+            "\n".join(value for value in (error_text, text, log_text) if value)
+        )
+        if quota_error:
+            raise RuntimeError(quota_error)
         cli_error = _cli_error_message(error_text or text)
         if cli_error:
             raise RuntimeError(cli_error)
@@ -153,6 +165,7 @@ class AntigravityCliRunner:
         conversation_id: str,
         model: str,
         extra_dirs: tuple[str, ...],
+        log_file: str = "",
         dangerously_skip_permissions: bool = False,
         sandbox: bool = False,
     ) -> tuple[str, ...]:
@@ -160,6 +173,8 @@ class AntigravityCliRunner:
             "--print-timeout",
             self._config.print_timeout,
         ]
+        if log_file:
+            args.extend(["--log-file", log_file])
         if conversation_id:
             args.extend(["--conversation", conversation_id])
         for directory in (cwd, *extra_dirs):
@@ -400,6 +415,51 @@ class AntigravityCliLocalProvider:
         dangerously_skip_permissions: bool = False,
         sandbox: bool = False,
     ) -> _RunOutcome:
+        selected_model = model.strip() or self._runner_default_model()
+        outcome = await self._run_prompt_once(
+            session=session,
+            prompt=prompt,
+            native_turn_id=native_turn_id,
+            conversation_id=conversation_id,
+            model=selected_model,
+            dangerously_skip_permissions=dangerously_skip_permissions,
+            sandbox=sandbox,
+        )
+        if not _should_fallback_for_antigravity_quota(
+            model=selected_model,
+            outcome=outcome,
+        ):
+            return outcome
+        fallback = await self._run_prompt_once(
+            session=session,
+            prompt=prompt,
+            native_turn_id=native_turn_id,
+            conversation_id=conversation_id,
+            model=ANTIGRAVITY_QUOTA_FALLBACK_MODEL,
+            dangerously_skip_permissions=dangerously_skip_permissions,
+            sandbox=sandbox,
+        )
+        return _RunOutcome(
+            status=fallback.status,
+            antigravity_conversation_id=fallback.antigravity_conversation_id,
+            error=fallback.error,
+            emitted_text=fallback.emitted_text,
+            model=fallback.model,
+            fallback_from_model=selected_model,
+            fallback_reason=outcome.error,
+        )
+
+    async def _run_prompt_once(
+        self,
+        *,
+        session: NativeAgentSession,
+        prompt: str,
+        native_turn_id: str,
+        conversation_id: str,
+        model: str,
+        dangerously_skip_permissions: bool = False,
+        sandbox: bool = False,
+    ) -> _RunOutcome:
         latest_conversation_id = conversation_id
         emitted_text = False
         execution_cwd = _session_execution_cwd(session)
@@ -438,6 +498,7 @@ class AntigravityCliLocalProvider:
                 antigravity_conversation_id=latest_conversation_id,
                 error=str(exc),
                 emitted_text=emitted_text,
+                model=model,
             )
         if not latest_conversation_id:
             latest = self._local_session_index.latest_for_cwd(execution_cwd)
@@ -451,15 +512,18 @@ class AntigravityCliLocalProvider:
                 status="failed",
                 antigravity_conversation_id=latest_conversation_id,
                 error=(
-                    "Antigravity CLI completed without assistant output. "
-                    "Run agy in a local terminal, complete Google login/setup, "
-                    "then retry from WLCodex."
+                    "Antigravity CLI completed without assistant output for "
+                    f"model {model}. The CLI exited successfully without "
+                    "assistant text; investigate Antigravity print-mode/model "
+                    "behavior instead of treating this as login/setup."
                 ),
+                model=model,
             )
         return _RunOutcome(
             status="done",
             antigravity_conversation_id=latest_conversation_id,
             emitted_text=emitted_text,
+            model=model,
         )
 
     def _start_background_prompt(
@@ -584,6 +648,16 @@ class AntigravityCliLocalProvider:
             metadata["antigravity_conversation_id"] = (
                 outcome.antigravity_conversation_id
             )
+        if outcome.model:
+            metadata["antigravity_model"] = outcome.model
+        else:
+            metadata.pop("antigravity_model", None)
+        if outcome.fallback_from_model:
+            metadata["antigravity_model_fallback_from"] = outcome.fallback_from_model
+            metadata["antigravity_model_fallback_reason"] = outcome.fallback_reason
+        else:
+            metadata.pop("antigravity_model_fallback_from", None)
+            metadata.pop("antigravity_model_fallback_reason", None)
         if outcome.error:
             metadata["error"] = outcome.error
         else:
@@ -1053,6 +1127,71 @@ def _cli_error_message(text: str) -> str:
     if stripped.startswith("Error:"):
         return stripped
     return ""
+
+
+def _quota_or_limit_error_message(text: str) -> str:
+    if not _is_antigravity_quota_or_limit_error(text):
+        return ""
+    for line in text.splitlines():
+        if _is_antigravity_quota_or_limit_error(line):
+            return _clean_antigravity_log_line(line)
+    return text.strip()
+
+
+def _clean_antigravity_log_line(line: str) -> str:
+    stripped = line.strip()
+    marker = "RESOURCE_EXHAUSTED"
+    marker_index = stripped.find(marker)
+    if marker_index >= 0:
+        return stripped[marker_index:]
+    return stripped
+
+
+def _should_fallback_for_antigravity_quota(
+    *,
+    model: str,
+    outcome: _RunOutcome,
+) -> bool:
+    if model != DEFAULT_ANTIGRAVITY_MODEL:
+        return False
+    if outcome.status != "failed" or outcome.emitted_text:
+        return False
+    return _is_antigravity_quota_or_limit_error(outcome.error)
+
+
+def _is_antigravity_quota_or_limit_error(error: str) -> bool:
+    lowered = error.lower()
+    quota_markers = (
+        "individual quota reached",
+        "quota exceeded",
+        "quota reached",
+        "rate limit",
+        "rate-limit",
+        "rate_limit",
+        "usage limit",
+        "limit exceeded",
+        "limits exceeded",
+        "resource exhausted",
+        "insufficient credits",
+        "insufficient credit",
+        "billing limit",
+    )
+    return any(marker in lowered for marker in quota_markers)
+
+
+def _new_antigravity_cli_log_file() -> str:
+    directory = Path(tempfile.gettempdir()) / "wlcodex-antigravity-cli" / "logs"
+    directory.mkdir(parents=True, exist_ok=True)
+    return str(directory / f"agy-{uuid4()}.log")
+
+
+def _read_text_file(path: str) -> str:
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _resolve_antigravity_binary(binary: str) -> str:

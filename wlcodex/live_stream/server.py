@@ -3633,6 +3633,25 @@ def _relay_routing_route_label(route: str) -> str:
     }.get(route, route or "等待总工程师判断")
 
 
+def _relay_humanize_display_text(text: str) -> str:
+    value = str(text or "")
+    replacements = (
+        ("路由为director_only", "由总工程师直接处理"),
+        ("director_only", "总工程师直接处理"),
+        ("core_relay", "核心角色接力"),
+        ("full_relay", "五角色完整接力"),
+        ("audit_first", "先审计再推进"),
+        ("waiting_user", "等待你补充"),
+        ("complete directly after routing by checking current market sources and returning the latest available gold price", "由总工程师核验最新行情来源并给出结果"),
+        ("complete directly after routing", "由总工程师直接处理"),
+        ("complete directly", "直接处理"),
+        ("dispatch next role", "交给下一位角色处理"),
+    )
+    for source, target in replacements:
+        value = value.replace(source, target)
+    return value
+
+
 def _relay_routing_risk_label(risk: str) -> str:
     return {
         "low": "低",
@@ -3743,7 +3762,9 @@ def _relay_routing_decision_html(detail: Any) -> str:
     stop_text = "、".join(stop_conditions) or "暂无额外停止条件"
     approval_text = "需要用户确认" if bool(decision.get("requires_user_approval")) else "无需额外确认"
     route = str(decision.get("route") or "")
-    summary = str(decision.get("summary") or "等待总工程师接收任务并形成调度决策。")
+    summary = _relay_humanize_display_text(
+        str(decision.get("summary") or "等待总工程师接收任务并形成调度决策。")
+    )
     return f"""
     <section class="relay-routing" aria-label="调度决策" data-routing-card>
       <div class="relay-board-head">
@@ -4310,6 +4331,9 @@ def _relay_task_detail_page(
     }}
     function relayHumanizeUserMessage(text) {{
       const value = String(text || "");
+      if (value.includes("你刚才作为") && value.includes("expected_output_envelope:")) {{
+        return "系统已要求当前角色重新输出合法结构化结果。";
+      }}
       if (!value.includes("latest_user_input:") && !value.includes("expected_output_envelope:")) return value;
       return relayExtractContextField(value, "latest_user_input") || relayExtractContextField(value, "goal") || value;
     }}
@@ -4326,6 +4350,9 @@ def _relay_task_detail_page(
         "open_questions",
         "next_action",
       ].some((marker) => value.includes(marker));
+    }}
+    function relayProtocolOutputHiddenText(role) {{
+      return `${{labelForRole(role)}} 的结构化输出已由系统处理，原始协议内容不在主会话展示。`;
     }}
     function relayDictLooksLikeEnvelope(payload) {{
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
@@ -4362,17 +4389,46 @@ def _relay_task_detail_page(
       }};
       return labels[route] || route || "";
     }}
+    function relayHumanizeDisplayText(text) {{
+      let value = String(text || "");
+      const replacements = [
+        [/路由为director_only/g, "由总工程师直接处理"],
+        [/director_only/g, "总工程师直接处理"],
+        [/core_relay/g, "核心角色接力"],
+        [/full_relay/g, "五角色完整接力"],
+        [/audit_first/g, "先审计再推进"],
+        [/waiting_user/g, "等待你补充"],
+        [/complete directly after routing by checking current market sources and returning the latest available gold price/g, "由总工程师核验最新行情来源并给出结果"],
+        [/complete directly after routing/g, "由总工程师直接处理"],
+        [/complete directly/g, "直接处理"],
+        [/dispatch next role/g, "交给下一位角色处理"],
+      ];
+      replacements.forEach(([pattern, label]) => {{
+        value = value.replace(pattern, label);
+      }});
+      return value;
+    }}
+    function relaySanitizeProtocolLeakText(role, text) {{
+      let value = relayHumanizeDisplayText(text);
+      const sentinel = "原始结构化输出不在主会话展示。";
+      if (value.includes(sentinel)) return value.split(sentinel, 1)[0] + sentinel;
+      const markers = ["artifact_type", "expected_output_envelope", "routing_decisioncomplexity", "required_roles", "handoff_to"];
+      if (markers.some((marker) => value.includes(marker)) && value.includes("{{")) {{
+        return relayProtocolOutputHiddenText(role);
+      }}
+      return value;
+    }}
     function relayRiskLabel(risk) {{
       const labels = {{ low: "低", medium: "中", high: "高", critical: "关键" }};
       return labels[risk] || risk || "";
     }}
     function relayHumanizeEnvelope(envelope) {{
       const lines = [];
-      const summary = String(envelope.summary || envelope.output || envelope.reason || "").trim();
+      const summary = relayHumanizeDisplayText(envelope.summary || envelope.output || envelope.reason || "").trim();
       if (summary) lines.push(`结论：${{summary}}`);
-      const nextAction = String(envelope.next_action || "").trim();
+      const nextAction = relayHumanizeDisplayText(envelope.next_action || "").trim();
       if (nextAction) lines.push(`下一步：${{nextAction}}`);
-      const questions = relayJoinTextList(envelope.open_questions);
+      const questions = relayHumanizeDisplayText(relayJoinTextList(envelope.open_questions));
       if (questions) lines.push(`待确认：${{questions}}`);
       const route = String(envelope.route || "").trim();
       const risk = String(envelope.risk || "").trim();
@@ -4382,7 +4438,7 @@ def _relay_task_detail_page(
         if (risk) parts.push(`风险：${{relayRiskLabel(risk)}}`);
         lines.push(parts.join(" · "));
       }}
-      const acceptance = relayJoinTextList(envelope.acceptance_criteria);
+      const acceptance = relayHumanizeDisplayText(relayJoinTextList(envelope.acceptance_criteria));
       if (acceptance) lines.push(`验收依据：${{acceptance}}`);
       return lines.length ? lines.join("\\n") : "角色已返回结构化结果。";
     }}
@@ -4451,7 +4507,19 @@ def _relay_task_detail_page(
           const candidate = kind === "text_delta" ? bufferedEnvelope + text : text || bufferedEnvelope;
           if (kind === "text_delta") nativeEnvelopeBuffers.set(key, candidate);
           const envelope = relayParseEnvelope(candidate);
-          if (!envelope) return;
+          if (!envelope) {{
+            if (kind === "message_completed") {{
+              nativeEnvelopeBuffers.delete(key);
+              let node = nativeTranscriptNodes.get(key);
+              if (!node) {{
+                node = createNativeMessage(role, "role_error", roleLabel, provider, key);
+                nativeTranscriptNodes.set(key, node);
+              }}
+              node.dataset.nativeKind = "role_error";
+              setNativeBodyText(node, relayProtocolOutputHiddenText(role));
+            }}
+            return;
+          }}
           nativeEnvelopeBuffers.delete(key);
           let node = nativeTranscriptNodes.get(key);
           if (!node) {{
@@ -4469,7 +4537,9 @@ def _relay_task_detail_page(
           nativeTranscriptNodes.set(key, node);
         }}
         node.dataset.nativeKind = kind;
-        setNativeBodyText(node, text, kind === "text_delta");
+        const bodyNode = node.querySelector("[data-native-message-body]");
+        const existingText = kind === "text_delta" ? (bodyNode?.textContent || "") : "";
+        setNativeBodyText(node, relaySanitizeProtocolLeakText(role, existingText + text));
         setRoleStatus(role, "streaming");
         return;
       }}
@@ -4563,14 +4633,14 @@ def _relay_task_detail_page(
       }};
       const riskLabels = {{ low: "低", medium: "中", high: "高", critical: "关键" }};
       const routeText = routeLabels[payload.route] || payload.route || "等待总工程师判断";
-      const stops = (payload.stop_conditions || []).join("、") || "暂无额外停止条件";
-      document.querySelector("[data-routing-summary]").textContent = payload.summary || "总工程师已形成调度决策。";
+      const stops = relayHumanizeDisplayText((payload.stop_conditions || []).join("、")) || "暂无额外停止条件";
+      document.querySelector("[data-routing-summary]").textContent = relayHumanizeDisplayText(payload.summary || "总工程师已形成调度决策。");
       document.querySelector("[data-routing-route]").textContent = routeText;
       document.querySelector("[data-routing-complexity]").textContent = payload.complexity || "待判断";
       document.querySelector("[data-routing-risk]").textContent = riskLabels[payload.risk] || payload.risk || "待判断";
       document.querySelector("[data-routing-path]").textContent = routeText;
       document.querySelector("[data-routing-roles]").textContent = (payload.required_roles || []).map(labelForRole).join("、") || "等待总工程师判断";
-      document.querySelector("[data-routing-acceptance]").textContent = (payload.acceptance_criteria || []).join("、") || "等待总工程师给出验收依据";
+      document.querySelector("[data-routing-acceptance]").textContent = relayHumanizeDisplayText((payload.acceptance_criteria || []).join("、")) || "等待总工程师给出验收依据";
       document.querySelector("[data-routing-stops]").textContent = `${{stops}} · ${{payload.requires_user_approval ? "需要用户确认" : "无需额外确认"}}`;
       appendActivity(`总工程师调度决策：${{routeText}}。`);
     }});
@@ -4579,15 +4649,17 @@ def _relay_task_detail_page(
       const envelope = payload.envelope || payload;
       const role = payload.role || envelope.role;
       if (envelope.summary) {{
-        appendActivity(`${{labelForRole(role)}} 产出摘要：${{envelope.summary}}`);
+        const summaryText = relayHumanizeDisplayText(envelope.summary);
+        appendActivity(`${{labelForRole(role)}} 产出摘要：${{summaryText}}`);
         if (role === "director") {{
           const summary = document.querySelector("[data-board-director-summary]");
-          if (summary) summary.textContent = envelope.summary;
+          if (summary) summary.textContent = summaryText;
         }}
       }}
       if (envelope.next_action) {{
+        const nextActionText = relayHumanizeDisplayText(envelope.next_action);
         const next = document.querySelector("[data-board-next-step]");
-        if (next) next.textContent = envelope.next_action;
+        if (next) next.textContent = nextActionText;
       }}
       if (envelope.status) setRoleStatus(role, envelope.status);
     }});
@@ -4831,7 +4903,13 @@ def _relay_project_native_conversation_row(
     humanized = _relay_humanized_role_output_row(row, body, job=job)
     if humanized is not None:
         return humanized
-    return row
+    return {
+        **row,
+        "body": _relay_sanitize_protocol_leak_text(
+            str(row.get("role") or ""),
+            body,
+        ),
+    }
 
 
 def _relay_humanized_role_output_row(
@@ -4861,7 +4939,11 @@ def _relay_humanized_role_output_row(
             "kind": "role_error",
             "body": _relay_role_output_error_text(str(row.get("role") or ""), error),
         }
-    return None
+    return {
+        **row,
+        "kind": "role_error",
+        "body": _relay_protocol_output_hidden_text(str(row.get("role") or "")),
+    }
 
 
 def _relay_text_looks_like_role_envelope(text: str) -> bool:
@@ -4882,6 +4964,8 @@ def _relay_text_looks_like_role_envelope(text: str) -> bool:
 
 
 def _relay_humanize_user_message(text: str) -> str:
+    if "你刚才作为" in text and "expected_output_envelope:" in text:
+        return "系统已要求当前角色重新输出合法结构化结果。"
     if "latest_user_input:" not in text and "expected_output_envelope:" not in text:
         return text
     return (
@@ -4922,6 +5006,23 @@ def _relay_extract_context_field(text: str, field: str) -> str:
     return ""
 
 
+def _relay_sanitize_protocol_leak_text(role: str, text: str) -> str:
+    value = _relay_humanize_display_text(text)
+    sentinel = "原始结构化输出不在主会话展示。"
+    if sentinel in value:
+        return value.split(sentinel, 1)[0] + sentinel
+    markers = (
+        "artifact_type",
+        "expected_output_envelope",
+        "routing_decisioncomplexity",
+        "required_roles",
+        "handoff_to",
+    )
+    if "{" in value and any(marker in value for marker in markers):
+        return _relay_protocol_output_hidden_text(role)
+    return value
+
+
 def _relay_dict_looks_like_role_envelope(payload: dict[str, Any]) -> bool:
     return any(
         key in payload
@@ -4943,12 +5044,15 @@ def _relay_humanize_role_envelope(payload: dict[str, Any]) -> str:
         payload.get("summary") or payload.get("output") or payload.get("reason") or ""
     ).strip()
     if summary:
+        summary = _relay_humanize_display_text(summary)
         lines.append(f"结论：{summary}")
     next_action = str(payload.get("next_action") or "").strip()
     if next_action:
+        next_action = _relay_humanize_display_text(next_action)
         lines.append(f"下一步：{next_action}")
     questions = _relay_join_text_list(payload.get("open_questions"))
     if questions:
+        questions = _relay_humanize_display_text(questions)
         lines.append(f"待确认：{questions}")
     route = str(payload.get("route") or "").strip()
     risk = str(payload.get("risk") or "").strip()
@@ -4961,6 +5065,7 @@ def _relay_humanize_role_envelope(payload: dict[str, Any]) -> str:
         lines.append(" · ".join(parts))
     acceptance = _relay_join_text_list(payload.get("acceptance_criteria"))
     if acceptance:
+        acceptance = _relay_humanize_display_text(acceptance)
         lines.append(f"验收依据：{acceptance}")
     if not lines:
         lines.append("角色已返回结构化结果。")
@@ -4977,9 +5082,14 @@ def _relay_role_output_error_text(role: str, error: str) -> str:
     role_label = _relay_role_label(role)
     lines = [f"{role_label}输出格式异常，任务已阻塞。"]
     if error:
-        lines.append(f"错误：{error}")
+        lines.append(f"错误：{_relay_humanize_display_text(error)}")
     lines.append("请补充确认后重新调度，原始结构化输出不在主会话展示。")
     return "\n".join(lines)
+
+
+def _relay_protocol_output_hidden_text(role: str) -> str:
+    role_label = _relay_role_label(role)
+    return f"{role_label}的结构化输出已由系统处理，原始协议内容不在主会话展示。"
 
 
 def _relay_native_message_html(row: dict[str, str]) -> str:

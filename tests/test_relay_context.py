@@ -93,3 +93,32 @@ def test_director_first_context_requires_routing_decision() -> None:
         "director_only|core_relay|full_relay|audit_first|waiting_user|blocked"
     )
     assert packet.expected_output_envelope["required_roles"] == ["director"]
+
+
+def test_director_after_routing_decision_requires_final_summary() -> None:
+    board = build_relay_board(
+        _task(),
+        latest_user_input="请用一句中文回答今日天气是否适合带伞。",
+    )
+
+    packet = build_role_context_packet(
+        task=_task(),
+        role="director",
+        board=board,
+        handoffs=[],
+        artifacts=[
+            {
+                "artifact_type": "routing_decision",
+                "relay_role": "director",
+                "summary": "由总工程师直接处理。",
+                "route": "director_only",
+                "required_roles": ["director"],
+            }
+        ],
+    )
+
+    constraints = " ".join(packet.constraints)
+    assert "must return a final_summary artifact" in constraints
+    assert "Do not invent task-specific artifact_type values" in constraints
+    assert packet.expected_output_envelope["artifact_type"] == "final_summary"
+    assert packet.expected_output_envelope["handoff_to"] == ""

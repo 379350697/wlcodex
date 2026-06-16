@@ -4,6 +4,7 @@ from typing import Any
 
 
 DEFAULT_ANTIGRAVITY_MODEL = "Claude Opus 4.6 (Thinking)"
+ANTIGRAVITY_QUOTA_FALLBACK_MODEL = "Gemini 3.5 Flash (High)"
 
 _ANTIGRAVITY_MODELS = (
     "Claude Opus 4.6 (Thinking)",

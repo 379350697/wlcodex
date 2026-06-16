@@ -321,6 +321,89 @@ def test_invalid_envelope_blocks_advancement(tmp_path) -> None:
     )
 
 
+def test_invalid_streamed_envelope_retries_format_once(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="请回答今日天气。",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+
+    result = asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            '{"artifact_type":"routing_decisioncomplexitylow"}',
+        )
+    )
+
+    detail = service.get_task(task.id)
+    director = next(job for job in detail.role_jobs if job.role == "director")
+    assert result.ok is False
+    assert detail.task.status == "running"
+    assert director.status == "streaming"
+    assert provider.calls[-1][0] == "continue_session"
+    assert "只重新输出一个合法 JSON object" in provider.calls[-1][2]
+    assert '"artifact_type": "routing_decision"' in provider.calls[-1][2]
+    assert any(
+        artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "director"
+        and artifact.get("retry_kind") == "format"
+        for artifact in detail.artifacts
+    )
+
+
+def test_malformed_director_routing_recovers_explicit_full_relay(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt=(
+            "请按完整五角色接力流程审查，不要修改任何文件，不要提交，不要部署。"
+            "总工程师、架构工程师、开发工程师、测试工程师、审计工程师都要参与。"
+        ),
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {"retry_kind": "format", "error": "invalid json"},
+        summary="format retry already attempted",
+    )
+
+    result = asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            (
+                '{"artifact_type":"routing_decisioncomplexityhighevidence_refs":[]'
+                'routefullstatuspassedrequired_rolesdirector"}'
+            ),
+        )
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert result.ok is False
+    assert detail.task.status == "running"
+    assert detail.routing_decision is not None
+    assert detail.routing_decision["route"] == "full_relay"
+    assert detail.routing_decision["required_roles"] == [
+        "director",
+        "architect",
+        "implementer",
+        "tester",
+        "auditor",
+    ]
+    assert jobs["architect"].status == "streaming"
+    assert provider.calls[-1][0] == "start_session"
+    assert "role: architect" in provider.calls[-1][2]
+
+
 def test_successful_role_envelopes_dispatch_next_roles(tmp_path) -> None:
     service, provider = _service(tmp_path)
     task = service.create_task(
@@ -665,7 +748,7 @@ def test_user_followup_continue_emits_dispatch_verified(tmp_path) -> None:
     assert event_types[-2:] == ["role.streaming", "dispatch.verified"]
 
 
-def test_codex_turn_completed_folds_text_deltas_into_role_completion(
+def test_non_native_turn_completed_folds_text_deltas_into_role_completion(
     tmp_path,
 ) -> None:
     service, _provider = _service(tmp_path)
@@ -691,8 +774,8 @@ def test_codex_turn_completed_folds_text_deltas_into_role_completion(
                 aggregate_type=AggregateType.AGENT_RUN,
                 aggregate_id="101",
                 correlation_id="corr-101",
-                source=EventSource.CODEX,
-                actor="codex",
+                source=EventSource.CLAUDE,
+                actor="claude",
                 visibility=Visibility.USER,
                 payload={"delta": delta},
                 occurred_at=now_iso(),
@@ -706,8 +789,8 @@ def test_codex_turn_completed_folds_text_deltas_into_role_completion(
             aggregate_type=AggregateType.AGENT_RUN,
             aggregate_id="101",
             correlation_id="corr-101",
-            source=EventSource.CODEX,
-            actor="codex",
+            source=EventSource.CLAUDE,
+            actor="claude",
             visibility=Visibility.USER,
             payload={"action": "turn_completed", "status": "completed"},
             occurred_at=now_iso(),
@@ -726,6 +809,166 @@ def test_codex_turn_completed_folds_text_deltas_into_role_completion(
         "director must produce routing_decision before final_summary"
     )
     assert event_types[-1] == "role.status"
+
+
+def test_codex_native_empty_turn_completed_waits_for_text(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="查询今日金价",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CODEX,
+            actor="codex_native",
+            visibility=Visibility.USER,
+            payload={
+                "action": "turn_completed",
+                "status": "completed",
+                "source_kind": "codex_native",
+                "provider": "codex",
+                "provider_engine": "app-server",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    event_types = [event.event_type for event in service.events_for_task(task.id)]
+    assert detail.task.status == "running"
+    assert jobs["director"].status == "streaming"
+    assert "role.status" not in event_types
+
+
+def test_runtime_agent_run_failed_blocks_streaming_role(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    failed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="agent.run.failed",
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"status": "failed", "error": "provider login required"},
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+
+    service.project_runtime_event(failed)
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.task.status == "blocked"
+    assert jobs["director"].status == "blocked"
+    assert jobs["director"].error_message == "provider login required"
+    assert any(
+        artifact.get("artifact_type") == "role_error"
+        and artifact.get("summary") == "provider login required"
+        for artifact in detail.artifacts
+    )
+
+
+def test_codex_native_turn_completed_folds_text_deltas_into_routing_decision(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="查询今日天气",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    for delta in (
+        '{"status":"passed","reason":"simple lookup","role":"director",',
+        '"artifact_type":"routing_decision","handoff_to":"",',
+        '"summary":"直接查询天气","evidence_refs":["wttr"],',
+        '"open_questions":[],"next_action":"complete directly",',
+        '"route":"director_only","risk":"low","complexity":"low",',
+        '"required_roles":["director"],',
+        '"acceptance_criteria":["给出天气结论"],',
+        '"stop_conditions":[],"requires_user_approval":false}',
+    ):
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.MODEL_TEXT_DELTA,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id="101",
+                correlation_id="corr-101",
+                source=EventSource.CODEX,
+                actor="codex_native",
+                visibility=Visibility.USER,
+                payload={
+                    "delta": delta,
+                    "source_kind": "codex_native",
+                    "provider": "codex",
+                    "provider_engine": "app-server",
+                },
+                occurred_at=now_iso(),
+                agent_run_id=101,
+            )
+        )
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CODEX,
+            actor="codex_native",
+            visibility=Visibility.USER,
+            payload={
+                "action": "turn_completed",
+                "status": "completed",
+                "source_kind": "codex_native",
+                "provider": "codex",
+                "provider_engine": "app-server",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    event_types = [event.event_type for event in service.events_for_task(task.id)]
+    assert detail.routing_decision is not None
+    assert detail.routing_decision["route"] == "director_only"
+    assert detail.task.status == "running"
+    assert jobs["director"].status == "streaming"
+    assert event_types[-2:] == ["role.streaming", "dispatch.verified"]
 
 
 def test_director_final_summary_requires_prior_routing_decision(tmp_path) -> None:
@@ -834,6 +1077,54 @@ def test_director_only_routing_decision_allows_director_final_summary(tmp_path) 
     assert routing["route"] == "director_only"
     assert routing["complexity"] == "simple"
     assert routing["required_roles"] == ["director"]
+
+
+def test_director_only_routing_decision_dispatches_director_final_summary(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="查询今日金价",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "low risk realtime lookup",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "",
+              "summary": "总工程师直接查询并汇总。",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "complete directly",
+              "complexity": "low",
+              "risk": "low",
+              "route": "director_only",
+              "required_roles": ["director"],
+              "acceptance_criteria": ["返回价格、单位、币种、更新时间和来源"],
+              "stop_conditions": ["无法访问可靠行情来源"],
+              "requires_user_approval": false
+            }
+            """,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    event_types = [event.event_type for event in service.events_for_task(task.id)]
+    assert [call[0] for call in provider.calls] == ["start_session", "start_session"]
+    assert detail.task.status == "running"
+    assert jobs["director"].status == "streaming"
+    assert event_types[-2:] == ["role.streaming", "dispatch.verified"]
 
 
 def test_director_only_is_rejected_when_user_requests_full_relay(tmp_path) -> None:

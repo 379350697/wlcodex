@@ -848,6 +848,164 @@ async def test_relay_task_detail_humanizes_valid_role_envelope(
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_humanizes_internal_route_terms(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Gold price task",
+        prompt="今日黄金多少钱？",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-gold",
+        agent_run_id=402,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "streaming")
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=402,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": json.dumps(
+                {
+                    "status": "passed",
+                    "role": "director",
+                    "artifact_type": "routing_decision",
+                    "summary": "路由为director_only：直接查询并汇总今日金价。",
+                    "next_action": "complete directly after routing by checking current market sources and returning the latest available gold price",
+                    "route": "director_only",
+                    "risk": "low",
+                    "required_roles": ["director"],
+                    "acceptance_criteria": ["不展示 director_only 给用户"],
+                    "requires_user_approval": False,
+                },
+                ensure_ascii=False,
+            ),
+            "native_turn_id": "turn-gold-1",
+            "itemId": "gold-assistant-1",
+        },
+        occurred_at="2026-06-14T12:40:01+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    visible_html = response.split("<script", 1)[0]
+    assert 'data-native-kind="role_envelope"' in visible_html
+    assert "结论：由总工程师直接处理：直接查询并汇总今日金价。" in visible_html
+    assert "下一步：由总工程师核验最新行情来源并给出结果" in visible_html
+    assert "验收依据：不展示 总工程师直接处理 给用户" in visible_html
+    assert "路由为director_only" not in visible_html
+    assert "complete directly after routing by checking current market sources" not in visible_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_hides_retry_prompt_and_malformed_protocol_output(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Complex relay task",
+        prompt="请按完整五角色接力流程审查，不要修改任何文件。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-complex",
+        agent_run_id=502,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_task_status(task.id, "running")
+    retry_prompt = (
+        "你刚才作为总工程师输出的接力结果不是合法 role_envelope JSON，服务端无法继续工作流。\n"
+        "请只重新输出一个合法 JSON object。\n"
+        'expected_output_envelope:\n{"route":"director_only|core_relay|full_relay",'
+        '"next_action":"complete directly"}\n'
+        "上一版无效输出如下，请保留语义、修正结构：\n"
+        '{"artifact_type":"routing_decisioncomplexityhighroutefull_relay"}'
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=502,
+        event_type=EventType.USER_MESSAGE_RECEIVED,
+        payload={
+            "text": retry_prompt,
+            "native_turn_id": "turn-complex-retry",
+            "itemId": "complex-user-retry",
+        },
+        occurred_at="2026-06-14T12:50:01+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=502,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": '{"artifact_type":"routing_decisioncomplexityhighroutefull_relaynext_actioncomplete directly"',
+            "native_turn_id": "turn-complex-retry",
+            "itemId": "complex-assistant-malformed",
+        },
+        occurred_at="2026-06-14T12:50:02+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=502,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": (
+                "总工程师输出格式异常，任务已阻塞。\n"
+                "错误：invalid json: Expecting ',' delimiter\n"
+                "请补充确认后重新调度，原始结构化输出不在主会话展示。"
+                '{"artifact_type":"routing_decisioncomplexityhighroutefull_relay"}'
+            ),
+            "native_turn_id": "turn-complex-retry-2",
+            "itemId": "complex-assistant-leaked-error",
+        },
+        occurred_at="2026-06-14T12:50:03+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    visible_html = response.split("<script", 1)[0]
+    assert "系统已要求当前角色重新输出合法结构化结果。" in visible_html
+    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" in visible_html
+    assert "总工程师输出格式异常，任务已阻塞。" in visible_html
+    assert "expected_output_envelope" not in visible_html
+    assert "director_only" not in visible_html
+    assert "full_relay" not in visible_html
+    assert "complete directly" not in visible_html
+    assert "routing_decisioncomplexityhigh" not in visible_html
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_board_view_activates_status_cards(
     tmp_path: Path,
 ) -> None:

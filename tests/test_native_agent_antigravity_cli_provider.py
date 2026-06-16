@@ -681,6 +681,67 @@ async def test_cli_provider_forwards_explicit_model_to_runner(
 
 
 @pytest.mark.asyncio
+async def test_cli_provider_falls_back_to_gemini_high_for_opus_quota_error(
+    tmp_path: Path,
+) -> None:
+    class QuotaThenGeminiRunner(FakeAntigravityCliRunner):
+        async def run(
+            self,
+            *,
+            prompt: str,
+            cwd: str,
+            conversation_id: str = "",
+            model: str = "",
+            extra_dirs: tuple[str, ...] = (),
+            dangerously_skip_permissions: bool = False,
+            sandbox: bool = False,
+        ):
+            self.calls.append(
+                {
+                    "prompt": prompt,
+                    "cwd": cwd,
+                    "conversation_id": conversation_id,
+                    "model": model,
+                    "extra_dirs": extra_dirs,
+                    "dangerously_skip_permissions": bool(dangerously_skip_permissions),
+                    "sandbox": bool(sandbox),
+                }
+            )
+            if model == "Claude Opus 4.6 (Thinking)":
+                raise RuntimeError("Quota exceeded for Claude Opus 4.6")
+            yield {
+                "type": "assistant",
+                "text": "fallback ok",
+                "conversation_id": conversation_id or "ag-conv-fallback",
+            }
+
+    runner = QuotaThenGeminiRunner()
+    provider, store, _runtime_store, _runner = _provider(tmp_path, runner=runner)
+
+    result = await provider.start_session(str(tmp_path), "quota fallback")
+    await provider.wait_for_background_tasks()
+
+    assert [call["model"] for call in runner.calls] == [
+        "Claude Opus 4.6 (Thinking)",
+        "Gemini 3.5 Flash (High)",
+    ]
+    session = store.get_by_native_session_id(
+        provider="antigravity",
+        provider_engine="cli-local",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    assert session.status == "done"
+    assert session.metadata["antigravity_model"] == "Gemini 3.5 Flash (High)"
+    assert session.metadata["antigravity_model_fallback_from"] == (
+        "Claude Opus 4.6 (Thinking)"
+    )
+    assert session.metadata["antigravity_model_fallback_reason"] == (
+        "Quota exceeded for Claude Opus 4.6"
+    )
+
+
+@pytest.mark.asyncio
 async def test_cli_provider_imports_local_pb_history_and_can_continue_it(
     tmp_path: Path,
 ) -> None:
@@ -902,7 +963,7 @@ async def test_cli_provider_ignores_stale_latest_local_cwd(
 
 
 @pytest.mark.asyncio
-async def test_cli_provider_empty_output_failure_mentions_cli_setup(
+async def test_cli_provider_empty_output_failure_does_not_fallback_to_gemini(
     tmp_path: Path,
 ) -> None:
     class EmptyRunner(FakeAntigravityCliRunner):
@@ -931,7 +992,7 @@ async def test_cli_provider_empty_output_failure_mentions_cli_setup(
             if False:
                 yield {}
 
-    provider, store, _runtime_store, _runner = _provider(
+    provider, store, _runtime_store, runner = _provider(
         tmp_path,
         runner=EmptyRunner(),
     )
@@ -946,7 +1007,11 @@ async def test_cli_provider_empty_output_failure_mentions_cli_setup(
     )
     assert session is not None
     assert session.status == "failed"
-    assert "Run agy" in session.metadata["error"]
+    assert len(runner.calls) == 1
+    assert runner.calls[0]["model"] == "Claude Opus 4.6 (Thinking)"
+    assert "completed without assistant output" in session.metadata["error"]
+    assert "quota" not in session.metadata["error"].lower()
+    assert "Run agy" not in session.metadata["error"]
 
 
 @pytest.mark.asyncio
@@ -1096,7 +1161,12 @@ async def test_cli_runner_builds_agy_print_command(monkeypatch, tmp_path: Path) 
     ]
 
     args, kwargs = commands[0]
-    assert args == (
+    assert "--log-file" in args
+    log_file_index = args.index("--log-file")
+    log_file = args[log_file_index + 1]
+    args_without_log_file = args[:log_file_index] + args[log_file_index + 2 :]
+    assert log_file.endswith(".log")
+    assert args_without_log_file == (
         str(fake_binary),
         "--print-timeout",
         "7m0s",
@@ -1116,6 +1186,104 @@ async def test_cli_runner_builds_agy_print_command(monkeypatch, tmp_path: Path) 
     assert kwargs["cwd"] == str(tmp_path)
     assert events == [
         {"type": "assistant", "text": "hello\n", "conversation_id": "conv-1"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cli_runner_raises_quota_error_from_silent_print_log(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        AntigravityCliConfig,
+        AntigravityCliRunner,
+    )
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, log_file: str) -> None:
+            self.log_file = log_file
+
+        async def communicate(self):
+            Path(self.log_file).write_text(
+                "E0616 log.go:398] RESOURCE_EXHAUSTED (code 429): "
+                "Individual quota reached. Contact your administrator to "
+                "enable overages. Resets in 22h50m44s.\n",
+                encoding="utf-8",
+            )
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        log_file = args[args.index("--log-file") + 1]
+        return FakeProcess(str(log_file))
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    fake_binary = tmp_path / "agy"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = AntigravityCliRunner(AntigravityCliConfig(binary=str(fake_binary)))
+
+    with pytest.raises(RuntimeError, match="Individual quota reached"):
+        _events = [
+            event
+            async for event in runner.run(
+                prompt="hello",
+                cwd=str(tmp_path),
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_cli_runner_ignores_benign_quota_project_log_field(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from wlcodex.native_agents.antigravity_cli_provider import (
+        AntigravityCliConfig,
+        AntigravityCliRunner,
+    )
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, log_file: str) -> None:
+            self.log_file = log_file
+
+        async def communicate(self):
+            Path(self.log_file).write_text(
+                "I0616 server_oauth.go:212] applyAuthResult: "
+                "email=, authMethod=consumer, quotaProject=\n",
+                encoding="utf-8",
+            )
+            return b"OK\n", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        log_file = args[args.index("--log-file") + 1]
+        return FakeProcess(str(log_file))
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    fake_binary = tmp_path / "agy"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = AntigravityCliRunner(AntigravityCliConfig(binary=str(fake_binary)))
+
+    events = [
+        event
+        async for event in runner.run(
+            prompt="hello",
+            cwd=str(tmp_path),
+        )
+    ]
+
+    assert events == [
+        {"type": "assistant", "text": "OK\n", "conversation_id": ""}
     ]
 
 
