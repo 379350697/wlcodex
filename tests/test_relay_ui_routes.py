@@ -1206,8 +1206,115 @@ async def test_relay_conversation_hides_blocked_error_details_and_dedupes_user_p
     assert "请补充确认后重新调度" not in conversation_html
     assert "expected_output_envelope" not in conversation_html
     assert "你刚才作为总工程师" not in conversation_html
+    assert 'data-conversation-role-preview="director"' not in conversation_html
     assert "总工程师执行问题" in board_html
     assert "invalid json: Expecting" in board_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_projects_running_delta_as_initial_preview(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Live preview task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-live-preview",
+        agent_run_id=501,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "streaming")
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=501,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": "总工程师正在拆解任务，先确认影响面。",
+            "native_turn_id": "turn-live-preview",
+            "itemId": "assistant-live-preview",
+        },
+        occurred_at="2026-06-14T14:00:01+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert 'data-conversation-role-preview="director"' in conversation_html
+    assert 'data-conversation-role-final="director"' not in conversation_html
+    assert 'data-raw-preview="总工程师正在拆解任务，先确认影响面。"' in conversation_html
+    assert 'data-preview-event-ids="1"' in conversation_html
+    assert "总工程师正在拆解任务，先确认影响面。" in _relay_message_bodies_html(
+        conversation_html
+    )
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_projects_structured_running_delta_as_counted_preview(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Structured live preview task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-structured-preview",
+        agent_run_id=502,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "streaming")
+    delta = '{"artifact_type":"routing_decision","handoff_to":"architect"'
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=502,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": delta,
+            "native_turn_id": "turn-structured-preview",
+            "itemId": "assistant-structured-preview",
+        },
+        occurred_at="2026-06-14T14:00:01+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    bodies_html = _relay_message_bodies_html(conversation_html)
+    assert 'data-conversation-role-preview="director"' in conversation_html
+    assert "正在接收结构化输出" in bodies_html
+    assert f"已接收 {len(delta)} 字" in bodies_html
 
 
 @pytest.mark.asyncio
@@ -1237,6 +1344,12 @@ async def test_relay_task_detail_streaming_delta_is_preview_not_final_output(
     assert "function appendRolePreview" in response
     assert "function relayPreviewDisplayText" in response
     assert "function renderRoleEnvelope" in response
+    assert "已接收 ${value.length} 字" in response
+    assert "function clearAllRolePreviews" in response
+    assert "const seenPreviewEventKeys = new Set" in response
+    assert "function previewEventKey" in response
+    assert "renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);" in response
+    assert 'appendRolePreview(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);' in response
     delta_handler = response.split('source.addEventListener("role.output_delta"', 1)[1]
     delta_handler = delta_handler.split('source.addEventListener("routing.decision"', 1)[0]
     assert "appendRolePreview" in delta_handler

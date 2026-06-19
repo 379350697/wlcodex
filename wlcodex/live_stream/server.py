@@ -4403,6 +4403,7 @@ def _relay_task_detail_page(
     const nativeTranscriptNodes = new Map();
     const nativeEnvelopeBuffers = new Map();
     const conversationUserBodies = new Set();
+    const seenPreviewEventKeys = new Set();
     function scrollNativeConversationToEnd() {{
       if (conversationTimeline) conversationTimeline.scrollTop = conversationTimeline.scrollHeight;
     }}
@@ -4623,7 +4624,7 @@ def _relay_task_detail_page(
       scrollNativeConversationToEnd();
       return block;
     }}
-    function renderRelayNativeEvent(role, nativeEvent) {{
+    function renderRelayNativeEvent(role, nativeEvent, runtimeEventId = "") {{
       if (!conversationTimeline || !nativeEvent) return;
       const kind = nativeEvent.kind || "event";
       const payload = nativeEventPayload(nativeEvent);
@@ -4645,7 +4646,7 @@ def _relay_task_detail_page(
         return;
       }}
       if (kind === "text_delta") {{
-        appendRolePreview(role, text);
+        appendRolePreview(role, text, runtimeEventId || nativeEvent?.id);
         setRoleStatus(role, "streaming");
         return;
       }}
@@ -4677,16 +4678,24 @@ def _relay_task_detail_page(
       const normalizedBody = relayNormalizeConversationText(node.textContent || "");
       if (normalizedBody) conversationUserBodies.add(normalizedBody);
     }});
+    function previewEventKey(role, eventId) {{
+      const value = String(eventId || "").trim();
+      return value ? `${{role || ""}}:${{value}}` : "";
+    }}
     function relayPreviewDisplayText(role, text) {{
       const value = String(text || "");
       const markers = ["artifact_type", "expected_output_envelope", "routing_decisioncomplexity", "required_roles", "handoff_to", "acceptance_criteria"];
       if (value.includes("{{") && markers.some((marker) => value.includes(marker))) {{
-        return `${{labelForRole(role)}} 正在接收结构化输出，完成后展示 canonical 摘要和 JSON。`;
+        return `${{labelForRole(role)}} 正在接收结构化输出，完成后展示 canonical 摘要和 JSON。（已接收 ${{value.length}} 字）`;
       }}
       return relaySanitizeProtocolLeakText(role, value);
     }}
-    function appendRolePreview(role, text) {{
+    function appendRolePreview(role, text, eventId = "") {{
       if (!role || !text) return;
+      if (TERMINAL_ROLE_STATUSES.has(currentRoleStatus(role))) return;
+      const eventKey = previewEventKey(role, eventId);
+      if (eventKey && seenPreviewEventKeys.has(eventKey)) return;
+      if (eventKey) seenPreviewEventKeys.add(eventKey);
       const preview = rolePreviews[role];
       let rawPreview = text;
       if (preview) {{
@@ -4715,6 +4724,9 @@ def _relay_task_detail_page(
         preview.classList.add("is-idle");
       }}
       conversationTimeline?.querySelector(`[data-conversation-role-preview="${{role}}"]`)?.remove();
+    }}
+    function clearAllRolePreviews() {{
+      Object.keys(rolePreviews).forEach(clearRolePreview);
     }}
     function canonicalEnvelopeJson(envelope) {{
       return JSON.stringify(envelope || {{}}, null, 2);
@@ -4758,6 +4770,20 @@ def _relay_task_detail_page(
         ensureCanonicalDetails(node, role, envelope);
       }}
     }}
+    document.querySelectorAll("[data-conversation-role-preview]").forEach((node) => {{
+      const role = node.dataset.conversationRolePreview;
+      const rawPreview = node.dataset.rawPreview || "";
+      const preview = rolePreviews[role];
+      if (preview && rawPreview) {{
+        preview.dataset.rawPreview = rawPreview;
+        preview.textContent = relayPreviewDisplayText(role, rawPreview);
+        preview.classList.remove("is-idle");
+      }}
+      (node.dataset.previewEventIds || "").split(",").filter(Boolean).forEach((eventId) => {{
+        const eventKey = previewEventKey(role, eventId);
+        if (eventKey) seenPreviewEventKeys.add(eventKey);
+      }});
+    }});
     const TERMINAL_ROLE_STATUSES = new Set(["passed", "completed", "blocked", "failed", "interrupted"]);
     function currentRoleStatus(role) {{
       const lane = document.querySelector(`[data-role="${{role}}"]`);
@@ -4833,11 +4859,11 @@ def _relay_task_detail_page(
     }});
     source.addEventListener("role.native_event", (event) => {{
       const payload = parseRelayEvent(event);
-      renderRelayNativeEvent(payload.role, payload.native_event || payload);
+      renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);
     }});
     source.addEventListener("role.output_delta", (event) => {{
       const payload = parseRelayEvent(event);
-      appendRolePreview(payload.role, payload.delta || payload.text || "");
+      appendRolePreview(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);
       setRoleStatus(payload.role, "streaming");
     }});
     source.addEventListener("routing.decision", (event) => {{
@@ -4892,14 +4918,17 @@ def _relay_task_detail_page(
     source.addEventListener("role.status", (event) => {{
       const payload = parseRelayEvent(event);
       setRoleStatus(payload.role, payload.status);
+      if (TERMINAL_ROLE_STATUSES.has(payload.status)) clearRolePreview(payload.role);
       appendActivity(`${{labelForRole(payload.role)}} 状态更新为 ${{labelForStatus(payload.status)}}。`);
     }});
     source.addEventListener("task.completed", () => {{
       updateTaskStatus("completed");
+      clearAllRolePreviews();
       appendActivity("任务已完成，可以继续补充给总工程师进行追问或追加验收。");
     }});
     source.addEventListener("task.interrupted", () => {{
       updateTaskStatus("interrupted");
+      clearAllRolePreviews();
       appendActivity("任务已中断。");
     }});
     document.querySelector(".relay-composer")?.addEventListener("submit", async (event) => {{
@@ -5057,9 +5086,13 @@ def _relay_native_conversation_html(
                     "meta": str(worker_event.source or ""),
                     "body": "",
                     "key": key,
+                    "preview_event_ids": str(worker_event.id),
                 }
                 rows.append(row)
                 row_by_key[key] = row
+            event_ids = set(filter(None, row_by_key[key].get("preview_event_ids", "").split(",")))
+            event_ids.add(str(worker_event.id))
+            row_by_key[key]["preview_event_ids"] = ",".join(sorted(event_ids, key=int))
             row_by_key[key]["body"] += text
             continue
         row = _relay_native_event_row(role, display_name, worker_event)
@@ -5183,7 +5216,43 @@ def _relay_project_native_conversation_row(
     humanized = _relay_humanized_role_output_row(row, body, job=job)
     if humanized is not None and str(humanized.get("kind") or "") == "role_envelope":
         return humanized
+    if kind == "text_delta" and _relay_role_job_is_live_preview(job):
+        role = str(row.get("role") or "")
+        return {
+            **row,
+            "kind": "text_delta",
+            "meta": "实时预览",
+            "body": _relay_preview_display_text(role, body),
+            "raw_preview": body,
+        }
     return None
+
+
+def _relay_role_job_is_live_preview(job: Any | None) -> bool:
+    if job is None:
+        return False
+    status = str(getattr(job, "status", "") or "")
+    if status in {"blocked", "failed", "interrupted", "passed", "completed"}:
+        return False
+    return status == "streaming" or bool(getattr(job, "turn_running", False))
+
+
+def _relay_preview_display_text(role: str, text: str) -> str:
+    value = str(text or "")
+    markers = (
+        "artifact_type",
+        "expected_output_envelope",
+        "routing_decisioncomplexity",
+        "required_roles",
+        "handoff_to",
+        "acceptance_criteria",
+    )
+    if "{" in value and any(marker in value for marker in markers):
+        return (
+            f"{_relay_role_label(role)} 正在接收结构化输出，"
+            f"完成后展示 canonical 摘要和 JSON。（已接收 {len(value)} 字）"
+        )
+    return _relay_sanitize_protocol_leak_text(role, value)
 
 
 def _relay_conversation_row_is_task_status_noise(row: dict[str, str]) -> bool:
@@ -5444,6 +5513,18 @@ def _relay_native_message_html(row: dict[str, str]) -> str:
         if kind == "text_delta"
         else ""
     )
+    raw_preview = str(row.get("raw_preview") or "")
+    raw_preview_attr = (
+        f' data-raw-preview="{escape(raw_preview)}"'
+        if kind == "text_delta" and raw_preview
+        else ""
+    )
+    preview_event_ids = str(row.get("preview_event_ids") or "")
+    preview_event_ids_attr = (
+        f' data-preview-event-ids="{escape(preview_event_ids)}"'
+        if kind == "text_delta" and preview_event_ids
+        else ""
+    )
     canonical_json = str(row.get("canonical_json") or "")
     canonical_html = (
         '<details class="role-canonical-json">'
@@ -5454,7 +5535,7 @@ def _relay_native_message_html(row: dict[str, str]) -> str:
         else ""
     )
     return f"""
-      <article class="relay-message" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(row.get("key", "") or "")}"{role_final_attr}{role_preview_attr}>
+      <article class="relay-message" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(row.get("key", "") or "")}"{role_final_attr}{role_preview_attr}{raw_preview_attr}{preview_event_ids_attr}>
         <div class="relay-message-head">
           <strong>{escape(row.get("speaker", "") or "系统")}</strong>
           {meta_html}
