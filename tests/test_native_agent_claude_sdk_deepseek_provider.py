@@ -392,9 +392,11 @@ async def test_start_session_returns_before_sdk_runner_finishes_and_streams_even
         EventType.AGENT_RUN_STARTED,
         EventType.USER_MESSAGE_RECEIVED,
         EventType.MODEL_TEXT_DELTA,
+        EventType.MODEL_MESSAGE_COMPLETED,
         EventType.AGENT_RUN_COMPLETED,
     ]
     assert events[2].payload["delta"] == "background done"
+    assert events[3].payload["text"] == "background done"
 
 
 @pytest.mark.asyncio
@@ -456,6 +458,41 @@ async def test_interrupt_session_stays_interrupted_when_sdk_raises_after_interru
 
 
 @pytest.mark.asyncio
+async def test_interrupt_session_cancels_turn_when_sdk_interrupt_raises(
+    tmp_path: Path,
+) -> None:
+    class InterruptRaisesRunner(BlockingSdkRunner):
+        async def interrupt(self, *, session_id: str, turn_id: str) -> bool:
+            self.interrupt_calls.append((session_id, turn_id))
+            raise RuntimeError("sdk interrupt failed")
+
+    runner = InterruptRaisesRunner()
+    provider, _runner, store, runtime_store = _provider(tmp_path, runner=runner)
+
+    result = await provider.start_session(str(tmp_path), "long run")
+    interrupted = await provider.interrupt_session(
+        result.native_session_id,
+        turn_id=result.turn_id,
+    )
+    await provider.wait_for_background_tasks()
+
+    assert interrupted.status == "interrupted"
+    assert runner.interrupt_calls == [(result.native_session_id, result.turn_id)]
+    session = store.get_by_native_session_id(
+        provider="claude",
+        provider_engine="sdk-deepseek",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    assert session.status == "interrupted"
+    assert session.metadata["error"] == "interrupted"
+    assert session.metadata["interrupt_error"] == "RuntimeError"
+    events = runtime_store.list_by_agent_run(result.agent_run_id)
+    assert events[-1].event_type == EventType.AGENT_RUN_FAILED
+    assert events[-1].payload["error"] == "interrupted"
+
+
+@pytest.mark.asyncio
 async def test_structured_sdk_messages_emit_text_and_persist_diagnostics(
     tmp_path: Path,
 ) -> None:
@@ -498,11 +535,13 @@ async def test_structured_sdk_messages_emit_text_and_persist_diagnostics(
         EventType.MODEL_TEXT_DELTA,
         EventType.TOOL_CALL_STARTED,
         EventType.MODEL_USAGE_UPDATED,
+        EventType.MODEL_MESSAGE_COMPLETED,
         EventType.AGENT_RUN_COMPLETED,
     ]
     assert events[2].payload["delta"] == "hello "
     assert events[3].payload["tool_name"] == "Read"
     assert events[4].payload["usage"] == {"input_tokens": 3, "output_tokens": 5}
+    assert events[5].payload["text"] == "hello "
     session = store.get_by_native_session_id(
         provider="claude",
         provider_engine="sdk-deepseek",
@@ -510,10 +549,79 @@ async def test_structured_sdk_messages_emit_text_and_persist_diagnostics(
     )
     assert session is not None
     assert session.metadata["claude_session_id"] == "sdk-session-123"
+    assert session.metadata["assistant_text"] == "hello "
     assert session.metadata["usage"] == {"input_tokens": 3, "output_tokens": 5}
     assert session.metadata["tool_events"] == [
         {"id": "tool-1", "name": "Read", "status": "started"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_sdk_object_blocks_emit_incremental_text_and_tools(
+    tmp_path: Path,
+) -> None:
+    class ObjectBlockRunner(FakeSdkRunner):
+        async def run(self, **kwargs):
+            self.calls.append(kwargs)
+            yield SimpleNamespace(
+                type="assistant",
+                content=[SimpleNamespace(type="text", text="hel")],
+            )
+            yield SimpleNamespace(
+                type="assistant",
+                content=[SimpleNamespace(type="text", text="hello")],
+            )
+            yield SimpleNamespace(
+                type="assistant",
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id="tool-obj",
+                        name="Read",
+                        input={"file_path": "README.md"},
+                    )
+                ],
+            )
+            yield SimpleNamespace(
+                type="result",
+                session_id="sdk-object-session",
+                usage={"input_tokens": 1, "output_tokens": 2},
+            )
+
+    provider, _runner, store, runtime_store = _provider(
+        tmp_path,
+        runner=ObjectBlockRunner(),
+    )
+
+    result = await provider.start_session(str(tmp_path), "inspect object blocks")
+    await provider.wait_for_background_tasks()
+
+    events = runtime_store.list_by_agent_run(result.agent_run_id)
+    text_events = [
+        event.payload["delta"]
+        for event in events
+        if event.event_type == EventType.MODEL_TEXT_DELTA
+    ]
+    assert text_events == ["hel", "lo"]
+    assert any(
+        event.event_type == EventType.TOOL_CALL_STARTED
+        and event.payload["tool_id"] == "tool-obj"
+        and event.payload["tool_name"] == "Read"
+        for event in events
+    )
+    completed = [
+        event.payload["text"]
+        for event in events
+        if event.event_type == EventType.MODEL_MESSAGE_COMPLETED
+    ]
+    assert completed == ["hello"]
+    session = store.get_by_native_session_id(
+        provider="claude",
+        provider_engine="sdk-deepseek",
+        native_session_id=result.native_session_id,
+    )
+    assert session is not None
+    assert session.metadata["assistant_text"] == "hello"
 
 
 @pytest.mark.asyncio

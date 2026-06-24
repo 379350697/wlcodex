@@ -103,3 +103,14 @@ def test_extract_native_agent_text_handles_common_runner_shapes() -> None:
     assert extract_native_agent_text({"content": [{"text": "a"}, {"text": "b"}]}) == "ab"
     assert extract_native_agent_text(SimpleNamespace(delta="from object")) == "from object"
     assert extract_native_agent_text(SimpleNamespace(content=[{"text": "x"}])) == "x"
+    assert (
+        extract_native_agent_text(
+            SimpleNamespace(
+                content=[
+                    SimpleNamespace(type="text", text="sdk "),
+                    SimpleNamespace(type="text", text="block"),
+                ],
+            )
+        )
+        == "sdk block"
+    )

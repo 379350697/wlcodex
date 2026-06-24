@@ -48,6 +48,7 @@ class ClaudeSdkDeepSeekConfig:
 class _RunOutcome:
     status: str
     claude_session_id: str = ""
+    assistant_text: str = ""
     usage: dict[str, Any] | None = None
     tool_events: list[dict[str, Any]] | None = None
     raw_tail: list[dict[str, Any]] | None = None
@@ -379,11 +380,23 @@ class ClaudeSdkDeepSeekProvider:
         if active is None or active.session_id != native_session_id:
             raise KeyError(turn_id or native_session_id)
         active.interrupted = True
+        interrupt_error = ""
         interrupt = getattr(self._runner, "interrupt", None)
+        interrupted = False
         if callable(interrupt):
-            await interrupt(session_id=native_session_id, turn_id=active.turn_id)
+            try:
+                interrupted = bool(
+                    await interrupt(session_id=native_session_id, turn_id=active.turn_id)
+                )
+            except Exception as exc:
+                interrupt_error = exc.__class__.__name__ or str(exc)
+        if not interrupted and not active.task.done():
+            await asyncio.sleep(0)
+            active.task.cancel()
         metadata = dict(session.metadata)
         metadata["error"] = "interrupted"
+        if interrupt_error:
+            metadata["interrupt_error"] = interrupt_error
         updated = self._session_store.update_session(
             session.id,
             status="interrupted",
@@ -422,6 +435,7 @@ class ClaudeSdkDeepSeekProvider:
         )
         usage: dict[str, Any] | None = None
         claude_session_id = ""
+        assistant_text = ""
         tool_events: list[dict[str, Any]] = []
         raw_tail: deque[dict[str, Any]] = deque(maxlen=20)
         try:
@@ -438,12 +452,17 @@ class ClaudeSdkDeepSeekProvider:
                 if event_session_id:
                     claude_session_id = event_session_id
                 text = extract_native_agent_text(_event)
-                if text and self._runtime_store is not None:
-                    self._emitter().text_delta(
-                        session,
-                        native_turn_id=native_turn_id,
-                        delta=text,
+                if text:
+                    delta, assistant_text = _append_assistant_text(
+                        assistant_text,
+                        text,
                     )
+                    if delta and self._runtime_store is not None:
+                        self._emitter().text_delta(
+                            session,
+                            native_turn_id=native_turn_id,
+                            delta=delta,
+                        )
                 for tool_event in _extract_tool_events(_event):
                     tool_events.append(tool_event)
                     if self._runtime_store is not None:
@@ -463,6 +482,20 @@ class ClaudeSdkDeepSeekProvider:
                             native_turn_id=native_turn_id,
                             usage=event_usage,
                         )
+        except asyncio.CancelledError:
+            active = self._active_turns.get(native_turn_id)
+            if active is not None and active.interrupted:
+                return _RunOutcome(
+                    status="interrupted",
+                    error="interrupted",
+                    claude_session_id=claude_session_id,
+                    assistant_text=assistant_text,
+                    usage=usage,
+                    tool_events=tool_events,
+                    raw_tail=list(raw_tail),
+                    materialized_images=materialized_images,
+                )
+            raise
         except Exception as exc:
             active = self._active_turns.get(native_turn_id)
             if active is not None and active.interrupted:
@@ -470,6 +503,7 @@ class ClaudeSdkDeepSeekProvider:
                     status="interrupted",
                     error="interrupted",
                     claude_session_id=claude_session_id,
+                    assistant_text=assistant_text,
                     usage=usage,
                     tool_events=tool_events,
                     raw_tail=list(raw_tail),
@@ -482,6 +516,7 @@ class ClaudeSdkDeepSeekProvider:
                 status="interrupted",
                 error="interrupted",
                 claude_session_id=claude_session_id,
+                assistant_text=assistant_text,
                 usage=usage,
                 tool_events=tool_events,
                 raw_tail=list(raw_tail),
@@ -490,6 +525,7 @@ class ClaudeSdkDeepSeekProvider:
         return _RunOutcome(
             status="done",
             claude_session_id=claude_session_id,
+            assistant_text=assistant_text,
             usage=usage,
             tool_events=tool_events,
             raw_tail=list(raw_tail),
@@ -541,16 +577,22 @@ class ClaudeSdkDeepSeekProvider:
         api_key: str,
         images: list[dict[str, Any]] | None = None,
     ) -> None:
-        outcome = await self._run_prompt(
-            session=session,
-            native_turn_id=native_turn_id,
-            prompt=prompt,
-            cwd=session.cwd,
-            session_id=session.native_session_id,
-            config=config,
-            api_key=api_key,
-            images=images,
-        )
+        try:
+            outcome = await self._run_prompt(
+                session=session,
+                native_turn_id=native_turn_id,
+                prompt=prompt,
+                cwd=session.cwd,
+                session_id=session.native_session_id,
+                config=config,
+                api_key=api_key,
+                images=images,
+            )
+        except asyncio.CancelledError:
+            active = self._active_turns.get(native_turn_id)
+            if active is None or not active.interrupted:
+                raise
+            outcome = _RunOutcome(status="interrupted", error="interrupted")
         updated = self._update_after_run(session, outcome, config, self._credentials_for_api_key(
             api_key,
             config,
@@ -565,6 +607,12 @@ class ClaudeSdkDeepSeekProvider:
                 error=outcome.error or outcome.status,
             )
         else:
+            if outcome.assistant_text:
+                emitter.message_completed(
+                    updated,
+                    native_turn_id=native_turn_id,
+                    text=outcome.assistant_text,
+                )
             emitter.completed(updated, native_turn_id=native_turn_id)
 
     def _update_after_run(
@@ -574,10 +622,19 @@ class ClaudeSdkDeepSeekProvider:
         config: ClaudeSdkDeepSeekConfig,
         credentials: DeepSeekCredentials,
     ) -> NativeAgentSession:
+        current = self._session_store.get_by_native_session_id(
+            provider=session.provider,
+            provider_engine=session.provider_engine,
+            native_session_id=session.native_session_id,
+        )
+        if current is not None:
+            session = current
         metadata = dict(session.metadata)
         metadata.update(self._metadata(config, credentials))
         if outcome.claude_session_id:
             metadata["claude_session_id"] = outcome.claude_session_id
+        if outcome.assistant_text:
+            metadata["assistant_text"] = outcome.assistant_text
         if outcome.usage is not None:
             metadata["usage"] = outcome.usage
         if outcome.tool_events:
@@ -710,6 +767,15 @@ def _sdk_resume_session_id(session: NativeAgentSession) -> str:
     return str(session.metadata.get("claude_session_id") or "").strip()
 
 
+def _append_assistant_text(current: str, incoming: str) -> tuple[str, str]:
+    if not incoming:
+        return "", current
+    if incoming.startswith(current):
+        delta = incoming[len(current) :]
+        return delta, incoming
+    return incoming, current + incoming
+
+
 async def _allow_tool(
     tool_name: str,
     tool_input: dict[str, Any],
@@ -740,6 +806,9 @@ def _message_mapping(message: Any) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key in (
         "type",
+        "id",
+        "name",
+        "input",
         "content",
         "text",
         "delta",

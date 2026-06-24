@@ -224,6 +224,11 @@ def _text_from_value(value: Any) -> str:
         return _text_from_mapping(value)
     if isinstance(value, list):
         return "".join(_text_from_value(item) for item in value)
+    for attr in ("text", "delta", "content"):
+        if hasattr(value, attr):
+            text = _text_from_value(getattr(value, attr))
+            if text:
+                return text
     return ""
 
 
