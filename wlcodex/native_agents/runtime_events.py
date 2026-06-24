@@ -92,6 +92,40 @@ class NativeAgentRuntimeEmitter:
             },
         )
 
+    def usage_updated(
+        self,
+        session: NativeAgentSession,
+        *,
+        native_turn_id: str,
+        usage: dict[str, Any],
+    ) -> RuntimeEvent:
+        return self._append(
+            session,
+            native_turn_id=native_turn_id,
+            event_type=EventType.MODEL_USAGE_UPDATED,
+            payload={"usage": usage},
+        )
+
+    def tool_call_started(
+        self,
+        session: NativeAgentSession,
+        *,
+        native_turn_id: str,
+        tool_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any] | None = None,
+    ) -> RuntimeEvent:
+        return self._append(
+            session,
+            native_turn_id=native_turn_id,
+            event_type=EventType.TOOL_CALL_STARTED,
+            payload={
+                "tool_id": tool_id,
+                "tool_name": tool_name,
+                "tool_input": tool_input or {},
+            },
+        )
+
     def heartbeat(
         self,
         session: NativeAgentSession,

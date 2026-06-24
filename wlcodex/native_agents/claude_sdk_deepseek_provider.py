@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
 
+from wlcodex.native_agents.claude_attachments import (
+    materialize_image_attachments,
+    safe_images,
+)
 from wlcodex.native_agents.models import (
     NativeAgentCapabilities,
     NativeAgentControlResult,
@@ -32,6 +37,9 @@ class ClaudeSdkDeepSeekConfig:
     base_url: str = "https://api.deepseek.com/anthropic"
     model: str = "deepseek-v4-pro"
     effort: str = "xhigh"
+    permission_mode: str = "acceptEdits"
+    system_prompt: str = ""
+    cli_path: str = ""
     ccswitch_fallback_enabled: bool = True
     ccswitch_db_path: str = str(DEFAULT_CCSWITCH_DB_PATH)
 
@@ -39,7 +47,20 @@ class ClaudeSdkDeepSeekConfig:
 @dataclass(frozen=True)
 class _RunOutcome:
     status: str
+    claude_session_id: str = ""
+    usage: dict[str, Any] | None = None
+    tool_events: list[dict[str, Any]] | None = None
+    raw_tail: list[dict[str, Any]] | None = None
+    materialized_images: list[dict[str, str]] | None = None
     error: str = ""
+
+
+@dataclass
+class _ActiveSdkTurn:
+    session_id: str
+    turn_id: str
+    task: asyncio.Task[None]
+    interrupted: bool = False
 
 
 _DEEPSEEK_REASONING_EFFORTS = [
@@ -52,40 +73,93 @@ _DEEPSEEK_REASONING_EFFORT_IDS = {
     str(item["reasoningEffort"]) for item in _DEEPSEEK_REASONING_EFFORTS
 }
 
+_ALLOWED_CLAUDE_SDK_TOOLS = frozenset(
+    {
+        "Bash",
+        "BashOutput",
+        "Edit",
+        "Glob",
+        "Grep",
+        "KillBash",
+        "LS",
+        "MultiEdit",
+        "NotebookEdit",
+        "NotebookRead",
+        "Read",
+        "TodoWrite",
+        "Write",
+    }
+)
+
 
 class ClaudeAgentSdkRunner:
+    def __init__(self) -> None:
+        self._active_clients: dict[str, Any] = {}
+
     async def run(
         self,
         *,
         prompt: str,
         cwd: str,
         session_id: str,
+        resume_session_id: str = "",
         config: ClaudeSdkDeepSeekConfig,
         api_key: str,
     ):
         try:
-            from claude_agent_sdk import ClaudeAgentOptions, query
+            from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
         except ImportError as exc:
             raise RuntimeError("claude-agent-sdk is not installed") from exc
 
-        old_api_key = os.environ.get("ANTHROPIC_API_KEY")
-        old_auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        old_base_url = os.environ.get("ANTHROPIC_BASE_URL")
-        os.environ["ANTHROPIC_API_KEY"] = api_key
-        os.environ["ANTHROPIC_AUTH_TOKEN"] = api_key
-        os.environ["ANTHROPIC_BASE_URL"] = config.base_url
+        sdk_message_session_id = resume_session_id or session_id or "default"
+
+        async def prompt_stream():
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": prompt},
+                "parent_tool_use_id": None,
+                "session_id": sdk_message_session_id,
+            }
+
+        options = ClaudeAgentOptions(
+            cwd=cwd,
+            model=config.model,
+            effort=config.effort or None,
+            permission_mode=config.permission_mode or None,
+            system_prompt=config.system_prompt or None,
+            cli_path=config.cli_path or None,
+            resume=resume_session_id or None,
+            env={
+                "ANTHROPIC_API_KEY": api_key,
+                "ANTHROPIC_AUTH_TOKEN": api_key,
+                "ANTHROPIC_BASE_URL": config.base_url,
+            },
+            include_partial_messages=True,
+            include_hook_events=True,
+            can_use_tool=_allow_tool,
+        )
+        client = ClaudeSDKClient(options)
+        self._active_clients[session_id] = client
         try:
-            options = ClaudeAgentOptions(
-                cwd=cwd,
-                model=config.model,
-                effort=config.effort or None,
-            )
-            async for message in query(prompt=prompt, options=options):
+            await client.connect(prompt_stream())
+            async for message in client.receive_response():
                 yield message
         finally:
-            _restore_env("ANTHROPIC_API_KEY", old_api_key)
-            _restore_env("ANTHROPIC_AUTH_TOKEN", old_auth_token)
-            _restore_env("ANTHROPIC_BASE_URL", old_base_url)
+            if self._active_clients.get(session_id) is client:
+                self._active_clients.pop(session_id, None)
+            disconnect = getattr(client, "disconnect", None)
+            if callable(disconnect):
+                await disconnect()
+
+    async def interrupt(self, *, session_id: str, turn_id: str) -> bool:
+        client = self._active_clients.get(session_id)
+        if client is None:
+            return False
+        interrupt = getattr(client, "interrupt", None)
+        if not callable(interrupt):
+            return False
+        await interrupt()
+        return True
 
 
 class ClaudeSdkDeepSeekProvider:
@@ -107,6 +181,7 @@ class ClaudeSdkDeepSeekProvider:
         self._runner = runner or ClaudeAgentSdkRunner()
         self._env = env if env is not None else os.environ
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._active_turns: dict[str, _ActiveSdkTurn] = {}
 
     async def status(self) -> NativeAgentStatus:
         credentials = self._credentials()
@@ -142,14 +217,12 @@ class ClaudeSdkDeepSeekProvider:
             can_read_history=True,
             can_stream_events=True,
             can_continue_session=True,
+            can_interrupt=True,
             can_apply_file_edits=True,
             can_run_shell_commands=True,
             disabled_reasons={
                 "can_steer_active_turn": (
                     "Claude Agent SDK sessions continue by prompt, not same-turn steering."
-                ),
-                "can_interrupt": (
-                    "SDK cancellation is not exposed through the first native-agent slice."
                 ),
                 "can_resolve_approval": (
                     "SDK human-in-loop approval mapping is not enabled in this slice."
@@ -210,6 +283,7 @@ class ClaudeSdkDeepSeekProvider:
             prompt=prompt,
             config=run_config,
             api_key=credentials.api_key,
+            images=safe_images(kwargs.get("images")),
         )
         return _control_result(
             session,
@@ -264,7 +338,10 @@ class ClaudeSdkDeepSeekProvider:
             session.id,
             status="running",
             last_turn_id=native_turn_id,
-            metadata=self._metadata(run_config, credentials),
+            metadata={
+                **session.metadata,
+                **self._metadata(run_config, credentials),
+            },
         )
         self._start_background_prompt(
             session=session,
@@ -272,6 +349,7 @@ class ClaudeSdkDeepSeekProvider:
             prompt=prompt,
             config=run_config,
             api_key=credentials.api_key,
+            images=safe_images(kwargs.get("images")),
         )
         return _control_result(
             session,
@@ -296,7 +374,27 @@ class ClaudeSdkDeepSeekProvider:
         native_session_id: str,
         turn_id: str = "",
     ) -> NativeAgentControlResult:
-        raise NotImplementedError("Claude DeepSeek SDK provider does not support interrupt yet")
+        session = self._lookup_session(native_session_id)
+        active = self._active_turns.get(turn_id or session.last_turn_id)
+        if active is None or active.session_id != native_session_id:
+            raise KeyError(turn_id or native_session_id)
+        active.interrupted = True
+        interrupt = getattr(self._runner, "interrupt", None)
+        if callable(interrupt):
+            await interrupt(session_id=native_session_id, turn_id=active.turn_id)
+        metadata = dict(session.metadata)
+        metadata["error"] = "interrupted"
+        updated = self._session_store.update_session(
+            session.id,
+            status="interrupted",
+            metadata=metadata,
+        )
+        return _control_result(
+            updated,
+            status="interrupted",
+            turn_id=active.turn_id,
+            turn_running=False,
+        )
 
     async def resolve_approval(
         self,
@@ -315,15 +413,30 @@ class ClaudeSdkDeepSeekProvider:
         session_id: str,
         config: ClaudeSdkDeepSeekConfig,
         api_key: str,
+        images: list[dict[str, Any]] | None = None,
     ) -> _RunOutcome:
+        prompt_for_sdk, materialized_images = materialize_image_attachments(
+            cwd,
+            prompt,
+            images,
+        )
+        usage: dict[str, Any] | None = None
+        claude_session_id = ""
+        tool_events: list[dict[str, Any]] = []
+        raw_tail: deque[dict[str, Any]] = deque(maxlen=20)
         try:
             async for _event in self._runner.run(
-                prompt=prompt,
+                prompt=prompt_for_sdk,
                 cwd=cwd,
                 session_id=session_id,
+                resume_session_id=_sdk_resume_session_id(session),
                 config=config,
                 api_key=api_key,
             ):
+                raw_tail.append(_safe_message_summary(_event))
+                event_session_id = _extract_session_id(_event)
+                if event_session_id:
+                    claude_session_id = event_session_id
                 text = extract_native_agent_text(_event)
                 if text and self._runtime_store is not None:
                     self._emitter().text_delta(
@@ -331,9 +444,57 @@ class ClaudeSdkDeepSeekProvider:
                         native_turn_id=native_turn_id,
                         delta=text,
                     )
+                for tool_event in _extract_tool_events(_event):
+                    tool_events.append(tool_event)
+                    if self._runtime_store is not None:
+                        self._emitter().tool_call_started(
+                            session,
+                            native_turn_id=native_turn_id,
+                            tool_id=str(tool_event.get("id") or ""),
+                            tool_name=str(tool_event.get("name") or ""),
+                            tool_input=_tool_input(tool_event),
+                        )
+                event_usage = _extract_usage(_event)
+                if event_usage:
+                    usage = event_usage
+                    if self._runtime_store is not None:
+                        self._emitter().usage_updated(
+                            session,
+                            native_turn_id=native_turn_id,
+                            usage=event_usage,
+                        )
         except Exception as exc:
+            active = self._active_turns.get(native_turn_id)
+            if active is not None and active.interrupted:
+                return _RunOutcome(
+                    status="interrupted",
+                    error="interrupted",
+                    claude_session_id=claude_session_id,
+                    usage=usage,
+                    tool_events=tool_events,
+                    raw_tail=list(raw_tail),
+                    materialized_images=materialized_images,
+                )
             return _RunOutcome(status="failed", error=str(exc))
-        return _RunOutcome(status="done")
+        active = self._active_turns.get(native_turn_id)
+        if active is not None and active.interrupted:
+            return _RunOutcome(
+                status="interrupted",
+                error="interrupted",
+                claude_session_id=claude_session_id,
+                usage=usage,
+                tool_events=tool_events,
+                raw_tail=list(raw_tail),
+                materialized_images=materialized_images,
+            )
+        return _RunOutcome(
+            status="done",
+            claude_session_id=claude_session_id,
+            usage=usage,
+            tool_events=tool_events,
+            raw_tail=list(raw_tail),
+            materialized_images=materialized_images,
+        )
 
     def _start_background_prompt(
         self,
@@ -343,6 +504,7 @@ class ClaudeSdkDeepSeekProvider:
         prompt: str,
         config: ClaudeSdkDeepSeekConfig,
         api_key: str,
+        images: list[dict[str, Any]] | None = None,
     ) -> None:
         if self._runtime_store is not None:
             emitter = self._emitter()
@@ -355,10 +517,19 @@ class ClaudeSdkDeepSeekProvider:
                 prompt=prompt,
                 config=config,
                 api_key=api_key,
+                images=images,
             )
+        )
+        self._active_turns[native_turn_id] = _ActiveSdkTurn(
+            session_id=session.native_session_id,
+            turn_id=native_turn_id,
+            task=task,
         )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(
+            lambda _task: self._active_turns.pop(native_turn_id, None)
+        )
 
     async def _run_prompt_to_terminal_state(
         self,
@@ -368,6 +539,7 @@ class ClaudeSdkDeepSeekProvider:
         prompt: str,
         config: ClaudeSdkDeepSeekConfig,
         api_key: str,
+        images: list[dict[str, Any]] | None = None,
     ) -> None:
         outcome = await self._run_prompt(
             session=session,
@@ -377,6 +549,7 @@ class ClaudeSdkDeepSeekProvider:
             session_id=session.native_session_id,
             config=config,
             api_key=api_key,
+            images=images,
         )
         updated = self._update_after_run(session, outcome, config, self._credentials_for_api_key(
             api_key,
@@ -385,8 +558,12 @@ class ClaudeSdkDeepSeekProvider:
         if self._runtime_store is None:
             return
         emitter = self._emitter()
-        if outcome.status == "failed":
-            emitter.failed(updated, native_turn_id=native_turn_id, error=outcome.error)
+        if outcome.status in {"failed", "interrupted"}:
+            emitter.failed(
+                updated,
+                native_turn_id=native_turn_id,
+                error=outcome.error or outcome.status,
+            )
         else:
             emitter.completed(updated, native_turn_id=native_turn_id)
 
@@ -399,6 +576,18 @@ class ClaudeSdkDeepSeekProvider:
     ) -> NativeAgentSession:
         metadata = dict(session.metadata)
         metadata.update(self._metadata(config, credentials))
+        if outcome.claude_session_id:
+            metadata["claude_session_id"] = outcome.claude_session_id
+        if outcome.usage is not None:
+            metadata["usage"] = outcome.usage
+        if outcome.tool_events:
+            metadata["tool_events"] = [
+                _tool_metadata(event) for event in outcome.tool_events
+            ]
+        if outcome.raw_tail:
+            metadata["raw_tail"] = outcome.raw_tail
+        if outcome.materialized_images:
+            metadata["images"] = outcome.materialized_images
         if outcome.error:
             metadata["error"] = outcome.error
         else:
@@ -422,11 +611,14 @@ class ClaudeSdkDeepSeekProvider:
     def _config_for_kwargs(self, kwargs: dict[str, Any]) -> ClaudeSdkDeepSeekConfig:
         model = str(kwargs.get("model") or "").strip()
         effort = str(kwargs.get("effort") or "").strip()
+        permission_mode = str(kwargs.get("permission_mode") or "").strip()
         changes: dict[str, str] = {}
         if model:
             changes["model"] = model
         if effort in _DEEPSEEK_REASONING_EFFORT_IDS:
             changes["effort"] = effort
+        if permission_mode:
+            changes["permission_mode"] = permission_mode
         return replace(self._config, **changes) if changes else self._config
 
     def _config_for_credentials(
@@ -447,6 +639,7 @@ class ClaudeSdkDeepSeekProvider:
             "base_url": config.base_url,
             "model": config.model,
             "effort": config.effort,
+            "permission_mode": config.permission_mode,
         }
         if credentials is not None:
             metadata.update(credentials.safe_metadata())
@@ -513,8 +706,144 @@ def _new_turn_id(provider_engine: str) -> str:
     return f"{provider_engine}-turn-{uuid4()}"
 
 
-def _restore_env(key: str, previous: str | None) -> None:
-    if previous is None:
-        os.environ.pop(key, None)
-    else:
-        os.environ[key] = previous
+def _sdk_resume_session_id(session: NativeAgentSession) -> str:
+    return str(session.metadata.get("claude_session_id") or "").strip()
+
+
+async def _allow_tool(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    _context: Any,
+) -> Any:
+    del tool_input
+    name = str(tool_name or "").strip()
+    if name in _ALLOWED_CLAUDE_SDK_TOOLS:
+        try:
+            from claude_agent_sdk.types import PermissionResultAllow
+
+            return PermissionResultAllow()
+        except Exception:
+            return {"behavior": "allow"}
+
+    message = f"Tool {name or '<unknown>'} is not enabled for this Claude SDK session."
+    try:
+        from claude_agent_sdk.types import PermissionResultDeny
+
+        return PermissionResultDeny(message=message, interrupt=False)
+    except Exception:
+        return {"behavior": "deny", "message": message, "interrupt": False}
+
+
+def _message_mapping(message: Any) -> dict[str, Any]:
+    if isinstance(message, dict):
+        return message
+    result: dict[str, Any] = {}
+    for key in (
+        "type",
+        "content",
+        "text",
+        "delta",
+        "session_id",
+        "usage",
+        "total_cost_usd",
+        "duration_ms",
+    ):
+        if hasattr(message, key):
+            result[key] = getattr(message, key)
+    return result
+
+
+def _extract_session_id(message: Any) -> str:
+    data = _message_mapping(message)
+    return str(data.get("session_id") or "")
+
+
+def _extract_usage(message: Any) -> dict[str, Any] | None:
+    data = _message_mapping(message)
+    usage = data.get("usage")
+    if isinstance(usage, dict) and usage:
+        return _jsonable_mapping(usage)
+    usage_fields = {}
+    for key in ("total_cost_usd", "duration_ms"):
+        if data.get(key) is not None:
+            usage_fields[key] = data[key]
+    return usage_fields or None
+
+
+def _extract_tool_events(message: Any) -> list[dict[str, Any]]:
+    data = _message_mapping(message)
+    events: list[dict[str, Any]] = []
+    for block in _content_blocks(data.get("content")):
+        block_type = str(block.get("type") or "")
+        if block_type != "tool_use":
+            continue
+        events.append(
+            {
+                "id": str(block.get("id") or ""),
+                "name": str(block.get("name") or ""),
+                "input": _jsonable_mapping(block.get("input")),
+                "status": "started",
+            }
+        )
+    if str(data.get("type") or "") == "tool_use":
+        events.append(
+            {
+                "id": str(data.get("id") or ""),
+                "name": str(data.get("name") or ""),
+                "input": _jsonable_mapping(data.get("input")),
+                "status": "started",
+            }
+        )
+    return events
+
+
+def _content_blocks(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [_message_mapping(item) for item in value]
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
+def _tool_input(tool_event: dict[str, Any]) -> dict[str, Any]:
+    value = tool_event.get("input")
+    return value if isinstance(value, dict) else {}
+
+
+def _tool_metadata(tool_event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(tool_event.get("id") or ""),
+        "name": str(tool_event.get("name") or ""),
+        "status": str(tool_event.get("status") or ""),
+    }
+
+
+def _safe_message_summary(message: Any) -> dict[str, Any]:
+    data = _message_mapping(message)
+    summary: dict[str, Any] = {}
+    for key in ("type", "session_id", "usage", "total_cost_usd", "duration_ms"):
+        if key in data:
+            summary[key] = _jsonable(data[key])
+    text = extract_native_agent_text(message)
+    if text:
+        summary["text"] = text[-500:]
+    tools = _extract_tool_events(message)
+    if tools:
+        summary["tools"] = tools
+    return summary or {"repr": repr(message)[-500:]}
+
+
+def _jsonable_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): _jsonable(item) for key, item in value.items()}
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return _jsonable_mapping(value)
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    return repr(value)

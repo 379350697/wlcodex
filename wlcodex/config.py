@@ -264,6 +264,10 @@ class NativeAgentsClaudeSdkDeepSeekConfig:
     api_key_env: str = "DEEPSEEK_API_KEY"
     base_url: str = "https://api.deepseek.com/anthropic"
     model: str = "deepseek-v4-pro"
+    effort: str = "xhigh"
+    permission_mode: str = "acceptEdits"
+    system_prompt: str = ""
+    cli_path: str = ""
     ccswitch_fallback_enabled: bool = True
     ccswitch_db_path: str = "~/.cc-switch/cc-switch.db"
 
@@ -271,7 +275,7 @@ class NativeAgentsClaudeSdkDeepSeekConfig:
 @dataclass(frozen=True)
 class NativeAgentsClaudeConfig:
     enabled: bool = False
-    engine: str = "cli-local"
+    engine: str = "sdk-deepseek"
     cli_local: NativeAgentsClaudeCliLocalConfig = NativeAgentsClaudeCliLocalConfig()
     sdk_deepseek: NativeAgentsClaudeSdkDeepSeekConfig = (
         NativeAgentsClaudeSdkDeepSeekConfig()
@@ -696,7 +700,7 @@ def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
             "not by per-engine enabled flags"
         )
 
-    engine = str(claude_raw.get("engine", "cli-local"))
+    engine = str(claude_raw.get("engine", "sdk-deepseek"))
     if engine not in {"cli-local", "sdk-deepseek"}:
         raise ConfigError(
             "native_agents.claude.engine must be cli-local or sdk-deepseek"
@@ -711,6 +715,12 @@ def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
     try:
         cli_permission_mode = normalize_claude_permission_mode(
             str(cli_raw.get("permission_mode", "acceptEdits"))
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    try:
+        sdk_permission_mode = normalize_claude_permission_mode(
+            str(sdk_raw.get("permission_mode", "acceptEdits"))
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
@@ -737,6 +747,10 @@ def _native_agents_config(data: dict[str, object]) -> NativeAgentsConfig:
                     sdk_raw.get("base_url", "https://api.deepseek.com/anthropic")
                 ),
                 model=str(sdk_raw.get("model", "deepseek-v4-pro")),
+                effort=str(sdk_raw.get("effort", "xhigh")),
+                permission_mode=sdk_permission_mode,
+                system_prompt=str(sdk_raw.get("system_prompt", "")),
+                cli_path=str(sdk_raw.get("cli_path", "")),
                 ccswitch_fallback_enabled=bool(
                     sdk_raw.get("ccswitch_fallback_enabled", True)
                 ),

@@ -132,7 +132,18 @@ enabled = true
 
 [native_agents.claude]
 enabled = true
-engine = "cli-local"
+engine = "sdk-deepseek"
+
+[native_agents.claude.sdk_deepseek]
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com/anthropic"
+model = "deepseek-v4-pro"
+effort = "xhigh"
+permission_mode = "acceptEdits"
+system_prompt = ""
+cli_path = ""
+ccswitch_fallback_enabled = true
+ccswitch_db_path = "~/.cc-switch/cc-switch.db"
 
 [native_agents.antigravity]
 enabled = true

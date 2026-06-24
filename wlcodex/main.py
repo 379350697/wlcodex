@@ -351,6 +351,10 @@ def _create_live_stream_components(
                                 api_key_env=sdk_config.api_key_env,
                                 base_url=sdk_config.base_url,
                                 model=sdk_config.model,
+                                effort=sdk_config.effort,
+                                permission_mode=sdk_config.permission_mode,
+                                system_prompt=sdk_config.system_prompt,
+                                cli_path=sdk_config.cli_path,
                                 ccswitch_fallback_enabled=(
                                     sdk_config.ccswitch_fallback_enabled
                                 ),

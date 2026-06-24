@@ -187,11 +187,12 @@ enabled = false
 
 [native_agents.claude]
 # Exactly one Claude engine is active at a time:
-# - cli-local reuses the local Claude Code login state, including ccswitch routing.
 # - sdk-deepseek uses DEEPSEEK_API_KEY first, then the current ccswitch DeepSeek
-#   provider credentials.
+#   provider credentials. This is the default and recommended path.
+# - cli-local is retained for compatibility; set engine = "cli-local" explicitly
+#   to reuse the local Claude Code login state.
 enabled = false
-engine = "cli-local"
+engine = "sdk-deepseek"
 
 [native_agents.claude.cli_local]
 binary = "auto"
@@ -202,6 +203,10 @@ permission_mode = "acceptEdits"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com/anthropic"
 model = "deepseek-v4-pro"
+effort = "xhigh"
+permission_mode = "acceptEdits"
+system_prompt = ""
+cli_path = ""
 ccswitch_fallback_enabled = true
 ccswitch_db_path = "~/.cc-switch/cc-switch.db"
 

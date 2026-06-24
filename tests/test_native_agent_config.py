@@ -54,7 +54,7 @@ def test_native_agents_default_to_codex_only_compatibility(tmp_path: Path) -> No
     assert config.native_agents.default_provider == "codex"
     assert config.native_agents.codex.enabled is False
     assert config.native_agents.claude.enabled is False
-    assert config.native_agents.claude.engine == "cli-local"
+    assert config.native_agents.claude.engine == "sdk-deepseek"
     assert config.native_agents.antigravity.engine == "cli-local"
 
 
@@ -75,6 +75,10 @@ engine = "sdk-deepseek"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com/anthropic"
 model = "deepseek-v4-pro"
+effort = "high"
+permission_mode = "acceptEdits"
+system_prompt = "You are wlcodex Claude."
+cli_path = "/Users/wl/.local/bin/claude"
 ccswitch_fallback_enabled = false
 ccswitch_db_path = "/tmp/cc-switch.db"
 """,
@@ -86,6 +90,13 @@ ccswitch_db_path = "/tmp/cc-switch.db"
     assert config.native_agents.claude.enabled is True
     assert config.native_agents.claude.engine == "sdk-deepseek"
     assert config.native_agents.claude.sdk_deepseek.model == "deepseek-v4-pro"
+    assert config.native_agents.claude.sdk_deepseek.effort == "high"
+    assert config.native_agents.claude.sdk_deepseek.permission_mode == "acceptEdits"
+    assert (
+        config.native_agents.claude.sdk_deepseek.system_prompt
+        == "You are wlcodex Claude."
+    )
+    assert config.native_agents.claude.sdk_deepseek.cli_path == "/Users/wl/.local/bin/claude"
     assert config.native_agents.claude.sdk_deepseek.ccswitch_fallback_enabled is False
     assert config.native_agents.claude.sdk_deepseek.ccswitch_db_path == "/tmp/cc-switch.db"
 
