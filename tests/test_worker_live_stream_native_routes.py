@@ -692,7 +692,7 @@ async def test_static_assets_are_publicly_cacheable(tmp_path: Path) -> None:
         office_image_response = await _read_response(
             server.host,
             server.port,
-            "GET /static/marvis/office-desk-worker-1.png HTTP/1.1\r\n"
+            "GET /static/marvis/office-scene-empty.png HTTP/1.1\r\n"
             "Host: test\r\n"
             "Connection: close\r\n\r\n",
         )

@@ -140,7 +140,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office-roles"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office-scene"
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
@@ -4082,29 +4082,87 @@ def _marvis_relay_office_roles(relay_config: dict[str, Any] | None) -> list[dict
     return roles[:6]
 
 
+_MARVIS_OFFICE_PERSONAS: dict[str, dict[str, Any]] = {
+    "director": {
+        "title": "Team Leader",
+        "intro": "团队队长，全盘统筹，负责拆任务、派角色、收结果，并把接力过程汇成你能直接看的结论。",
+        "skills": ("分派任务", "汇总结果呈现", "调度接力", "读写文档", "写代码"),
+    },
+    "architect": {
+        "title": "System Architect",
+        "intro": "负责把需求拆成结构、边界和风险点，先看清怎么做，再把可执行方案交给后续角色。",
+        "skills": ("方案设计", "影响分析", "模块边界", "技术取舍"),
+    },
+    "implementer": {
+        "title": "Developer",
+        "intro": "负责把方案落到代码里，按现有工程风格实现功能、修复问题，并尽量保持改动范围收敛。",
+        "skills": ("写代码", "改页面", "接 API", "修复缺陷"),
+    },
+    "tester": {
+        "title": "QA Engineer",
+        "intro": "负责验证行为是不是符合预期，补关键测试，复查手机端、路由、流式状态这些容易回归的地方。",
+        "skills": ("跑测试", "回归验证", "边界用例", "复现问题"),
+    },
+    "auditor": {
+        "title": "Reviewer",
+        "intro": "负责最后审一遍风险、遗漏和上线边界，确认改动没有影响 Codex、Claude、Antigravity 等其他页面。",
+        "skills": ("代码审查", "风险检查", "上线把关", "回滚判断"),
+    },
+}
+
+
+def _marvis_relay_office_persona(
+    role: str,
+    *,
+    display_name: str,
+    provider: str = "",
+) -> dict[str, Any]:
+    persona = _MARVIS_OFFICE_PERSONAS.get(role, {})
+    title = str(persona.get("title") or "Relay Agent")
+    provider_label = provider.strip()
+    if provider_label:
+        title = f"{title} · {provider_label}"
+    return {
+        "role": role,
+        "display_name": display_name,
+        "title": title,
+        "intro": str(persona.get("intro") or f"{display_name}正在处理分配给自己的接力任务。"),
+        "skills": list(persona.get("skills") or (display_name,)),
+        "avatar": "marvis" if role == "director" else role,
+    }
+
+
 def _marvis_relay_office_page(
     *,
     access_token: str = "",
     relay_config: dict[str, Any] | None = None,
 ) -> str:
     token_suffix = _token_suffix(access_token)
+    config = relay_config if isinstance(relay_config, dict) else {}
+    assignment_map = config.get("assignments")
+    assignments = assignment_map if isinstance(assignment_map, dict) else {}
     active_roles = _marvis_relay_office_roles(relay_config)
+    role_personas = {
+        role["role"]: _marvis_relay_office_persona(
+            role["role"],
+            display_name=role["display_name"],
+            provider=str(assignments.get(role["role"]) or ""),
+        )
+        for role in active_roles
+    }
+    role_personas_json = json.dumps(
+        role_personas,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
     occupied_desks = "\n".join(
         f"""
-        <button class="marvis-office-desk marvis-office-desk-occupied" type="button" data-marvis-office-role="{escape(role['role'])}"{' data-marvis-persona-open' if index == 0 else ''} aria-label="{escape(role['display_name'])}正在办公">
-          <span class="marvis-office-desk-name">{escape(role['display_name'])}</span>
-          <img src="/static/marvis/office-desk-worker-{(index % 6) + 1}.png" alt="{escape(role['display_name'])}正在办公" loading="eager">
+        <button class="marvis-office-hotspot marvis-office-hotspot-{index + 1}" type="button" data-marvis-office-role="{escape(role['role'])}" data-marvis-persona-open="{escape(role['role'])}" aria-label="打开{escape(role['display_name'])}人设">
+          <img class="marvis-office-worker" src="/static/marvis/office-worker-cutout-{(index % 6) + 1}.png" alt="" loading="eager">
+          <span>{escape(role['display_name'])}</span>
         </button>
         """
         for index, role in enumerate(active_roles)
-    )
-    empty_desks = "\n".join(
-        """
-        <button class="marvis-office-desk" type="button" aria-label="空工位">
-          <img src="/static/marvis/office-desk-empty.jpg" alt="" loading="eager">
-        </button>
-        """
-        for _index in range(max(0, 6 - len(active_roles)))
     )
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
@@ -4124,9 +4182,11 @@ def _marvis_relay_office_page(
       <span aria-hidden="true"></span>
     </header>
     <main class="marvis-office-main">
-      <section class="marvis-office-grid" aria-label="Marvis办公室工位">
-        {occupied_desks}
-        {empty_desks}
+      <section class="marvis-office-scene" aria-label="Marvis办公室工位">
+        <img class="marvis-office-scene-img" src="/static/marvis/office-scene-empty.png" alt="" loading="eager">
+        <div class="marvis-office-layer">
+          {occupied_desks}
+        </div>
       </section>
       <section class="marvis-office-token-row" aria-label="Token统计">
         <div class="marvis-office-token-card">
@@ -4142,23 +4202,63 @@ def _marvis_relay_office_page(
     </main>
     <div class="marvis-office-backdrop" data-marvis-persona-backdrop hidden></div>
     <section class="marvis-persona-modal" data-marvis-persona-modal hidden aria-modal="true" role="dialog" aria-label="Marvis（马维斯）人设">
-      <img src="/static/marvis/persona-modal-marvis.jpg" alt="Marvis（马维斯） Team Leader 空闲中，技能包括分派任务、汇总结果呈现、使用厉害的技能、读写文档、写代码" loading="eager">
       <button class="marvis-persona-close" type="button" data-marvis-persona-close aria-label="关闭"></button>
+      <header class="marvis-persona-head">
+        <span class="marvis-persona-avatar marvis-relay-avatar marvis-relay-avatar-marvis" data-persona-avatar aria-hidden="true"></span>
+        <div>
+          <h2 data-persona-name>Marvis（马维斯）</h2>
+          <p data-persona-title>Team Leader</p>
+          <small>◷ 空闲中</small>
+        </div>
+      </header>
+      <div class="marvis-persona-divider"></div>
+      <div class="marvis-persona-content">
+        <p class="marvis-persona-label">简介:</p>
+        <p class="marvis-persona-intro" data-persona-intro></p>
+        <p class="marvis-persona-label">技能:</p>
+        <div class="marvis-persona-skills" data-persona-skills></div>
+      </div>
     </section>
   </div>
   <script>
     (() => {{
-      const openButton = document.querySelector("[data-marvis-persona-open]");
+      const personas = {role_personas_json};
+      const openButtons = document.querySelectorAll("[data-marvis-persona-open]");
       const modal = document.querySelector("[data-marvis-persona-modal]");
       const backdrop = document.querySelector("[data-marvis-persona-backdrop]");
       const closeButtons = document.querySelectorAll("[data-marvis-persona-close]");
+      const avatar = document.querySelector("[data-persona-avatar]");
+      const name = document.querySelector("[data-persona-name]");
+      const title = document.querySelector("[data-persona-title]");
+      const intro = document.querySelector("[data-persona-intro]");
+      const skills = document.querySelector("[data-persona-skills]");
+      const renderPersona = (role) => {{
+        const persona = personas[role];
+        if (!persona) return false;
+        if (avatar) avatar.className = `marvis-persona-avatar marvis-relay-avatar marvis-relay-avatar-${{persona.avatar || role}}`;
+        if (name) name.textContent = persona.display_name || role;
+        if (title) title.textContent = persona.title || "Relay Agent";
+        if (intro) intro.textContent = persona.intro || "";
+        if (skills) {{
+          skills.textContent = "";
+          (persona.skills || []).forEach((skill) => {{
+            const chip = document.createElement("span");
+            chip.textContent = skill;
+            skills.appendChild(chip);
+          }});
+        }}
+        return true;
+      }};
       const setOpen = (isOpen) => {{
         if (!modal || !backdrop) return;
         modal.hidden = !isOpen;
         backdrop.hidden = !isOpen;
         document.body.classList.toggle("marvis-office-modal-open", isOpen);
       }};
-      openButton?.addEventListener("click", () => setOpen(true));
+      openButtons.forEach((button) => button.addEventListener("click", () => {{
+        const role = button.getAttribute("data-marvis-persona-open") || "";
+        if (renderPersona(role)) setOpen(true);
+      }}));
       backdrop?.addEventListener("click", () => setOpen(false));
       closeButtons.forEach((button) => button.addEventListener("click", () => setOpen(false)));
       window.addEventListener("keydown", (event) => {{

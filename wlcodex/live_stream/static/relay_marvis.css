@@ -777,6 +777,14 @@ body[data-marvis-relay-view="office"] .marvis-office-shell {
   color: #111 !important;
 }
 
+@media (max-width: 480px) {
+  body[data-marvis-relay-view="office"] .marvis-office-shell {
+    width: 100vw;
+    max-width: 100vw;
+    margin: 0;
+  }
+}
+
 body[data-marvis-relay-view="office"] .marvis-relay-phone::after {
   display: none;
 }
@@ -824,69 +832,123 @@ body[data-marvis-relay-view="office"] .marvis-office-back::before {
 body[data-marvis-relay-view="office"] .marvis-office-main {
   height: calc(100dvh - 132px);
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
-  gap: 18px;
-  padding: 0 28px 28px;
-  box-sizing: border-box;
-}
-
-body[data-marvis-relay-view="office"] .marvis-office-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 26px;
-  row-gap: 30px;
+  grid-template-rows: auto auto;
   align-content: start;
+  gap: 18px;
+  padding: 0 18px 24px;
+  box-sizing: border-box;
+  overflow-x: hidden;
 }
 
-body[data-marvis-relay-view="office"] .marvis-office-desk {
+body[data-marvis-relay-view="office"] .marvis-office-scene {
+  position: relative;
+  width: min(100%, calc(100vw - 44px));
+  max-width: 280px;
+  aspect-ratio: 1050 / 1200;
+  align-self: start;
+  justify-self: center;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-scene-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  pointer-events: none;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-layer {
+  position: absolute;
+  inset: 0;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-hotspot {
+  position: absolute;
+  width: 38%;
+  height: 30%;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-hotspot {
+  z-index: 3;
   border: 0;
   background: transparent;
   padding: 0;
   margin: 0;
-  width: 100%;
-  min-width: 0;
-  min-height: 0;
-  display: block;
   color: inherit;
-  text-align: left;
   appearance: none;
   -webkit-appearance: none;
+  cursor: pointer;
 }
 
-body[data-marvis-relay-view="office"] .marvis-office-desk-name {
-  display: block;
-  min-height: 20px;
-  margin: 0 0 -2px 32%;
-  color: #111;
-  font-size: 14px;
-  font-weight: 800;
-  line-height: 1.2;
-  white-space: nowrap;
-}
-
-body[data-marvis-relay-view="office"] .marvis-office-desk img {
+body[data-marvis-relay-view="office"] .marvis-office-worker {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  height: auto;
-  border: 0;
+  height: 100%;
   object-fit: contain;
-  pointer-events: none;
   user-select: none;
+  pointer-events: none;
 }
 
-body[data-marvis-relay-view="office"] .marvis-office-desk-occupied {
-  cursor: pointer;
+body[data-marvis-relay-view="office"] .marvis-office-hotspot span {
+  position: absolute;
+  left: 50%;
+  top: -1%;
+  transform: translateX(-50%);
+  color: #111;
+  font-size: clamp(11px, 3vw, 14px);
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  text-align: center;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, .95);
+  z-index: 2;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-hotspot-1 {
+  left: 8%;
+  top: 0;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-hotspot-2 {
+  left: 55%;
+  top: 0;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-hotspot-3 {
+  left: 8%;
+  top: 33%;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-hotspot-4 {
+  left: 55%;
+  top: 33%;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-hotspot-5 {
+  left: 8%;
+  top: 66%;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-hotspot-6 {
+  left: 55%;
+  top: 66%;
 }
 
 body[data-marvis-relay-view="office"] .marvis-office-token-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 34px;
-  padding: 10px 0 18px;
+  gap: clamp(18px, 7vw, 34px);
+  padding: 8px 0 18px;
   border-bottom: 1px solid rgba(17, 17, 17, .06);
 }
 
 body[data-marvis-relay-view="office"] .marvis-office-token-card {
+  min-width: 0;
   display: grid;
   gap: 12px;
   border-bottom: 3px solid rgba(17, 17, 17, .06);
@@ -896,8 +958,9 @@ body[data-marvis-relay-view="office"] .marvis-office-token-card {
 body[data-marvis-relay-view="office"] .marvis-office-token-card span,
 body[data-marvis-relay-view="office"] .marvis-office-token-card small {
   color: #5f5f5f;
-  font-size: 15px;
+  font-size: clamp(13px, 3.6vw, 15px);
   line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 body[data-marvis-relay-view="office"] .marvis-office-token-card strong {
@@ -958,10 +1021,14 @@ body[data-marvis-relay-view="office"] .marvis-persona-modal {
   left: 50%;
   top: 50%;
   width: min(92vw, 392px);
+  min-height: 350px;
   transform: translate(-50%, -48%);
   border-radius: 18px;
   overflow: hidden;
+  background: #fff;
   box-shadow: none;
+  padding: 28px 26px 26px;
+  box-sizing: border-box;
 }
 
 body[data-marvis-relay-view="office"] .marvis-persona-modal[hidden],
@@ -969,17 +1036,10 @@ body[data-marvis-relay-view="office"] .marvis-office-backdrop[hidden] {
   display: none !important;
 }
 
-body[data-marvis-relay-view="office"] .marvis-persona-modal img {
-  display: block;
-  width: 100%;
-  height: auto;
-  user-select: none;
-}
-
 body[data-marvis-relay-view="office"] .marvis-persona-close {
   position: absolute;
-  right: 14px;
-  top: 14px;
+  right: 18px;
+  top: 18px;
   width: 42px;
   height: 42px;
   border: 0;
@@ -988,6 +1048,99 @@ body[data-marvis-relay-view="office"] .marvis-persona-close {
   padding: 0;
   appearance: none;
   -webkit-appearance: none;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-close::before,
+body[data-marvis-relay-view="office"] .marvis-persona-close::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  top: 20px;
+  width: 20px;
+  height: 3px;
+  border-radius: 999px;
+  background: #111;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-close::before {
+  transform: rotate(45deg);
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-close::after {
+  transform: rotate(-45deg);
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-head {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 20px;
+  padding-right: 42px;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-avatar {
+  width: 92px;
+  height: 92px;
+  border: 1px solid rgba(17, 17, 17, .08);
+  box-shadow: none;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-head h2 {
+  margin: 0;
+  color: #111;
+  font-size: 23px;
+  font-weight: 800;
+  line-height: 1.16;
+  word-break: keep-all;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-head p {
+  margin: 5px 0 8px;
+  color: #555;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-head small {
+  color: #999;
+  font-size: 13px;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-divider {
+  height: 1px;
+  margin: 24px 0 22px;
+  background: rgba(17, 17, 17, .07);
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-label {
+  margin: 0 0 10px;
+  color: #999;
+  font-size: 14px;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-intro {
+  margin: 0 0 24px;
+  color: #222;
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 10px;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-skills span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 39px;
+  padding: 0 14px;
+  border-radius: 8px;
+  background: #f5f1ef;
+  color: #7a4a3f;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 body.marvis-office-modal-open {
