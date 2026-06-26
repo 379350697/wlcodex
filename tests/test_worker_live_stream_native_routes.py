@@ -443,6 +443,15 @@ class FailingCodexProviderWithCache(SlowCodexProviderWithCache):
         raise RuntimeError("boom")
 
 
+class FakeTranscriptMirror:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, ...]] = []
+
+    def index_recent_sessions(self, *, limit: int = 100) -> int:
+        self.calls.append(("index_recent_sessions", limit))
+        return 2
+
+
 def _store(tmp_path: Path) -> RuntimeEventStore:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
@@ -849,6 +858,42 @@ async def test_native_sessions_returns_cached_snapshot_when_provider_times_out(
     assert body["native_refresh_pending"] is True
     assert body["native_session_source"] == "cache"
     assert provider.calls == [("list_cached_sessions", 50), ("list_sessions", 50)]
+
+
+@pytest.mark.asyncio
+async def test_native_codex_sessions_background_refresh_indexes_jsonl_sessions(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    provider = SlowCodexProviderWithCache()
+    mirror = FakeTranscriptMirror()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([provider]),
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+        native_transcript_mirror=mirror,
+        native_sessions_timeout_seconds=10,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        await asyncio.sleep(0.1)
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert provider.calls == [("list_cached_sessions", 50), ("list_sessions", 50)]
+    assert mirror.calls == [("index_recent_sessions", 100)]
 
 
 @pytest.mark.asyncio
@@ -2064,7 +2109,7 @@ def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
     assert "isUnreadCompletedSession(session)" in response
     assert 'status === "idle" && hasReviewableTurn(session)' in response
     assert "function hasReviewableTurn(session)" in response
-    assert 'class="recent-status ${sessionVisualStateClass(session)}"' in response
+    assert 'statusEl.className = `recent-status ${sessionVisualStateClass(session)}`;' in response
 
 
 @pytest.mark.asyncio
@@ -2711,11 +2756,50 @@ async def test_native_provider_home_polling_skips_unchanged_list_rerender(
     assert "HTTP/1.1 200 OK" in response
     assert 'let renderedHomeDataSignature = "";' in response
     assert "function homeDataSignature()" in response
+    assert "function renderNativePageIfHomeDataChanged()" in response
     assert "const signature = homeDataSignature();" in response
-    assert "if (signature === renderedHomeDataSignature) return;" in response
+    assert "if (signature === renderedHomeDataSignature) return false;" in response
     assert "await loadSessions(false);" in response
     assert "updated_at: String(session.updated_at || \"\")," not in response
     assert "activity_at: String(session.activity_at || \"\")," not in response
+
+
+def test_native_provider_home_signature_is_stable_for_all_session_pages() -> None:
+    for provider_name in ("codex", "claude", "antigravity"):
+        response = _native_codex_page(provider_name)
+
+        signature_body = response.split("function homeDataSignature()", 1)[1].split(
+            "async function loadHomeData()", 1
+        )[0]
+        load_sessions_body = response.split("async function loadSessions", 1)[1].split(
+            "async function loadProjects()", 1
+        )[0]
+
+        assert "relativeTime(" not in signature_body
+        assert "activity_label:" not in signature_body
+        assert "renderNativePageIfHomeDataChanged();" in load_sessions_body
+        assert "renderedHomeDataSignature = homeDataSignature();" not in load_sessions_body
+        assert "renderNativePage();" not in load_sessions_body
+
+
+def test_native_provider_session_polling_uses_silent_incremental_updates() -> None:
+    for provider_name in ("codex", "claude", "antigravity"):
+        response = _native_codex_page(provider_name)
+
+        render_changed_body = response.split(
+            "function renderNativePageIfHomeDataChanged()", 1
+        )[1].split("async function loadHomeData()", 1)[0]
+        render_sessions_body = response.split("function renderSessions(", 1)[1].split(
+            "function renderSessionList(", 1
+        )[0]
+
+        assert "renderNativePage({silentSessions: true});" in render_changed_body
+        assert "function syncSessionList(source, target)" in response
+        assert "function createSessionButton(session)" in response
+        assert "function updateSessionButton(btn, session)" in response
+        assert "const silent = Boolean(options.silent);" in render_sessions_body
+        assert "syncSessionList(filtered.slice(0, SESSION_PREVIEW_LIMIT), sessionsEl);" in render_sessions_body
+        assert "syncSessionList(filtered.slice(SESSION_PREVIEW_LIMIT), body);" in render_sessions_body
 
 
 @pytest.mark.asyncio

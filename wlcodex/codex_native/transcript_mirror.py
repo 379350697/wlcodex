@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -14,6 +15,7 @@ from wlcodex.runtime_events import EventType
 
 _DEFAULT_TAIL_LINES = 2_000
 _DEFAULT_MAX_BYTES = 8_000_000
+_DEFAULT_INDEX_HEAD_LINES = 600
 _SOURCE_KIND = "codex_jsonl"
 
 
@@ -24,6 +26,18 @@ class _TranscriptItem:
     timestamp: str
     turn_id: str
     item_id: str
+
+
+@dataclass(frozen=True)
+class _SessionIndexEntry:
+    native_thread_id: str
+    title: str
+    cwd: str
+    activity_at: str
+    originator: str
+    source: str
+    thread_source: str
+    path: Path
 
 
 class CodexSessionTranscriptMirror:
@@ -166,6 +180,34 @@ class CodexSessionTranscriptMirror:
                 projected_count += len(projected)
         return projected_count
 
+    def index_recent_sessions(self, *, limit: int = 100) -> int:
+        if not self._root.exists():
+            return 0
+        indexed = 0
+        for path in _recent_session_files(self._root, limit=max(1, limit)):
+            entry = _parse_session_index_entry(path)
+            if entry is None:
+                continue
+            self._path_cache[entry.native_thread_id] = entry.path
+            existing = self._session_store.get_by_thread_id(entry.native_thread_id)
+            self._session_store.get_or_create_session(
+                native_thread_id=entry.native_thread_id,
+                title=entry.title or (existing.title if existing else ""),
+                cwd=entry.cwd or (existing.cwd if existing else ""),
+                source_kind=_SOURCE_KIND,
+                status=(existing.status if existing else "") or "idle",
+                last_turn_id=existing.last_turn_id if existing else "",
+                activity_at=entry.activity_at or (existing.activity_at if existing else ""),
+                metadata={
+                    "originator": entry.originator,
+                    "source": entry.source,
+                    "thread_source": entry.thread_source,
+                    "rollout_path": str(entry.path),
+                },
+            )
+            indexed += 1
+        return indexed
+
     def _has_duplicate_user_item(
         self,
         item: _TranscriptItem,
@@ -211,6 +253,101 @@ class CodexSessionTranscriptMirror:
         path = max(candidates, key=lambda item: item.stat().st_mtime)
         self._path_cache[native_thread_id] = path
         return path
+
+
+def _recent_session_files(root: Path, *, limit: int) -> list[Path]:
+    candidates = [path for path in root.rglob("*.jsonl") if path.is_file()]
+    return sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True)[
+        :limit
+    ]
+
+
+def _parse_session_index_entry(path: Path) -> _SessionIndexEntry | None:
+    native_thread_id = ""
+    cwd = ""
+    title = ""
+    created_at = ""
+    originator = ""
+    source = ""
+    thread_source = ""
+    try:
+        lines = _read_head_lines(path, limit=_DEFAULT_INDEX_HEAD_LINES)
+    except OSError:
+        return None
+    for line in lines:
+        row = _json_object(line)
+        if not row:
+            continue
+        row_type = str(row.get("type") or "")
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if row_type == "session_meta":
+            native_thread_id = (
+                _text(payload.get("id")) or _text(payload.get("session_id"))
+            )
+            cwd = cwd or _text(payload.get("cwd"))
+            created_at = created_at or _text(payload.get("timestamp"))
+            originator = _text(payload.get("originator"))
+            source = _text(payload.get("source"))
+            thread_source = _text(payload.get("thread_source"))
+            continue
+        if row_type == "turn_context":
+            cwd = cwd or _text(payload.get("cwd"))
+            continue
+        if row_type == "event_msg" and payload.get("type") == "user_message":
+            title = title or _title_from_text(_text(payload.get("message")))
+            if native_thread_id and cwd and title:
+                break
+    if not native_thread_id:
+        native_thread_id = _thread_id_from_path(path)
+    if not native_thread_id:
+        return None
+    if thread_source and thread_source != "user":
+        return None
+    return _SessionIndexEntry(
+        native_thread_id=native_thread_id,
+        title=title,
+        cwd=cwd,
+        activity_at=_path_mtime_iso(path) or created_at,
+        originator=originator,
+        source=source,
+        thread_source=thread_source,
+        path=path,
+    )
+
+
+def _read_head_lines(path: Path, *, limit: int) -> list[str]:
+    lines: list[str] = []
+    with path.open("rb") as handle:
+        for index, line in enumerate(handle):
+            if index >= limit:
+                break
+            lines.append(line.decode("utf-8", errors="replace"))
+    return lines
+
+
+def _thread_id_from_path(path: Path) -> str:
+    stem = path.stem
+    marker = "-019"
+    index = stem.find(marker)
+    if index < 0:
+        return ""
+    return stem[index + 1 :]
+
+
+def _path_mtime_iso(path: Path) -> str:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        return ""
+
+
+def _title_from_text(value: str) -> str:
+    title = " ".join(value.split())
+    if len(title) <= 80:
+        return title
+    return title[:77].rstrip() + "..."
 
 
 def _read_tail_lines(path: Path, *, limit: int, max_bytes: int) -> list[str]:

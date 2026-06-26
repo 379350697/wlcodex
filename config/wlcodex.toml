@@ -122,6 +122,7 @@ allow_unauthenticated_loopback = true
 [codex_native]
 enabled = true
 transport = "daemon"
+sock_path = "/Users/wl/.codex/app-server-control/app-server-control.sock"
 
 [native_agents]
 enabled = true

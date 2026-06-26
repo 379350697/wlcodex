@@ -806,6 +806,21 @@ class WorkerLiveStreamServer:
             return await result
         return list(result)
 
+    async def _index_native_jsonl_sessions(self, provider_name: str) -> int:
+        if provider_name != "codex" or self._native_transcript_mirror is None:
+            return 0
+        index_recent = getattr(
+            self._native_transcript_mirror,
+            "index_recent_sessions",
+            None,
+        )
+        if index_recent is None:
+            return 0
+        result = index_recent(limit=100)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return int(result or 0)
+
     def _schedule_native_sessions_refresh(
         self,
         provider_name: str,
@@ -821,6 +836,7 @@ class WorkerLiveStreamServer:
         async def refresh() -> None:
             try:
                 await asyncio.sleep(_NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS)
+                await self._index_native_jsonl_sessions(provider_name)
                 await self._list_native_sessions(
                     target,
                     legacy_codex_controller=legacy_codex_controller,
@@ -1273,6 +1289,7 @@ class WorkerLiveStreamServer:
                 native_session_source = "cache"
             else:
                 try:
+                    await self._index_native_jsonl_sessions(provider_name)
                     sessions = await asyncio.wait_for(
                         self._list_native_sessions(
                             target,
@@ -6763,8 +6780,7 @@ __ICONS_JS__
         }
         if (selected && !sessions.some(session => session.native_thread_id === selected.native_thread_id)) selected = null;
         if (render) {
-          renderedHomeDataSignature = homeDataSignature();
-          renderNativePage();
+          renderNativePageIfHomeDataChanged();
         }
       } catch (error) {
         sessionsEl.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
@@ -6795,7 +6811,6 @@ __ICONS_JS__
           title: String(session.title || ""),
           cwd: String(session.cwd || ""),
           status: String(session.status || ""),
-          activity_label: relativeTime(sessionActivityAt(session)),
           model: String(((session.metadata || {}).model) || ""),
           effort: String(((session.metadata || {}).effort) || ""),
           service_tier: String(((session.metadata || {}).service_tier) || ""),
@@ -6803,13 +6818,18 @@ __ICONS_JS__
       });
     }
 
+    function renderNativePageIfHomeDataChanged() {
+      const signature = homeDataSignature();
+      if (signature === renderedHomeDataSignature) return false;
+      renderedHomeDataSignature = signature;
+      renderNativePage({silentSessions: true});
+      return true;
+    }
+
     async function loadHomeData() {
       await loadProjects();
       await loadSessions(false);
-      const signature = homeDataSignature();
-      if (signature === renderedHomeDataSignature) return;
-      renderedHomeDataSignature = signature;
-      renderNativePage();
+      renderNativePageIfHomeDataChanged();
     }
 
     async function loadModelCatalog() {
@@ -7454,10 +7474,10 @@ __ICONS_JS__
       return (option && option.textContent ? option.textContent : fallback) || fallback;
     }
 
-    function renderNativePage() {
+    function renderNativePage(options = {}) {
       updateNativeChrome();
       renderProjects();
-      renderSessions();
+      renderSessions({silent: Boolean(options.silentSessions)});
     }
 
     function updateNativeChrome() {
@@ -7611,7 +7631,8 @@ __ICONS_JS__
       projectNewChatMeta.textContent = selectedProjectCwd ? `在 ${lastPath(selectedProjectCwd)} 新建会话` : "";
     }
 
-    function renderSessions() {
+    function renderSessions(options = {}) {
+      const silent = Boolean(options.silent);
       if (viewMode === "compose") {
         sessionsEl.innerHTML = "";
         return;
@@ -7622,6 +7643,31 @@ __ICONS_JS__
         if (!needle) return true;
         return `${session.title || ""} ${session.cwd || ""}`.toLowerCase().includes(needle);
       });
+      if (silent && filtered.length && !sessionsEl.querySelector(":scope > .empty")) {
+        scheduleLivePrefetch(filtered.slice(0, LIVE_PREFETCH_LIMIT));
+        syncSessionList(filtered.slice(0, SESSION_PREVIEW_LIMIT), sessionsEl);
+        const overflow = filtered.slice(SESSION_PREVIEW_LIMIT);
+        let details = sessionsEl.querySelector(":scope > details.more-sessions");
+        if (!overflow.length) {
+          if (details) details.remove();
+          return;
+        }
+        if (!details) {
+          details = document.createElement("details");
+          details.className = "more-sessions";
+          details.append(document.createElement("summary"), document.createElement("div"));
+          sessionsEl.append(details);
+        }
+        const summary = details.querySelector("summary") || document.createElement("summary");
+        const body = details.querySelector(".more-sessions-body") || document.createElement("div");
+        if (!summary.parentElement) details.prepend(summary);
+        if (!body.parentElement) details.append(body);
+        body.className = "more-sessions-body";
+        summary.textContent = `更多聊天 ${overflow.length}`;
+        sessionsEl.append(details);
+        syncSessionList(filtered.slice(SESSION_PREVIEW_LIMIT), body);
+        return;
+      }
       sessionsEl.innerHTML = "";
       if (!filtered.length) {
         sessionsEl.innerHTML = `<div class="empty">没有最近聊天</div>`;
@@ -7643,22 +7689,66 @@ __ICONS_JS__
 
     function renderSessionList(source, target) {
       for (const session of source) {
-        const btn = document.createElement("button");
-        btn.className = "recent" + (selected && selected.native_thread_id === session.native_thread_id ? " active" : "");
-        const activityLabel = relativeTime(sessionActivityAt(session));
-        btn.innerHTML = `<span class="recent-copy"><span class="label recent-title">${escapeHtml(session.title || session.native_thread_id)}</span><span class="meta">${escapeHtml(sessionMetaText(session))}</span></span><span class="recent-status ${sessionVisualStateClass(session)}"><span class="status-time">${escapeHtml(activityLabel)}</span></span>`;
-        btn.onpointerenter = () => prefetchLive(session);
-        btn.onpointerdown = () => prefetchLive(session);
-        btn.onclick = () => {
-          selected = session;
-          markSessionViewed(session);
-          btn.classList.add("loading");
-          const timeEl = btn.querySelector(".status-time");
-          if (timeEl) timeEl.textContent = "打开中";
-          openLive(session);
-        };
+        target.appendChild(createSessionButton(session));
+      }
+    }
+
+    function syncSessionList(source, target) {
+      const existing = new Map();
+      for (const child of Array.from(target.children)) {
+        if (child.matches && child.matches("button.recent[data-session-id]")) {
+          existing.set(child.dataset.sessionId || "", child);
+        }
+      }
+      const desired = new Set();
+      for (const session of source) {
+        const id = sessionDomId(session);
+        if (!id) continue;
+        desired.add(id);
+        const btn = existing.get(id) || createSessionButton(session);
+        updateSessionButton(btn, session);
         target.appendChild(btn);
       }
+      for (const [id, btn] of existing.entries()) {
+        if (!desired.has(id)) btn.remove();
+      }
+    }
+
+    function createSessionButton(session) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.innerHTML = '<span class="recent-copy"><span class="label recent-title"></span><span class="meta"></span></span><span class="recent-status"><span class="status-time"></span></span>';
+      updateSessionButton(btn, session);
+      return btn;
+    }
+
+    function updateSessionButton(btn, session) {
+      const id = sessionDomId(session);
+      const isLoading = btn.classList.contains("loading");
+      btn.className = "recent" + (selected && selected.native_thread_id === session.native_thread_id ? " active" : "") + (isLoading ? " loading" : "");
+      btn.dataset.sessionId = id;
+      const titleEl = btn.querySelector(".recent-title");
+      const metaEl = btn.querySelector(".meta");
+      const statusEl = btn.querySelector(".recent-status");
+      const timeEl = btn.querySelector(".status-time");
+      if (titleEl) titleEl.textContent = session.title || session.native_thread_id || "";
+      if (metaEl) metaEl.textContent = sessionMetaText(session);
+      if (statusEl) statusEl.className = `recent-status ${sessionVisualStateClass(session)}`;
+      if (timeEl && !isLoading) timeEl.textContent = relativeTime(sessionActivityAt(session));
+      btn.onpointerenter = () => prefetchLive(session);
+      btn.onpointerdown = () => prefetchLive(session);
+      btn.onclick = () => {
+        selected = session;
+        markSessionViewed(session);
+        btn.classList.add("loading");
+        const currentTimeEl = btn.querySelector(".status-time");
+        if (currentTimeEl) currentTimeEl.textContent = "打开中";
+        openLive(session);
+      };
+    }
+
+    function sessionDomId(session) {
+      return String((session && session.native_thread_id) || "");
     }
     function sessionVisualStateClass(session) {
       const status = String((session && session.status) || "").trim().toLowerCase();

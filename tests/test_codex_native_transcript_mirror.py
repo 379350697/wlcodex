@@ -29,6 +29,103 @@ def _write_session_jsonl(root: Path, thread_id: str, rows: list[dict]) -> Path:
     return path
 
 
+def test_transcript_mirror_indexes_recent_desktop_sessions(tmp_path: Path) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    thread_id = "019efc99-e43b-7e83-95a7-88194da07f75"
+    root = tmp_path / "sessions"
+    path = _write_session_jsonl(
+        root,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-06-25T02:26:44.423Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": thread_id,
+                    "cwd": "/Users/wl/projects/LiangH",
+                    "timestamp": "2026-06-25T02:26:44.423Z",
+                    "originator": "Codex Desktop",
+                    "source": "codex_desktop",
+                    "thread_source": "user",
+                },
+            },
+            {
+                "timestamp": "2026-06-25T02:26:45.000Z",
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "turn-1",
+                    "cwd": "/Users/wl/projects/LiangH",
+                },
+            },
+            {
+                "timestamp": "2026-06-25T02:26:46.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "现在策略库有多少个策略了\n",
+                },
+            },
+        ],
+    )
+    path.touch()
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+    )
+
+    assert mirror.index_recent_sessions(limit=20) == 1
+
+    [session] = session_store.list_recent(limit=10)
+    assert session.native_thread_id == thread_id
+    assert session.title == "现在策略库有多少个策略了"
+    assert session.cwd == "/Users/wl/projects/LiangH"
+    assert session.source_kind == "codex_jsonl"
+    assert session.status == "idle"
+    assert session.metadata["originator"] == "Codex Desktop"
+    assert session.metadata["thread_source"] == "user"
+    assert session.metadata["rollout_path"].endswith(f"{thread_id}.jsonl")
+
+
+def test_transcript_mirror_skips_desktop_subagent_sessions(tmp_path: Path) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    thread_id = "019efded-972d-7ca3-84de-ea4ed72eecc1"
+    root = tmp_path / "sessions"
+    _write_session_jsonl(
+        root,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-06-25T08:37:46.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": thread_id,
+                    "cwd": "/Users/wl/projects/LiangH",
+                    "originator": "Codex Desktop",
+                    "source": {"subagent": {"other": "guardian"}},
+                    "thread_source": "subagent",
+                },
+            },
+            {
+                "timestamp": "2026-06-25T08:37:47.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "The following is the Codex agent history...",
+                },
+            },
+        ],
+    )
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+    )
+
+    assert mirror.index_recent_sessions(limit=20) == 0
+    assert session_store.list_recent(limit=10) == []
+
+
 def test_transcript_mirror_imports_official_jsonl_tail_without_duplicates(
     tmp_path: Path,
 ) -> None:
