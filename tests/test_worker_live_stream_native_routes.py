@@ -682,12 +682,22 @@ async def test_static_assets_are_publicly_cacheable(tmp_path: Path) -> None:
             "Host: test\r\n"
             "Connection: close\r\n\r\n",
         )
+        image_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /static/marvis/marvis-avatar.png HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
     finally:
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
     assert "Content-Type: text/css; charset=utf-8" in response
     assert "Cache-Control: public, max-age=300, stale-while-revalidate=60" in response
+    assert "HTTP/1.1 200 OK" in image_response
+    assert "Content-Type: image/png" in image_response
+    assert "Cache-Control: public, max-age=300, stale-while-revalidate=60" in image_response
 
 
 @pytest.mark.asyncio
@@ -2191,27 +2201,20 @@ def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
     assert 'statusEl.className = `recent-status ${sessionVisualStateClass(session)}`;' in response
 
 
-def test_native_provider_home_exposes_theme_toggle_and_preserves_theme() -> None:
+def test_native_provider_home_does_not_expose_marvis_theme_entry() -> None:
     response = _native_codex_page("codex")
     marvis_response = _native_codex_page("codex", theme="marvis")
 
-    assert 'id="themeToggle"' in response
-    assert 'class="circle theme-toggle"' in response
-    assert 'const THEME_STORAGE_KEY = "wlcodex:native-theme";' in response
-    assert "function currentTheme()" in response
-    assert "function applyThemePreference(theme)" in response
-    assert "function toggleTheme()" in response
-    assert "themeToggle.onclick = toggleTheme;" in response
-    assert (
-        'themeToggle.setAttribute("aria-pressed", currentTheme() === "marvis" ? "true" : "false");'
-        in response
-    )
-    assert 'if (currentTheme()) params.set("theme", currentTheme());' in response
-    assert (
-        'body class="aurora-bg noise-overlay" data-native-view="home" data-theme="marvis"'
-        in marvis_response
-    )
-    assert '<link rel="stylesheet" href="/static/marvis.css">' in marvis_response
+    assert 'id="themeToggle"' not in response
+    assert 'class="circle theme-toggle"' not in response
+    assert 'const THEME_STORAGE_KEY = "wlcodex:native-theme";' not in response
+    assert "function applyThemePreference(theme)" not in response
+    assert "function toggleTheme()" not in response
+    assert "themeToggle.onclick = toggleTheme;" not in response
+    assert 'if (currentTheme()) params.set("theme", currentTheme());' not in response
+    assert 'data-theme="marvis"' not in marvis_response
+    assert '<link rel="stylesheet" href="/static/marvis.css">' not in marvis_response
+    assert "<title>Codex</title>" in marvis_response
 
 
 @pytest.mark.asyncio

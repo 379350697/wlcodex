@@ -173,8 +173,9 @@ async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path)
     assert "Claude" in response
     assert "Antigravity" in response
     assert "议会审核" in response
-    assert "流式接力" in response
+    assert "Marvis 接力" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
+    assert 'data-native-entry="marvis-relay"' in response
     assert '<span>工作流</span>' not in response
 
 
@@ -187,7 +188,7 @@ async def test_workflow_directory_links_to_relay_council_and_dev_flow(tmp_path: 
     )
 
     assert "HTTP/1.1 200 OK" in response
-    assert "流式接力模式" in response
+    assert "Marvis 接力" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "议会审核" in response
     assert 'href="/council?token=secret"' in response
@@ -222,7 +223,13 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert "流式接力" in response
+    assert "Marvis" in response
+    assert 'data-marvis-relay-view="tasks"' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css">' in response
+    assert 'class="marvis-relay-bottom-nav"' in response
+    assert 'class="marvis-relay-composer"' in response
+    assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
+    assert "请输入任务" in response
     assert "任务历史" in response
     assert response.count('data-open-new-task>新接力任务</button>') == 1
     assert "配置" in response
@@ -265,7 +272,8 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "native session list" not in response.lower()
     assert "Default workspace relay" in response
     assert "Other workspace relay" not in response
-    assert 'class="relay-task-card"' in response
+    assert "relay-task-card" in response
+    assert "marvis-relay-task-card" in response
     assert 'class="relay-status-badge"' in response
     assert "等待总工程师接收" in response
     assert "打开任务" in response
@@ -297,7 +305,8 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     )
     assert "Long relay title wraps without overlap" in populated
     assert "Other workspace relay" not in populated
-    assert 'class="relay-task-card"' in populated
+    assert "relay-task-card" in populated
+    assert "marvis-relay-task-card" in populated
     assert 'class="relay-status-badge"' in populated
     assert "总工程师" in populated
     assert "架构工程师" in populated
@@ -485,6 +494,24 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
+    assert 'data-marvis-relay-view="conversation"' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css">' in response
+    assert 'class="marvis-relay-topbar"' in response
+    assert 'class="marvis-relay-bottom-nav"' in response
+    assert 'class="marvis-work-log"' in response
+    assert "工作日志" in response
+    assert "产出物" in response
+    assert 'class="marvis-relay-avatar marvis-relay-avatar-director"' in response
+    assert 'class="marvis-relay-composer"' in response
+    assert "请输入任务" in response
+    assert response.count('data-role-output="director"') == 1
+    assert response.count('<ol class="relay-activity-log" data-activity-log>') == 1
+    assert response.count("data-routing-summary>") == 1
+    assert response.count("<p data-board-next-step>") == 1
+    assert 'data-marvis-snapshot-role-output="director"' in response
+    assert "data-marvis-snapshot-activity-log" in response
+    assert "data-marvis-snapshot-routing-summary" in response
+    assert "data-marvis-snapshot-board-next-step" in response
     assert 'data-relay-view="conversation"' in response
     assert 'data-view-tab="conversation" data-view-active="true"' in response
     assert 'data-view-tab="board" data-view-active="false"' in response
