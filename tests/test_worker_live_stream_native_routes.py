@@ -2191,6 +2191,29 @@ def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
     assert 'statusEl.className = `recent-status ${sessionVisualStateClass(session)}`;' in response
 
 
+def test_native_provider_home_exposes_theme_toggle_and_preserves_theme() -> None:
+    response = _native_codex_page("codex")
+    marvis_response = _native_codex_page("codex", theme="marvis")
+
+    assert 'id="themeToggle"' in response
+    assert 'class="circle theme-toggle"' in response
+    assert 'const THEME_STORAGE_KEY = "wlcodex:native-theme";' in response
+    assert "function currentTheme()" in response
+    assert "function applyThemePreference(theme)" in response
+    assert "function toggleTheme()" in response
+    assert "themeToggle.onclick = toggleTheme;" in response
+    assert (
+        'themeToggle.setAttribute("aria-pressed", currentTheme() === "marvis" ? "true" : "false");'
+        in response
+    )
+    assert 'if (currentTheme()) params.set("theme", currentTheme());' in response
+    assert (
+        'body class="aurora-bg noise-overlay" data-native-view="home" data-theme="marvis"'
+        in marvis_response
+    )
+    assert '<link rel="stylesheet" href="/static/marvis.css">' in marvis_response
+
+
 @pytest.mark.asyncio
 async def test_live_page_shell_is_not_cacheable(
     tmp_path: Path,

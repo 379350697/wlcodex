@@ -6593,6 +6593,9 @@ __MARVIS_CSS_LINK__  <style>
     h1 { margin: 0; text-align: center; font-size: 22px; font-weight: var(--weight-black); letter-spacing: 0; }
     .circle { width: 54px; min-height: 54px; border-radius: 50%; border-color: #343434; background: #202022; color: #f5f5f5; font-size: 34px; }
     .menu { font-size: 25px; }
+    .theme-toggle { font-size: 22px; font-weight: var(--weight-black); line-height: 1; }
+    .theme-toggle[aria-pressed="true"] { background: #fff4df; border-color: #e2c48e; color: #4b3820; }
+    .theme-toggle-icon { display: inline-flex; align-items: center; justify-content: center; width: 1em; height: 1em; }
     .devices { display: flex; gap: 10px; overflow-x: auto; padding: 14px 6px 4px; scrollbar-width: none; }
     .title-stack { min-width: 0; display: grid; gap: 3px; text-align: center; }
     .page-subtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cfcfd5; font-size: 13px; font-weight: var(--weight-bold); }
@@ -6835,7 +6838,7 @@ __MARVIS_CSS_LINK__  <style>
         <h1 id="pageTitle">__PROVIDER_LABEL__</h1>
         <div class="page-subtitle" id="pageSubtitle" hidden></div>
       </div>
-      <button class="circle menu" aria-label="menu">⋮</button>
+      <button class="circle theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换主题" aria-pressed="false"><span class="theme-toggle-icon" aria-hidden="true">◐</span></button>
     </div>
     <div class="devices" id="devices">
       <button class="device-chip off"><span class="dot"></span><span class="laptop"></span><span>connecting</span></button>
@@ -6971,10 +6974,39 @@ __ICONS_JS__
     const SUPPORTS_PLUGIN_MENU = __SUPPORTS_PLUGIN_MENU_JSON__;
     const USES_CLAUDE_PLAN_PERMISSION_MODE = __USES_CLAUDE_PLAN_PERMISSION_MODE_JSON__;
     const PROJECTS_URL = "/api/council/projects";
+    const THEME_STORAGE_KEY = "wlcodex:native-theme";
     const token = new URLSearchParams(location.search).get("token") || "";
     if (token) {
       try { localStorage.setItem("wlcodexToken", token); } catch (_error) {}
       document.cookie = "wlcodex_token=" + encodeURIComponent(token) + "; Path=/; Max-Age=2592000; SameSite=Lax";
+    }
+    function currentTheme() {
+      return String((document.body.dataset && document.body.dataset.theme) || "").trim().toLowerCase();
+    }
+    function storedThemePreference() {
+      try {
+        return String(localStorage.getItem(THEME_STORAGE_KEY) || "").trim().toLowerCase();
+      } catch (_error) {
+        return "";
+      }
+    }
+    function applyThemePreference(theme) {
+      const normalized = String(theme || "").trim().toLowerCase() === "marvis" ? "marvis" : "";
+      try {
+        if (normalized) localStorage.setItem(THEME_STORAGE_KEY, normalized);
+        else localStorage.removeItem(THEME_STORAGE_KEY);
+      } catch (_error) {}
+      const target = new URL(location.href);
+      if (normalized) target.searchParams.set("theme", normalized);
+      else target.searchParams.delete("theme");
+      if (target.href !== location.href) location.href = target.href;
+    }
+    function toggleTheme() {
+      applyThemePreference(currentTheme() === "marvis" ? "" : "marvis");
+    }
+    const requestedTheme = new URLSearchParams(location.search).get("theme") || "";
+    if (!requestedTheme && storedThemePreference() === "marvis") {
+      applyThemePreference("marvis");
     }
     const headers = token ? {"Authorization": "Bearer " + token} : {};
     let selected = null;
@@ -7004,6 +7036,7 @@ __ICONS_JS__
     const imageInput = document.getElementById("imageInput");
     const attachmentStrip = document.getElementById("attachmentStrip");
     const chatRow = document.getElementById("chat");
+    const themeToggle = document.getElementById("themeToggle");
     const composeHero = document.getElementById("composeHero");
     const composeProjectButton = document.getElementById("composeProjectButton");
     const composeProjectLabel = document.getElementById("composeProjectLabel");
@@ -7838,6 +7871,9 @@ __ICONS_JS__
     function updateNativeChrome() {
       document.body.dataset.nativeView = viewMode;
       controlsEl.dataset.view = viewMode;
+      themeToggle.setAttribute("aria-pressed", currentTheme() === "marvis" ? "true" : "false");
+      const themeIcon = themeToggle.querySelector(".theme-toggle-icon");
+      if (themeIcon) themeIcon.textContent = currentTheme() === "marvis" ? "☀" : "◐";
       const title = viewMode === "home" ? PROVIDER_LABEL : (viewMode === "compose" ? "新聊天" : historyTitle);
       pageTitle.textContent = title || PROVIDER_LABEL;
       const showSubtitle = viewMode !== "home" && Boolean(deviceStatusText);
@@ -8157,8 +8193,7 @@ __ICONS_JS__
       if (token) params.set("token", token);
       params.set("native_provider", PROVIDER);
       params.set("native_thread_id", session.native_thread_id);
-      const urlTheme = new URLSearchParams(location.search).get("theme");
-      if (urlTheme) params.set("theme", urlTheme);
+      if (currentTheme()) params.set("theme", currentTheme());
       return `/workers/${session.agent_run_id}/live?${params.toString()}`;
     }
     function prefetchLive(session) {
@@ -8300,6 +8335,7 @@ __ICONS_JS__
       renderNativePage();
     });
     chatRow.onclick = () => openHistory("", "聊天");
+    themeToggle.onclick = toggleTheme;
     composeProjectButton.onclick = openProjectPicker;
     projectPickerCancel.onclick = closeProjectPicker;
     projectNewChat.onclick = handleProjectNewChat;
