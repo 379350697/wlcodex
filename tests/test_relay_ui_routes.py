@@ -225,7 +225,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "HTTP/1.1 200 OK" in response
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-dock">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-composer"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
@@ -495,7 +495,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
 
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-dock">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-work-log"' in response
