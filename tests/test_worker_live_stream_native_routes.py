@@ -431,6 +431,23 @@ class SlowCodexProviderWithCache:
         ]
 
 
+class PushCodexProviderWithCache(SlowCodexProviderWithCache):
+    def __init__(self) -> None:
+        super().__init__()
+        self.refreshed = asyncio.Event()
+
+    async def list_sessions(self, limit: int = 50) -> list[FakeNativeSession]:
+        self.calls.append(("list_sessions", limit))
+        self.refreshed.set()
+        return [
+            FakeNativeSession(
+                "fresh-thread",
+                456,
+                metadata={"source": "daemon"},
+            )
+        ]
+
+
 class SlowCodexProviderWithoutCache(SlowCodexProviderWithCache):
     async def list_cached_sessions(self, limit: int = 50) -> list[FakeNativeSession]:
         self.calls.append(("list_cached_sessions", limit))
@@ -446,10 +463,24 @@ class FailingCodexProviderWithCache(SlowCodexProviderWithCache):
 class FakeTranscriptMirror:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
+        self.session_signature = "sessions:0"
+        self.thread_signatures: dict[str, str] = {}
 
     def index_recent_sessions(self, *, limit: int = 100) -> int:
         self.calls.append(("index_recent_sessions", limit))
         return 2
+
+    def session_index_signature(self, *, limit: int = 100) -> str:
+        self.calls.append(("session_index_signature", limit))
+        return self.session_signature
+
+    def thread_file_signature(self, native_thread_id: str) -> str:
+        self.calls.append(("thread_file_signature", native_thread_id))
+        return self.thread_signatures.get(native_thread_id, "")
+
+    def sync_thread(self, native_thread_id: str) -> int:
+        self.calls.append(("sync_thread", native_thread_id))
+        return 1
 
 
 def _store(tmp_path: Path) -> RuntimeEventStore:
@@ -894,6 +925,54 @@ async def test_native_codex_sessions_background_refresh_indexes_jsonl_sessions(
     assert "HTTP/1.1 200 OK" in response
     assert provider.calls == [("list_cached_sessions", 50), ("list_sessions", 50)]
     assert mirror.calls == [("index_recent_sessions", 100)]
+
+
+@pytest.mark.asyncio
+async def test_native_sessions_stream_pushes_cached_snapshot_and_refresh(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    provider = PushCodexProviderWithCache()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([provider]),
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+        native_sessions_timeout_seconds=10,
+    )
+    await server.start()
+    reader: asyncio.StreamReader | None = None
+    writer: asyncio.StreamWriter | None = None
+    try:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        writer.write(
+            b"GET /api/native/codex/sessions/stream HTTP/1.1\r\n"
+            b"Host: test\r\n"
+            b"Authorization: Bearer secret\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        await writer.drain()
+        initial = await asyncio.wait_for(reader.readuntil(b"cached-thread"), timeout=1.0)
+        await asyncio.wait_for(provider.refreshed.wait(), timeout=1.0)
+        refreshed = await asyncio.wait_for(reader.readuntil(b"fresh-thread"), timeout=1.0)
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await server.stop()
+
+    response = (initial + refreshed).decode("utf-8", errors="replace")
+    assert "HTTP/1.1 200 OK" in response
+    assert "Content-Type: text/event-stream; charset=utf-8" in response
+    assert "event: native_sessions" in response
+    assert "cached-thread" in response
+    assert "fresh-thread" in response
+    assert provider.calls == [
+        ("list_cached_sessions", 50),
+        ("list_sessions", 50),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2355,6 +2434,67 @@ async def test_sse_stream_is_not_cacheable_and_not_buffered(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_sse_stream_watches_native_transcript_file_changes(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    hub = WorkerLiveStreamHub(store)
+    mirror = FakeTranscriptMirror()
+    mirror.thread_signatures["thread-1"] = "thread:0"
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=hub,
+        native_transcript_mirror=mirror,
+    )
+
+    class FakeWriter:
+        def __init__(self) -> None:
+            self.body = bytearray()
+            self.ready = asyncio.Event()
+
+        def write(self, data: bytes) -> None:
+            self.body.extend(data)
+            if b": connected\n\n" in self.body:
+                self.ready.set()
+
+        async def drain(self) -> None:
+            return None
+
+        def is_closing(self) -> bool:
+            return False
+
+    writer = FakeWriter()
+    task = asyncio.create_task(
+        server._send_sse(
+            writer,
+            42,
+            0,
+            native_thread_id="thread-1",
+            native_provider="codex",
+        )
+    )
+    try:
+        await asyncio.wait_for(writer.ready.wait(), timeout=1.0)
+        for _index in range(20):
+            if ("thread_file_signature", "thread-1") in mirror.calls:
+                break
+            await asyncio.sleep(0.1)
+        mirror.thread_signatures["thread-1"] = "thread:1"
+        for _index in range(20):
+            if ("sync_thread", "thread-1") in mirror.calls:
+                break
+            await asyncio.sleep(0.1)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert ("thread_file_signature", "thread-1") in mirror.calls
+    assert ("sync_thread", "thread-1") in mirror.calls
+
+
+@pytest.mark.asyncio
 async def test_native_root_and_unauthorized_page_show_token_entry(
     tmp_path: Path,
 ) -> None:
@@ -2771,13 +2911,17 @@ def test_native_provider_home_signature_is_stable_for_all_session_pages() -> Non
         signature_body = response.split("function homeDataSignature()", 1)[1].split(
             "async function loadHomeData()", 1
         )[0]
+        apply_sessions_body = response.split("function applySessionsPayload", 1)[
+            1
+        ].split("async function loadSessions", 1)[0]
         load_sessions_body = response.split("async function loadSessions", 1)[1].split(
             "async function loadProjects()", 1
         )[0]
 
         assert "relativeTime(" not in signature_body
         assert "activity_label:" not in signature_body
-        assert "renderNativePageIfHomeDataChanged();" in load_sessions_body
+        assert "renderNativePageIfHomeDataChanged();" in apply_sessions_body
+        assert "applySessionsPayload(data, render);" in load_sessions_body
         assert "renderedHomeDataSignature = homeDataSignature();" not in load_sessions_body
         assert "renderNativePage();" not in load_sessions_body
 
@@ -2800,6 +2944,22 @@ def test_native_provider_session_polling_uses_silent_incremental_updates() -> No
         assert "const silent = Boolean(options.silent);" in render_sessions_body
         assert "syncSessionList(filtered.slice(0, SESSION_PREVIEW_LIMIT), sessionsEl);" in render_sessions_body
         assert "syncSessionList(filtered.slice(SESSION_PREVIEW_LIMIT), body);" in render_sessions_body
+
+
+def test_native_provider_home_uses_session_stream_with_polling_fallback() -> None:
+    for provider_name in ("codex", "claude", "antigravity"):
+        response = _native_codex_page(provider_name)
+
+        assert "let sessionsEventSource = null;" in response
+        assert "function sessionsStreamPath()" in response
+        assert "new EventSource(sessionsStreamPath())" in response
+        assert "source.addEventListener(\"native_sessions\"" in response
+        assert "sessions = data.sessions || [];" in response
+        assert "renderNativePageIfHomeDataChanged();" in response
+        assert "function startSessionsStream()" in response
+        assert "startSessionsStream();" in response
+        assert "setInterval(loadHomeData, 15000)" in response
+        assert "setInterval(loadHomeData, 3000)" not in response
 
 
 @pytest.mark.asyncio
@@ -3961,6 +4121,9 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "function eventsPath(params, options = {})" in response
     assert 'if (nativeThreadId) search.set("native_thread_id", nativeThreadId);' in response
     assert "eventsPath(`after=${latestEventId}&limit=100`)" in response
+    assert "function streamPathWithCursor(afterId)" in response
+    assert 'if (nativeThreadId) params.set("native_thread_id", nativeThreadId);' in response
+    assert 'if (PROVIDER) params.set("native_provider", PROVIDER);' in response
     assert 'source.onerror = () => { setConnectionState("reconnecting"); pollEvents(); };' in response
     assert "function isInternalEvent(event)" in response
     assert "if (isInternalEvent(event)) return;" in response

@@ -208,6 +208,23 @@ class CodexSessionTranscriptMirror:
             indexed += 1
         return indexed
 
+    def session_index_signature(self, *, limit: int = 100) -> str:
+        if not self._root.exists():
+            return ""
+        parts: list[str] = []
+        for path in _recent_session_files(self._root, limit=max(1, limit)):
+            parts.append(_file_signature_part(path))
+        return _digest_signature(parts)
+
+    def thread_file_signature(self, native_thread_id: str) -> str:
+        native_thread_id = native_thread_id.strip()
+        if not native_thread_id:
+            return ""
+        path = self._find_session_file(native_thread_id)
+        if path is None:
+            return ""
+        return _digest_signature([_file_signature_part(path)])
+
     def _has_duplicate_user_item(
         self,
         item: _TranscriptItem,
@@ -341,6 +358,21 @@ def _path_mtime_iso(path: Path) -> str:
         return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
     except OSError:
         return ""
+
+
+def _file_signature_part(path: Path) -> str:
+    try:
+        stat = path.stat()
+    except OSError:
+        return f"{path}:missing"
+    return f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _digest_signature(parts: Iterable[str]) -> str:
+    raw = "\n".join(parts)
+    if not raw:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _title_from_text(value: str) -> str:

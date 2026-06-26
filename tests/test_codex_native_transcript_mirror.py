@@ -87,6 +87,55 @@ def test_transcript_mirror_indexes_recent_desktop_sessions(tmp_path: Path) -> No
     assert session.metadata["rollout_path"].endswith(f"{thread_id}.jsonl")
 
 
+def test_transcript_mirror_signatures_change_when_jsonl_changes(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    thread_id = "019efc99-e43b-7e83-95a7-88194da07f75"
+    root = tmp_path / "sessions"
+    path = _write_session_jsonl(
+        root,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-06-25T02:26:44.423Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": thread_id,
+                    "cwd": "/Users/wl/projects/LiangH",
+                    "thread_source": "user",
+                },
+            },
+        ],
+    )
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+    )
+
+    initial_session_signature = mirror.session_index_signature(limit=20)
+    initial_thread_signature = mirror.thread_file_signature(thread_id)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-06-25T02:26:46.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "现在策略库有多少个策略了\n",
+                    },
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+    assert mirror.session_index_signature(limit=20) != initial_session_signature
+    assert mirror.thread_file_signature(thread_id) != initial_thread_signature
+
+
 def test_transcript_mirror_skips_desktop_subagent_sessions(tmp_path: Path) -> None:
     session_store, runtime_store = _stores(tmp_path)
     thread_id = "019efded-972d-7ca3-84de-ea4ed72eecc1"

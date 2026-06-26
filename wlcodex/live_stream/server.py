@@ -52,6 +52,8 @@ _MAX_BODY_BYTES = 24 * 1024 * 1024
 _MAX_NATIVE_IMAGE_ATTACHMENTS = 8
 _MAX_PLUGIN_ICON_BYTES = 128 * 1024
 _NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS = 0.05
+_NATIVE_SESSION_WATCH_INTERVAL_SECONDS = 1.0
+_NATIVE_TRANSCRIPT_WATCH_INTERVAL_SECONDS = 0.5
 _CODEX_PERMISSION_PRESETS: dict[str, dict[str, object]] = {
     "default": {},
     "read_only": {
@@ -256,6 +258,9 @@ class WorkerLiveStreamServer:
         self._client_tasks: set[asyncio.Task[None]] = set()
         self._native_background_tasks: dict[tuple[str, ...], asyncio.Task[None]] = {}
         self._native_background_errors: dict[tuple[str, ...], str] = {}
+        self._native_session_streams: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+        self._native_session_file_signatures: dict[str, str] = {}
+        self._native_transcript_file_signatures: dict[tuple[str, str], str] = {}
         self._council_runs: dict[str, dict[str, Any]] = {}
         self._council_run_tasks: set[asyncio.Task[None]] = set()
         self._login_tickets: dict[str, float] = {}
@@ -695,10 +700,13 @@ class WorkerLiveStreamServer:
                 )
                 if self._native_provider(native_provider) is None:
                     native_provider = "codex"
+                theme = _optional_nonempty_string(
+                    query.get("theme", [""])[0]
+                ) or ""
                 await self._send_html(
                     writer,
                     200,
-                    _live_page(agent_id, native_provider=native_provider),
+                    _live_page(agent_id, native_provider=native_provider, theme=theme),
                 )
                 return
 
@@ -712,7 +720,19 @@ class WorkerLiveStreamServer:
                     query.get("after", [headers.get("last-event-id", "0")])[0],
                     default=0,
                 )
-                await self._send_sse(writer, agent_id, after)
+                native_thread_id = _optional_nonempty_string(
+                    query.get("native_thread_id", [""])[0]
+                ) or ""
+                native_provider = _optional_nonempty_string(
+                    query.get("native_provider", [""])[0]
+                ) or "codex"
+                await self._send_sse(
+                    writer,
+                    agent_id,
+                    after,
+                    native_thread_id=native_thread_id,
+                    native_provider=native_provider,
+                )
                 return
 
             await self._send_json(writer, 404, {"error": "not found"})
@@ -806,6 +826,52 @@ class WorkerLiveStreamServer:
             return await result
         return list(result)
 
+    async def _native_sessions_payload(
+        self,
+        provider_name: str,
+        target: Any,
+        *,
+        legacy_codex_controller: bool,
+        fresh: bool,
+        schedule_refresh: bool,
+    ) -> dict[str, Any]:
+        key = ("native_sessions", provider_name)
+        native_sync_error = self._native_background_errors.get(key, "")
+        native_refresh_pending = False
+        if not fresh and getattr(target, "list_cached_sessions", None) is not None:
+            sessions = await self._list_cached_native_sessions(target)
+            if schedule_refresh:
+                native_refresh_pending = self._schedule_native_sessions_refresh(
+                    provider_name,
+                    target,
+                    legacy_codex_controller=legacy_codex_controller,
+                )
+            native_session_source = "cache"
+        else:
+            try:
+                await self._index_native_jsonl_sessions(provider_name)
+                sessions = await asyncio.wait_for(
+                    self._list_native_sessions(
+                        target,
+                        legacy_codex_controller=legacy_codex_controller,
+                    ),
+                    timeout=self._native_sessions_timeout_seconds,
+                )
+                native_session_source = "daemon"
+                self._native_background_errors.pop(key, None)
+            except (asyncio.TimeoutError, JsonRpcTimeout) as exc:
+                native_sync_error = str(exc) or "native sessions sync timed out"
+                sessions = await self._list_cached_native_sessions(target)
+                native_session_source = "cache"
+        payload: dict[str, Any] = {
+            "sessions": [_json_object(session) for session in sessions],
+            "native_refresh_pending": native_refresh_pending,
+            "native_session_source": native_session_source,
+        }
+        if native_sync_error:
+            payload["native_sync_error"] = native_sync_error
+        return payload
+
     async def _index_native_jsonl_sessions(self, provider_name: str) -> int:
         if provider_name != "codex" or self._native_transcript_mirror is None:
             return 0
@@ -836,11 +902,14 @@ class WorkerLiveStreamServer:
         async def refresh() -> None:
             try:
                 await asyncio.sleep(_NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS)
-                await self._index_native_jsonl_sessions(provider_name)
-                await self._list_native_sessions(
+                payload = await self._native_sessions_payload(
+                    provider_name,
                     target,
                     legacy_codex_controller=legacy_codex_controller,
+                    fresh=True,
+                    schedule_refresh=False,
                 )
+                self._publish_native_sessions(provider_name, payload)
                 self._native_background_errors.pop(key, None)
             except Exception as exc:
                 self._native_background_errors[key] = (
@@ -853,6 +922,221 @@ class WorkerLiveStreamServer:
         task = asyncio.create_task(refresh())
         self._native_background_tasks[key] = task
         return True
+
+    async def _send_native_sessions_sse(
+        self,
+        writer: asyncio.StreamWriter,
+        provider_name: str,
+        target: Any,
+        *,
+        legacy_codex_controller: bool,
+    ) -> None:
+        header = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream; charset=utf-8\r\n"
+            "Cache-Control: no-cache\r\n"
+            "X-Accel-Buffering: no\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+        writer.write(header.encode("utf-8"))
+        writer.write(b": connected\n\n")
+        await writer.drain()
+
+        queue = self._subscribe_native_sessions(provider_name)
+        self._ensure_native_sessions_watcher(
+            provider_name,
+            target,
+            legacy_codex_controller=legacy_codex_controller,
+        )
+        initial_payload = await self._native_sessions_payload(
+            provider_name,
+            target,
+            legacy_codex_controller=legacy_codex_controller,
+            fresh=False,
+            schedule_refresh=True,
+        )
+        await _write_json_sse(writer, "native_sessions", initial_payload)
+
+        try:
+            while not writer.is_closing():
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    writer.write(b": heartbeat\n\n")
+                    await writer.drain()
+                    continue
+                await _write_json_sse(writer, "native_sessions", payload)
+        finally:
+            self._unsubscribe_native_sessions(provider_name, queue)
+            if not self._native_session_streams.get(provider_name):
+                key = ("native_sessions_watch", provider_name)
+                task = self._native_background_tasks.get(key)
+                if task is not None and task is not asyncio.current_task():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    def _subscribe_native_sessions(
+        self,
+        provider_name: str,
+    ) -> asyncio.Queue[dict[str, Any]]:
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=20)
+        self._native_session_streams.setdefault(provider_name, set()).add(queue)
+        return queue
+
+    def _unsubscribe_native_sessions(
+        self,
+        provider_name: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> None:
+        queues = self._native_session_streams.get(provider_name)
+        if queues is None:
+            return
+        queues.discard(queue)
+        if not queues:
+            self._native_session_streams.pop(provider_name, None)
+
+    def _publish_native_sessions(
+        self,
+        provider_name: str,
+        payload: dict[str, Any],
+    ) -> None:
+        for queue in list(self._native_session_streams.get(provider_name, ())):
+            _offer_json_queue(queue, payload)
+
+    def _ensure_native_sessions_watcher(
+        self,
+        provider_name: str,
+        target: Any,
+        *,
+        legacy_codex_controller: bool,
+    ) -> None:
+        key = ("native_sessions_watch", provider_name)
+        existing = self._native_background_tasks.get(key)
+        if existing is not None and not existing.done():
+            return
+
+        async def watch() -> None:
+            try:
+                self._native_session_file_signatures[provider_name] = (
+                    self._native_sessions_file_signature(provider_name)
+                )
+                while self._native_session_streams.get(provider_name):
+                    await asyncio.sleep(_NATIVE_SESSION_WATCH_INTERVAL_SECONDS)
+                    signature = self._native_sessions_file_signature(provider_name)
+                    if not signature:
+                        continue
+                    if signature == self._native_session_file_signatures.get(
+                        provider_name
+                    ):
+                        continue
+                    self._native_session_file_signatures[provider_name] = signature
+                    payload = await self._native_sessions_payload(
+                        provider_name,
+                        target,
+                        legacy_codex_controller=legacy_codex_controller,
+                        fresh=True,
+                        schedule_refresh=False,
+                    )
+                    self._publish_native_sessions(provider_name, payload)
+            finally:
+                if self._native_background_tasks.get(key) is task:
+                    self._native_background_tasks.pop(key, None)
+
+        task = asyncio.create_task(watch())
+        self._native_background_tasks[key] = task
+
+    def _native_sessions_file_signature(self, provider_name: str) -> str:
+        if provider_name != "codex" or self._native_transcript_mirror is None:
+            return ""
+        signature = getattr(
+            self._native_transcript_mirror,
+            "session_index_signature",
+            None,
+        )
+        if signature is None:
+            return ""
+        result = signature(limit=100)
+        return str(result or "")
+
+    def _ensure_native_transcript_watcher(
+        self,
+        agent_run_id: int,
+        native_thread_id: str,
+        *,
+        native_provider: str = "codex",
+    ) -> None:
+        if not native_thread_id:
+            return
+        provider_name = native_provider.strip().lower() or "codex"
+        key = (
+            "native_transcript_watch",
+            provider_name,
+            native_thread_id,
+            str(agent_run_id),
+        )
+        existing = self._native_background_tasks.get(key)
+        if existing is not None and not existing.done():
+            return
+
+        async def watch() -> None:
+            signature_key = (provider_name, native_thread_id)
+            try:
+                self._native_transcript_file_signatures[signature_key] = (
+                    self._native_transcript_file_signature(
+                        provider_name,
+                        native_thread_id,
+                    )
+                )
+                while self._hub.subscriber_count(agent_run_id=agent_run_id) > 0:
+                    await asyncio.sleep(_NATIVE_TRANSCRIPT_WATCH_INTERVAL_SECONDS)
+                    signature = self._native_transcript_file_signature(
+                        provider_name,
+                        native_thread_id,
+                    )
+                    if not signature:
+                        continue
+                    if signature == self._native_transcript_file_signatures.get(
+                        signature_key
+                    ):
+                        continue
+                    self._native_transcript_file_signatures[signature_key] = signature
+                    sync_error = await self._sync_native_transcript(
+                        native_thread_id,
+                        native_provider=provider_name,
+                    )
+                    error_key = (
+                        "native_transcript",
+                        provider_name,
+                        native_thread_id,
+                    )
+                    if sync_error:
+                        self._native_background_errors[error_key] = sync_error
+                    else:
+                        self._native_background_errors.pop(error_key, None)
+            finally:
+                if self._native_background_tasks.get(key) is task:
+                    self._native_background_tasks.pop(key, None)
+
+        task = asyncio.create_task(watch())
+        self._native_background_tasks[key] = task
+
+    def _native_transcript_file_signature(
+        self,
+        provider_name: str,
+        native_thread_id: str,
+    ) -> str:
+        if provider_name != "codex" or self._native_transcript_mirror is None:
+            return ""
+        signature = getattr(
+            self._native_transcript_mirror,
+            "thread_file_signature",
+            None,
+        )
+        if signature is None:
+            return ""
+        result = signature(native_thread_id)
+        return str(result or "")
 
     def _schedule_native_transcript_sync(
         self,
@@ -1269,46 +1553,30 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 200, provider.capabilities().to_json_dict())
             return
 
+        if route == "/sessions/stream":
+            if method != "GET":
+                await self._send_json(writer, 405, {"error": "method not allowed"})
+                return
+            await self._send_native_sessions_sse(
+                writer,
+                provider_name,
+                target,
+                legacy_codex_controller=legacy_codex_controller,
+            )
+            return
+
         if route == "/sessions":
             if method != "GET":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
-            native_sync_error = self._native_background_errors.get(
-                ("native_sessions", provider_name),
-                "",
-            )
-            native_refresh_pending = False
             fresh = query.get("fresh", [""])[0].lower() in ("1", "true", "yes")
-            if not fresh and getattr(target, "list_cached_sessions", None) is not None:
-                sessions = await self._list_cached_native_sessions(target)
-                native_refresh_pending = self._schedule_native_sessions_refresh(
-                    provider_name,
-                    target,
-                    legacy_codex_controller=legacy_codex_controller,
-                )
-                native_session_source = "cache"
-            else:
-                try:
-                    await self._index_native_jsonl_sessions(provider_name)
-                    sessions = await asyncio.wait_for(
-                        self._list_native_sessions(
-                            target,
-                            legacy_codex_controller=legacy_codex_controller,
-                        ),
-                        timeout=self._native_sessions_timeout_seconds,
-                    )
-                    native_session_source = "daemon"
-                except (asyncio.TimeoutError, JsonRpcTimeout) as exc:
-                    native_sync_error = str(exc) or "native sessions sync timed out"
-                    sessions = await self._list_cached_native_sessions(target)
-                    native_session_source = "cache"
-            payload: dict[str, Any] = {
-                "sessions": [_json_object(session) for session in sessions],
-                "native_refresh_pending": native_refresh_pending,
-                "native_session_source": native_session_source,
-            }
-            if native_sync_error:
-                payload["native_sync_error"] = native_sync_error
+            payload = await self._native_sessions_payload(
+                provider_name,
+                target,
+                legacy_codex_controller=legacy_codex_controller,
+                fresh=fresh,
+                schedule_refresh=True,
+            )
             await self._send_json(
                 writer,
                 200,
@@ -1952,7 +2220,8 @@ class WorkerLiveStreamServer:
                 _native_token_entry_page(f"/native/{safe_provider}"),
             )
             return
-        await self._send_html(writer, 200, _native_codex_page(provider_name))
+        theme = _optional_nonempty_string(query.get("theme", [""])[0]) or ""
+        await self._send_html(writer, 200, _native_codex_page(provider_name, theme=theme))
 
     async def _read_request_json(
         self,
@@ -2109,6 +2378,9 @@ class WorkerLiveStreamServer:
         writer: asyncio.StreamWriter,
         agent_run_id: int,
         after_id: int,
+        *,
+        native_thread_id: str = "",
+        native_provider: str = "codex",
     ) -> None:
         header = (
             "HTTP/1.1 200 OK\r\n"
@@ -2130,6 +2402,11 @@ class WorkerLiveStreamServer:
             latest = event.id
             await _write_sse(writer, event)
         queue = self._hub.subscribe(agent_run_id=agent_run_id)
+        self._ensure_native_transcript_watcher(
+            agent_run_id,
+            native_thread_id,
+            native_provider=native_provider,
+        )
         try:
             while not writer.is_closing():
                 event = await queue.get()
@@ -2139,6 +2416,20 @@ class WorkerLiveStreamServer:
                 await _write_sse(writer, event)
         finally:
             self._hub.unsubscribe(agent_run_id=agent_run_id, queue=queue)
+            if native_thread_id and self._hub.subscriber_count(
+                agent_run_id=agent_run_id
+            ) == 0:
+                provider_name = native_provider.strip().lower() or "codex"
+                key = (
+                    "native_transcript_watch",
+                    provider_name,
+                    native_thread_id,
+                    str(agent_run_id),
+                )
+                task = self._native_background_tasks.get(key)
+                if task is not None and task is not asyncio.current_task():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
 
 
 async def _send_response(
@@ -2180,6 +2471,36 @@ async def _send_response(
 async def _write_sse(writer: asyncio.StreamWriter, event: WorkerStreamEvent) -> None:
     writer.write(format_sse_event(event))
     await writer.drain()
+
+
+async def _write_json_sse(
+    writer: asyncio.StreamWriter,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    writer.write(f"event: {event_type}\n".encode("utf-8"))
+    writer.write(f"data: {raw}\n\n".encode("utf-8"))
+    await writer.drain()
+
+
+def _offer_json_queue(
+    queue: asyncio.Queue[dict[str, Any]],
+    payload: dict[str, Any],
+) -> None:
+    try:
+        queue.put_nowait(payload)
+        return
+    except asyncio.QueueFull:
+        pass
+    try:
+        queue.get_nowait()
+    except asyncio.QueueEmpty:
+        pass
+    try:
+        queue.put_nowait(payload)
+    except asyncio.QueueFull:
+        pass
 
 
 async def _send_relay_sse(
@@ -6236,7 +6557,7 @@ def _native_login_ticket_page(ticket: str, provider_name: str = "codex") -> str:
 </html>"""
 
 
-def _native_codex_page(provider_name: str = "codex") -> str:
+def _native_codex_page(provider_name: str = "codex", *, theme: str = "") -> str:
     provider_name = provider_name.strip() or "codex"
     provider_label = _native_provider_display_name(provider_name)
     api_base = f"/api/native/{quote(provider_name, safe='')}"
@@ -6245,18 +6566,22 @@ def _native_codex_page(provider_name: str = "codex") -> str:
     uses_claude_plan_permission_mode = provider_name == "claude"
     plan_mode_action_hidden = "" if supports_plan_mode else " hidden"
     plugin_menu_hidden = "" if supports_plugin_menu else " hidden"
+    is_marvis = theme.strip().lower() == "marvis"
+    marvis_css_link = '  <link rel="stylesheet" href="/static/marvis.css">\n' if is_marvis else ""
+    marvis_body_attr = ' data-theme="marvis"' if is_marvis else ""
+    marvis_title = "Marvis" if is_marvis else escape(provider_label)
     template = """<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>__PROVIDER_LABEL__</title>
+  <title>__MARVIS_TITLE__</title>
 __NATIVE_APP_HEAD__
   <link rel="stylesheet" href="/static/base.css">
   <link rel="stylesheet" href="/static/animations.css">
   <link rel="stylesheet" href="/static/effects.css">
   <link rel="stylesheet" href="/static/components.css">
-  <style>
+__MARVIS_CSS_LINK__  <style>
     :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; }
     body { background: #000; }
     body { scrollbar-width: none; }
@@ -6501,7 +6826,7 @@ __NATIVE_APP_HEAD__
     button.chat:disabled { background: var(--bg-pill); color: var(--text-dim); opacity: 1; cursor: default; }
   </style>
 </head>
-<body class="aurora-bg noise-overlay" data-native-view="home">
+<body class="aurora-bg noise-overlay" data-native-view="home"__MARVIS_BODY_ATTR__>
   <header>
     <div class="topbar">
       <button class="circle" id="back" aria-label="back">‹</button>
@@ -6660,6 +6985,7 @@ __ICONS_JS__
     let deviceStatusText = "";
     let sessions = [];
     let sessionsRefreshTimer = null;
+    let sessionsEventSource = null;
     let projectRoot = "";
     let projectCatalog = [];
     let renderedHomeDataSignature = "";
@@ -6768,22 +7094,51 @@ __ICONS_JS__
       }
     }
 
+    function applySessionsPayload(data, render = true) {
+      sessions = data.sessions || [];
+      if (data.native_refresh_pending && sessionsRefreshTimer === null) {
+        sessionsRefreshTimer = setTimeout(() => {
+          sessionsRefreshTimer = null;
+          loadSessions(true);
+        }, 800);
+      }
+      if (selected && !sessions.some(session => session.native_thread_id === selected.native_thread_id)) selected = null;
+      if (render) {
+        renderNativePageIfHomeDataChanged();
+      }
+    }
+
     async function loadSessions(render = true) {
       try {
         const data = await api(`${API_BASE}/sessions`);
-        sessions = data.sessions || [];
-        if (data.native_refresh_pending && sessionsRefreshTimer === null) {
-          sessionsRefreshTimer = setTimeout(() => {
-            sessionsRefreshTimer = null;
-            loadSessions(true);
-          }, 800);
-        }
-        if (selected && !sessions.some(session => session.native_thread_id === selected.native_thread_id)) selected = null;
-        if (render) {
-          renderNativePageIfHomeDataChanged();
-        }
+        applySessionsPayload(data, render);
       } catch (error) {
         sessionsEl.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function sessionsStreamPath() {
+      return tokenizedPath(`${API_BASE}/sessions/stream`);
+    }
+
+    function startSessionsStream() {
+      if (sessionsEventSource) return;
+      try {
+        const source = new EventSource(sessionsStreamPath());
+        sessionsEventSource = source;
+        source.addEventListener("native_sessions", message => {
+          const data = JSON.parse(message.data || "{}");
+          sessions = data.sessions || [];
+          applySessionsPayload(data, true);
+        });
+        source.onerror = () => {
+          if (sessionsEventSource !== source) return;
+          source.close();
+          sessionsEventSource = null;
+          window.setTimeout(startSessionsStream, 3000);
+        };
+      } catch (_error) {
+        sessionsEventSource = null;
       }
     }
 
@@ -7802,6 +8157,8 @@ __ICONS_JS__
       if (token) params.set("token", token);
       params.set("native_provider", PROVIDER);
       params.set("native_thread_id", session.native_thread_id);
+      const urlTheme = new URLSearchParams(location.search).get("theme");
+      if (urlTheme) params.set("theme", urlTheme);
       return `/workers/${session.agent_run_id}/live?${params.toString()}`;
     }
     function prefetchLive(session) {
@@ -8211,13 +8568,19 @@ __ICONS_JS__
     loadStatus();
     loadModelCatalog();
     loadHomeData();
-    setInterval(loadHomeData, 3000);
+    startSessionsStream();
+    setInterval(loadHomeData, 15000);
   </script>
+__MARVIS_EXTRA_HTML__
 </body>
 </html>"""
     return _replace_html_icons(
         template.replace("__PROVIDER_LABEL__", escape(provider_label))
+        .replace("__MARVIS_TITLE__", marvis_title)
         .replace("__NATIVE_APP_HEAD__", _NATIVE_APP_HEAD)
+        .replace("__MARVIS_CSS_LINK__", marvis_css_link)
+        .replace("__MARVIS_BODY_ATTR__", marvis_body_attr)
+        .replace("__MARVIS_EXTRA_HTML__", _marvis_extra_html() if is_marvis else "")
         .replace("__PROVIDER_JSON__", json.dumps(provider_name, ensure_ascii=False))
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
@@ -8258,7 +8621,230 @@ __ICONS_JS__
     )
 
 
-def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
+def _marvis_extra_html() -> str:
+    """Return Marvis-specific HTML: bottom nav, work log panel, persona page, backdrop."""
+    return """
+  <!-- Marvis Bottom Navigation Bar -->
+  <nav class="marvis-bottom-nav" id="marvisBottomNav">
+    <button class="marvis-nav-item active" id="marvisNavChat" type="button">
+      <span class="marvis-nav-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+      <span class="marvis-nav-label">对话</span>
+    </button>
+    <button class="marvis-nav-item" id="marvisNavTasks" type="button">
+      <span class="marvis-nav-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+      <span class="marvis-nav-label">任务</span>
+    </button>
+    <button class="marvis-nav-item" id="marvisNavSkills" type="button">
+      <span class="marvis-nav-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span>
+      <span class="marvis-nav-label">技能</span>
+    </button>
+    <button class="marvis-nav-item" id="marvisNavProfile" type="button">
+      <span class="marvis-nav-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+      <span class="marvis-nav-label">我的</span>
+    </button>
+  </nav>
+
+  <!-- Marvis Backdrop Overlay -->
+  <div class="marvis-backdrop" id="marvisBackdrop"></div>
+
+  <!-- Marvis Work Log Panel -->
+  <section class="marvis-work-log" id="marvisWorkLog" hidden>
+    <div class="marvis-work-log-handle"><span></span></div>
+    <button class="marvis-work-log-close" id="marvisWorkLogClose" type="button" aria-label="关闭">×</button>
+    <div class="marvis-work-log-tabs">
+      <button class="marvis-work-log-tab active" type="button">工作日志</button>
+      <button class="marvis-work-log-tab" type="button">产出物</button>
+    </div>
+    <div class="marvis-work-log-body">
+      <div class="marvis-work-log-avatar">
+        <span class="marvis-work-log-avatar-name">Marvis</span>
+      </div>
+      <div class="marvis-work-log-screenshots" id="marvisScreenshots">
+        <div class="marvis-work-log-screenshot"></div>
+        <div class="marvis-work-log-screenshot"></div>
+        <div class="marvis-work-log-screenshot"></div>
+        <div class="marvis-work-log-screenshot"></div>
+      </div>
+      <div class="marvis-work-log-status">
+        <span class="marvis-work-log-status-text">空闲中...</span>
+        <span class="marvis-work-log-status-link">工作状态 ›</span>
+      </div>
+      <div class="marvis-work-log-status">
+        <span class="marvis-work-log-tokens">消耗Token ›</span>
+        <span>0 🔥</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Marvis Persona Page -->
+  <section class="marvis-persona-page" id="marvisPersonaPage" hidden>
+    <button class="marvis-persona-back" id="marvisPersonaBack" type="button" aria-label="返回">‹</button>
+    <div class="marvis-persona-hero">
+      <div class="marvis-persona-avatar">
+        <svg viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg">
+          <!-- Marvis character - stylized black mascot with red scarf -->
+          <g transform="translate(30,10)">
+            <!-- Body -->
+            <ellipse cx="50" cy="110" rx="38" ry="30" fill="#1A1A1A"/>
+            <!-- Head -->
+            <circle cx="50" cy="55" r="32" fill="#1A1A1A"/>
+            <!-- Ears/Horns -->
+            <path d="M28 28 L22 8 L36 22Z" fill="#1A1A1A"/>
+            <path d="M72 28 L78 8 L64 22Z" fill="#1A1A1A"/>
+            <!-- Eyes -->
+            <rect x="33" y="46" width="14" height="8" rx="2" fill="#FFFFFF"/>
+            <rect x="53" y="46" width="14" height="8" rx="2" fill="#FFFFFF"/>
+            <rect x="37" y="48" width="6" height="4" rx="1" fill="#E53935"/>
+            <rect x="57" y="48" width="6" height="4" rx="1" fill="#E53935"/>
+            <!-- Scarf -->
+            <path d="M22 72 Q50 85 78 72 Q78 92 62 90 L58 105 L50 95 L42 105 L38 90 Q22 92 22 72Z" fill="#E53935"/>
+            <!-- Arms -->
+            <ellipse cx="16" cy="100" rx="10" ry="18" fill="#1A1A1A" transform="rotate(-15 16 100)"/>
+            <ellipse cx="84" cy="95" rx="10" ry="18" fill="#1A1A1A" transform="rotate(15 84 95)"/>
+            <!-- Legs -->
+            <ellipse cx="35" cy="135" rx="12" ry="10" fill="#1A1A1A"/>
+            <ellipse cx="65" cy="135" rx="12" ry="10" fill="#1A1A1A"/>
+          </g>
+        </svg>
+      </div>
+      <h2 class="marvis-persona-greeting">Hi，我是 Marvis</h2>
+      <div class="marvis-persona-tags">
+        <span class="marvis-persona-tag">理智高效</span>
+        <span class="marvis-persona-tag">极简办公</span>
+        <span class="marvis-persona-tag">默默干活</span>
+      </div>
+    </div>
+    <div class="marvis-persona-body">
+      <div class="marvis-persona-section">
+        <div class="marvis-persona-section-title">👋 自我介绍</div>
+        <div class="marvis-persona-section-content">
+          老板，我是理智高效版 Marvis。我 24 小时在线，有问题随时来找我。
+        </div>
+      </div>
+      <div class="marvis-persona-section">
+        <div class="marvis-persona-section-title">📋 人设特征</div>
+        <div class="marvis-persona-section-content">
+          <dl>
+            <dt>性格关键词：理智高效</dt>
+            <dd>说话风格：不做多余寒暄，直奔问题核心，用最短路径帮你解决需求</dd>
+            <dt>适用场景：</dt>
+            <dd>适合办公需求处理：文档整理、信息查询、方案梳理等高效场景</dd>
+          </dl>
+        </div>
+      </div>
+      <button class="marvis-persona-edit" type="button">✏️ 人设调整</button>
+    </div>
+    <button class="marvis-persona-cta" id="marvisPersonaCta" type="button">设定我的Marvis</button>
+  </section>
+
+  <!-- Marvis UI JavaScript -->
+  <script>
+  (function() {
+    if (!document.body.dataset.theme || document.body.dataset.theme !== 'marvis') return;
+
+    const bottomNav = document.getElementById('marvisBottomNav');
+    const backdrop = document.getElementById('marvisBackdrop');
+    const workLog = document.getElementById('marvisWorkLog');
+    const workLogClose = document.getElementById('marvisWorkLogClose');
+    const personaPage = document.getElementById('marvisPersonaPage');
+    const personaBack = document.getElementById('marvisPersonaBack');
+    const personaCta = document.getElementById('marvisPersonaCta');
+    const navChat = document.getElementById('marvisNavChat');
+    const navTasks = document.getElementById('marvisNavTasks');
+    const navSkills = document.getElementById('marvisNavSkills');
+    const navProfile = document.getElementById('marvisNavProfile');
+
+    if (!bottomNav) return;
+
+    // Tab switching
+    const navItems = [navChat, navTasks, navSkills, navProfile];
+    function activateTab(item) {
+      navItems.forEach(n => { if (n) n.classList.remove('active'); });
+      if (item) item.classList.add('active');
+    }
+
+    if (navChat) navChat.addEventListener('click', function() {
+      activateTab(navChat);
+      closeWorkLog();
+      closePersonaPage();
+    });
+
+    if (navTasks) navTasks.addEventListener('click', function() {
+      activateTab(navTasks);
+      openWorkLog();
+    });
+
+    if (navSkills) navSkills.addEventListener('click', function() {
+      activateTab(navSkills);
+    });
+
+    if (navProfile) navProfile.addEventListener('click', function() {
+      activateTab(navProfile);
+      openPersonaPage();
+    });
+
+    // Work Log panel
+    function openWorkLog() {
+      if (!workLog) return;
+      workLog.hidden = false;
+      requestAnimationFrame(function() {
+        requestAnimationFrame(function() {
+          workLog.classList.add('open');
+          if (backdrop) { backdrop.classList.add('visible'); }
+        });
+      });
+    }
+
+    function closeWorkLog() {
+      if (!workLog) return;
+      workLog.classList.remove('open');
+      if (backdrop) backdrop.classList.remove('visible');
+      setTimeout(function() { workLog.hidden = true; }, 350);
+      activateTab(navChat);
+    }
+
+    if (workLogClose) workLogClose.addEventListener('click', closeWorkLog);
+
+    // Work Log tabs
+    var wlTabs = workLog ? workLog.querySelectorAll('.marvis-work-log-tab') : [];
+    wlTabs.forEach(function(tab) {
+      tab.addEventListener('click', function() {
+        wlTabs.forEach(function(t) { t.classList.remove('active'); });
+        tab.classList.add('active');
+      });
+    });
+
+    // Persona Page
+    function openPersonaPage() {
+      if (!personaPage) return;
+      personaPage.hidden = false;
+      requestAnimationFrame(function() {
+        requestAnimationFrame(function() {
+          personaPage.classList.add('open');
+        });
+      });
+    }
+
+    function closePersonaPage() {
+      if (!personaPage) return;
+      personaPage.classList.remove('open');
+      setTimeout(function() { personaPage.hidden = true; }, 300);
+      activateTab(navChat);
+    }
+
+    if (personaBack) personaBack.addEventListener('click', closePersonaPage);
+    if (personaCta) personaCta.addEventListener('click', closePersonaPage);
+
+    // Backdrop click closes work log
+    if (backdrop) backdrop.addEventListener('click', function() {
+      closeWorkLog();
+    });
+  })();
+  </script>
+"""
+
+
+def _live_page(agent_run_id: int, *, native_provider: str = "codex", theme: str = "") -> str:
     stream_path = f"/api/workers/{agent_run_id}/stream"
     native_provider = native_provider.strip() or "codex"
     provider_label = _native_provider_display_name(native_provider)
@@ -8269,6 +8855,9 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex") -> str:
     uses_claude_plan_permission_mode = native_provider == "claude"
     plan_mode_action_hidden = "" if supports_plan_mode else " hidden"
     plugin_menu_hidden = "" if supports_plugin_menu else " hidden"
+    is_marvis = theme.strip().lower() == "marvis"
+    marvis_css_link = '  <link rel="stylesheet" href="/static/marvis.css">\n' if is_marvis else ""
+    marvis_body_attr = ' data-theme="marvis"' if is_marvis else ""
     template = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -8280,7 +8869,7 @@ __NATIVE_APP_HEAD__
   <link rel="stylesheet" href="/static/animations.css">
   <link rel="stylesheet" href="/static/effects.css">
   <link rel="stylesheet" href="/static/components.css">
-  <style>
+__MARVIS_CSS_LINK__  <style>
     :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; }
     html, body, .native-mobile-shell, .codex-run-shell, .codex-transcript, .transcript-body, .codex-input-dock, input { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     body { background: #000; }
@@ -8585,7 +9174,7 @@ __NATIVE_APP_HEAD__
     }
   </style>
 </head>
-<body class="aurora-bg noise-overlay">
+<body class="aurora-bg noise-overlay"__MARVIS_BODY_ATTR__>
   <div class="native-mobile-shell codex-run-shell">
     <header id="header">
       <button class="circle" id="back" aria-label="返回">‹</button>
@@ -10240,6 +10829,8 @@ __ICONS_JS__
       const params = new URLSearchParams();
       if (token) params.set("token", token);
       params.set("t", String(Date.now()));
+      const urlTheme = new URLSearchParams(location.search).get("theme");
+      if (urlTheme) params.set("theme", urlTheme);
       location.href = `/native/${encodeURIComponent(PROVIDER)}?${params.toString()}`;
     };
     async function submitPrompt(action = primaryComposerAction()) {
@@ -11119,6 +11710,8 @@ __ICONS_JS__
       const params = new URLSearchParams();
       if (token) params.set("token", token);
       if (afterId) params.set("after", String(afterId));
+      if (nativeThreadId) params.set("native_thread_id", nativeThreadId);
+      if (PROVIDER) params.set("native_provider", PROVIDER);
       const suffix = params.toString();
       return suffix ? streamPathBase + "?" + suffix : streamPathBase;
     }
@@ -12500,12 +13093,16 @@ __ICONS_JS__
       return fallback || event.kind || "状态";
     }
   </script>
+__MARVIS_EXTRA_HTML__
 </body>
 </html>"""
     return _replace_html_icons(
         template
-        .replace("__SAFE_TITLE__", safe_title)
+        .replace("__SAFE_TITLE__", "Marvis" if is_marvis else safe_title)
         .replace("__NATIVE_APP_HEAD__", _NATIVE_APP_HEAD)
+        .replace("__MARVIS_CSS_LINK__", marvis_css_link)
+        .replace("__MARVIS_BODY_ATTR__", marvis_body_attr)
+        .replace("__MARVIS_EXTRA_HTML__", _marvis_extra_html() if is_marvis else "")
         .replace("__PROVIDER_LABEL_TEXT__", safe_title)
         .replace("__STREAM_PATH__", stream_path)
         .replace("__AGENT_RUN_ID__", str(agent_run_id))

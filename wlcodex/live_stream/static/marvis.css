@@ -1,0 +1,1580 @@
+/* ═══════════════════════════════════════════════════════════
+   Marvis — warm light theme
+   Activated via body[data-theme="marvis"]
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Design Tokens Override ──────────────────────────────── */
+
+body[data-theme="marvis"] {
+  /* Background layers — warm cream/off-white */
+  --bg-root:            #FAF8F5;
+  --bg-elevated:        #FFFFFF;
+  --bg-surface:         #F5F2EE;
+  --bg-input:           #F0EDE8;
+  --bg-interact:        #E8E4DF;
+  --bg-canvas:          #FAF8F5;
+  --bg-popover:         #FFFFFF;
+  --bg-composer-input:  #F0EDE8;
+  --bg-attachment:      #F5F2EE;
+  --bg-chip-off:        #E8E5E0;
+  --bg-code:            #F0EDE8;
+  --bg-user-bubble:     #EDE8E2;
+  --bg-remove-btn:      #E0DCD6;
+  --bg-setting-options: #F8F6F3;
+  --bg-pill:            #EDEAE5;
+  --bg-pill-hover:      #E5E2DC;
+  --bg-pill-modified:   #E8E0D5;
+  --bg-option-hover:    #F0EDE8;
+  --bg-option-selected: #E5E1DB;
+
+  /* Borders — subtle warm grays */
+  --border-subtle:      #E8E4DF;
+  --border-default:     #DDD9D3;
+  --border-input:       #D0CBC4;
+  --border-popover:     #E0DCD6;
+  --border-section:     #E5E1DB;
+  --border-header:      #E8E4DF;
+  --border-card:        #DDD9D3;
+  --border-input-alt:   #D5D0C9;
+  --border-code:        #DDD9D3;
+  --border-council:     #D0CBC4;
+
+  /* Text — dark tones */
+  --text-primary:       #1A1A1A;
+  --text-secondary:     #333333;
+  --text-muted:         #888580;
+  --text-heading:       #111111;
+  --text-placeholder:   #A09B95;
+  --text-dim:           #666360;
+  --text-meta:          #9E9A95;
+  --text-code:          #4A4845;
+
+  /* Semantic colors — warmer variants */
+  --color-success:      #34A853;
+  --color-warning:      #E8A020;
+  --color-error:        #D93025;
+  --color-link:         #5D4E37;
+  --color-error-bg:     #FDE8E8;
+  --color-error-light:  #D93025;
+  --color-error-text:   #B91C1C;
+
+  /* Button colors */
+  --btn-primary-bg:     #1A1A1A;
+  --btn-primary-color:  #FFFFFF;
+  --btn-secondary-bg:   #F0EDE8;
+  --btn-primary-hover:  #333333;
+  --btn-secondary-hover-bg:   #E5E2DC;
+  --btn-secondary-hover-border: #C5C0B8;
+  --btn-warn-bg:        #D93025;
+  --btn-warn-color:     #FFFFFF;
+  --btn-ghost-hover:    rgba(0,0,0,0.04);
+  --btn-ghost-active:   rgba(0,0,0,0.07);
+  --btn-active-bg:      rgba(93,78,55,0.10);
+  --btn-active-hover:   rgba(93,78,55,0.14);
+  --btn-active-press:   rgba(93,78,55,0.18);
+
+  /* Circle navigation */
+  --circle-bg:        transparent;
+  --circle-bg-hover:  rgba(0,0,0,0.04);
+  --circle-bg-active: rgba(0,0,0,0.08);
+
+  /* Shadows — soft warm */
+  --shadow-popover:   0 8px 32px rgba(60,50,40,0.12);
+  --shadow-sm:        0 1px 3px rgba(60,50,40,0.06);
+  --shadow-md:        0 4px 16px rgba(60,50,40,0.08);
+  --shadow-lg:        0 12px 40px rgba(60,50,40,0.12);
+  --shadow-glow:      none;
+
+  /* Gradients */
+  --gradient-brand:   linear-gradient(135deg, #C4A47A 0%, #8B6E4E 100%);
+  --gradient-accent:  linear-gradient(135deg, #D4B896 0%, #B89B78 50%, #9E8060 100%);
+  --gradient-surface: linear-gradient(180deg, #FFFFFF 0%, #F5F2EE 100%);
+
+  /* Glass */
+  --glass-bg:         rgba(0, 0, 0, 0.02);
+  --glass-border:     rgba(0, 0, 0, 0.06);
+
+  color-scheme: light;
+}
+
+/* ── Body / Root ─────────────────────────────────────────── */
+
+body[data-theme="marvis"] {
+  background: #FAF8F5 !important;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .aurora-bg {
+  background: #FAF8F5 !important;
+}
+
+body[data-theme="marvis"] .noise-overlay::before {
+  display: none !important;
+}
+
+/* ── Header — Marvis Style ───────────────────────────────── */
+
+body[data-theme="marvis"] header {
+  background: #FFFFFF !important;
+  border-bottom: 1px solid #EDEBE8 !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+
+body[data-theme="marvis"] .native-mobile-shell,
+body[data-theme="marvis"] .codex-run-shell {
+  min-height: 100vh;
+  background: #FAF8F5 !important;
+}
+
+body[data-theme="marvis"] .circle {
+  width: 44px;
+  min-height: 44px;
+  border-color: transparent;
+  background: transparent;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .circle:hover {
+  background: rgba(0,0,0,0.04);
+}
+
+body[data-theme="marvis"] h1 {
+  color: #1A1A1A;
+  font-weight: 700;
+}
+
+body[data-theme="marvis"] .subtitle {
+  color: #888580;
+}
+
+/* Session float bar */
+body[data-theme="marvis"] .session-float {
+  border: 1px solid #E0DCD6;
+  background: #FFFFFF;
+  color: #1A1A1A;
+  box-shadow: 0 4px 16px rgba(60,50,40,0.08);
+}
+
+body[data-theme="marvis"] .session-float-title {
+  color: #1A1A1A;
+  font-weight: 700;
+}
+
+body[data-theme="marvis"] .session-float-meta {
+  color: #888580;
+}
+
+/* Header run indicator */
+body[data-theme="marvis"] .header-run-indicator {
+  border: 1px solid #E0DCD6;
+  background: #FFFFFF;
+  color: #1A1A1A;
+  box-shadow: 0 4px 16px rgba(60,50,40,0.08);
+}
+
+body[data-theme="marvis"] .header-run-menu {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .header-run-spinner {
+  border-color: #D0CBC4;
+  border-right-color: transparent;
+}
+
+body[data-theme="marvis"] .header-run-indicator.running .header-run-spinner {
+  border-color: transparent;
+  border-top-color: #5D4E37;
+  border-right-color: #5D4E37;
+}
+
+/* ── Native header popover ───────────────────────────────── */
+
+body[data-theme="marvis"] .native-header-popover {
+  border: 1px solid #E0DCD6;
+  background: #FFFFFF;
+  color: #1A1A1A;
+  box-shadow: 0 12px 40px rgba(60,50,40,0.12);
+}
+
+/* ── Context info sheet ──────────────────────────────────── */
+
+body[data-theme="marvis"] .context-info-sheet {
+  background: #FFFFFF;
+  color: #1A1A1A;
+  border-top: 1px solid #EDEBE8;
+  box-shadow: 0 -12px 40px rgba(60,50,40,0.1);
+}
+
+body[data-theme="marvis"] .context-sheet-handle {
+  background: #D5D0C9;
+}
+
+body[data-theme="marvis"] .context-info-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .context-info-close {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .context-info-label {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .context-info-value {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .context-info-copy {
+  color: #1A1A1A;
+}
+
+/* ── Session action menu ─────────────────────────────────── */
+
+body[data-theme="marvis"] .session-action-title {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .session-action-item {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .session-action-item.danger {
+  color: #D93025;
+}
+
+/* ── Main content area ───────────────────────────────────── */
+
+body[data-theme="marvis"] main {
+  padding-bottom: calc(var(--codex-dock-height, 150px) + 90px + env(safe-area-inset-bottom));
+}
+
+/* ── Status flow bar ─────────────────────────────────────── */
+
+body[data-theme="marvis"] .codex-status-flow {
+  background: rgba(250,248,245,0.94);
+  border-bottom: 1px solid #EDEBE8;
+  color: #888580;
+}
+
+/* ── Transcript — chat messages ──────────────────────────── */
+
+/* User messages */
+body[data-theme="marvis"] .transcript-item.user .transcript-body {
+  background: #EDE8E2;
+  border: none;
+  border-radius: 20px 20px 4px 20px;
+  color: #1A1A1A;
+  padding: 12px 16px;
+}
+
+body[data-theme="marvis"] .transcript-item.user .transcript-meta {
+  display: none;
+}
+
+/* Assistant messages — Marvis style with avatar */
+body[data-theme="marvis"] .transcript-item.assistant {
+  border-left: none;
+  padding-left: 0;
+  position: relative;
+}
+
+body[data-theme="marvis"] .transcript-item.assistant .transcript-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #888580;
+  font-size: 13px;
+  font-weight: 500;
+  padding-left: 0;
+}
+
+body[data-theme="marvis"] .transcript-item.assistant .transcript-meta::before {
+  content: "";
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #1A1A1A url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Ccircle cx='20' cy='20' r='20' fill='%231A1A1A'/%3E%3Crect x='8' y='12' width='24' height='14' rx='3' fill='%23fff'/%3E%3Crect x='11' y='15' width='7' height='5' rx='1' fill='%23E53935'/%3E%3Crect x='22' y='15' width='7' height='5' rx='1' fill='%23E53935'/%3E%3Crect x='16' y='28' width='8' height='4' rx='2' fill='%23E53935'/%3E%3C/svg%3E") center/cover no-repeat;
+  flex: 0 0 28px;
+}
+
+body[data-theme="marvis"] .transcript-body {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .transcript-body a {
+  color: #5D4E37;
+  border-bottom-color: rgba(93,78,55,0.3);
+}
+
+body[data-theme="marvis"] .transcript-body a:hover {
+  border-bottom-color: rgba(93,78,55,0.6);
+}
+
+body[data-theme="marvis"] .transcript-body strong {
+  color: #111111;
+}
+
+body[data-theme="marvis"] .transcript-body code {
+  border: 1px solid #E0DCD6;
+  background: #F0EDE8;
+  color: #4A4845;
+}
+
+body[data-theme="marvis"] .transcript-body pre {
+  border: 1px solid #E0DCD6;
+  background: linear-gradient(145deg, #F8F6F3, #F0EDE8);
+  box-shadow: none;
+}
+
+body[data-theme="marvis"] .transcript-body pre code {
+  background: transparent;
+}
+
+body[data-theme="marvis"] .transcript-body h3 {
+  color: #111111;
+}
+
+/* Status labels — warm orange-brown like Marvis */
+body[data-theme="marvis"] .status-event {
+  color: #666360;
+}
+
+body[data-theme="marvis"] .status-event:before {
+  background: #C4A47A;
+}
+
+body[data-theme="marvis"] .status-event.busy:before {
+  background: #E8A020;
+}
+
+body[data-theme="marvis"] .status-event.done:before {
+  background: #34A853;
+}
+
+body[data-theme="marvis"] .status-event.failed:before {
+  background: #D93025;
+}
+
+body[data-theme="marvis"] .status-title {
+  color: #333333;
+}
+
+/* Transcript images */
+body[data-theme="marvis"] .transcript-image {
+  border: 1px solid #E0DCD6;
+  border-radius: 12px;
+  background: #F0EDE8;
+}
+
+/* Message enter animations */
+@keyframes marvisMessageEnter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+body[data-theme="marvis"] .transcript-item {
+  animation-name: marvisMessageEnter;
+}
+
+/* ── Tool calls / approval cards ─────────────────────────── */
+
+body[data-theme="marvis"] .codex-tool-call {
+  border: 1px solid #E0DCD6;
+  background: #F8F6F3;
+  border-radius: 12px;
+}
+
+body[data-theme="marvis"] .codex-tool-call.failed {
+  border-color: #FECACA;
+}
+
+body[data-theme="marvis"] .tool-head,
+body[data-theme="marvis"] .approval-head {
+  border-bottom: 1px solid #EDEBE8;
+}
+
+body[data-theme="marvis"] .tool-title,
+body[data-theme="marvis"] .approval-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .tool-state {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .tool-output {
+  color: #4A4845;
+  background: transparent;
+}
+
+body[data-theme="marvis"] .approval-card {
+  border-color: #E8C67A;
+  background: #FDF8ED;
+}
+
+body[data-theme="marvis"] .approval-card::after {
+  background: #E8A020;
+}
+
+body[data-theme="marvis"] .approval-card.resolved {
+  border-color: #A3D9A5;
+  background: #F0FAF0;
+}
+
+body[data-theme="marvis"] .approval-card.resolved::after {
+  background: #34A853;
+}
+
+body[data-theme="marvis"] .approval-card.failed {
+  border-color: #FECACA;
+  background: #FEF2F2;
+}
+
+body[data-theme="marvis"] .approval-card.failed::after {
+  background: #D93025;
+}
+
+body[data-theme="marvis"] .approval-body {
+  color: #8B6E4E;
+}
+
+body[data-theme="marvis"] .approval-state {
+  color: #888580;
+}
+
+/* File change summary pill */
+body[data-theme="marvis"] .file-change-summary-pill {
+  border: 1px solid #E0DCD6;
+  background: #FFFFFF;
+  color: #1A1A1A;
+  box-shadow: 0 4px 16px rgba(60,50,40,0.06);
+}
+
+/* ── Plan cards ──────────────────────────────────────────── */
+
+body[data-theme="marvis"] .plan-card {
+  border: 1px solid #E0DCD6;
+  background: #FFFFFF;
+  color: #1A1A1A;
+  box-shadow: 0 4px 20px rgba(60,50,40,0.08);
+}
+
+body[data-theme="marvis"] .plan-card:not(.expanded)::after {
+  background: linear-gradient(to bottom, rgba(255,255,255,0), #FFFFFF 86%);
+}
+
+body[data-theme="marvis"] .plan-card-head {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .plan-card-label {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .plan-card-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plan-card-summary-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plan-card-summary {
+  color: #333333;
+}
+
+body[data-theme="marvis"] .plan-card-action {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plan-card-execute {
+  border: 1px solid #E0DCD6;
+  background: #1A1A1A;
+  color: #FFFFFF;
+}
+
+body[data-theme="marvis"] .plan-card-readonly {
+  border: 1px solid #E0DCD6;
+  color: #888580;
+}
+
+/* Plan page backdrop */
+body[data-theme="marvis"] .plan-page-backdrop {
+  background: #FFFFFF;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plan-page-shell {
+  background: #FFFFFF;
+}
+
+body[data-theme="marvis"] .plan-page-top {
+  background: rgba(255,255,255,0.96);
+}
+
+body[data-theme="marvis"] .plan-page-close {
+  border-color: #E0DCD6;
+  background: #F5F2EE;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plan-page-heading-label {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plan-page-icon {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plan-page-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plan-page-section-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plan-page-summary,
+body[data-theme="marvis"] .plan-page-body {
+  color: #333333;
+}
+
+body[data-theme="marvis"] .plan-page-body h3 {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plan-page-body code,
+body[data-theme="marvis"] .plan-page-summary code {
+  background: #F0EDE8;
+  color: #4A4845;
+}
+
+body[data-theme="marvis"] .plan-page-execute {
+  background: #1A1A1A;
+  color: #FFFFFF;
+}
+
+/* ── History fold ────────────────────────────────────────── */
+
+body[data-theme="marvis"] .history-fold {
+  border-bottom-color: #EDEBE8;
+  color: #888580;
+}
+
+body[data-theme="marvis"] .turn-fold {
+  border-bottom-color: #EDEBE8;
+}
+
+body[data-theme="marvis"] .turn-fold summary {
+  color: #666360;
+}
+
+body[data-theme="marvis"] .turn-fold-preview-user {
+  border: 1px solid #E0DCD6;
+  background: #EDE8E2;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .turn-fold-preview-assistant {
+  border-left-color: #E0DCD6;
+  color: #666360;
+}
+
+body[data-theme="marvis"] .turn-fold-chevron {
+  color: #A09B95;
+}
+
+/* ── Input dock — Marvis style ───────────────────────────── */
+
+body[data-theme="marvis"] .codex-input-dock {
+  background: linear-gradient(to top, rgba(250,248,245,0.98) 55%, rgba(250,248,245,0.88) 78%, rgba(250,248,245,0));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-top: 1px solid #EDEBE8;
+}
+
+body[data-theme="marvis"] .codex-input-dock input {
+  min-height: 50px;
+  border-radius: 25px;
+  border: 1px solid #DDD9D3;
+  background: #FFFFFF;
+  color: #1A1A1A;
+  padding: 0 48px 0 20px;
+  font-size: 16px;
+}
+
+body[data-theme="marvis"] .codex-input-dock input::placeholder {
+  color: #A09B95;
+}
+
+body[data-theme="marvis"] .codex-input-dock input:focus {
+  border-color: #C4A47A;
+  box-shadow: 0 0 0 3px rgba(196,164,122,0.12);
+}
+
+body[data-theme="marvis"] .primary-action {
+  background: #1A1A1A;
+  color: #FFFFFF;
+}
+
+body[data-theme="marvis"] .primary-action:disabled {
+  background: #D0CBC4;
+  color: #FFFFFF;
+  opacity: 1;
+}
+
+body[data-theme="marvis"] .primary-action.stop {
+  background: #1A1A1A;
+  color: #FFFFFF;
+}
+
+/* Attach button */
+body[data-theme="marvis"] .attach-button {
+  background: transparent;
+  border: 1px solid #DDD9D3;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .attach-button:before,
+body[data-theme="marvis"] .attach-button:after {
+  background: #1A1A1A;
+}
+
+/* Setting pills */
+body[data-theme="marvis"] .setting-pill {
+  background: #F0EDE8;
+  color: #1A1A1A;
+  border-color: #E0DCD6;
+}
+
+body[data-theme="marvis"] .setting-pill.modified {
+  border-color: rgba(196,164,122,0.5);
+  background: #EDE5D8;
+}
+
+body[data-theme="marvis"] .setting-pill:not(:disabled):hover {
+  background: #E5E2DC;
+}
+
+/* Mode chip */
+body[data-theme="marvis"] .mode-chip {
+  background: #EDE8E2;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .mode-chip-cancel {
+  color: #1A1A1A;
+}
+
+/* Model popover */
+body[data-theme="marvis"] .model-popover {
+  border: 1px solid #E0DCD6;
+  background: #FFFFFF;
+  box-shadow: 0 12px 40px rgba(60,50,40,0.12);
+}
+
+body[data-theme="marvis"] .setting-row {
+  border-bottom-color: #EDEBE8;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .setting-label {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .setting-value {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .setting-chevron {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .setting-options {
+  border-bottom-color: #EDEBE8;
+  background: #F8F6F3;
+}
+
+body[data-theme="marvis"] .setting-option {
+  color: #666360;
+}
+
+body[data-theme="marvis"] .setting-option-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .setting-option-desc {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .setting-option.selected {
+  background: #EDE8E2;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .setting-option-check {
+  color: #1A1A1A;
+}
+
+/* Composer action menu */
+body[data-theme="marvis"] .composer-action-menu {
+  border: 1px solid #E0DCD6;
+  background: #FFFFFF;
+  box-shadow: 0 12px 40px rgba(60,50,40,0.12);
+}
+
+body[data-theme="marvis"] .composer-menu-icon {
+  background: #F0EDE8;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .composer-menu-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .composer-menu-desc {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .composer-menu-check {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .composer-menu-section {
+  border-top-color: #EDEBE8;
+  color: #888580;
+}
+
+/* Plugin dots */
+body[data-theme="marvis"] .plugin-dot {
+  background: #F0EDE8;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .selected-plugin-chip {
+  background: #EDE8E2;
+  color: #1A1A1A;
+}
+
+/* Plugin autocomplete */
+body[data-theme="marvis"] .plugin-autocomplete {
+  border: 1px solid #E0DCD6;
+  background: #FFFFFF;
+  box-shadow: 0 12px 40px rgba(60,50,40,0.12);
+}
+
+body[data-theme="marvis"] .plugin-suggestion-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .plugin-suggestion-desc {
+  color: #888580;
+}
+
+/* Attachment strip */
+body[data-theme="marvis"] .attachment-chip {
+  border-color: #E0DCD6;
+  background: #F8F6F3;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .attachment-chip img {
+  background: #F0EDE8;
+}
+
+body[data-theme="marvis"] .attachment-name {
+  color: #666360;
+}
+
+body[data-theme="marvis"] .attachment-remove {
+  background: #E0DCD6;
+  color: #1A1A1A;
+}
+
+/* Interruption choices */
+body[data-theme="marvis"] .choice-action {
+  background: #F0EDE8;
+  color: #1A1A1A;
+  border-color: #DDD9D3;
+}
+
+body[data-theme="marvis"] .choice-action.primary {
+  background: #1A1A1A;
+  color: #FFFFFF;
+  border: 0;
+}
+
+/* Send status */
+body[data-theme="marvis"] .send-status {
+  color: #A09B95;
+}
+
+body[data-theme="marvis"] .send-status.error {
+  color: #D93025;
+}
+
+body[data-theme="marvis"] .send-status.ok {
+  color: #34A853;
+}
+
+/* Composer activity dots */
+body[data-theme="marvis"] .composer-activity-dot {
+  background: #C4A47A;
+}
+
+/* ── Handoff panel ───────────────────────────────────────── */
+
+body[data-theme="marvis"] .handoff-target,
+body[data-theme="marvis"] .handoff-action {
+  border-color: #DDD9D3;
+  background: #F0EDE8;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .handoff-target.selected,
+body[data-theme="marvis"] .handoff-action.primary {
+  background: #1A1A1A;
+  color: #FFFFFF;
+  border-color: transparent;
+}
+
+body[data-theme="marvis"] .handoff-intent,
+body[data-theme="marvis"] .handoff-note {
+  border-color: #DDD9D3;
+  background: #F8F6F3;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .handoff-preview {
+  border-color: #E0DCD6;
+  background: #FFFFFF;
+  color: #1A1A1A;
+  box-shadow: 0 12px 40px rgba(60,50,40,0.12);
+}
+
+body[data-theme="marvis"] .handoff-preview-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .handoff-copy {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .handoff-preview-status {
+  color: #666360;
+}
+
+body[data-theme="marvis"] .handoff-prompt-body {
+  color: #333333;
+}
+
+body[data-theme="marvis"] .prompt-card {
+  background: #F5F2EE !important;
+  background-color: #F5F2EE !important;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .prompt-card.collapsed::after {
+  background: linear-gradient(to bottom, rgba(245,242,238,0), #F5F2EE 78%);
+}
+
+body[data-theme="marvis"] .prompt-card-head {
+  background: #F5F2EE;
+}
+
+body[data-theme="marvis"] .prompt-card-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .transcript-body .prompt-card-body {
+  background: #F5F2EE;
+  color: #333333;
+}
+
+/* ── Native Codex Page (session list) ────────────────────── */
+
+body[data-theme="marvis"] .topbar {
+  background: transparent;
+}
+
+body[data-theme="marvis"] .devices {
+  padding-top: 8px;
+}
+
+body[data-theme="marvis"] .device-chip {
+  background: #1A1A1A;
+  color: #FFFFFF;
+}
+
+body[data-theme="marvis"] .device-chip.off {
+  background: #E8E5E0;
+  color: #888580;
+}
+
+body[data-theme="marvis"] .nav-row,
+body[data-theme="marvis"] .project,
+body[data-theme="marvis"] .recent {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .icon-folder {
+  border-color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .icon-folder:before {
+  border-color: #1A1A1A;
+  background: #FAF8F5;
+}
+
+body[data-theme="marvis"] .icon-chat {
+  border-color: #1A1A1A;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .label {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .section-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .time {
+  color: #A09B95;
+}
+
+body[data-theme="marvis"] .meta {
+  color: #A09B95;
+}
+
+body[data-theme="marvis"] .empty {
+  color: #A09B95;
+}
+
+body[data-theme="marvis"] .recent-status.running::before {
+  border-top-color: #5D4E37;
+  border-right-color: #5D4E37;
+}
+
+body[data-theme="marvis"] .recent-status.finished::before {
+  background: #D93025;
+}
+
+body[data-theme="marvis"] .recent.loading {
+  background: rgba(196,164,122,0.1);
+}
+
+body[data-theme="marvis"] button.nav-row:not(.secondary):not(.warn):not(:disabled):hover,
+body[data-theme="marvis"] button.project:not(.secondary):not(.warn):not(:disabled):hover,
+body[data-theme="marvis"] button.recent:not(.secondary):not(.warn):not(:disabled):hover {
+  background: rgba(0,0,0,0.03);
+}
+
+body[data-theme="marvis"] button.nav-row.active:not(.secondary):not(.warn):not(:disabled):hover,
+body[data-theme="marvis"] button.project.active:not(.secondary):not(.warn):not(:disabled):hover {
+  background: rgba(196,164,122,0.12);
+}
+
+/* Controls section */
+body[data-theme="marvis"] .controls {
+  background: linear-gradient(to top, rgba(250,248,245,0.98) 55%, rgba(250,248,245,0.88) 78%, rgba(250,248,245,0));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+body[data-theme="marvis"] .search-wrap input {
+  border-color: #DDD9D3;
+  background: #FFFFFF;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .search-wrap input::placeholder {
+  color: #A09B95;
+}
+
+body[data-theme="marvis"] .search-icon {
+  color: #A09B95;
+}
+
+body[data-theme="marvis"] .mic-icon {
+  color: #A09B95;
+}
+
+body[data-theme="marvis"] button.chat {
+  background: #1A1A1A;
+  color: #FFFFFF;
+}
+
+body[data-theme="marvis"] button.chat:disabled {
+  background: #E0DCD6;
+  color: #A09B95;
+}
+
+/* Compose hero */
+body[data-theme="marvis"] .compose-hero {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .compose-hero h2 {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .compose-project-button {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .compose-project-chevron {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .compose-mode-toggle {
+  border-color: #E0DCD6;
+  background: #F5F2EE;
+}
+
+body[data-theme="marvis"] .compose-mode-toggle button {
+  background: transparent;
+  color: #888580;
+}
+
+body[data-theme="marvis"] .compose-mode-toggle button.selected {
+  background: #1A1A1A;
+  color: #FFFFFF;
+}
+
+/* Project picker */
+body[data-theme="marvis"] .project-picker {
+  background: rgba(250,248,245,0.95);
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .project-picker h2 {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .project-picker-title {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .project-picker-path {
+  color: #888580;
+}
+
+body[data-theme="marvis"] .project-picker-check {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .project-picker-row .icon-folder {
+  border-color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .project-picker-row .icon-folder:before {
+  border-color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .project-picker-row .icon-chat {
+  border-color: #1A1A1A;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .project-picker-cancel {
+  color: #1A1A1A;
+}
+
+/* More sessions */
+body[data-theme="marvis"] .more-sessions {
+  border-top-color: #EDEBE8;
+}
+
+body[data-theme="marvis"] .more-sessions summary {
+  color: #888580;
+}
+
+/* ── Marvis Status Tags (dispatch task, prepare automation) ── */
+
+body[data-theme="marvis"] .marvis-status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 12px;
+  border-radius: 14px;
+  background: #F5EFE6;
+  color: #B8860B;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+body[data-theme="marvis"] .marvis-status-tag::before {
+  content: "🔥";
+  font-size: 12px;
+}
+
+body[data-theme="marvis"] .marvis-status-tag.completed {
+  background: #F0FAF0;
+  color: #2E7D32;
+}
+
+body[data-theme="marvis"] .marvis-status-tag.completed::before {
+  content: "✓";
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* ── Marvis Quick Reply Chips ────────────────────────────── */
+
+body[data-theme="marvis"] .marvis-quick-replies {
+  display: grid;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+body[data-theme="marvis"] .marvis-quick-reply {
+  min-height: 52px;
+  padding: 14px 20px;
+  border: 1px solid #E0DCD6;
+  border-radius: 26px;
+  background: #FFFFFF;
+  color: #1A1A1A;
+  font-size: 15px;
+  font-weight: 500;
+  text-align: center;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+body[data-theme="marvis"] .marvis-quick-reply:hover {
+  background: #F5F2EE;
+  border-color: #D0CBC4;
+}
+
+body[data-theme="marvis"] .marvis-quick-reply:active {
+  background: #EDE8E2;
+  transform: scale(0.98);
+}
+
+/* ── Marvis Bottom Navigation Bar ────────────────────────── */
+
+body[data-theme="marvis"] .marvis-bottom-nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  min-height: 72px;
+  padding: 0 0 env(safe-area-inset-bottom);
+  background: #FFFFFF;
+  border-top: 1px solid #EDEBE8;
+  box-shadow: 0 -2px 10px rgba(0,0,0,0.03);
+}
+
+body[data-theme="marvis"] .marvis-nav-item {
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  padding: 10px 0 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #A09B95;
+  font-size: 11px;
+  font-weight: 500;
+  min-height: 72px;
+  transition: color 150ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body[data-theme="marvis"] .marvis-nav-item:hover {
+  background: transparent;
+  filter: none;
+}
+
+body[data-theme="marvis"] .marvis-nav-item:active {
+  transform: none;
+}
+
+body[data-theme="marvis"] .marvis-nav-item.active {
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .marvis-nav-icon {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+}
+
+body[data-theme="marvis"] .marvis-nav-icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+body[data-theme="marvis"] .marvis-nav-label {
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* Adjust main content padding when bottom nav is visible */
+body[data-theme="marvis"] .codex-input-dock {
+  bottom: 72px;
+}
+
+body[data-theme="marvis"] .controls {
+  padding-bottom: calc(72px + 18px);
+}
+
+/* ── Marvis Work Log Panel ───────────────────────────────── */
+
+body[data-theme="marvis"] .marvis-work-log {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 60;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 0 0 env(safe-area-inset-bottom);
+  background: #FFFFFF;
+  border-radius: 24px 24px 0 0;
+  box-shadow: 0 -16px 48px rgba(0,0,0,0.1);
+  transform: translateY(100%);
+  transition: transform 350ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+body[data-theme="marvis"] .marvis-work-log.open {
+  transform: translateY(0);
+}
+
+body[data-theme="marvis"] .marvis-work-log[hidden] {
+  display: block;
+  pointer-events: none;
+}
+
+body[data-theme="marvis"] .marvis-work-log-handle {
+  display: grid;
+  place-items: center;
+  padding: 12px 0 4px;
+}
+
+body[data-theme="marvis"] .marvis-work-log-handle span {
+  width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background: #D5D0C9;
+}
+
+body[data-theme="marvis"] .marvis-work-log-tabs {
+  display: flex;
+  gap: 0;
+  justify-content: center;
+  padding: 12px 24px;
+  border-bottom: 1px solid #EDEBE8;
+}
+
+body[data-theme="marvis"] .marvis-work-log-tab {
+  min-height: 36px;
+  padding: 6px 20px;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  color: #A09B95;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+body[data-theme="marvis"] .marvis-work-log-tab.active {
+  background: #F0EDE8;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .marvis-work-log-tab:hover {
+  filter: none;
+}
+
+body[data-theme="marvis"] .marvis-work-log-close {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #888580;
+  font-size: 20px;
+}
+
+body[data-theme="marvis"] .marvis-work-log-body {
+  padding: 20px 24px 24px;
+}
+
+body[data-theme="marvis"] .marvis-work-log-avatar {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding-bottom: 20px;
+}
+
+body[data-theme="marvis"] .marvis-work-log-avatar-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .marvis-work-log-screenshots {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 0 0 16px;
+  scrollbar-width: none;
+}
+
+body[data-theme="marvis"] .marvis-work-log-screenshots::-webkit-scrollbar {
+  display: none;
+}
+
+body[data-theme="marvis"] .marvis-work-log-screenshot {
+  flex: 0 0 auto;
+  width: 100px;
+  height: 80px;
+  border-radius: 8px;
+  background: #F0EDE8;
+  border: 1px solid #E0DCD6;
+  object-fit: cover;
+}
+
+body[data-theme="marvis"] .marvis-work-log-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+}
+
+body[data-theme="marvis"] .marvis-work-log-status-text {
+  color: #1A1A1A;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+body[data-theme="marvis"] .marvis-work-log-status-link {
+  color: #A09B95;
+  font-size: 13px;
+}
+
+body[data-theme="marvis"] .marvis-work-log-tokens {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #1A1A1A;
+  font-size: 14px;
+}
+
+/* ── Marvis Persona Page ─────────────────────────────────── */
+
+body[data-theme="marvis"] .marvis-persona-page {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  overflow-y: auto;
+  background: #FFFFFF;
+  color: #1A1A1A;
+  transform: translateX(100%);
+  transition: transform 300ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+body[data-theme="marvis"] .marvis-persona-page.open {
+  transform: translateX(0);
+}
+
+body[data-theme="marvis"] .marvis-persona-page[hidden] {
+  display: block;
+  pointer-events: none;
+}
+
+body[data-theme="marvis"] .marvis-persona-back {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  width: 44px;
+  min-height: 44px;
+  margin: 12px 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #1A1A1A;
+  font-size: 24px;
+}
+
+body[data-theme="marvis"] .marvis-persona-back:hover {
+  background: rgba(0,0,0,0.04);
+  filter: none;
+}
+
+body[data-theme="marvis"] .marvis-persona-hero {
+  display: grid;
+  place-items: center;
+  gap: 16px;
+  padding: 20px 32px 32px;
+}
+
+body[data-theme="marvis"] .marvis-persona-avatar {
+  width: 160px;
+  height: 160px;
+}
+
+body[data-theme="marvis"] .marvis-persona-greeting {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 800;
+  color: #1A1A1A;
+  text-align: center;
+  line-height: 1.2;
+}
+
+body[data-theme="marvis"] .marvis-persona-tags {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+body[data-theme="marvis"] .marvis-persona-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 1px solid #E0DCD6;
+  border-radius: 14px;
+  background: transparent;
+  color: #C4A47A;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+body[data-theme="marvis"] .marvis-persona-body {
+  padding: 0 32px 40px;
+}
+
+body[data-theme="marvis"] .marvis-persona-section {
+  margin: 0 0 24px;
+}
+
+body[data-theme="marvis"] .marvis-persona-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #1A1A1A;
+}
+
+body[data-theme="marvis"] .marvis-persona-section-content {
+  color: #333333;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+body[data-theme="marvis"] .marvis-persona-section-content dt {
+  margin-top: 12px;
+  color: #666360;
+  font-weight: 600;
+}
+
+body[data-theme="marvis"] .marvis-persona-section-content dd {
+  margin: 4px 0 0;
+}
+
+body[data-theme="marvis"] .marvis-persona-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #1A1A1A;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+body[data-theme="marvis"] .marvis-persona-edit:hover {
+  filter: none;
+}
+
+body[data-theme="marvis"] .marvis-persona-cta {
+  display: block;
+  width: calc(100% - 64px);
+  margin: 20px 32px 40px;
+  min-height: 52px;
+  border: 0;
+  border-radius: 26px;
+  background: #1A1A1A;
+  color: #FFFFFF;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+/* ── Marvis backdrop overlay ─────────────────────────────── */
+
+body[data-theme="marvis"] .marvis-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(0,0,0,0.3);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 250ms ease;
+}
+
+body[data-theme="marvis"] .marvis-backdrop.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ── Marvis Prompt message (assistant meta with status tag) ── */
+
+body[data-theme="marvis"] .transcript-item.prompt-message .transcript-body {
+  gap: 10px;
+}
+
+/* ── Scrollbar override ──────────────────────────────────── */
+
+body[data-theme="marvis"] {
+  scrollbar-width: thin;
+  scrollbar-color: #D5D0C9 transparent;
+}
+
+body[data-theme="marvis"]::-webkit-scrollbar {
+  width: 6px;
+}
+
+body[data-theme="marvis"]::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+body[data-theme="marvis"]::-webkit-scrollbar-thumb {
+  background: #D5D0C9;
+  border-radius: 3px;
+}
+
+/* ── Focus visible override ──────────────────────────────── */
+
+body[data-theme="marvis"] *:focus-visible {
+  outline: 2px solid #C4A47A;
+  outline-offset: 2px;
+}
+
+/* ── Viewport debug override ─────────────────────────────── */
+
+body[data-theme="marvis"] .viewport-debug {
+  border-color: rgba(196,164,122,0.5);
+  background: rgba(255,255,255,0.95);
+  color: #4A4845;
+}
