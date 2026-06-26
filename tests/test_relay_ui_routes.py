@@ -226,7 +226,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-seamless">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-token-stats">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-composer"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
@@ -335,7 +335,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-seamless">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-token-stats">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png" in response
@@ -350,6 +350,69 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "Team Leader" in response
     assert "今日消耗Token" in response
     assert "今日节省Token" in response
+    assert "marvis-token-beans" in response
+
+
+@pytest.mark.asyncio
+async def test_marvis_relay_office_page_displays_today_token_usage(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Token stats relay",
+        prompt="count tokens",
+        workspace="/repo",
+        provider="codex",
+    )
+    ledger = service._store._ledger
+    ledger.record_usage_event(
+        task_id=task.id,
+        agent="codex",
+        role="director",
+        phase="dispatch",
+        request_kind="turn",
+        model="gpt-5",
+        source="exact",
+        input_tokens=1200,
+        output_tokens=300,
+        status="completed",
+    )
+    ledger.record_usage_event(
+        task_id=task.id,
+        agent="workflow",
+        role="architect",
+        phase="local_model",
+        request_kind="turn",
+        model="ollama-qwen",
+        source="local",
+        total_tokens=700,
+        status="completed",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/workflows/relay/office?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+        stats_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/relay/token-stats?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert 'data-token-consumed="1500"' in response
+    assert 'data-token-local="700"' in response
+    assert 'data-token-saved="700"' in response
+    assert "1,500" in response
+    assert "<em data-token-local-label>700</em>" in response
+    assert '"consumed_tokens": 1500' in stats_response
+    assert '"local_tokens": 700' in stats_response
+    assert '"saved_tokens": 700' in stats_response
 
 
 @pytest.mark.asyncio
@@ -571,7 +634,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-seamless">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-token-stats">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response

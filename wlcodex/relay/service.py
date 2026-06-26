@@ -188,6 +188,11 @@ class RelayService:
     def list_tasks(self, **kwargs: Any):
         return self._store.list_tasks(**kwargs)
 
+    def today_token_stats(self) -> dict[str, int]:
+        if hasattr(self._store, "today_token_stats"):
+            return self._store.today_token_stats()
+        return {"consumed_tokens": 0, "local_tokens": 0, "saved_tokens": 0}
+
     def config(self) -> dict[str, Any]:
         return {
             "roles": [

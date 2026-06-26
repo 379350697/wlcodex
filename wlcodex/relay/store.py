@@ -114,6 +114,37 @@ class RelayStore:
             raise RuntimeError("relay runtime settings are unavailable")
         self._ledger.set_runtime_setting(key, value)
 
+    def today_token_stats(self) -> dict[str, int]:
+        rows = self._ledger._conn.execute(
+            """
+            SELECT
+                source,
+                model,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens
+            FROM usage_events
+            WHERE date(created_at, 'localtime') = date('now', 'localtime')
+              AND task_id IN (
+                  SELECT id FROM team_runs WHERE route = 'relay'
+              )
+            GROUP BY source, model
+            """
+        ).fetchall()
+        consumed = 0
+        local = 0
+        for row in rows:
+            total = int(row["total_tokens"] or 0)
+            if total <= 0:
+                continue
+            if _usage_row_is_local_model(row):
+                local += total
+            else:
+                consumed += total
+        return {
+            "consumed_tokens": consumed,
+            "local_tokens": local,
+            "saved_tokens": local,
+        }
+
     def get_task_detail(self, task_id: int) -> RelayTaskDetail:
         team_run = self._ledger.get_team_run(task_id)
         if team_run is None or team_run.route != "relay":
@@ -470,6 +501,25 @@ def _row_to_team_run(row: Any) -> TeamRun:
     from wlcodex.db import _row_to_team_run
 
     return _row_to_team_run(row)
+
+
+def _usage_row_is_local_model(row: Any) -> bool:
+    source = str(row["source"] or "").strip().lower()
+    if source in {"local", "local_model", "on_device"}:
+        return True
+    model = str(row["model"] or "").strip().lower()
+    return any(
+        marker in model
+        for marker in (
+            "ollama",
+            "lmstudio",
+            "lm-studio",
+            "llama.cpp",
+            "gguf",
+            "mlx",
+            "local",
+        )
+    )
 
 
 def _packet_prompt(packet: RoleContextPacket) -> str:

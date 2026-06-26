@@ -140,7 +140,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office-seamless"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office-token-stats"
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
@@ -1212,12 +1212,18 @@ class WorkerLiveStreamServer:
             relay_config = (
                 self._relay_service.config() if self._relay_service is not None else {}
             )
+            token_stats = (
+                self._relay_service.today_token_stats()
+                if self._relay_service is not None
+                else {}
+            )
             await self._send_html(
                 writer,
                 200,
                 _marvis_relay_office_page(
                     access_token=token,
                     relay_config=relay_config,
+                    token_stats=token_stats,
                 ),
             )
             return
@@ -1326,6 +1332,12 @@ class WorkerLiveStreamServer:
             return
         normalized_path = _normalize_relay_api_path(path)
         try:
+            if normalized_path == "/api/relay/token-stats":
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                await self._send_json(writer, 200, self._relay_service.today_token_stats())
+                return
             if normalized_path == "/api/relay/config":
                 if method == "GET":
                     await self._send_json(writer, 200, self._relay_service.config())
@@ -4136,9 +4148,17 @@ def _marvis_relay_office_page(
     *,
     access_token: str = "",
     relay_config: dict[str, Any] | None = None,
+    token_stats: dict[str, Any] | None = None,
 ) -> str:
     token_suffix = _token_suffix(access_token)
     config = relay_config if isinstance(relay_config, dict) else {}
+    stats = token_stats if isinstance(token_stats, dict) else {}
+    consumed_tokens = _marvis_token_int(stats.get("consumed_tokens"))
+    local_tokens = _marvis_token_int(stats.get("local_tokens"))
+    saved_tokens = _marvis_token_int(stats.get("saved_tokens"))
+    consumed_label = _format_marvis_token_count(consumed_tokens)
+    local_label = _format_marvis_token_count(local_tokens)
+    saved_label = _format_marvis_token_count(saved_tokens)
     assignment_map = config.get("assignments")
     assignments = assignment_map if isinstance(assignment_map, dict) else {}
     active_roles = _marvis_relay_office_roles(relay_config)
@@ -4199,14 +4219,14 @@ def _marvis_relay_office_page(
           {office_slots_html}
         </div>
       </section>
-      <section class="marvis-office-token-row" aria-label="Token统计">
+      <section class="marvis-office-token-row" aria-label="Token统计" data-marvis-token-stats data-token-endpoint="/api/relay/token-stats{token_suffix}">
         <div class="marvis-office-token-card">
           <span>今日消耗Token</span>
-          <strong>0/<em>0</em> <i aria-hidden="true"></i></strong>
+          <strong data-token-consumed="{consumed_tokens}" data-token-local="{local_tokens}"><b data-token-consumed-label>{escape(consumed_label)}</b>/<em data-token-local-label>{escape(local_label)}</em> <span class="marvis-token-beans" aria-hidden="true"><span></span><span></span></span></strong>
         </div>
         <div class="marvis-office-token-card">
           <span>今日节省Token</span>
-          <strong>0 <i aria-hidden="true"></i></strong>
+          <strong data-token-saved="{saved_tokens}"><b data-token-saved-label>{escape(saved_label)}</b> <span class="marvis-token-beans" aria-hidden="true"><span></span><span></span></span></strong>
           <small>使用本地模型 节省</small>
         </div>
       </section>
@@ -4275,10 +4295,67 @@ def _marvis_relay_office_page(
       window.addEventListener("keydown", (event) => {{
         if (event.key === "Escape") setOpen(false);
       }});
+      const tokenStats = document.querySelector("[data-marvis-token-stats]");
+      const consumed = document.querySelector("[data-token-consumed]");
+      const consumedLabel = document.querySelector("[data-token-consumed-label]");
+      const localLabel = document.querySelector("[data-token-local-label]");
+      const saved = document.querySelector("[data-token-saved]");
+      const savedLabel = document.querySelector("[data-token-saved-label]");
+      const formatToken = (value) => {{
+        const number = Number(value || 0);
+        if (!Number.isFinite(number) || number <= 0) return "0";
+        if (number >= 100000000) return `${{(number / 100000000).toFixed(1).replace(/\\.0$/, "")}}亿`;
+        if (number >= 10000) return `${{(number / 10000).toFixed(1).replace(/\\.0$/, "")}}万`;
+        return Math.round(number).toLocaleString("en-US");
+      }};
+      const applyTokenStats = (stats) => {{
+        const used = Number(stats && stats.consumed_tokens || 0);
+        const local = Number(stats && stats.local_tokens || 0);
+        const savedTokens = Number(stats && stats.saved_tokens || 0);
+        if (consumed) {{
+          consumed.dataset.tokenConsumed = String(Math.max(0, Math.round(used)));
+          consumed.dataset.tokenLocal = String(Math.max(0, Math.round(local)));
+        }}
+        if (saved) saved.dataset.tokenSaved = String(Math.max(0, Math.round(savedTokens)));
+        if (consumedLabel) consumedLabel.textContent = formatToken(used);
+        if (localLabel) localLabel.textContent = formatToken(local);
+        if (savedLabel) savedLabel.textContent = formatToken(savedTokens);
+      }};
+      const refreshTokenStats = async () => {{
+        if (!tokenStats) return;
+        const endpoint = tokenStats.getAttribute("data-token-endpoint");
+        if (!endpoint) return;
+        try {{
+          const response = await fetch(endpoint, {{headers: {{"Accept": "application/json"}}}});
+          if (!response.ok) return;
+          applyTokenStats(await response.json());
+        }} catch (_error) {{
+          // Keep the last good values; the office should stay quiet if stats lag.
+        }}
+      }};
+      refreshTokenStats();
+      window.setInterval(refreshTokenStats, 2000);
     }})();
   </script>
 </body>
 </html>""")
+
+
+def _marvis_token_int(raw: Any) -> int:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
+
+
+def _format_marvis_token_count(value: int) -> str:
+    count = max(0, int(value))
+    if count >= 100_000_000:
+        return f"{count / 100_000_000:.1f}".removesuffix(".0") + "亿"
+    if count >= 10_000:
+        return f"{count / 10_000:.1f}".removesuffix(".0") + "万"
+    return f"{count:,}"
 
 
 def _marvis_relay_followup_composer(*, task_id: int, placeholder: str = "请输入任务") -> str:
