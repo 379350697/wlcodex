@@ -140,7 +140,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-dock"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-phone"
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
@@ -3534,6 +3534,7 @@ def _relay_task_list_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light only">
   <title>流式接力</title>
   <link rel="stylesheet" href="/static/base.css">
   <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
@@ -4784,6 +4785,7 @@ def _relay_task_detail_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light only">
   <title>{escape(task.title)} · Relay</title>
   <link rel="stylesheet" href="/static/base.css">
   <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
