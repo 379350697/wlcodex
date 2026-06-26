@@ -140,7 +140,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office-scene"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office-seamless"
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
@@ -4155,15 +4155,28 @@ def _marvis_relay_office_page(
         ensure_ascii=False,
         separators=(",", ":"),
     ).replace("</", "<\\/")
-    occupied_desks = "\n".join(
-        f"""
-        <button class="marvis-office-hotspot marvis-office-hotspot-{index + 1}" type="button" data-marvis-office-role="{escape(role['role'])}" data-marvis-persona-open="{escape(role['role'])}" aria-label="打开{escape(role['display_name'])}人设">
-          <img class="marvis-office-worker" src="/static/marvis/office-worker-cutout-{(index % 6) + 1}.png" alt="" loading="eager">
+    office_slots: list[str] = []
+    for index in range(6):
+        slot_class = f"marvis-office-hotspot marvis-office-hotspot-{index + 1}"
+        if index < len(active_roles):
+            role = active_roles[index]
+            office_slots.append(
+                f"""
+        <button class="{slot_class}" type="button" data-marvis-office-role="{escape(role['role'])}" data-marvis-persona-open="{escape(role['role'])}" aria-label="打开{escape(role['display_name'])}人设">
+          <img class="marvis-office-station marvis-office-worker" src="/static/marvis/office-worker-cutout-{(index % 6) + 1}.png" alt="" loading="eager">
           <span>{escape(role['display_name'])}</span>
         </button>
         """
-        for index, role in enumerate(active_roles)
-    )
+            )
+        else:
+            office_slots.append(
+                f"""
+        <div class="{slot_class} marvis-office-empty" aria-hidden="true">
+          <img class="marvis-office-station marvis-office-empty-station" src="/static/marvis/office-desk-empty-slot.png" alt="" loading="eager">
+        </div>
+        """
+            )
+    office_slots_html = "\n".join(office_slots)
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -4185,7 +4198,7 @@ def _marvis_relay_office_page(
       <section class="marvis-office-scene" aria-label="Marvis办公室工位">
         <img class="marvis-office-scene-img" src="/static/marvis/office-scene-empty.png" alt="" loading="eager">
         <div class="marvis-office-layer">
-          {occupied_desks}
+          {office_slots_html}
         </div>
       </section>
       <section class="marvis-office-token-row" aria-label="Token统计">
