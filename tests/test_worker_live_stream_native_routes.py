@@ -703,6 +703,13 @@ async def test_static_assets_are_publicly_cacheable(tmp_path: Path) -> None:
             "Host: test\r\n"
             "Connection: close\r\n\r\n",
         )
+        office_roles_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /static/marvis/office-scene-roles-5.png HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
     finally:
         await server.stop()
 
@@ -720,6 +727,12 @@ async def test_static_assets_are_publicly_cacheable(tmp_path: Path) -> None:
     assert (
         "Cache-Control: public, max-age=300, stale-while-revalidate=60"
         in office_empty_slot_response
+    )
+    assert "HTTP/1.1 200 OK" in office_roles_response
+    assert "Content-Type: image/png" in office_roles_response
+    assert (
+        "Cache-Control: public, max-age=300, stale-while-revalidate=60"
+        in office_roles_response
     )
 
 

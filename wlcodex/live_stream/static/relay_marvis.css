@@ -888,18 +888,6 @@ body[data-marvis-relay-view="office"] .marvis-office-empty {
   pointer-events: none;
 }
 
-body[data-marvis-relay-view="office"] .marvis-office-station {
-  position: absolute;
-  inset: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  mix-blend-mode: multiply;
-  user-select: none;
-  pointer-events: none;
-}
-
 body[data-marvis-relay-view="office"] .marvis-office-hotspot span {
   position: absolute;
   left: 50%;

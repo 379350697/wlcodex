@@ -4155,6 +4155,7 @@ def _marvis_relay_office_page(
         ensure_ascii=False,
         separators=(",", ":"),
     ).replace("</", "<\\/")
+    role_count = min(len(active_roles), 6)
     office_slots: list[str] = []
     for index in range(6):
         slot_class = f"marvis-office-hotspot marvis-office-hotspot-{index + 1}"
@@ -4163,7 +4164,6 @@ def _marvis_relay_office_page(
             office_slots.append(
                 f"""
         <button class="{slot_class}" type="button" data-marvis-office-role="{escape(role['role'])}" data-marvis-persona-open="{escape(role['role'])}" aria-label="打开{escape(role['display_name'])}人设">
-          <img class="marvis-office-station marvis-office-worker" src="/static/marvis/office-worker-cutout-{(index % 6) + 1}.png" alt="" loading="eager">
           <span>{escape(role['display_name'])}</span>
         </button>
         """
@@ -4171,9 +4171,7 @@ def _marvis_relay_office_page(
         else:
             office_slots.append(
                 f"""
-        <div class="{slot_class} marvis-office-empty" aria-hidden="true">
-          <img class="marvis-office-station marvis-office-empty-station" src="/static/marvis/office-desk-empty-slot.png" alt="" loading="eager">
-        </div>
+        <div class="{slot_class} marvis-office-empty" aria-hidden="true"></div>
         """
             )
     office_slots_html = "\n".join(office_slots)
@@ -4196,7 +4194,7 @@ def _marvis_relay_office_page(
     </header>
     <main class="marvis-office-main">
       <section class="marvis-office-scene" aria-label="Marvis办公室工位">
-        <img class="marvis-office-scene-img" src="/static/marvis/office-scene-empty.png" alt="" loading="eager">
+        <img class="marvis-office-scene-img" src="/static/marvis/office-scene-roles-{role_count}.png" alt="" loading="eager">
         <div class="marvis-office-layer">
           {office_slots_html}
         </div>
