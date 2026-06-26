@@ -117,6 +117,7 @@ class RelayService:
         default_provider: str = "codex",
         events: RelayEventBus | None = None,
         role_provider_defaults: dict[str, str] | None = None,
+        configured_roles: tuple[str, ...] | None = None,
         role_skills: dict[str, tuple[str, ...]] | None = None,
         role_capabilities: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
@@ -131,6 +132,10 @@ class RelayService:
             role_provider_defaults or {},
             allow_partial=True,
         )
+        clean_configured_roles = tuple(
+            role for role in (configured_roles or RELAY_ROLE_IDS) if role in RELAY_ROLE_IDS
+        )
+        self._configured_roles = clean_configured_roles or RELAY_ROLE_IDS
         self._role_skills = {
             str(role): tuple(str(item) for item in items)
             for role, items in (role_skills or {}).items()
@@ -196,6 +201,15 @@ class RelayService:
             ],
             "providers": self._registry.list_provider_summaries(),
             "assignments": self.role_provider_assignments(),
+            "configured_roles": [
+                {
+                    "role": role,
+                    "display_name": RELAY_ROLE_DISPLAY_NAMES.get(role, role),
+                    "skills": list(self._role_skills.get(role, ())),
+                    "capabilities": list(self._role_capabilities.get(role, ())),
+                }
+                for role in self._configured_roles
+            ],
         }
 
     def save_config(self, assignments: dict[str, str]) -> dict[str, Any]:

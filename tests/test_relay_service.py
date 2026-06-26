@@ -295,6 +295,33 @@ def test_create_task_snapshots_role_providers_and_dispatches_each_role_provider(
     assert implementer.native_session_id == "native-1"
 
 
+def test_config_exposes_explicitly_configured_roles_without_autofill(
+    tmp_path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([FakeCodexProvider(), FakeProvider()]),
+        default_provider="codex",
+        configured_roles=("architect", "implementer", "investigator"),
+    )
+
+    config = service.config()
+
+    assert [role["role"] for role in config["configured_roles"]] == [
+        "architect",
+        "implementer",
+    ]
+    assert [role["role"] for role in config["roles"]] == [
+        "director",
+        "architect",
+        "implementer",
+        "tester",
+        "auditor",
+    ]
+
+
 def test_create_task_rejects_unknown_role_provider_assignment(tmp_path) -> None:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()

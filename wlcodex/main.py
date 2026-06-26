@@ -444,6 +444,11 @@ def _create_live_stream_components(
                 registry=native_registry,
                 default_provider=relay_default_provider,
                 role_provider_defaults=relay_role_provider_defaults,
+                configured_roles=tuple(
+                    role
+                    for role in config.adaptive_team.assignments
+                    if role in relay_role_provider_defaults
+                ),
                 role_skills=config.adaptive_team.role_skills,
                 role_capabilities=config.adaptive_team.role_capabilities,
             )

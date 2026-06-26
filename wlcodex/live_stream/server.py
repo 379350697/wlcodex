@@ -4049,7 +4049,7 @@ def _marvis_relay_task_composer(
 
 def _marvis_relay_office_roles(relay_config: dict[str, Any] | None) -> list[dict[str, str]]:
     config = relay_config if isinstance(relay_config, dict) else {}
-    raw_roles = config.get("roles")
+    raw_roles = config.get("configured_roles") or config.get("roles")
     role_entries: list[Any]
     if isinstance(raw_roles, list) and raw_roles:
         role_entries = raw_roles

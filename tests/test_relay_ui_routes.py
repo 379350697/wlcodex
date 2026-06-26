@@ -354,9 +354,16 @@ async def test_marvis_relay_office_occupancy_follows_configured_roles(
 ) -> None:
     server, service, _runtime_store = _server(tmp_path)
     service.config = lambda: {  # type: ignore[method-assign]
-        "roles": [
+        "configured_roles": [
             {"role": "architect", "display_name": "架构工程师"},
             {"role": "implementer", "display_name": "开发工程师"},
+        ],
+        "roles": [
+            {"role": "director", "display_name": "总工程师"},
+            {"role": "architect", "display_name": "架构工程师"},
+            {"role": "implementer", "display_name": "开发工程师"},
+            {"role": "tester", "display_name": "测试工程师"},
+            {"role": "auditor", "display_name": "审计工程师"},
         ],
         "providers": [],
         "assignments": {"architect": "codex", "implementer": "claude"},
