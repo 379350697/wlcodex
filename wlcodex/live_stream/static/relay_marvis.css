@@ -19,6 +19,24 @@ body[data-marvis-relay-view] .marvis-relay-phone {
   overflow: hidden;
 }
 
+body[data-marvis-relay-view] .marvis-relay-phone::after {
+  content: "";
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  z-index: 10;
+  width: min(430px, 100%);
+  height: 176px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(243, 243, 243, 0),
+    rgba(243, 243, 243, .96) 26%,
+    #f3f3f3 52%
+  );
+}
+
 body[data-marvis-relay-view] .marvis-relay-topbar {
   position: sticky;
   top: 0;
@@ -166,7 +184,7 @@ body[data-marvis-relay-view] .marvis-relay-icon-list::after {
 body[data-marvis-relay-view] main {
   width: 100%;
   box-sizing: border-box;
-  padding: 14px 20px 170px;
+  padding: 14px 20px 230px;
   color: #111;
 }
 
