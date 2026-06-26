@@ -853,6 +853,17 @@ body[data-marvis-relay-view="office"] .marvis-office-desk {
   -webkit-appearance: none;
 }
 
+body[data-marvis-relay-view="office"] .marvis-office-desk-name {
+  display: block;
+  min-height: 20px;
+  margin: 0 0 -2px 32%;
+  color: #111;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 body[data-marvis-relay-view="office"] .marvis-office-desk img {
   display: block;
   width: 100%;

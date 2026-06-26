@@ -140,7 +140,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office-roles"
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
@@ -1209,10 +1209,16 @@ class WorkerLiveStreamServer:
             await self._send_html(writer, 200, _native_workflows_page(access_token=token))
             return
         if path == "/native/workflows/relay/office":
+            relay_config = (
+                self._relay_service.config() if self._relay_service is not None else {}
+            )
             await self._send_html(
                 writer,
                 200,
-                _marvis_relay_office_page(access_token=token),
+                _marvis_relay_office_page(
+                    access_token=token,
+                    relay_config=relay_config,
+                ),
             )
             return
         if path in ("/native/workflows/relay", "/native/workflows/relay/config"):
@@ -4041,15 +4047,64 @@ def _marvis_relay_task_composer(
     """
 
 
-def _marvis_relay_office_page(*, access_token: str = "") -> str:
+def _marvis_relay_office_roles(relay_config: dict[str, Any] | None) -> list[dict[str, str]]:
+    config = relay_config if isinstance(relay_config, dict) else {}
+    raw_roles = config.get("roles")
+    role_entries: list[Any]
+    if isinstance(raw_roles, list) and raw_roles:
+        role_entries = raw_roles
+    else:
+        assignments = config.get("assignments")
+        if isinstance(assignments, dict) and assignments:
+            role_entries = [{"role": role} for role in assignments]
+        else:
+            role_entries = [{"role": role} for role in RELAY_ROLE_IDS]
+
+    roles: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in role_entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("enabled") is False:
+            continue
+        role = str(entry.get("role") or "").strip()
+        if role not in RELAY_ROLE_IDS or role in seen:
+            continue
+        seen.add(role)
+        roles.append(
+            {
+                "role": role,
+                "display_name": str(
+                    entry.get("display_name") or _relay_role_label(role)
+                ),
+            }
+        )
+    return roles[:6]
+
+
+def _marvis_relay_office_page(
+    *,
+    access_token: str = "",
+    relay_config: dict[str, Any] | None = None,
+) -> str:
     token_suffix = _token_suffix(access_token)
+    active_roles = _marvis_relay_office_roles(relay_config)
+    occupied_desks = "\n".join(
+        f"""
+        <button class="marvis-office-desk marvis-office-desk-occupied" type="button" data-marvis-office-role="{escape(role['role'])}"{' data-marvis-persona-open' if index == 0 else ''} aria-label="{escape(role['display_name'])}正在办公">
+          <span class="marvis-office-desk-name">{escape(role['display_name'])}</span>
+          <img src="/static/marvis/office-desk-worker-{(index % 6) + 1}.png" alt="{escape(role['display_name'])}正在办公" loading="eager">
+        </button>
+        """
+        for index, role in enumerate(active_roles)
+    )
     empty_desks = "\n".join(
         """
         <button class="marvis-office-desk" type="button" aria-label="空工位">
           <img src="/static/marvis/office-desk-empty.jpg" alt="" loading="eager">
         </button>
         """
-        for _index in range(5)
+        for _index in range(max(0, 6 - len(active_roles)))
     )
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
@@ -4070,9 +4125,7 @@ def _marvis_relay_office_page(*, access_token: str = "") -> str:
     </header>
     <main class="marvis-office-main">
       <section class="marvis-office-grid" aria-label="Marvis办公室工位">
-        <button class="marvis-office-desk marvis-office-desk-occupied" type="button" data-marvis-persona-open aria-label="打开 Marvis 人设">
-          <img src="/static/marvis/office-desk-marvis.jpg" alt="Marvis 在办公室工位" loading="eager">
-        </button>
+        {occupied_desks}
         {empty_desks}
       </section>
       <section class="marvis-office-token-row" aria-label="Token统计">
