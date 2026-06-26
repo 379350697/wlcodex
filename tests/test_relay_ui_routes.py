@@ -226,10 +226,11 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-phone">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-composer"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
+    assert 'href="/native/workflows/relay/office?token=secret"' in response
     assert "请输入任务" in response
     assert "任务历史" in response
     assert response.count('data-open-new-task>新接力任务</button>') == 1
@@ -319,6 +320,31 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "open task" not in populated
     assert f'/native/workflows/relay/tasks/{repo_task.id}?token=secret' in populated
     assert f'/native/workflows/relay/tasks/{other.id}?token=secret' not in populated
+
+
+@pytest.mark.asyncio
+async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal(
+    tmp_path: Path,
+) -> None:
+    response, _service = await _request(
+        tmp_path,
+        "GET /native/workflows/relay/office?token=secret HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'data-marvis-relay-view="office"' in response
+    assert '<meta name="color-scheme" content="light only">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office">' in response
+    assert "Marvis办公室" in response
+    assert 'href="/native/workflows/relay?token=secret"' in response
+    assert "/static/marvis/office-desk-marvis.jpg" in response
+    assert response.count("/static/marvis/office-desk-empty.jpg") == 5
+    assert "data-marvis-persona-open" in response
+    assert "/static/marvis/persona-modal-marvis.jpg" in response
+    assert "Marvis（马维斯）" in response
+    assert "今日消耗Token" in response
+    assert "今日节省Token" in response
 
 
 @pytest.mark.asyncio
@@ -497,9 +523,11 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-phone">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
+    assert 'href="/native/workflows/relay/office?token=secret"' in response
+    assert 'data-marvis-open-log aria-label="工作日志"' not in response
     assert 'class="marvis-work-log"' in response
     assert "工作日志" in response
     assert "产出物" in response

@@ -140,7 +140,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-phone"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office"
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
@@ -480,6 +480,7 @@ class WorkerLiveStreamServer:
                 "/native/workflows",
                 "/native/workflows/relay",
                 "/native/workflows/relay/config",
+                "/native/workflows/relay/office",
             ) or parsed.path.startswith("/native/workflows/relay/tasks/"):
                 await self._handle_relay_ui_route(
                     writer,
@@ -1206,6 +1207,13 @@ class WorkerLiveStreamServer:
         token = str((query.get("token") or [""])[0] or "")
         if path == "/native/workflows":
             await self._send_html(writer, 200, _native_workflows_page(access_token=token))
+            return
+        if path == "/native/workflows/relay/office":
+            await self._send_html(
+                writer,
+                200,
+                _marvis_relay_office_page(access_token=token),
+            )
             return
         if path in ("/native/workflows/relay", "/native/workflows/relay/config"):
             project_rows = _relay_project_rows()
@@ -3517,10 +3525,10 @@ def _relay_task_list_page(
         title="Marvis",
         subtitle=workspace_label,
         back_href=f"/native{token_suffix}",
-        right_html="""
-          <button class="marvis-relay-icon-button" type="button" aria-label="设备">
+        right_html=f"""
+          <a class="marvis-relay-icon-button" href="/native/workflows/relay/office{token_suffix}" aria-label="Marvis办公室">
             <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
-          </button>
+          </a>
           <button class="relay-primary marvis-relay-primary" id="new-task-button" type="button" data-open-new-task>新接力任务</button>
         """,
     )
@@ -4031,6 +4039,82 @@ def _marvis_relay_task_composer(
       <button class="marvis-relay-mic" type="submit" aria-label="发送任务"></button>
     </form>
     """
+
+
+def _marvis_relay_office_page(*, access_token: str = "") -> str:
+    token_suffix = _token_suffix(access_token)
+    empty_desks = "\n".join(
+        """
+        <button class="marvis-office-desk" type="button" aria-label="空工位">
+          <img src="/static/marvis/office-desk-empty.jpg" alt="" loading="eager">
+        </button>
+        """
+        for _index in range(5)
+    )
+    return _replace_html_icons(f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light only">
+  <title>Marvis办公室</title>
+  <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
+</head>
+<body data-marvis-relay-view="office">
+  <div class="marvis-relay-phone marvis-office-shell">
+    <header class="marvis-office-topbar">
+      <a class="marvis-office-back" href="/native/workflows/relay{token_suffix}" aria-label="返回"></a>
+      <h1>Marvis办公室</h1>
+      <span aria-hidden="true"></span>
+    </header>
+    <main class="marvis-office-main">
+      <section class="marvis-office-grid" aria-label="Marvis办公室工位">
+        <button class="marvis-office-desk marvis-office-desk-occupied" type="button" data-marvis-persona-open aria-label="打开 Marvis 人设">
+          <img src="/static/marvis/office-desk-marvis.jpg" alt="Marvis 在办公室工位" loading="eager">
+        </button>
+        {empty_desks}
+      </section>
+      <section class="marvis-office-token-row" aria-label="Token统计">
+        <div class="marvis-office-token-card">
+          <span>今日消耗Token</span>
+          <strong>0/<em>0</em> <i aria-hidden="true"></i></strong>
+        </div>
+        <div class="marvis-office-token-card">
+          <span>今日节省Token</span>
+          <strong>0 <i aria-hidden="true"></i></strong>
+          <small>使用本地模型 节省</small>
+        </div>
+      </section>
+    </main>
+    <div class="marvis-office-backdrop" data-marvis-persona-backdrop hidden></div>
+    <section class="marvis-persona-modal" data-marvis-persona-modal hidden aria-modal="true" role="dialog" aria-label="Marvis（马维斯）人设">
+      <img src="/static/marvis/persona-modal-marvis.jpg" alt="Marvis（马维斯） Team Leader 空闲中，技能包括分派任务、汇总结果呈现、使用厉害的技能、读写文档、写代码" loading="eager">
+      <button class="marvis-persona-close" type="button" data-marvis-persona-close aria-label="关闭"></button>
+    </section>
+  </div>
+  <script>
+    (() => {{
+      const openButton = document.querySelector("[data-marvis-persona-open]");
+      const modal = document.querySelector("[data-marvis-persona-modal]");
+      const backdrop = document.querySelector("[data-marvis-persona-backdrop]");
+      const closeButtons = document.querySelectorAll("[data-marvis-persona-close]");
+      const setOpen = (isOpen) => {{
+        if (!modal || !backdrop) return;
+        modal.hidden = !isOpen;
+        backdrop.hidden = !isOpen;
+        document.body.classList.toggle("marvis-office-modal-open", isOpen);
+      }};
+      openButton?.addEventListener("click", () => setOpen(true));
+      backdrop?.addEventListener("click", () => setOpen(false));
+      closeButtons.forEach((button) => button.addEventListener("click", () => setOpen(false)));
+      window.addEventListener("keydown", (event) => {{
+        if (event.key === "Escape") setOpen(false);
+      }});
+    }})();
+  </script>
+</body>
+</html>""")
 
 
 def _marvis_relay_followup_composer(*, task_id: int, placeholder: str = "请输入任务") -> str:
@@ -4737,9 +4821,9 @@ def _relay_task_detail_page(
         subtitle=workspace_label,
         back_href=back_href,
         right_html=f"""
-          <button class="marvis-relay-icon-button" type="button" data-marvis-open-log aria-label="工作日志">
+          <a class="marvis-relay-icon-button" href="/native/workflows/relay/office{token_suffix}" aria-label="Marvis办公室">
             <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
-          </button>
+          </a>
           <button class="relay-action marvis-relay-interrupt" data-interrupt-url="/api/relay/tasks/{task.id}/interrupt" type="button">中断任务</button>
         """,
     )

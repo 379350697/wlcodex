@@ -689,6 +689,13 @@ async def test_static_assets_are_publicly_cacheable(tmp_path: Path) -> None:
             "Host: test\r\n"
             "Connection: close\r\n\r\n",
         )
+        office_image_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /static/marvis/office-desk-marvis.jpg HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
     finally:
         await server.stop()
 
@@ -698,6 +705,9 @@ async def test_static_assets_are_publicly_cacheable(tmp_path: Path) -> None:
     assert "HTTP/1.1 200 OK" in image_response
     assert "Content-Type: image/png" in image_response
     assert "Cache-Control: public, max-age=300, stale-while-revalidate=60" in image_response
+    assert "HTTP/1.1 200 OK" in office_image_response
+    assert "Content-Type: image/jpeg" in office_image_response
+    assert "Cache-Control: public, max-age=300, stale-while-revalidate=60" in office_image_response
 
 
 @pytest.mark.asyncio
