@@ -159,21 +159,36 @@ def _native_message_kinds(response: str) -> list[str]:
 def _relay_view_panel_html(response: str, view: str) -> str:
     if view == "conversation":
         start_marker = '<section class="relay-view relay-conversation-panel"'
-        end_marker = '<section class="relay-view relay-board-panel"'
+        end_markers = (
+            '<section class="relay-view relay-board-panel"',
+            '<section class="marvis-work-log"',
+            "</main>",
+        )
     elif view == "board":
         start_marker = '<section class="relay-view relay-board-panel"'
-        end_marker = "</main>"
+        end_markers = ("</main>",)
+        if start_marker not in response:
+            return _relay_work_log_html(response)
     else:
         raise AssertionError(f"unknown relay view: {view}")
     assert start_marker in response
-    assert end_marker in response
-    return response.split(start_marker, 1)[1].split(end_marker, 1)[0]
+    panel = response.split(start_marker, 1)[1]
+    for end_marker in end_markers:
+        if end_marker in panel:
+            return panel.split(end_marker, 1)[0]
+    raise AssertionError(f"missing relay panel end marker for {view}")
+
+
+def _relay_work_log_html(response: str) -> str:
+    start_marker = '<section class="marvis-work-log"'
+    assert start_marker in response
+    return response.split(start_marker, 1)[1].split("<script", 1)[0]
 
 
 def _relay_message_bodies_html(panel_html: str) -> str:
     return "\n".join(
         re.findall(
-            r'<div class="relay-message-body" data-native-message-body>(.*?)</div>',
+            r'<div class="(?:relay-message-body|marvis-relay-agent-bubble|marvis-relay-user-bubble)" data-native-message-body>(.*?)</div>',
             panel_html,
             flags=re.DOTALL,
         )
@@ -246,7 +261,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-persona-avatars">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-work-log">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
@@ -422,7 +437,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-persona-avatars">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-work-log">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png?v=20260627-red-director" in response
@@ -775,35 +790,26 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-persona-avatars">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-work-log">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
-    assert 'data-marvis-open-log aria-label="工作日志"' not in response
+    assert 'data-marvis-open-log aria-label="工作日志"' in response
     assert 'class="marvis-work-log"' in response
     assert "工作日志" in response
     assert "产出物" in response
-    assert 'class="marvis-relay-avatar marvis-relay-avatar-director"' in response
     assert 'class="marvis-relay-composer"' in response
     assert "请输入任务" in response
-    assert response.count('data-role-output="director"') == 1
-    assert response.count('<ol class="relay-activity-log" data-activity-log>') == 1
-    assert response.count("data-routing-summary>") == 1
-    assert response.count("<p data-board-next-step>") == 1
-    assert 'data-marvis-snapshot-role-output="director"' in response
-    assert "data-marvis-snapshot-activity-log" in response
-    assert "data-marvis-snapshot-routing-summary" in response
-    assert "data-marvis-snapshot-board-next-step" in response
     assert 'data-relay-view="conversation"' in response
     assert 'class="marvis-relay-task-title"' not in response
     assert 'class="relay-view-switch"' not in response
     assert 'data-view-tab="conversation"' not in response
     assert 'data-view-tab="board"' not in response
     assert "会话流" not in response
-    assert 'aria-label="任务状态"' in response
+    assert 'aria-label="任务状态"' not in response
     assert "你好，今天想做什么？" not in response
     assert "marvis-relay-hero-avatar" not in response
-    assert 'class="relay-conversation"' in response
+    assert "relay-conversation" in response
     assert 'data-native-conversation-timeline' in response
     assert 'class="relay-native-stack"' not in response
     assert 'data-native-session-stack' not in response
@@ -811,31 +817,21 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'class="relay-native-frame"' not in response
     assert "<iframe" not in response
     conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
     assert "让审计工程师确认一下" in conversation_html
     assert "我会先确认风险。" not in conversation_html
-    assert "架构侧继续补齐影响面。" not in conversation_html
+    assert "架构侧继续补齐影响面。" in conversation_html
     assert "结论：本任务判定无需派发，由总工程师直接完成。" in conversation_html
     assert 'data-native-role="director"' in response
     assert 'data-native-role="architect"' in response
     assert 'data-view-panel="conversation"' in response
-    assert 'data-view-panel="board"' in response
-    assert "任务进度" in response
-    assert "调度决策" in response
-    assert "任务难度" in response
-    assert "风险等级" in response
-    assert "执行路径" in response
-    assert "simple" in response
-    assert "低" in response
+    assert 'data-view-panel="board"' not in response
+    assert "任务进度" not in response.split("<script", 1)[0]
+    assert "调度决策" not in response.split("<script", 1)[0]
     assert "总工程师直接完成" in response
     assert "验收依据" in response
     assert "给出清晰说明" in response
-    assert "验收面板" in response
-    assert "推进日志" in response
-    assert "当前阶段" in response
-    assert "当前负责角色" in response
     assert "下一步" in response
-    assert "最近用户补充" in response
-    assert "总工程师决策" in response
     assert "RelayBoard" not in response
     assert "current goal" not in response
     assert "latest user input" not in response
@@ -844,24 +840,22 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "open native session" not in response
     assert ">interrupt<" not in response
     assert ">send<" not in response
-    for display_name in ["总工程师", "架构工程师", "开发工程师", "测试工程师", "审计工程师"]:
+    for display_name in ["Marvis", "Computer Agent"]:
         assert display_name in response
-    assert 'data-role="director"' in response
-    assert 'data-role="architect"' in response
-    assert "未纳入本轮路线" in response
+    assert 'data-marvis-work-log-role="director"' in work_log_html
+    assert 'data-marvis-work-log-role="architect"' in work_log_html
     assert "继续补充给总工程师" in response
-    assert "中断任务" in response
     assert "发送补充" in response
-    assert "打开原生会话" in response
-    assert "native_thread_id=native-director-1" in response
+    assert "中断任务" not in response.split("<script", 1)[0]
+    assert "打开原生会话" not in response.split("<script", 1)[0]
+    assert "native_thread_id=native-director-1" not in response
     assert "/sessions/native-director-1" not in response
-    assert "执行问题：invalid json: Expecting value" in response
+    assert "执行问题：invalid json: Expecting value" in work_log_html
     assert "等待总工程师接收并形成决策摘要" not in response
     assert f"/api/relay/tasks/{task.id}/message" in response
-    assert "relay-board-grid" in response
-    assert "relay-progress" in response
-    assert "relay-progress-status" in response
-    assert "relay-activity-log" in response
+    assert "relay-board-grid" not in response.split("<script", 1)[0]
+    assert "relay-progress" not in response.split("<script", 1)[0]
+    assert "relay-activity-log" not in response.split("<script", 1)[0]
     assert 'const EVENTS_SUFFIX = "?token=secret&after=3";' in response
     assert "function normalizeRelayPayload(raw)" in response
     assert "const payload = parseRelayEvent(event);" in response
@@ -978,14 +972,199 @@ async def test_relay_task_detail_hides_native_activity_from_conversation(
 
     conversation_html = _relay_view_panel_html(response, "conversation")
     assert "请确认要删除哪个文件" in conversation_html
-    assert "需要你确认精确文件路径。" not in conversation_html
+    assert "需要你确认精确文件路径。" in conversation_html
     kinds = _native_message_kinds(response)
     assert "activity" not in kinds
     assert "completed" not in kinds
-    assert "turn_started" not in response
-    assert "turn_completed" not in response
+    assert "turn_started" not in conversation_html
+    assert "turn_completed" not in conversation_html
     keys = _native_message_keys(response)
     assert keys == list(dict.fromkeys(keys))
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Marvis interaction task",
+        prompt="手机办公室看不到其他小马",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-marvis",
+        agent_run_id=701,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_role_metadata(
+        task.id,
+        "implementer",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-implementer-marvis",
+        agent_run_id=702,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "implementer", "passed")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "relay_role": "director",
+            "status": "passed",
+            "reason": "needs app window inspection",
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "summary": "问题收到了，先派 App Agent 查看窗口。",
+            "route": "core_relay",
+            "required_roles": ["director", "implementer"],
+            "handoff_to": "implementer",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给 App Agent 查看窗口状态。",
+        },
+        summary="问题收到了，先派 App Agent 查看窗口。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "relay_role": "implementer",
+            "status": "passed",
+            "reason": "window list checked",
+            "role": "implementer",
+            "artifact_type": "implementation_report",
+            "summary": "搞定，有请下一位。",
+            "handoff_to": "tester",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交还 Marvis 汇总。",
+        },
+        summary="搞定，有请下一位。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "status": "passed",
+            "reason": "window scope checked",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": "App Agent 那边反馈 Marvis 本身不在可操作应用范围内，后面要从办公室入口或应用权限方向继续排查。",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "等待用户补充办公室页面信息。",
+        },
+        summary="App Agent 那边反馈 Marvis 本身不在可操作应用范围内，后面要从办公室入口或应用权限方向继续排查。",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=701,
+        event_type=EventType.USER_MESSAGE_RECEIVED,
+        payload={
+            "text": "手机办公室看不到其他小马",
+            "native_turn_id": "turn-marvis-1",
+            "itemId": "marvis-user-1",
+        },
+        occurred_at="2026-06-14T12:10:01+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=702,
+        event_type=EventType.TOOL_CALL_STARTED,
+        payload={
+            "tool_name": "list windows",
+            "native_turn_id": "turn-marvis-2",
+            "itemId": "marvis-tool-1",
+        },
+        occurred_at="2026-06-14T12:10:02+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=702,
+        event_type=EventType.TOOL_CALL_COMPLETED,
+        payload={
+            "tool_name": "list windows",
+            "native_turn_id": "turn-marvis-2",
+            "itemId": "marvis-tool-1",
+        },
+        occurred_at="2026-06-14T12:10:03+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=701,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "已完成汇总。",
+            "usage": {"total_tokens": 12416},
+        },
+        occurred_at="2026-06-14T12:10:04+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    visible_html = response.split("<script", 1)[0]
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
+
+    assert 'data-marvis-open-log aria-label="工作日志"' in response
+    assert "wanglin的Mac mini" in response
+    assert 'data-marvis-nav="tasks"' in response
+    assert 'data-marvis-nav="tasks"' not in response.split(
+        'document.querySelectorAll("[data-marvis-open-log]"', 1
+    )[-1]
+    assert "手机办公室看不到其他小马" in conversation_html
+    assert "Marvis" in conversation_html
+    assert "dispatch task 已完成" in conversation_html
+    assert "Marvis拍了拍 App Agent" in conversation_html
+    assert "App Agent" in conversation_html
+    assert "搞定，有请下一位。" in conversation_html
+    assert "App Agent 那边反馈 Marvis 本身不在可操作应用范围内" in conversation_html
+    assert "list windows" not in conversation_html
+    assert "tool.call" not in conversation_html
+    for forbidden in [
+        "relay-board-grid",
+        "role-lane",
+        "查看结构化数据",
+        "打开原生会话",
+        "data-role-output",
+        "data-view-panel=\"board\"",
+        "任务进度",
+        "调度决策",
+        "你好，今天想做什么？",
+        "marvis-relay-hero-avatar",
+    ]:
+        assert forbidden not in visible_html
+    assert "工作日志" in work_log_html
+    assert "产出物" in work_log_html
+    assert "/static/marvis/office-desk-worker-" in work_log_html
+    assert "/static/marvis/office-desk-empty-slot.png" in work_log_html
+    assert 'data-marvis-work-log-role="director"' in work_log_html
+    assert 'data-marvis-work-log-role="implementer"' in work_log_html
+    assert "12K" in work_log_html
+    assert "list windows 已完成" in work_log_html
+    assert "marvis-work-log-tool-chip" in work_log_html
 
 
 @pytest.mark.asyncio
@@ -1113,7 +1292,7 @@ async def test_relay_task_detail_humanizes_malformed_role_envelope(
     assert 'data-native-kind="role_error"' not in conversation_html
     assert "总工程师输出格式异常，任务已阻塞。" not in conversation_html
     assert "invalid json: Expecting" not in conversation_html
-    assert "接力暂停在总工程师，详情见任务状态。" in conversation_html
+    assert "接力暂停在总工程师，详情见工作日志。" in conversation_html
     assert "routing_decisioncomplexitylow" not in conversation_html
     assert '{"acceptance_criteria"' not in conversation_html
     assert "总工程师执行问题" in board_html
@@ -1271,11 +1450,11 @@ async def test_relay_task_detail_uses_canonical_envelope_when_output_has_bad_pre
 
     visible_html = response.split("<script", 1)[0]
     assert 'data-conversation-role-final="director"' in visible_html
-    assert 'data-role-canonical-json="director"' in visible_html
+    assert 'data-role-canonical-json="director"' not in visible_html
     assert "结论：完成闭环修复，最终展示只使用权威完成态。" in visible_html
     assert "下一步：继续观察全新复杂接力任务。" in visible_html
     assert "验收依据：会话流不显示污染前缀" in visible_html
-    assert "&quot;artifact_type&quot;: &quot;final_summary&quot;" in visible_html
+    assert "&quot;artifact_type&quot;: &quot;final_summary&quot;" not in visible_html
     assert "模型先说了一段废话" not in visible_html
 
 
@@ -1371,7 +1550,7 @@ async def test_relay_conversation_role_replies_are_humanized_to_chinese(
     conversation_html = _relay_view_panel_html(response, "conversation")
     message_bodies = _relay_message_bodies_html(conversation_html)
     assert conversation_html.count('data-conversation-role-final="') == 5
-    assert conversation_html.count('data-role-canonical-json="') == 5
+    assert conversation_html.count('data-role-canonical-json="') == 0
     for english_phrase in (
         "Route to full relay",
         "Formulated read-only browser",
@@ -1504,7 +1683,7 @@ async def test_relay_conversation_hides_blocked_error_details_and_dedupes_user_p
     board_html = _relay_view_panel_html(response, "board")
     assert conversation_html.count(prompt) == 1
     assert "结论：路由到五角色完整接力，下一步交给架构工程师。" in conversation_html
-    assert "接力暂停在总工程师，详情见任务状态。" in conversation_html
+    assert "接力暂停在总工程师，详情见工作日志。" in conversation_html
     assert "输出格式异常" not in conversation_html
     assert "任务已阻塞" not in conversation_html
     assert "invalid json" not in conversation_html
@@ -1645,7 +1824,9 @@ async def test_relay_task_detail_streaming_delta_is_preview_not_final_output(
     finally:
         await server.stop()
 
-    assert 'data-role-preview="' in response
+    assert 'data-role-preview="' not in response
+    assert 'data-native-kind="waiting"' in response
+    assert "..." in response
     assert "function appendRolePreview" in response
     assert "function relayPreviewDisplayText" in response
     assert "function renderRoleEnvelope" in response
@@ -1724,16 +1905,15 @@ async def test_relay_task_detail_humanizes_internal_route_terms(
         await server.stop()
 
     visible_html = response.split("<script", 1)[0]
-    message_body_html = visible_html.split('<details class="role-canonical-json">', 1)[0]
     assert 'data-native-kind="role_envelope"' in visible_html
-    assert 'data-role-canonical-json="director"' in visible_html
+    assert 'data-role-canonical-json="director"' not in visible_html
     assert "结论：由总工程师直接处理：直接查询并汇总今日金价。" in visible_html
     assert "下一步：由总工程师核验最新行情来源并给出结果" in visible_html
     assert "验收依据：不展示 总工程师直接处理 给用户" in visible_html
-    assert "路由为director_only" not in message_body_html
+    assert "路由为director_only" not in visible_html
     assert (
         "complete directly after routing by checking current market sources"
-        not in message_body_html
+        not in visible_html
     )
 
 
@@ -1855,11 +2035,13 @@ async def test_relay_task_detail_board_view_activates_status_cards(
     assert 'data-view-tab="conversation"' not in response
     assert 'data-view-tab="board"' not in response
     assert 'class="relay-view-switch"' not in response
-    assert "任务进度" in response
-    assert "五角色进度" in response
-    assert "交接摘要" in response
-    assert "待确认问题" in response
-    assert "原生会话" in response
+    assert "任务进度" not in response.split("<script", 1)[0]
+    assert "五角色进度" not in response
+    assert "交接摘要" not in response
+    assert "待确认问题" not in response
+    assert "原生会话" not in response.split("<script", 1)[0]
+    assert 'data-marvis-open-log aria-label="工作日志"' in response
+    assert 'class="marvis-work-log"' in response
 
 
 @pytest.mark.asyncio
@@ -1898,6 +2080,6 @@ async def test_relay_task_detail_uses_role_error_as_director_summary(
 
     assert "执行问题：invalid json: Expecting value" in response
     assert "等待总工程师接收并形成决策摘要" not in response
-    assert "调度决策未生成" in response
-    assert "总工程师输出协议错误：invalid json: Expecting value" in response
+    assert "调度决策未生成" not in response
+    assert "总工程师执行问题：invalid json: Expecting value" in response
     assert "等待总工程师接收任务并形成调度决策" not in response

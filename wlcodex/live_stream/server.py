@@ -141,7 +141,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-persona-avatars"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-work-log"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -3969,6 +3969,46 @@ def _marvis_relay_avatar_html(role: str, *, label: str = "") -> str:
     )
 
 
+_MARVIS_RELAY_ROLE_PERSONAS: dict[str, tuple[str, str]] = {
+    "director": ("marvis", "Marvis"),
+    "implementer": ("app-agent", "App Agent"),
+    "architect": ("computer-agent", "Computer Agent"),
+    "tester": ("search-agent", "Search Agent"),
+    "auditor": ("file-agent", "File Agent"),
+}
+
+
+def _marvis_relay_public_role(role: str) -> tuple[str, str]:
+    return _MARVIS_RELAY_ROLE_PERSONAS.get(
+        str(role or "").strip(),
+        ("marvis", "Marvis"),
+    )
+
+
+def _marvis_relay_role_status_label(status: str) -> str:
+    value = str(status or "").strip()
+    if value in {"passed", "completed", "success", "succeeded"}:
+        return "已完成"
+    if value in {"failed", "blocked", "error"}:
+        return "调用失败"
+    if value in {"queued", "streaming", "running", "started", "progress"}:
+        return "进行中"
+    if value == "waiting_user":
+        return "等待中"
+    if value == "interrupted":
+        return "已中断"
+    return _relay_role_status_label(value) if value else "进行中"
+
+
+def _marvis_relay_action_label(role: str, payload: dict[str, Any] | None = None) -> str:
+    artifact_type = str((payload or {}).get("artifact_type") or "").strip()
+    if role == "director":
+        return "dispatch task"
+    if artifact_type:
+        return artifact_type.replace("_", " ")
+    return "task"
+
+
 def _marvis_relay_topbar(
     *,
     title: str = "Marvis",
@@ -4496,6 +4536,13 @@ def _format_marvis_token_count(value: int) -> str:
     return f"{count:,}"
 
 
+def _format_marvis_relay_token_count(value: int) -> str:
+    count = max(0, int(value))
+    if count >= 1000:
+        return f"{round(count / 1000)}K"
+    return str(count)
+
+
 def _marvis_relay_followup_composer(*, task_id: int, placeholder: str = "请输入任务") -> str:
     return f"""
     <form class="marvis-relay-composer" method="post" action="/api/relay/tasks/{task_id}/message">
@@ -4521,7 +4568,9 @@ def _marvis_relay_work_log_html(
       </div>
       <div class="marvis-work-log-hero">
         <div class="marvis-work-log-desks" aria-hidden="true">
-          <span class="active"></span><span></span><span></span>
+          <img src="/static/marvis/office-desk-worker-1.png" alt="">
+          <img src="/static/marvis/office-desk-empty-slot.png" alt="">
+          <img src="/static/marvis/office-desk-empty-slot.png" alt="">
         </div>
         <div class="marvis-work-log-metrics">
           <span>空闲中...</span>
@@ -4531,6 +4580,184 @@ def _marvis_relay_work_log_html(
       <div class="marvis-work-log-body">{body_html}</div>
     </section>
     """
+
+
+def _marvis_relay_token_text_from_events(
+    role_jobs: list[Any],
+    *,
+    hub: WorkerLiveStreamHub | None,
+) -> str:
+    total = 0
+    token_keys = {
+        "total_tokens",
+        "tokens",
+        "consumed_tokens",
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+    }
+    for _occurred_at, _event_id, _role, _display_name, worker_event in _relay_worker_events_for_roles(
+        role_jobs,
+        hub=hub,
+    ):
+        payload = dict(worker_event.payload or {})
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            payload = {**payload, **usage}
+        for key in token_keys:
+            value = payload.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)) and value > 0:
+                total += int(value)
+    return _format_marvis_relay_token_count(total)
+
+
+def _marvis_relay_work_log_body_html(
+    detail: Any,
+    *,
+    hub: WorkerLiveStreamHub | None,
+    canonical_payloads: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    canonical_payloads = canonical_payloads or {}
+    events = _relay_worker_events_for_roles(detail.role_jobs, hub=hub)
+    events_by_role: dict[str, list[WorkerStreamEvent]] = {}
+    for _occurred_at, _event_id, role, _display_name, worker_event in events:
+        events_by_role.setdefault(role, []).append(worker_event)
+
+    rows: list[str] = []
+    for job in detail.role_jobs:
+        role = str(getattr(job, "role", "") or "")
+        if role not in RELAY_ROLE_IDS:
+            continue
+        role_events = events_by_role.get(role, [])
+        payload = canonical_payloads.get(role)
+        has_content = (
+            role_events
+            or payload is not None
+            or str(getattr(job, "error_message", "") or "").strip()
+            or str(getattr(job, "status", "") or "") != "idle"
+        )
+        if not has_content:
+            continue
+        persona, display_name = _marvis_relay_public_role(role)
+        timeline_items: list[str] = []
+        if payload is not None:
+            timeline_items.append(
+                _marvis_relay_work_log_text_item(
+                    _relay_humanize_role_envelope(payload),
+                    chip=f"{_marvis_relay_action_label(role, payload)} {_marvis_relay_role_status_label(str(payload.get('status') or getattr(job, 'status', '') or 'passed'))}",
+                )
+            )
+        error_message = str(getattr(job, "error_message", "") or "").strip()
+        if error_message:
+            timeline_items.append(
+                _marvis_relay_work_log_text_item(
+                    f"{_relay_role_label(role)}执行问题：{_relay_humanize_display_text(error_message)}",
+                    chip="调用失败",
+                )
+            )
+        for worker_event in role_events:
+            item = _marvis_relay_work_log_event_item(worker_event)
+            if item:
+                timeline_items.append(item)
+        if not timeline_items:
+            timeline_items.append(
+                _marvis_relay_work_log_text_item(
+                    f"{display_name} {_marvis_relay_role_status_label(str(getattr(job, 'status', '') or 'idle'))}"
+                )
+            )
+        rows.append(
+            f"""
+      <section class="marvis-work-log-role" data-marvis-work-log-role="{escape(role)}">
+        {_marvis_relay_avatar_html(persona, label=display_name)}
+        <div class="marvis-work-log-role-main">
+          <h3>{escape(display_name)}</h3>
+          <div class="marvis-work-log-line">{''.join(timeline_items)}</div>
+        </div>
+      </section>
+            """
+        )
+    if not rows:
+        return '<p class="marvis-work-log-empty">暂无工作日志</p>'
+    rows.append(
+        """
+      <section class="marvis-work-log-artifacts" data-marvis-work-log-artifacts>
+        <h3>产出物</h3>
+        <p>暂无产出物</p>
+      </section>
+        """
+    )
+    return "\n".join(rows)
+
+
+def _marvis_relay_work_log_text_item(text: str, *, chip: str = "") -> str:
+    chip_html = (
+        f'<span class="marvis-work-log-tool-chip">{escape(chip)}</span>' if chip else ""
+    )
+    return f"""
+      <div class="marvis-work-log-entry">
+        {chip_html}
+        <p>{escape(text)}</p>
+      </div>
+    """
+
+
+def _marvis_relay_work_log_event_item(worker_event: WorkerStreamEvent) -> str:
+    kind = str(worker_event.kind or "")
+    if kind in {"user_message", "text_delta", "reasoning_delta"}:
+        return ""
+    payload = dict(worker_event.payload or {})
+    if kind == "message_completed":
+        text = _relay_native_event_text(worker_event).strip()
+        if not text or _relay_text_looks_like_role_envelope(text):
+            return ""
+        return _marvis_relay_work_log_text_item(
+            _relay_sanitize_protocol_leak_text("", text),
+            chip="model 已完成",
+        )
+    if kind.startswith("tool_call"):
+        label = _marvis_relay_tool_label(payload) or "tool"
+        return _marvis_relay_work_log_text_item(
+            "",
+            chip=f"{label} {_marvis_relay_event_status_label(kind)}",
+        )
+    if kind.startswith("command"):
+        label = _marvis_relay_command_label(payload) or "command"
+        return _marvis_relay_work_log_text_item(
+            "",
+            chip=f"{label} {_marvis_relay_event_status_label(kind)}",
+        )
+    if kind in {"activity", "lifecycle", "completed", "failed"}:
+        text = _relay_native_event_text(worker_event).strip() or str(
+            payload.get("status") or kind
+        )
+        return _marvis_relay_work_log_text_item(text)
+    return ""
+
+
+def _marvis_relay_event_status_label(kind: str) -> str:
+    if kind.endswith("_completed") or kind == "completed":
+        return "已完成"
+    if kind.endswith("_failed") or kind == "failed":
+        return "调用失败"
+    return "进行中"
+
+
+def _marvis_relay_tool_label(payload: dict[str, Any]) -> str:
+    for key in ("tool_name", "name", "tool", "display_name", "action"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _marvis_relay_command_label(payload: dict[str, Any]) -> str:
+    command = payload.get("command")
+    if isinstance(command, (list, tuple)):
+        return " ".join(str(part) for part in command[:3])
+    value = str(command or payload.get("cmd") or payload.get("name") or "").strip()
+    return value
 
 
 def _marvis_relay_static_work_log_body_html(body_html: str) -> str:
@@ -4698,11 +4925,20 @@ def _relay_text_needs_chinese_fallback(text: str) -> bool:
     value = str(text or "").strip()
     if not value:
         return False
-    if not re.search(r"[A-Za-z]{3,}", value):
+    normalized = value
+    for public_name in (
+        "App Agent",
+        "Computer Agent",
+        "Search Agent",
+        "File Agent",
+        "Marvis",
+    ):
+        normalized = normalized.replace(public_name, "")
+    if not re.search(r"[A-Za-z]{3,}", normalized):
         return False
-    if not re.search(r"[\u4e00-\u9fff]", value):
+    if not re.search(r"[\u4e00-\u9fff]", normalized):
         return True
-    return bool(re.search(r"[A-Za-z]{3,}(?:[ -]+[A-Za-z]{2,}){1,}", value))
+    return bool(re.search(r"[A-Za-z]{3,}(?:[ -]+[A-Za-z]{2,}){1,}", normalized))
 
 
 def _relay_routing_risk_label(risk: str) -> str:
@@ -5170,38 +5406,28 @@ def _relay_task_detail_page(
     canonical_payloads = _relay_role_canonical_payloads_by_role(
         getattr(detail, "artifacts", []) or []
     )
-    role_panels = "\n".join(
-        _relay_role_panel_html(
-            job,
-            canonical_payload=canonical_payloads.get(str(getattr(job, "role", "") or "")),
-        )
-        for job in detail.role_jobs
-    )
-    native_conversation_html = _relay_native_conversation_html(
+    native_conversation_html = _marvis_relay_conversation_html(
         detail.role_jobs,
         hub=hub,
         canonical_payloads=canonical_payloads,
+        canonical_payload_sequence=_relay_role_canonical_payload_sequence(
+            getattr(detail, "artifacts", []) or []
+        ),
     )
-    progress_html = _relay_role_progress_html(detail.role_jobs)
-    activity_html = _relay_initial_activity_html(detail)
-    routing_html = _relay_routing_decision_html(detail)
-    board = detail.board
     task = detail.task
     back_href = _relay_workspace_href(str(task.workspace or ""), access_token)
-    task_status_label = _relay_task_status_label(str(task.status or ""))
-    phase_label = _relay_phase_label(str(board.phase or task.phase or "director"))
-    current_dispatch_label = _relay_current_dispatch_label(board)
-    director_summary = _relay_director_summary_text(detail.role_jobs, canonical_payloads)
-    workspace_label = Path(str(task.workspace or "")).name or str(task.workspace or "") or "wlcodex"
+    device_label = "wanglin的Mac mini"
     topbar_html = _marvis_relay_topbar(
         title="Marvis",
-        subtitle=workspace_label,
+        subtitle=device_label,
         back_href=back_href,
         right_html=f"""
           <a class="marvis-relay-icon-button" href="/native/workflows/relay/office{token_suffix}" aria-label="Marvis办公室">
             <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
           </a>
-          <button class="relay-action marvis-relay-interrupt" data-interrupt-url="/api/relay/tasks/{task.id}/interrupt" type="button">中断任务</button>
+          <button class="marvis-relay-icon-button" type="button" data-marvis-open-log aria-label="工作日志">
+            <span class="marvis-relay-icon-list" aria-hidden="true"></span>
+          </button>
         """,
     )
     bottom_nav_html = _marvis_relay_bottom_nav(
@@ -5209,40 +5435,14 @@ def _relay_task_detail_page(
         access_token=access_token,
         selected_workspace=str(task.workspace or ""),
     )
-    board_panel_inner = f"""
-      {routing_html}
-      <section class="relay-board" aria-label="任务进度">
-        <div class="relay-board-head">
-          <div>
-            <h2>任务进度</h2>
-            <p class="relay-muted">验收面板会随着总工程师调度和角色交接实时更新。</p>
-          </div>
-          <span class="relay-status-badge">{escape(task_status_label)}</span>
-        </div>
-        <div class="relay-board-grid">
-          <div class="relay-board-item"><strong>任务目标</strong><p data-board-current-goal>{escape(board.current_goal)}</p></div>
-          <div class="relay-board-item"><strong>当前阶段</strong><p data-board-phase>{escape(phase_label)}</p></div>
-          <div class="relay-board-item"><strong>当前负责角色</strong><p data-board-dispatch>{escape(current_dispatch_label)}</p></div>
-          <div class="relay-board-item"><strong>下一步</strong><p data-board-next-step>{escape(board.next_step or "等待总工程师拆解任务")}</p></div>
-          <div class="relay-board-item"><strong>最近用户补充</strong><p data-board-latest-user>{escape(board.latest_user_input or "暂无补充")}</p></div>
-          <div class="relay-board-item"><strong>总工程师决策</strong><p data-board-director-summary>{escape(director_summary)}</p></div>
-        </div>
-        <div class="relay-progress" aria-label="五角色进度">
-          {progress_html}
-        </div>
-      </section>
-      <section class="role-grid" data-task-id="{task.id}">
-        {role_panels}
-      </section>
-      <section class="relay-activity" aria-label="推进日志">
-        <h2>推进日志</h2>
-        <ol class="relay-activity-log" data-activity-log>
-          {activity_html}
-        </ol>
-      </section>
-    """
+    token_text = _marvis_relay_token_text_from_events(detail.role_jobs, hub=hub)
     work_log_html = _marvis_relay_work_log_html(
-        body_html=_marvis_relay_static_work_log_body_html(board_panel_inner)
+        body_html=_marvis_relay_work_log_body_html(
+            detail,
+            hub=hub,
+            canonical_payloads=canonical_payloads,
+        ),
+        token_text=token_text,
     )
     followup_composer_html = _marvis_relay_followup_composer(task_id=int(task.id))
     return _replace_html_icons(f"""<!doctype html>
@@ -5255,88 +5455,19 @@ def _relay_task_detail_page(
   <link rel="stylesheet" href="/static/base.css">
   <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
   <style>
-    html {{ background: var(--bg-canvas); }}
-    body {{ margin: 0; color: var(--text-primary); background: transparent; }}
-    header {{ position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 48px 1fr auto; gap: 12px; align-items: center; padding: 12px 18px; background: rgba(5,5,8,.88); border-bottom: 1px solid var(--border-header); }}
+    html {{ background: #f6f6f6; }}
+    body {{ margin: 0; color: #111; background: #f6f6f6; }}
     h1, h2, h3 {{ margin: 0; letter-spacing: 0; }}
-    h1 {{ font-size: 20px; overflow-wrap: anywhere; }}
-    main {{ width: min(1220px, 100%); margin: 0 auto; padding: 18px; box-sizing: border-box; display: grid; gap: 14px; padding-bottom: 132px; }}
-    .relay-board, .relay-routing, .role-lane, .relay-composer, .relay-activity, .relay-conversation {{ border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 14px; min-width: 0; overflow-wrap: anywhere; }}
-    .relay-page-status {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
-    .relay-status-badge {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 9px; color: var(--text-primary); font-size: 12px; background: rgba(255,255,255,.04); }}
-    .relay-view-switch {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
-    .relay-view-tab {{ min-height: 34px; display: inline-grid; place-items: center; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 0 12px; color: var(--text-muted); text-decoration: none; background: rgba(255,255,255,.025); }}
-    .relay-view-tab[data-view-active="true"] {{ color: var(--text-primary); border-color: var(--color-link); background: rgba(88,166,255,.12); }}
-    body[data-relay-view="conversation"] [data-view-panel="board"],
-    body[data-relay-view="board"] [data-view-panel="conversation"] {{ display: none; }}
-    .relay-view {{ min-width: 0; display: grid; gap: 14px; }}
-    .relay-conversation {{ min-height: 420px; max-height: calc(100vh - 240px); overflow: auto; display: grid; align-content: start; gap: 12px; }}
-    .relay-message {{ border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px 12px; display: grid; gap: 7px; max-width: min(820px, 100%); background: rgba(255,255,255,.035); }}
-    .relay-message[data-native-kind="user_message"] {{ justify-self: end; background: rgba(255,255,255,.075); border-color: rgba(255,255,255,.18); }}
-    .relay-message[data-native-kind="status"], .relay-message[data-native-kind="reasoning_delta"], .relay-message[data-native-kind="activity"], .relay-message[data-native-kind="lifecycle"] {{ justify-self: center; max-width: min(720px, 100%); color: var(--text-muted); background: rgba(255,255,255,.025); }}
-    .relay-message[data-native-role="director"] {{ border-color: rgba(88,166,255,.32); }}
-    .relay-message[data-native-role="architect"] {{ border-color: rgba(126,231,135,.28); }}
-    .relay-message[data-native-role="developer"] {{ border-color: rgba(255,193,7,.30); }}
-    .relay-message[data-native-role="tester"] {{ border-color: rgba(196,167,231,.30); }}
-    .relay-message[data-native-role="reviewer"] {{ border-color: rgba(255,123,114,.30); }}
-    .relay-message-head {{ display: flex; gap: 8px; justify-content: space-between; align-items: baseline; flex-wrap: wrap; }}
-    .relay-message-meta {{ color: var(--text-muted); font-size: 12px; }}
-    .relay-message-body {{ white-space: pre-wrap; line-height: 1.58; }}
-    .relay-message-body pre {{ margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }}
-    .relay-board-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: start; flex-wrap: wrap; margin-bottom: 12px; }}
-    .relay-board-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
-    .relay-board-item {{ border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px; min-width: 0; background: rgba(255,255,255,.025); }}
-    .relay-board-item strong {{ display: block; margin-bottom: 6px; font-size: 13px; color: var(--text-primary); }}
-    .relay-board-item p {{ margin: 0; color: var(--text-muted); line-height: 1.55; }}
-    .relay-progress {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }}
-    .relay-progress-step {{ display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 9px; min-width: 0; }}
-    .relay-progress-dot {{ width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted); margin-top: 4px; }}
-    .relay-progress-step[data-progress-status="queued"] .relay-progress-dot,
-    .relay-progress-step[data-progress-status="streaming"] .relay-progress-dot {{ background: var(--color-link); box-shadow: 0 0 0 4px rgba(88,166,255,.12); }}
-    .relay-progress-step[data-progress-status="passed"] .relay-progress-dot {{ background: #56d364; }}
-    .relay-progress-step[data-progress-status="blocked"] .relay-progress-dot,
-    .relay-progress-step[data-progress-status="failed"] .relay-progress-dot {{ background: #ff7b72; }}
-    .relay-progress-step strong, .relay-progress-step span {{ display: block; min-width: 0; overflow-wrap: anywhere; }}
-    .relay-progress-step span {{ color: var(--text-muted); font-size: 12px; margin-top: 2px; }}
-    .relay-muted {{ color: var(--text-muted); font-size: 13px; }}
-    .role-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: stretch; }}
-    .role-lane[data-role="director"] {{ grid-column: 1 / -1; }}
-    .role-lane {{ display: grid; gap: 10px; }}
-    .role-head {{ display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }}
-    .role-meta {{ display: flex; gap: 6px; flex-wrap: wrap; }}
-    .role-status, .role-provider {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; }}
-    .role-status[data-status="streaming"], .role-status[data-status="queued"] {{ border-color: var(--color-link); color: var(--text-primary); background: rgba(88,166,255,.1); }}
-    .role-output {{ min-height: 116px; max-height: 360px; overflow: auto; white-space: pre-wrap; border-top: 1px solid var(--border-subtle); padding-top: 10px; line-height: 1.55; }}
-    .role-output.is-idle {{ color: var(--text-muted); }}
-    .role-preview {{ max-height: 180px; overflow: auto; white-space: pre-wrap; border: 1px dashed var(--border-subtle); border-radius: 6px; padding: 8px; color: var(--text-muted); font-size: 13px; line-height: 1.5; }}
-    .role-preview.is-idle {{ display: none; }}
-    .role-canonical-json {{ border-top: 1px solid var(--border-subtle); padding-top: 8px; }}
-    .role-canonical-json summary {{ cursor: pointer; color: var(--text-muted); font-size: 12px; }}
-    .role-canonical-json pre {{ max-height: 260px; overflow: auto; white-space: pre-wrap; font-size: 12px; line-height: 1.45; color: var(--text-muted); }}
-    .role-notes {{ display: grid; gap: 6px; border-top: 1px solid var(--border-subtle); padding-top: 10px; }}
-    .role-link {{ color: var(--color-link); text-decoration: none; }}
-    .relay-activity {{ display: grid; gap: 10px; }}
-    .relay-activity-log {{ list-style: none; display: grid; gap: 8px; margin: 0; padding: 0; }}
-    .relay-activity-log li {{ display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 8px; align-items: start; color: var(--text-muted); line-height: 1.45; }}
-    .relay-activity-dot {{ width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--color-link); opacity: .85; }}
-    .relay-composer {{ position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(760px, calc(100% - 24px)); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }}
-    .relay-composer textarea {{ min-height: 44px; max-height: 120px; resize: vertical; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px; background: rgba(255,255,255,.04); color: var(--text-primary); }}
-    .relay-composer button, .relay-action {{ min-height: 42px; border-radius: 6px; border: 1px solid var(--color-link); background: transparent; color: var(--text-primary); padding: 0 12px; }}
-    @media (max-width: 900px) {{ .relay-progress {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
-    @media (max-width: 760px) {{ .role-grid, .relay-board-grid, header {{ grid-template-columns: 1fr; }} .role-lane[data-role="director"] {{ grid-column: auto; }} main {{ padding: 12px; padding-bottom: 152px; }} .relay-composer {{ grid-template-columns: 1fr; }} .relay-progress {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
 <body data-relay-view="{escape(view)}" data-marvis-relay-view="{escape(view)}">
   <div class="marvis-relay-phone">
   {topbar_html}
-  <main>
+  <main class="marvis-relay-task-main">
     <section class="relay-view relay-conversation-panel" data-view-panel="conversation" aria-label="会话">
-      <div class="relay-conversation" data-native-conversation-timeline>
+      <div class="marvis-relay-chat-thread relay-conversation" data-native-conversation-timeline>
         {native_conversation_html}
       </div>
-    </section>
-    <section class="relay-view relay-board-panel" data-view-panel="board" aria-label="任务状态">
-      {board_panel_inner}
     </section>
   </main>
   {followup_composer_html}
@@ -5391,7 +5522,7 @@ def _relay_task_detail_page(
         if (marvisWorkLogBackdrop) marvisWorkLogBackdrop.hidden = true;
       }}, 240);
     }}
-    document.querySelectorAll("[data-marvis-open-log], [data-marvis-nav='tasks']").forEach((button) => {{
+    document.querySelectorAll("[data-marvis-open-log]").forEach((button) => {{
       button.addEventListener("click", openMarvisWorkLog);
     }});
     document.querySelectorAll("[data-marvis-close-log], [data-marvis-work-log-backdrop]").forEach((button) => {{
@@ -5909,14 +6040,22 @@ def _relay_task_detail_page(
       const riskLabels = {{ low: "低", medium: "中", high: "高", critical: "关键" }};
       const routeText = routeLabels[payload.route] || payload.route || "等待总工程师判断";
       const stops = relayHumanizeDisplayText((payload.stop_conditions || []).join("、")) || "暂无额外停止条件";
-      document.querySelector("[data-routing-summary]").textContent = relayHumanizeDisplayText(payload.summary || "总工程师已形成调度决策。");
-      document.querySelector("[data-routing-route]").textContent = routeText;
-      document.querySelector("[data-routing-complexity]").textContent = payload.complexity || "待判断";
-      document.querySelector("[data-routing-risk]").textContent = riskLabels[payload.risk] || payload.risk || "待判断";
-      document.querySelector("[data-routing-path]").textContent = routeText;
-      document.querySelector("[data-routing-roles]").textContent = (payload.required_roles || []).map(labelForRole).join("、") || "等待总工程师判断";
-      document.querySelector("[data-routing-acceptance]").textContent = relayHumanizeDisplayText((payload.acceptance_criteria || []).join("、")) || "等待总工程师给出验收依据";
-      document.querySelector("[data-routing-stops]").textContent = `${{stops}} · ${{payload.requires_user_approval ? "需要用户确认" : "无需额外确认"}}`;
+      const routingSummary = document.querySelector("[data-routing-summary]");
+      const routingRoute = document.querySelector("[data-routing-route]");
+      const routingComplexity = document.querySelector("[data-routing-complexity]");
+      const routingRisk = document.querySelector("[data-routing-risk]");
+      const routingPath = document.querySelector("[data-routing-path]");
+      const routingRoles = document.querySelector("[data-routing-roles]");
+      const routingAcceptance = document.querySelector("[data-routing-acceptance]");
+      const routingStops = document.querySelector("[data-routing-stops]");
+      if (routingSummary) routingSummary.textContent = relayHumanizeDisplayText(payload.summary || "总工程师已形成调度决策。");
+      if (routingRoute) routingRoute.textContent = routeText;
+      if (routingComplexity) routingComplexity.textContent = payload.complexity || "待判断";
+      if (routingRisk) routingRisk.textContent = riskLabels[payload.risk] || payload.risk || "待判断";
+      if (routingPath) routingPath.textContent = routeText;
+      if (routingRoles) routingRoles.textContent = (payload.required_roles || []).map(labelForRole).join("、") || "等待总工程师判断";
+      if (routingAcceptance) routingAcceptance.textContent = relayHumanizeDisplayText((payload.acceptance_criteria || []).join("、")) || "等待总工程师给出验收依据";
+      if (routingStops) routingStops.textContent = `${{stops}} · ${{payload.requires_user_approval ? "需要用户确认" : "无需额外确认"}}`;
       appendActivity(`总工程师调度决策：${{routeText}}。`);
     }});
     source.addEventListener("role.envelope", (event) => {{
@@ -6046,6 +6185,272 @@ def _relay_role_panel_html(
           <div class="relay-muted">交接摘要：{escape(handoff)}</div>
           <div class="relay-muted">待确认问题：{escape(questions)}</div>
           <div data-native-link>{link}</div>
+        </div>
+      </article>
+    """
+
+
+def _relay_worker_events_for_roles(
+    role_jobs: list[Any],
+    *,
+    hub: WorkerLiveStreamHub | None,
+) -> list[tuple[str, int, str, str, WorkerStreamEvent]]:
+    events: list[tuple[str, int, str, str, WorkerStreamEvent]] = []
+    if hub is None:
+        return events
+    for job in role_jobs:
+        agent_run_id = getattr(job, "agent_run_id", None)
+        if agent_run_id is None:
+            continue
+        role = str(getattr(job, "role", "") or "")
+        display_name = str(getattr(job, "display_name", "") or _relay_role_label(role))
+        for worker_event in hub.snapshot(agent_run_id=int(agent_run_id), after_id=0, limit=500):
+            events.append(
+                (
+                    str(worker_event.occurred_at or ""),
+                    int(worker_event.id),
+                    role,
+                    display_name,
+                    worker_event,
+                )
+            )
+    events.sort(key=lambda item: (item[0], item[1]))
+    return events
+
+
+def _relay_projected_conversation_rows(
+    role_jobs: list[Any],
+    *,
+    hub: WorkerLiveStreamHub | None,
+    canonical_payloads: dict[str, dict[str, Any]] | None = None,
+    canonical_payload_sequence: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    canonical_payloads = canonical_payloads or {}
+    canonical_payload_sequence = canonical_payload_sequence or list(canonical_payloads.values())
+    events = _relay_worker_events_for_roles(role_jobs, hub=hub)
+    job_by_role = {str(getattr(job, "role", "") or ""): job for job in role_jobs}
+    completed_keys = {
+        _relay_native_message_key(role, worker_event, bucket="assistant")
+        for _occurred_at, _event_id, role, _display_name, worker_event in events
+        if worker_event.kind == "message_completed"
+        and _relay_native_event_text(worker_event).strip()
+    }
+    rows: list[dict[str, str]] = []
+    row_by_key: dict[str, dict[str, str]] = {}
+    for _occurred_at, _event_id, role, display_name, worker_event in events:
+        kind = str(worker_event.kind or "event")
+        text = _relay_native_event_text(worker_event)
+        if kind in {"text_delta", "message_completed"} and role in canonical_payloads:
+            continue
+        if kind == "text_delta":
+            key = _relay_native_message_key(role, worker_event, bucket="assistant")
+            if key in completed_keys:
+                continue
+            if key not in row_by_key:
+                row = {
+                    "role": role,
+                    "kind": kind,
+                    "speaker": display_name,
+                    "meta": str(worker_event.source or ""),
+                    "body": "",
+                    "key": key,
+                    "preview_event_ids": str(worker_event.id),
+                }
+                rows.append(row)
+                row_by_key[key] = row
+            event_ids = set(
+                filter(None, row_by_key[key].get("preview_event_ids", "").split(","))
+            )
+            event_ids.add(str(worker_event.id))
+            row_by_key[key]["preview_event_ids"] = ",".join(sorted(event_ids, key=int))
+            row_by_key[key]["body"] += text
+            continue
+        row = _relay_native_event_row(role, display_name, worker_event)
+        if row is not None:
+            rows.append(row)
+
+    projected_rows: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+    seen_user_bodies: set[str] = set()
+    for row in rows:
+        projected = _relay_project_native_conversation_row(
+            row,
+            job=job_by_role.get(str(row.get("role") or "")),
+        )
+        if projected is None and str(row.get("kind") or "") == "message_completed":
+            role = str(row.get("role") or "")
+            body = _relay_sanitize_protocol_leak_text(role, str(row.get("body") or ""))
+            if body and not _relay_conversation_row_is_task_status_noise(
+                {"kind": "message_completed", "body": body}
+            ):
+                projected = {**row, "body": body}
+        if projected is None:
+            continue
+        if _relay_conversation_row_is_task_status_noise(projected):
+            continue
+        if str(projected.get("kind") or "") == "user_message":
+            body = str(projected.get("body") or "").strip()
+            if not body or body in seen_user_bodies:
+                continue
+            seen_user_bodies.add(body)
+        key = str(projected.get("key") or "")
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        projected_rows.append(projected)
+
+    for index, payload in enumerate(canonical_payload_sequence):
+        role = str(payload.get("role") or payload.get("relay_role") or "")
+        if not role:
+            continue
+        key = (
+            f"canonical:{role}:{payload.get('artifact_type') or 'role_envelope'}:"
+            f"{payload.get('_relay_artifact_key') or index}"
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        projected_rows.append(
+            {
+                "role": role,
+                "kind": "role_envelope",
+                "speaker": _relay_role_label(role),
+                "meta": _marvis_relay_role_status_label(
+                    str(getattr(job_by_role.get(role), "status", "") or "passed")
+                ),
+                "body": _relay_humanize_role_envelope(payload),
+                "key": key,
+                "artifact_type": str(payload.get("artifact_type") or ""),
+                "status": str(payload.get("status") or ""),
+                "handoff_to": str(payload.get("handoff_to") or ""),
+            }
+        )
+    blocked_role = _relay_first_blocked_role(role_jobs)
+    if blocked_role:
+        projected_rows.append(
+            {
+                "role": blocked_role,
+                "kind": "status",
+                "speaker": "系统",
+                "meta": "",
+                "body": f"接力暂停在{_relay_role_label(blocked_role)}，详情见工作日志。",
+                "key": f"relay-paused:{blocked_role}",
+            }
+        )
+    return projected_rows
+
+
+def _marvis_relay_conversation_html(
+    role_jobs: list[Any],
+    *,
+    hub: WorkerLiveStreamHub | None,
+    canonical_payloads: dict[str, dict[str, Any]] | None = None,
+    canonical_payload_sequence: list[dict[str, Any]] | None = None,
+) -> str:
+    rows = _relay_projected_conversation_rows(
+        role_jobs,
+        hub=hub,
+        canonical_payloads=canonical_payloads,
+        canonical_payload_sequence=canonical_payload_sequence,
+    )
+    if not rows:
+        if any(str(getattr(job, "status", "") or "") in {"queued", "streaming"} for job in role_jobs):
+            return _marvis_relay_waiting_message_html()
+        return _marvis_relay_empty_conversation_html()
+    html_rows: list[str] = []
+    previous_role = ""
+    for row in rows:
+        role = str(row.get("role") or "")
+        kind = str(row.get("kind") or "")
+        if (
+            kind == "role_envelope"
+            and previous_role == "director"
+            and role
+            and role != "director"
+        ):
+            _persona, name = _marvis_relay_public_role(role)
+            html_rows.append(
+                f'<div class="marvis-relay-handoff" data-marvis-handoff>Marvis拍了拍 {escape(name)}，说干活吧</div>'
+            )
+        html_rows.append(_marvis_relay_message_html(row))
+        if kind == "role_envelope":
+            previous_role = role
+    return "\n".join(html_rows)
+
+
+def _marvis_relay_empty_conversation_html() -> str:
+    return """
+      <article class="marvis-relay-agent-step marvis-relay-waiting" data-native-role="director" data-native-kind="status" data-native-empty>
+        <span class="marvis-relay-avatar marvis-relay-avatar-marvis" aria-label="Marvis"></span>
+        <div>
+          <div class="marvis-relay-agent-head"><strong>Marvis</strong></div>
+          <div class="marvis-relay-agent-bubble">等待总工程师接收任务。</div>
+        </div>
+      </article>
+    """
+
+
+def _marvis_relay_waiting_message_html() -> str:
+    return """
+      <article class="marvis-relay-agent-step marvis-relay-waiting" data-native-role="director" data-native-kind="waiting">
+        <span class="marvis-relay-avatar marvis-relay-avatar-marvis" aria-label="Marvis"></span>
+        <div>
+          <div class="marvis-relay-agent-head"><strong>Marvis</strong></div>
+          <div class="marvis-relay-agent-bubble">...</div>
+        </div>
+      </article>
+    """
+
+
+def _marvis_relay_message_html(row: dict[str, str]) -> str:
+    role = str(row.get("role") or "system")
+    kind = str(row.get("kind") or "event")
+    body = str(row.get("body") or "")
+    key = str(row.get("key") or "")
+    if kind == "user_message":
+        return f"""
+      <article class="marvis-relay-user-message" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(key)}">
+        <div class="marvis-relay-user-bubble" data-native-message-body>{escape(body)}</div>
+      </article>
+        """
+    persona, display_name = _marvis_relay_public_role(role)
+    meta = str(row.get("meta") or row.get("status") or "")
+    status_label = _marvis_relay_role_status_label(meta)
+    action = _marvis_relay_action_label(role, row)
+    role_final_attr = (
+        f' data-conversation-role-final="{escape(role)}"'
+        if kind == "role_envelope"
+        else ""
+    )
+    role_preview_attr = (
+        f' data-conversation-role-preview="{escape(role)}"'
+        if kind == "text_delta"
+        else ""
+    )
+    raw_preview = str(row.get("raw_preview") or "")
+    raw_preview_attr = (
+        f' data-raw-preview="{escape(raw_preview)}"'
+        if kind == "text_delta" and raw_preview
+        else ""
+    )
+    preview_event_ids = str(row.get("preview_event_ids") or "")
+    preview_event_ids_attr = (
+        f' data-preview-event-ids="{escape(preview_event_ids)}"'
+        if kind == "text_delta" and preview_event_ids
+        else ""
+    )
+    action_html = (
+        f'<span class="marvis-relay-agent-action">| {escape(action)} {escape(status_label)}</span>'
+        if kind in {"role_envelope", "text_delta"} or role == "director"
+        else ""
+    )
+    return f"""
+      <article class="marvis-relay-agent-step" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(key)}"{role_final_attr}{role_preview_attr}{raw_preview_attr}{preview_event_ids_attr}>
+        {_marvis_relay_avatar_html(persona, label=display_name)}
+        <div class="marvis-relay-agent-content">
+          <div class="marvis-relay-agent-head"><strong>{escape(display_name)}</strong> {action_html}</div>
+          <div class="marvis-relay-agent-bubble" data-native-message-body>{escape(body)}</div>
         </div>
       </article>
     """
@@ -6659,6 +7064,28 @@ def _relay_role_canonical_payloads_by_role(
         role = str(payload.get("role") or payload.get("relay_role") or "")
         if role:
             payloads[role] = payload
+    return payloads
+
+
+def _relay_role_canonical_payload_sequence(
+    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for index, artifact in enumerate(artifacts):
+        payload = _relay_canonical_payload_from_artifact(artifact)
+        if payload is None:
+            continue
+        role = str(payload.get("role") or payload.get("relay_role") or "")
+        if not role:
+            continue
+        payloads.append(
+            {
+                **payload,
+                "_relay_artifact_key": str(
+                    artifact.get("id") or artifact.get("created_at") or index
+                ),
+            }
+        )
     return payloads
 
 
