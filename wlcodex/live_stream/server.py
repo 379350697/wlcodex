@@ -7083,16 +7083,18 @@ def _relay_task_detail_page(
       const form = event.currentTarget;
       const data = Object.fromEntries(new FormData(form).entries());
       if (!String(data.text || "").trim()) {{
-        if (!followupSubmitButton?.classList.contains("is-stop")) return;
+        if (!followupSubmitButton?.classList.contains("is-stop") || !relayTaskIsRunning()) return;
         const response = await fetch(`${{form.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
           body: JSON.stringify({{}}),
         }});
         if (response.ok) {{
-          updateTaskStatus("interrupted");
-          clearAllRolePreviews();
-          appendActivity("你已中断任务。");
+          if (relayTaskIsRunning()) {{
+            updateTaskStatus("interrupted");
+            clearAllRolePreviews();
+            appendActivity("你已中断任务。");
+          }}
         }} else {{
           appendActivity("中断失败，请稍后重试。");
         }}

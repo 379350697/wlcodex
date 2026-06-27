@@ -1041,6 +1041,8 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "function renderRelayNativeEvent" in response
     assert "const TERMINAL_ROLE_STATUSES = new Set" in response
     assert "TERMINAL_ROLE_STATUSES.has(currentStatus)" in response
+    assert "function relayTaskIsRunning()" in response
+    assert '!relayTaskIsRunning()) return;' in response
     assert 'source.addEventListener("role.native_event"' in response
     assert 'document.querySelectorAll("[data-native-key]")' in response
     assert "nativeTranscriptNodes.set(node.dataset.nativeKey" in response

@@ -3564,3 +3564,86 @@ def test_single_role_interrupt_stops_native_session_without_interrupting_whole_t
     assert jobs["director"].status == "interrupted"
     assert jobs["architect"].status == "idle"
     assert ("interrupt_session", "native-1", "") in provider.calls
+
+
+def test_interrupt_completed_task_is_noop(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "done",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "",
+              "summary": "Direct answer.",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "complete directly",
+              "complexity": "low",
+              "risk": "low",
+              "route": "director_only",
+              "required_roles": ["director"],
+              "acceptance_criteria": ["answer"],
+              "stop_conditions": [],
+              "requires_user_approval": false
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "final summary accepted",
+              "role": "director",
+              "artifact_type": "final_summary",
+              "handoff_to": "",
+              "summary": "Relay task complete",
+              "evidence_refs": ["summary"],
+              "open_questions": [],
+              "next_action": "complete task"
+            }
+            """,
+        )
+    )
+
+    asyncio.run(service.interrupt(task.id))
+
+    detail = service.get_task(task.id)
+    event_types = [event.event_type for event in service.events_for_task(task.id)]
+    assert detail.task.status == "completed"
+    assert event_types[-1] == "task.completed"
+    assert "task.interrupted" not in event_types
+    assert not any(call[0] == "interrupt_session" for call in provider.calls)
+
+
+def test_interrupt_passed_role_is_noop(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+
+    asyncio.run(service.interrupt(task.id, role="director"))
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert jobs["director"].status == "passed"
+    assert not any(call[0] == "interrupt_session" for call in provider.calls)

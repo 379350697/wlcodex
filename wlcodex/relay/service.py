@@ -1583,6 +1583,14 @@ class RelayService:
         if role:
             detail = self._store.get_task_detail(task_id)
             job = next((job for job in detail.role_jobs if job.role == role), None)
+            if job is not None and job.status in {
+                "passed",
+                "failed",
+                "blocked",
+                "interrupted",
+                "idle",
+            }:
+                return
             if job is not None:
                 await self._interrupt_native_job(job)
             self._store.update_role_status(task_id, role, "interrupted")
@@ -1594,6 +1602,8 @@ class RelayService:
             )
             return
         detail = self._store.get_task_detail(task_id)
+        if detail.task.status not in {"queued", "running", "streaming", "waiting_user"}:
+            return
         self._store.update_task_status(task_id, "interrupted")
         for job in detail.role_jobs:
             if job.status in {"queued", "streaming", "waiting"}:
