@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -1667,6 +1668,96 @@ def test_codex_native_turn_completed_folds_text_deltas_into_routing_decision(
     assert detail.task.status == "running"
     assert jobs["director"].status == "streaming"
     assert event_types[-2:] == ["role.streaming", "dispatch.verified"]
+
+
+def test_codex_native_turn_completed_recovers_core_relay_routing_decision(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="给聊天框上方增加工作区显示和选择入口",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CODEX,
+            actor="codex_native",
+            visibility=Visibility.USER,
+            payload={
+                "delta": json.dumps(
+                    {
+                        "status": "passed",
+                        "reason": "需要实现一个小的 UI 改动",
+                        "role": "director",
+                        "artifact_type": "routing_decision",
+                        "handoff_to": "core_relay",
+                        "summary": "建议走 core_relay：实现聊天框上方的当前工作区显示与选择入口。",
+                        "evidence_refs": [],
+                        "open_questions": [],
+                        "next_action": "派发给开发实现",
+                        "complexity": "medium",
+                        "risk": "medium",
+                        "route": "core_relay",
+                        "required_roles": ["director", "implementer", "reviewer"],
+                        "acceptance_criteria": ["显示当前工作区", "支持切换工作区"],
+                        "stop_conditions": ["需要用户确认交互细节时暂停"],
+                        "requires_user_approval": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                "source_kind": "codex_native",
+                "provider": "codex",
+                "provider_engine": "app-server",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CODEX,
+            actor="codex_native",
+            visibility=Visibility.USER,
+            payload={
+                "action": "turn_completed",
+                "status": "completed",
+                "source_kind": "codex_native",
+                "provider": "codex",
+                "provider_engine": "app-server",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.routing_decision is not None
+    assert detail.routing_decision["route"] == "core_relay"
+    assert detail.routing_decision["required_roles"] == ["director", "implementer"]
+    assert jobs["director"].status == "passed"
+    assert jobs["implementer"].status == "streaming"
+    assert any(
+        artifact.get("artifact_type") == "role_error"
+        and "已按明确语义恢复路由" in str(artifact.get("summary") or "")
+        for artifact in detail.artifacts
+    )
 
 
 def test_director_final_summary_requires_prior_routing_decision(tmp_path) -> None:

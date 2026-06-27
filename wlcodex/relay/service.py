@@ -1179,10 +1179,14 @@ class RelayService:
                     "native provider completed without assistant output",
                 )
             return None
-        if (
-            not _is_agent_run_completed_event(runtime_event)
-            and not parse_role_envelope(text).ok
-        ):
+        parse_result = parse_role_envelope(text)
+        if not _is_agent_run_completed_event(runtime_event) and not parse_result.ok:
+            await self._recover_director_routing_decision(
+                task_id,
+                role,
+                error=parse_result.error or "invalid role envelope",
+                output=text,
+            )
             return None
         try:
             return await self.handle_role_completion_event(
@@ -1555,7 +1559,15 @@ class RelayService:
         if not delta_events:
             return False
         output = "".join(_runtime_event_text(event) for event in delta_events)
-        if not parse_role_envelope(output).ok:
+        parse_result = parse_role_envelope(output)
+        if not parse_result.ok:
+            if await self._recover_director_routing_decision(
+                task_id,
+                role,
+                error=parse_result.error or "invalid role envelope",
+                output=output,
+            ):
+                return True
             return False
         runtime_event_id = int(getattr(delta_events[-1], "id", 0) or 0)
         await self.handle_role_completion_event(
@@ -1811,6 +1823,11 @@ def _recover_routing_decision_from_invalid_output(
     text = f"{prompt}\n{output}".lower()
     if "routing_decision" not in text and "route" not in text:
         return None
+    payload = _latest_json_object(output)
+    if payload is not None:
+        recovered = _recover_routing_decision_from_payload(prompt, payload)
+        if recovered is not None:
+            return recovered
     if _user_requested_full_relay(prompt):
         return {
             "status": "passed",
@@ -1845,6 +1862,25 @@ def _recover_routing_decision_from_invalid_output(
         }
     if _prompt_looks_high_risk(prompt):
         return None
+    if "core_relay" in text or "core relay" in text:
+        return {
+            "status": "passed",
+            "reason": "总工程师输出的路由语义明确为核心接力，格式恢复后继续调度开发角色。",
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "handoff_to": "",
+            "summary": "按核心接力处理：先由总工程师确认方向，再交给开发角色实现。",
+            "evidence_refs": ["recovered malformed director routing output"],
+            "open_questions": [],
+            "next_action": "调度开发角色继续接力",
+            "complexity": "medium",
+            "risk": "medium",
+            "route": "core_relay",
+            "required_roles": ["director", "implementer"],
+            "acceptance_criteria": ["完成用户请求并给出中文结果"],
+            "stop_conditions": ["发现需要用户确认范围或高风险操作时暂停"],
+            "requires_user_approval": False,
+        }
     if "director_only" in text or "route_only" in text or "routedirector" in text:
         return {
             "status": "passed",
@@ -1865,6 +1901,73 @@ def _recover_routing_decision_from_invalid_output(
             "requires_user_approval": False,
         }
     return None
+
+
+def _recover_routing_decision_from_payload(
+    prompt: str,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    if str(payload.get("artifact_type") or "") != "routing_decision":
+        return None
+    route = str(payload.get("route") or "").strip()
+    if route not in _ROUTING_DECISION_ROUTES:
+        if "core_relay" in route or "core" in route:
+            route = "core_relay"
+        else:
+            return None
+    if route == "director_only" and _prompt_looks_high_risk(prompt):
+        return None
+    required_roles = _clean_required_roles(payload.get("required_roles"))
+    if "director" not in required_roles:
+        required_roles.insert(0, "director")
+    if route == "director_only":
+        required_roles = ["director"]
+    elif route == "core_relay" and not any(
+        role for role in required_roles if role != "director"
+    ):
+        required_roles.append("implementer")
+    complexity = str(payload.get("complexity") or "medium").strip() or "medium"
+    risk = str(payload.get("risk") or "medium").strip().lower() or "medium"
+    if risk not in _ROUTING_DECISION_RISKS:
+        risk = "medium"
+    return {
+        "status": "passed",
+        "reason": str(payload.get("reason") or "总工程师路由语义明确，已恢复为合法 routing_decision。"),
+        "role": "director",
+        "artifact_type": "routing_decision",
+        "handoff_to": "",
+        "summary": str(payload.get("summary") or "总工程师已完成路由判断。"),
+        "evidence_refs": _clean_string_list(payload.get("evidence_refs"))
+        or ["recovered malformed director routing output"],
+        "open_questions": _clean_string_list(payload.get("open_questions")),
+        "next_action": str(payload.get("next_action") or "继续接力"),
+        "complexity": complexity,
+        "risk": risk,
+        "route": route,
+        "required_roles": required_roles,
+        "acceptance_criteria": _clean_string_list(payload.get("acceptance_criteria"))
+        or ["完成用户请求并给出中文结果"],
+        "stop_conditions": _clean_string_list(payload.get("stop_conditions"))
+        or ["发现需要用户确认范围或高风险操作时暂停"],
+        "requires_user_approval": bool(payload.get("requires_user_approval")),
+    }
+
+
+def _latest_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    candidates: list[dict[str, Any]] = []
+    for start, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _index = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            candidates.append(value)
+    if not candidates:
+        return None
+    return candidates[-1]
 
 
 def _user_requested_full_relay(prompt: str) -> bool:
