@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Manage the private Marvis image assets used by the relay UI."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import shutil
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DERIVED_DIR = REPO_ROOT / "wlcodex" / "live_stream" / "static" / "marvis"
+ORIGINALS_DIR = REPO_ROOT / "wlcodex" / "live_stream" / "static" / "marvis_originals"
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def image_files(path: Path) -> list[Path]:
+    return sorted(
+        item
+        for item in path.iterdir()
+        if item.is_file() and item.suffix.lower() in IMAGE_SUFFIXES
+    )
+
+
+def file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify() -> int:
+    if not ORIGINALS_DIR.is_dir():
+        print(f"missing originals directory: {ORIGINALS_DIR}")
+        return 1
+    if not DERIVED_DIR.is_dir():
+        print(f"missing derived directory: {DERIVED_DIR}")
+        return 1
+
+    originals = {item.name: item for item in image_files(ORIGINALS_DIR)}
+    derived = {item.name: item for item in image_files(DERIVED_DIR)}
+    missing_from_originals = sorted(set(derived) - set(originals))
+    missing_from_derived = sorted(set(originals) - set(derived))
+
+    if missing_from_originals:
+        print("images present only in derived assets:")
+        for name in missing_from_originals:
+            print(f"  {name}")
+    if missing_from_derived:
+        print("images present only in originals:")
+        for name in missing_from_derived:
+            print(f"  {name}")
+
+    if missing_from_originals or missing_from_derived:
+        return 1
+
+    changed = [
+        name
+        for name, original in originals.items()
+        if file_hash(original) != file_hash(derived[name])
+    ]
+    print(f"original images: {len(originals)}")
+    print(f"derived images: {len(derived)}")
+    print(f"derived files different from originals: {len(changed)}")
+    for name in changed:
+        print(f"  {name}")
+    return 0
+
+
+def restore() -> int:
+    if not ORIGINALS_DIR.is_dir():
+        print(f"missing originals directory: {ORIGINALS_DIR}")
+        return 1
+    DERIVED_DIR.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    for original in image_files(ORIGINALS_DIR):
+        shutil.copy2(original, DERIVED_DIR / original.name)
+        copied += 1
+
+    print(f"restored {copied} images from {ORIGINALS_DIR}")
+    return verify()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "command",
+        choices=("verify", "restore"),
+        help="verify asset coverage or restore derived assets from originals",
+    )
+    args = parser.parse_args()
+
+    if args.command == "verify":
+        return verify()
+    if args.command == "restore":
+        return restore()
+    raise AssertionError(args.command)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
