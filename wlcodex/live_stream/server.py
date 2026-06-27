@@ -142,7 +142,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-native-work-log"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-followup-chat"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -3727,6 +3727,7 @@ def _relay_chat_home_page(
     composer_html = _marvis_relay_task_composer(
         token_suffix=token_suffix,
         selected_workspace=selected_workspace,
+        access_token=access_token,
         placeholder="请在此输入任务",
     )
     return _replace_html_icons(f"""<!doctype html>
@@ -4131,9 +4132,15 @@ def _marvis_relay_task_composer(
     *,
     token_suffix: str,
     selected_workspace: str,
+    access_token: str = "",
     placeholder: str = "请输入任务",
 ) -> str:
+    workspace_dock = _marvis_relay_workspace_dock(
+        selected_workspace,
+        access_token=access_token,
+    )
     return f"""
+    {workspace_dock}
     <form class="marvis-relay-composer" data-marvis-task-composer action="/api/relay/tasks{token_suffix}">
       <button class="marvis-relay-plus" type="button" aria-label="添加">+</button>
       <input name="title" autocomplete="off" placeholder="{escape(placeholder)}">
@@ -4141,6 +4148,22 @@ def _marvis_relay_task_composer(
       <input type="hidden" name="workspace" value="{escape(selected_workspace)}">
       <button class="marvis-relay-mic" type="submit" aria-label="发送任务"></button>
     </form>
+    """
+
+
+def _marvis_relay_workspace_dock(workspace: str, *, access_token: str = "") -> str:
+    workspace = str(workspace or "")
+    label = Path(workspace).name or workspace or "选择工作区"
+    href = _relay_workspace_href(workspace, access_token)
+    return f"""
+    <div class="marvis-relay-workspace-dock" aria-label="当前工作区">
+      <span class="marvis-relay-workspace-folder" aria-hidden="true"></span>
+      <span class="marvis-relay-workspace-label">工作区</span>
+      <a class="marvis-relay-workspace-chip" href="{escape(href)}" title="{escape(workspace or label)}">
+        <span class="marvis-relay-workspace-name">{escape(label)}</span>
+        <span class="marvis-relay-workspace-action">选择</span>
+      </a>
+    </div>
     """
 
 
@@ -4573,8 +4596,19 @@ def _format_marvis_relay_token_count(value: int) -> str:
     return str(count)
 
 
-def _marvis_relay_followup_composer(*, task_id: int, placeholder: str = "请输入任务") -> str:
+def _marvis_relay_followup_composer(
+    *,
+    task_id: int,
+    placeholder: str = "请输入任务",
+    workspace: str = "",
+    access_token: str = "",
+) -> str:
+    workspace_dock = _marvis_relay_workspace_dock(
+        workspace,
+        access_token=access_token,
+    )
     return f"""
+    {workspace_dock}
     <form class="marvis-relay-composer" data-marvis-followup-composer method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
       <button class="marvis-relay-plus" type="button" aria-label="添加">+</button>
       <textarea name="text" placeholder="{escape(placeholder)}" aria-label="继续补充给总工程师"></textarea>
@@ -5862,6 +5896,7 @@ def _relay_task_detail_page(
         canonical_payload_sequence=_relay_role_canonical_payload_sequence(
             getattr(detail, "artifacts", []) or []
         ),
+        artifacts=getattr(detail, "artifacts", []) or [],
     )
     task = detail.task
     back_href = _relay_workspace_href(str(task.workspace or ""), access_token)
@@ -5896,7 +5931,11 @@ def _relay_task_detail_page(
         token_total=token_total,
         max_event_id=_marvis_relay_max_event_id_from_events(detail.role_jobs, hub=hub),
     )
-    followup_composer_html = _marvis_relay_followup_composer(task_id=int(task.id))
+    followup_composer_html = _marvis_relay_followup_composer(
+        task_id=int(task.id),
+        workspace=str(task.workspace or ""),
+        access_token=access_token,
+    )
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -6567,6 +6606,117 @@ def _relay_task_detail_page(
       scrollNativeConversationToEnd();
       return block;
     }}
+    function marvisConversationPersona(role) {{
+      if (role === "architect") return "computer";
+      if (role === "implementer") return "app";
+      if (role === "tester") return "search";
+      if (role === "auditor") return "file";
+      return "marvis";
+    }}
+    function appendMarvisConversationUser(text, key = "", pending = false) {{
+      if (!conversationTimeline) return null;
+      const body = relayHumanizeUserMessage(text);
+      const normalizedBody = relayNormalizeConversationText(body);
+      if (!normalizedBody || relayUserMessageIsRetryOrContext(body)) return null;
+      if (conversationUserBodies.has(normalizedBody)) return null;
+      conversationUserBodies.add(normalizedBody);
+      const empty = conversationTimeline.querySelector("[data-native-empty]");
+      if (empty) empty.remove();
+      const node = document.createElement("article");
+      node.className = "marvis-relay-user-message";
+      node.dataset.nativeRole = "user";
+      node.dataset.nativeKind = "user_message";
+      if (key) node.dataset.nativeKey = key;
+      if (pending) node.dataset.pendingFollowup = "true";
+      const bubble = document.createElement("div");
+      bubble.className = "marvis-relay-user-bubble";
+      bubble.dataset.nativeMessageBody = "";
+      bubble.textContent = body;
+      node.appendChild(bubble);
+      conversationTimeline.appendChild(node);
+      if (key) nativeTranscriptNodes.set(key, node);
+      scrollNativeConversationToEnd();
+      return node;
+    }}
+    function markMarvisConversationUserFailed(key) {{
+      if (!key) return;
+      const node = nativeTranscriptNodes.get(key) || conversationTimeline?.querySelector(`[data-native-key='${{CSS.escape(key)}}']`);
+      if (!node) return;
+      node.classList.add("is-failed");
+      node.dataset.pendingFollowup = "failed";
+      node.title = "发送失败";
+    }}
+    function appendMarvisConversationWaiting() {{
+      if (!conversationTimeline) return null;
+      let node = conversationTimeline.querySelector("[data-marvis-followup-waiting]");
+      if (node) return node;
+      const empty = conversationTimeline.querySelector("[data-native-empty]");
+      if (empty) empty.remove();
+      node = document.createElement("article");
+      node.className = "marvis-relay-agent-step marvis-relay-waiting";
+      node.dataset.nativeRole = "director";
+      node.dataset.nativeKind = "waiting";
+      node.dataset.marvisFollowupWaiting = "true";
+      const avatar = document.createElement("span");
+      avatar.className = "marvis-relay-avatar marvis-relay-avatar-marvis";
+      avatar.setAttribute("aria-label", "Marvis");
+      const content = document.createElement("div");
+      content.className = "marvis-relay-agent-content";
+      const head = document.createElement("div");
+      head.className = "marvis-relay-agent-head";
+      const title = document.createElement("strong");
+      title.textContent = "Marvis";
+      const action = document.createElement("span");
+      action.className = "marvis-relay-agent-action";
+      action.textContent = "| dispatch task 进行中";
+      head.append(title, document.createTextNode(" "), action);
+      const bubble = document.createElement("div");
+      bubble.className = "marvis-relay-agent-bubble";
+      bubble.dataset.nativeMessageBody = "";
+      bubble.textContent = "...";
+      content.append(head, bubble);
+      node.append(avatar, content);
+      conversationTimeline.appendChild(node);
+      scrollNativeConversationToEnd();
+      return node;
+    }}
+    function clearMarvisConversationWaiting() {{
+      conversationTimeline?.querySelectorAll("[data-marvis-followup-waiting]").forEach((node) => node.remove());
+    }}
+    function appendMarvisConversationAssistant(role, text, kind = "followup_response", key = "", status = "passed") {{
+      if (!conversationTimeline || !text) return null;
+      clearMarvisConversationWaiting();
+      const existing = key ? nativeTranscriptNodes.get(key) || conversationTimeline.querySelector(`[data-native-key='${{CSS.escape(key)}}']`) : null;
+      const node = existing || document.createElement("article");
+      node.className = "marvis-relay-agent-step";
+      node.dataset.nativeRole = role || "director";
+      node.dataset.nativeKind = kind || "followup_response";
+      if (key) node.dataset.nativeKey = key;
+      if (!existing) {{
+        const avatar = document.createElement("span");
+        avatar.className = `marvis-relay-avatar marvis-relay-avatar-${{marvisConversationPersona(role)}}`;
+        avatar.setAttribute("aria-label", labelForRole(role));
+        const content = document.createElement("div");
+        content.className = "marvis-relay-agent-content";
+        const head = document.createElement("div");
+        head.className = "marvis-relay-agent-head";
+        const title = document.createElement("strong");
+        title.textContent = labelForRole(role);
+        const action = document.createElement("span");
+        action.className = "marvis-relay-agent-action";
+        action.textContent = `| dispatch task ${{labelForStatus(status) || "已完成"}}`;
+        head.append(title, document.createTextNode(" "), action);
+        const bubble = document.createElement("div");
+        bubble.className = "marvis-relay-agent-bubble";
+        bubble.dataset.nativeMessageBody = "";
+        content.append(head, bubble);
+        node.append(avatar, content);
+        conversationTimeline.appendChild(node);
+      }}
+      setNativeBodyText(node, text);
+      if (key) nativeTranscriptNodes.set(key, node);
+      return node;
+    }}
     function renderRelayNativeEvent(role, nativeEvent, runtimeEventId = "") {{
       if (!conversationTimeline || !nativeEvent) return;
       const kind = nativeEvent.kind || "event";
@@ -6790,6 +6940,14 @@ def _relay_task_detail_page(
       const payload = parseRelayEvent(event);
       appendActivity(`${{labelForRole(payload.role)}} 调度降级：${{payload.reason || "使用可用 provider 继续"}}`);
     }});
+    source.addEventListener("user.followup", (event) => {{
+      const payload = parseRelayEvent(event);
+      const key = payload.artifact_id ? `user_followup:${{payload.artifact_id}}` : `user_followup:${{payload.context_packet_id || Date.now()}}`;
+      appendMarvisConversationUser(payload.text || payload.latest_user_input || "", key, false);
+      appendMarvisConversationWaiting();
+      updateTaskStatus("running");
+      setRoleStatus("director", "queued");
+    }});
     source.addEventListener("role.native_event", (event) => {{
       const payload = parseRelayEvent(event);
       renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);
@@ -6799,6 +6957,17 @@ def _relay_task_detail_page(
       const payload = parseRelayEvent(event);
       appendRolePreview(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);
       setRoleStatus(payload.role, "streaming");
+    }});
+    source.addEventListener("role.followup_response", (event) => {{
+      const payload = parseRelayEvent(event);
+      appendMarvisConversationAssistant(
+        payload.role || "director",
+        payload.text || payload.summary || "",
+        "followup_response",
+        payload.artifact_id ? `followup_response:${{payload.artifact_id}}` : "",
+        payload.status || "passed"
+      );
+      setRoleStatus(payload.role || "director", payload.status || "passed");
     }});
     source.addEventListener("routing.decision", (event) => {{
       const payload = parseRelayEvent(event);
@@ -6878,13 +7047,23 @@ def _relay_task_detail_page(
       const form = event.currentTarget;
       const data = Object.fromEntries(new FormData(form).entries());
       if (!data.text) return;
+      const localKey = `local-followup:${{Date.now()}}`;
+      appendMarvisConversationUser(data.text, localKey, true);
+      appendMarvisConversationWaiting();
+      updateTaskStatus("running");
+      setRoleStatus("director", "queued");
       appendActivity("你已补充需求，已发送给总工程师。");
       const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/message${{TOKEN_SUFFIX}}`, {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
         body: JSON.stringify(data),
       }});
-      if (!response.ok) appendActivity("补充发送失败，请稍后重试。");
+      if (!response.ok) {{
+        markMarvisConversationUserFailed(localKey);
+        clearMarvisConversationWaiting();
+        appendActivity("补充发送失败，请稍后重试。");
+        return;
+      }}
       form.reset();
     }});
     document.querySelector("[data-interrupt-url]")?.addEventListener("click", async (event) => {{
@@ -6997,6 +7176,7 @@ def _relay_projected_conversation_rows(
     hub: WorkerLiveStreamHub | None,
     canonical_payloads: dict[str, dict[str, Any]] | None = None,
     canonical_payload_sequence: list[dict[str, Any]] | None = None,
+    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> list[dict[str, str]]:
     canonical_payloads = canonical_payloads or {}
     canonical_payload_sequence = canonical_payload_sequence or list(canonical_payloads.values())
@@ -7073,32 +7253,60 @@ def _relay_projected_conversation_rows(
             seen_keys.add(key)
         projected_rows.append(projected)
 
-    for index, payload in enumerate(canonical_payload_sequence):
-        role = str(payload.get("role") or payload.get("relay_role") or "")
-        if not role:
-            continue
-        key = (
-            f"canonical:{role}:{payload.get('artifact_type') or 'role_envelope'}:"
-            f"{payload.get('_relay_artifact_key') or index}"
-        )
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        projected_rows.append(
-            {
-                "role": role,
-                "kind": "role_envelope",
-                "speaker": _relay_role_label(role),
-                "meta": _marvis_relay_role_status_label(
-                    str(getattr(job_by_role.get(role), "status", "") or "passed")
-                ),
-                "body": _relay_humanize_role_envelope(payload),
-                "key": key,
-                "artifact_type": str(payload.get("artifact_type") or ""),
-                "status": str(payload.get("status") or ""),
-                "handoff_to": str(payload.get("handoff_to") or ""),
-            }
-        )
+    if artifacts is not None:
+        user_followup_texts = {
+            str(artifact.get("text") or "").strip()
+            for artifact in artifacts
+            if str(artifact.get("artifact_type") or "") == "user_followup"
+            and str(artifact.get("text") or "").strip()
+        }
+        for index, artifact in enumerate(artifacts):
+            artifact_row = _relay_conversation_row_from_artifact(
+                artifact,
+                index=index,
+                job_by_role=job_by_role,
+                user_followup_texts=user_followup_texts,
+            )
+            if artifact_row is None:
+                continue
+            if str(artifact_row.get("kind") or "") == "user_message":
+                body = str(artifact_row.get("body") or "").strip()
+                if not body or body in seen_user_bodies:
+                    continue
+                seen_user_bodies.add(body)
+            key = str(artifact_row.get("key") or "")
+            if key and key in seen_keys:
+                continue
+            if key:
+                seen_keys.add(key)
+            projected_rows.append(artifact_row)
+    else:
+        for index, payload in enumerate(canonical_payload_sequence):
+            role = str(payload.get("role") or payload.get("relay_role") or "")
+            if not role:
+                continue
+            key = (
+                f"canonical:{role}:{payload.get('artifact_type') or 'role_envelope'}:"
+                f"{payload.get('_relay_artifact_key') or index}"
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            projected_rows.append(
+                {
+                    "role": role,
+                    "kind": "role_envelope",
+                    "speaker": _relay_role_label(role),
+                    "meta": _marvis_relay_role_status_label(
+                        str(getattr(job_by_role.get(role), "status", "") or "passed")
+                    ),
+                    "body": _relay_humanize_role_envelope(payload),
+                    "key": key,
+                    "artifact_type": str(payload.get("artifact_type") or ""),
+                    "status": str(payload.get("status") or ""),
+                    "handoff_to": str(payload.get("handoff_to") or ""),
+                }
+            )
     blocked_role = _relay_first_blocked_role(role_jobs)
     if blocked_role:
         projected_rows.append(
@@ -7114,18 +7322,96 @@ def _relay_projected_conversation_rows(
     return projected_rows
 
 
+def _relay_conversation_row_from_artifact(
+    artifact: dict[str, Any],
+    *,
+    index: int,
+    job_by_role: dict[str, Any],
+    user_followup_texts: set[str],
+) -> dict[str, str] | None:
+    artifact_type = str(artifact.get("artifact_type") or "")
+    artifact_key = str(artifact.get("id") or artifact.get("created_at") or index)
+    if artifact_type == "user_followup":
+        text = str(artifact.get("text") or artifact.get("summary") or "").strip()
+        if not text:
+            return None
+        return {
+            "role": "user",
+            "kind": "user_message",
+            "speaker": "你",
+            "meta": "",
+            "body": _relay_humanize_user_message(text),
+            "key": f"user_followup:{artifact_key}",
+        }
+    if artifact_type == "relay_board":
+        text = str(artifact.get("latest_user_input") or "").strip()
+        summary = str(artifact.get("summary") or "")
+        next_step = str(artifact.get("next_step") or "")
+        is_followup_board = (
+            summary == "User follow-up routed to director"
+            or next_step == "director review latest user input"
+        )
+        if not is_followup_board or not text or text in user_followup_texts:
+            return None
+        return {
+            "role": "user",
+            "kind": "user_message",
+            "speaker": "你",
+            "meta": "",
+            "body": _relay_humanize_user_message(text),
+            "key": f"relay_board_followup:{artifact_key}",
+        }
+    if artifact_type in {"role_dispatch_metadata", "role_error"}:
+        return None
+    if artifact_type == "followup_response":
+        text = str(artifact.get("text") or artifact.get("summary") or "").strip()
+        if not text:
+            return None
+        role = str(artifact.get("role") or artifact.get("relay_role") or "director")
+        return {
+            "role": role,
+            "kind": "followup_response",
+            "speaker": _relay_role_label(role),
+            "meta": "passed",
+            "body": _relay_sanitize_protocol_leak_text(role, text),
+            "key": f"followup_response:{artifact_key}",
+            "status": "passed",
+        }
+    payload = _relay_canonical_payload_from_artifact(artifact)
+    if payload is None:
+        return None
+    role = str(payload.get("role") or payload.get("relay_role") or "")
+    if not role:
+        return None
+    return {
+        "role": role,
+        "kind": "role_envelope",
+        "speaker": _relay_role_label(role),
+        "meta": _marvis_relay_role_status_label(
+            str(getattr(job_by_role.get(role), "status", "") or "passed")
+        ),
+        "body": _relay_humanize_role_envelope(payload),
+        "key": f"canonical:{role}:{payload.get('artifact_type') or 'role_envelope'}:{artifact_key}",
+        "artifact_type": str(payload.get("artifact_type") or ""),
+        "status": str(payload.get("status") or ""),
+        "handoff_to": str(payload.get("handoff_to") or ""),
+    }
+
+
 def _marvis_relay_conversation_html(
     role_jobs: list[Any],
     *,
     hub: WorkerLiveStreamHub | None,
     canonical_payloads: dict[str, dict[str, Any]] | None = None,
     canonical_payload_sequence: list[dict[str, Any]] | None = None,
+    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> str:
     rows = _relay_projected_conversation_rows(
         role_jobs,
         hub=hub,
         canonical_payloads=canonical_payloads,
         canonical_payload_sequence=canonical_payload_sequence,
+        artifacts=artifacts,
     )
     if not rows:
         if any(str(getattr(job, "status", "") or "") in {"queued", "streaming"} for job in role_jobs):
@@ -8874,7 +9160,10 @@ __ICONS_JS__
     const SUPPORTS_PLUGIN_MENU = __SUPPORTS_PLUGIN_MENU_JSON__;
     const USES_CLAUDE_PLAN_PERMISSION_MODE = __USES_CLAUDE_PLAN_PERMISSION_MODE_JSON__;
     const PROJECTS_URL = "/api/council/projects";
-    const token = new URLSearchParams(location.search).get("token") || "";
+    const nativePageParams = new URLSearchParams(location.search);
+    const token = nativePageParams.get("token") || "";
+    const initialComposeCwd = nativePageParams.get("cwd") || "";
+    let initialComposeCwdApplied = false;
     if (token) {
       try { localStorage.setItem("wlcodexToken", token); } catch (_error) {}
       document.cookie = "wlcodex_token=" + encodeURIComponent(token) + "; Path=/; Max-Age=2592000; SameSite=Lax";
@@ -9091,6 +9380,11 @@ __ICONS_JS__
       await loadProjects();
       await loadSessions(false);
       renderNativePageIfHomeDataChanged();
+      if (initialComposeCwd && !initialComposeCwdApplied) {
+        initialComposeCwdApplied = true;
+        selectComposeProject(initialComposeCwd);
+        openCompose(initialComposeCwd);
+      }
     }
 
     async function loadModelCatalog() {
@@ -11087,6 +11381,14 @@ __MARVIS_CSS_LINK__  <style>
     .attachment-chip img { width: 46px; height: 42px; border-radius: 7px; object-fit: cover; background: var(--bg-canvas); }
     .attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 12px; }
     .attachment-remove { width: 28px; min-height: 28px; padding: 0; border-radius: 50%; background: var(--bg-remove-btn); color: var(--btn-primary-bg); font-size: 16px; }
+    .live-workspace-bar { display: flex; align-items: center; gap: 8px; min-height: 34px; min-width: 0; }
+    .live-workspace-icon { width: 18px; height: 14px; flex: 0 0 auto; border: 2px solid var(--text-dim); border-radius: 3px 3px 0 0; border-bottom: 0; position: relative; }
+    .live-workspace-icon:before { content: ""; position: absolute; top: -5px; left: 50%; width: 8px; height: 5px; border: 2px solid var(--text-dim); border-bottom: 0; border-radius: 3px 3px 0 0; transform: translateX(-50%); }
+    .live-workspace-label { color: var(--text-dim); font-size: 12px; font-weight: var(--weight-extrabold); white-space: nowrap; }
+    .live-workspace-chip { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; min-height: 30px; padding: 0 11px; border: 1px solid var(--border-subtle); border-radius: 15px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 13px; font-weight: var(--weight-extrabold); overflow: hidden; cursor: pointer; }
+    button.live-workspace-chip:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-pill-hover); border-color: var(--border-default); filter: none; }
+    .live-workspace-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .live-workspace-action { color: var(--text-dim); font-size: 12px; flex: 0 0 auto; }
     .interruption-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 2px 0; }
     .interruption-choice[hidden] { display: none; }
     .choice-action { min-height: 42px; border-radius: 12px; background: var(--bg-interact); color: var(--btn-primary-bg); border: 1px solid var(--border-input); }
@@ -11280,6 +11582,14 @@ __MARVIS_CSS_LINK__  <style>
           <span>☷ 计划</span>
           <button class="mode-chip-cancel" id="planModeChipCancel" type="button" aria-label="取消计划模式">×</button>
         </div>
+      </div>
+      <div class="live-workspace-bar" id="liveWorkspaceBar">
+        <span class="live-workspace-icon" aria-hidden="true"></span>
+        <span class="live-workspace-label">工作区</span>
+        <button class="live-workspace-chip" id="liveWorkspaceChip" type="button">
+          <span class="live-workspace-name" id="liveWorkspaceName">同步中</span>
+          <span class="live-workspace-action">切换</span>
+        </button>
       </div>
       <div class="interruption-choice" id="interruptionChoice" hidden>
         <button class="choice-action primary" id="steerChoice" type="button">引导</button>
@@ -11477,6 +11787,8 @@ __ICONS_JS__
     const planModeCheck = document.getElementById("planModeCheck");
     const planModeChip = document.getElementById("planModeChip");
     const planModeChipCancel = document.getElementById("planModeChipCancel");
+    const liveWorkspaceChip = document.getElementById("liveWorkspaceChip");
+    const liveWorkspaceName = document.getElementById("liveWorkspaceName");
     const handoffButton = document.getElementById("handoffButton");
     const handoffPanel = document.getElementById("handoffPanel");
     const handoffTargets = document.getElementById("handoffTargets");
@@ -11676,6 +11988,21 @@ __ICONS_JS__
       writeCompactText(contextFiveHourValue, nativeLimitSummary("fiveHour"));
       writeCompactText(contextSevenDayValue, nativeLimitSummary("sevenDay"));
       writeCompactText(sessionActionTitle, title);
+      renderLiveWorkspaceBar(directory, project);
+    }
+    function renderLiveWorkspaceBar(directory, project) {
+      const workspace = directory || currentWorkspaceCwd() || "";
+      const label = workspace ? lastPathComponent(workspace) : (project || "未指定");
+      writeCompactText(liveWorkspaceName, label);
+      liveWorkspaceChip.title = workspace || label;
+      liveWorkspaceChip.disabled = false;
+    }
+    function openWorkspaceSwitcher() {
+      const cwd = nativeSessionDirectory() || currentWorkspaceCwd();
+      const target = new URL(`/native/${encodeURIComponent(PROVIDER)}`, location.origin);
+      if (token) target.searchParams.set("token", token);
+      if (cwd) target.searchParams.set("cwd", cwd);
+      location.href = target.pathname + "?" + target.searchParams.toString();
     }
     function nativeSessionTitle() {
       const thread = nativeSessionThread();
@@ -12723,6 +13050,7 @@ __ICONS_JS__
       closeComposerActionMenu();
     };
     planModeChipCancel.onclick = () => setSelectedCollaborationMode("default");
+    liveWorkspaceChip.onclick = openWorkspaceSwitcher;
     imageInput.onchange = async () => {
       const files = Array.from(imageInput.files || []);
       imageInput.value = "";

@@ -1053,6 +1053,34 @@ def test_user_followup_moves_waiting_task_back_to_running(tmp_path) -> None:
     assert {job.role: job.status for job in detail.role_jobs}["director"] == "streaming"
 
 
+def test_user_followup_on_completed_task_records_visible_turn_and_resumes(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "completed")
+
+    asyncio.run(service.add_user_message(task.id, "继续解释为什么没有显示"))
+
+    detail = service.get_task(task.id)
+    followups = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "user_followup"
+    ]
+    assert detail.task.status == "running"
+    assert {job.role: job.status for job in detail.role_jobs}["director"] == "streaming"
+    assert followups[-1]["text"] == "继续解释为什么没有显示"
+    assert followups[-1]["target_role"] == "director"
+    assert followups[-1]["context_packet_id"]
+
+
 def test_user_followup_continue_emits_dispatch_verified(tmp_path) -> None:
     service, _provider = _service(tmp_path)
     task = service.create_task(
@@ -1067,6 +1095,64 @@ def test_user_followup_continue_emits_dispatch_verified(tmp_path) -> None:
 
     event_types = [event.event_type for event in service.events_for_task(task.id)]
     assert event_types[-2:] == ["role.streaming", "dispatch.verified"]
+
+
+def test_director_followup_plain_text_completion_is_visible_and_completes_turn(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "completed")
+    asyncio.run(service.add_user_message(task.id, "继续解释为什么没有显示"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"delta": "问题在主会话投影层，"},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"status": "completed"},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    followup_responses = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "followup_response"
+    ]
+    assert detail.task.status == "completed"
+    assert {job.role: job.status for job in detail.role_jobs}["director"] == "passed"
+    assert followup_responses[-1]["text"] == "问题在主会话投影层，"
 
 
 def test_scan_stale_native_role_syncs_then_blocks_without_assistant_output(

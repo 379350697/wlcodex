@@ -1104,9 +1104,45 @@ class RelayService:
             },
             summary="User follow-up routed to director",
         )
-        if detail.task.status == "waiting_user":
+        if detail.task.status in {"waiting_user", "completed", "blocked", "failed"}:
             self._store.update_task_status(task_id, "running")
         self._store.update_role_status(task_id, "director", "queued")
+        refreshed = self._store.get_task_detail(task_id)
+        packet = build_role_context_packet(
+            task=refreshed.task,
+            role="director",
+            board=refreshed.board,
+            handoffs=self._store.handoffs_for_role(task_id, "director"),
+            artifacts=refreshed.artifacts,
+        )
+        context_record = self._store.save_context_packet(
+            task_id,
+            "director",
+            packet,
+        )
+        followup = self._store.save_artifact(
+            task_id,
+            "director",
+            "user_followup",
+            {
+                "text": text,
+                "target_role": "director",
+                "context_packet_id": int(getattr(context_record, "id", 0) or 0),
+            },
+            summary=text,
+        )
+        self._events.emit(
+            task_id,
+            "user.followup",
+            role="user",
+            payload={
+                "role": "user",
+                "text": text,
+                "target_role": "director",
+                "artifact_id": int(getattr(followup, "id", 0) or 0),
+                "context_packet_id": int(getattr(context_record, "id", 0) or 0),
+            },
+        )
         self._events.emit(
             task_id,
             "role.queued",
@@ -1128,19 +1164,6 @@ class RelayService:
             active_turn_id = director.active_turn_id or director.turn_id
             can_continue = bool(getattr(capabilities, "can_continue_session", False))
             if (can_steer and director.turn_running and active_turn_id) or can_continue:
-                refreshed = self._store.get_task_detail(task_id)
-                packet = build_role_context_packet(
-                    task=refreshed.task,
-                    role="director",
-                    board=refreshed.board,
-                    handoffs=self._store.handoffs_for_role(task_id, "director"),
-                    artifacts=refreshed.artifacts,
-                )
-                context_record = self._store.save_context_packet(
-                    task_id,
-                    "director",
-                    packet,
-                )
                 try:
                     if can_steer and director.turn_running and active_turn_id:
                         result = await provider.steer_session(
@@ -1265,6 +1288,16 @@ class RelayService:
                 )
             return None
         parse_result = parse_role_envelope(text)
+        if (
+            not parse_result.ok
+            and self._should_accept_plain_followup_response(task_id, role)
+        ):
+            return await self._handle_plain_followup_response(
+                task_id,
+                role,
+                runtime_event_id=event_id,
+                text=text,
+            )
         if not _is_agent_run_completed_event(runtime_event) and not parse_result.ok:
             await self._recover_director_routing_decision(
                 task_id,
@@ -1291,6 +1324,70 @@ class RelayService:
                 payload={"status": "blocked", "error": reason},
             )
             return None
+
+    def _should_accept_plain_followup_response(self, task_id: int, role: str) -> bool:
+        if role != "director":
+            return False
+        detail = self._store.get_task_detail(task_id)
+        latest_followup_id = _latest_artifact_id(detail.artifacts, "user_followup")
+        if latest_followup_id <= 0:
+            return False
+        latest_response_id = _latest_artifact_id(
+            detail.artifacts,
+            "followup_response",
+        )
+        return latest_followup_id > latest_response_id
+
+    async def _handle_plain_followup_response(
+        self,
+        task_id: int,
+        role: str,
+        *,
+        runtime_event_id: int,
+        text: str,
+    ):
+        if runtime_event_id > 0 and runtime_event_id in self._handled_runtime_completion_ids:
+            return None
+        if runtime_event_id > 0:
+            self._handled_runtime_completion_ids.add(runtime_event_id)
+        clean_text = text.strip()
+        response_artifact = self._store.save_artifact(
+            task_id,
+            role,
+            "followup_response",
+            {
+                "text": clean_text,
+                "target_role": "user",
+                "status": "passed",
+            },
+            summary=clean_text,
+        )
+        self._store.update_role_status(task_id, role, "passed")
+        self._store.update_task_status(task_id, "completed")
+        self._events.emit(
+            task_id,
+            "role.followup_response",
+            role=role,
+            payload={
+                "role": role,
+                "text": clean_text,
+                "status": "passed",
+                "artifact_id": int(getattr(response_artifact, "id", 0) or 0),
+            },
+        )
+        self._events.emit(
+            task_id,
+            "role.status",
+            role=role,
+            payload={"status": "passed"},
+        )
+        self._events.emit(
+            task_id,
+            "task.completed",
+            role=role,
+            payload={"summary": clean_text},
+        )
+        return None
 
     async def scan_active_native_runtime_events(
         self,
@@ -2175,6 +2272,22 @@ def _runtime_event_text(runtime_event: Any) -> str:
         or payload.get("chunk")
         or ""
     )
+
+
+def _latest_artifact_id(
+    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    artifact_type: str,
+) -> int:
+    latest = 0
+    for artifact in artifacts:
+        if str(artifact.get("artifact_type") or "") != artifact_type:
+            continue
+        try:
+            artifact_id = int(artifact.get("id") or 0)
+        except (TypeError, ValueError):
+            artifact_id = 0
+        latest = max(latest, artifact_id)
+    return latest
 
 
 def _session_assistant_role_envelope_text(payload: Any) -> str:

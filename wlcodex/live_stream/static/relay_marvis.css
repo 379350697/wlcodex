@@ -230,6 +230,16 @@ body[data-marvis-relay-view] .marvis-relay-user-bubble {
   overflow-wrap: anywhere;
 }
 
+body[data-marvis-relay-view] .marvis-relay-user-message[data-pending-followup="true"] .marvis-relay-user-bubble {
+  opacity: .72;
+}
+
+body[data-marvis-relay-view] .marvis-relay-user-message.is-failed .marvis-relay-user-bubble,
+body[data-marvis-relay-view] .marvis-relay-user-message[data-pending-followup="failed"] .marvis-relay-user-bubble {
+  background: #f4e7e7;
+  color: #8a1f1f;
+}
+
 body[data-marvis-relay-view] .marvis-relay-agent-step {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);
@@ -623,6 +633,83 @@ body[data-marvis-relay-view] .marvis-relay-composer {
   background: rgba(255, 255, 255, .94);
   padding: 0 10px;
   box-shadow: 0 -2px 18px rgba(0, 0, 0, .03);
+}
+
+body[data-marvis-relay-view] .marvis-relay-workspace-dock {
+  position: fixed;
+  left: 50%;
+  bottom: 146px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(390px, calc(100% - 40px));
+  min-height: 34px;
+  transform: translateX(-50%);
+  box-sizing: border-box;
+  color: #111;
+}
+
+body[data-marvis-relay-view] .marvis-relay-workspace-folder {
+  position: relative;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 14px;
+  border: 2px solid #8f8f8f;
+  border-bottom: 0;
+  border-radius: 3px 3px 0 0;
+}
+
+body[data-marvis-relay-view] .marvis-relay-workspace-folder::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  width: 8px;
+  height: 5px;
+  border: 2px solid #8f8f8f;
+  border-bottom: 0;
+  border-radius: 3px 3px 0 0;
+  transform: translateX(-50%);
+}
+
+body[data-marvis-relay-view] .marvis-relay-workspace-label {
+  flex: 0 0 auto;
+  color: #777;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+body[data-marvis-relay-view] .marvis-relay-workspace-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid #dfdfdf;
+  border-radius: 15px;
+  background: rgba(255, 255, 255, .92);
+  color: #111;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 800;
+  overflow: hidden;
+}
+
+body[data-marvis-relay-view] .marvis-relay-workspace-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body[data-marvis-relay-view] .marvis-relay-workspace-action {
+  flex: 0 0 auto;
+  color: #777;
+  font-size: 12px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-composer input,

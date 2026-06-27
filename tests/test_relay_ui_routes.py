@@ -212,6 +212,63 @@ def _relay_message_bodies_html(panel_html: str) -> str:
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_projects_followup_turns_into_marvis_chat(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Follow-up relay task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_task_status(task.id, "completed")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {
+            "text": "继续解释为什么没有显示",
+            "target_role": "director",
+            "context_packet_id": 41,
+        },
+        summary="继续解释为什么没有显示",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "followup_response",
+        {
+            "text": "问题在主会话投影层，现在已经接续到同一个 task。",
+            "target_role": "user",
+        },
+        summary="问题在主会话投影层，现在已经接续到同一个 task。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
+    assert "继续解释为什么没有显示" in conversation_html
+    assert "问题在主会话投影层，现在已经接续到同一个 task。" in conversation_html
+    assert 'class="marvis-relay-user-message"' in conversation_html
+    assert 'data-native-kind="followup_response"' in conversation_html
+    assert "继续解释为什么没有显示" not in work_log_html
+    assert "function appendMarvisConversationUser" in response
+    assert 'source.addEventListener("user.followup"' in response
+    assert 'source.addEventListener("role.followup_response"' in response
+
+
+@pytest.mark.asyncio
 async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path) -> None:
     response, _service = await _request(
         tmp_path,
@@ -277,7 +334,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-native-work-log">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-followup-chat">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
@@ -453,7 +510,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-native-work-log">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-followup-chat">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png?v=20260627-red-director" in response
@@ -806,7 +863,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-native-work-log">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-followup-chat">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
