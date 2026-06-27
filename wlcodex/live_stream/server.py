@@ -4034,6 +4034,18 @@ def _marvis_relay_handoff_role_label(role: str) -> str:
     return _marvis_relay_public_role(role)[1]
 
 
+def _marvis_relay_handoff_text(from_role: str, to_role: str) -> str:
+    to_name = _marvis_relay_handoff_role_label(to_role)
+    if from_role == "director":
+        return f"Marvis拍了拍 {to_name}，说开干吧"
+    from_name = _marvis_relay_handoff_role_label(from_role)
+    if to_role == "auditor":
+        return f"{from_name}交给{to_name}复核"
+    if from_role == "auditor":
+        return f"{from_name}退回{to_name}继续处理"
+    return f"{from_name}交给{to_name}继续处理"
+
+
 def _marvis_relay_legacy_persona_label(role: str) -> str:
     labels = _MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS.get(str(role or "").strip(), ())
     return " ".join(labels[0]) if labels else ""
@@ -6135,6 +6147,14 @@ def _relay_task_detail_page(
     function marvisHandoffRoleLabel(role) {{
       return MARVIS_HANDOFF_ROLE_LABELS[role] || labelForRole(role);
     }}
+    function marvisHandoffText(fromRole, toRole) {{
+      const toName = marvisHandoffRoleLabel(toRole);
+      if (fromRole === "director") return `Marvis拍了拍 ${{toName}}，说开干吧`;
+      const fromName = marvisHandoffRoleLabel(fromRole);
+      if (toRole === "auditor") return `${{fromName}}交给${{toName}}复核`;
+      if (fromRole === "auditor") return `${{fromName}}退回${{toName}}继续处理`;
+      return `${{fromName}}交给${{toName}}继续处理`;
+    }}
     function marvisLegacyPersonaLabels(role) {{
       return (MARVIS_LEGACY_ROLE_LABEL_PARTS[role] || []).map((parts) => parts.join(" "));
     }}
@@ -6855,8 +6875,13 @@ def _relay_task_detail_page(
       if (key) nativeTranscriptNodes.set(key, node);
       return node;
     }}
-    function appendMarvisConversationHandoff(toRole, key = "") {{
+    function appendMarvisConversationHandoff(toRole, key = "", fromRole = "") {{
       if (!conversationTimeline || !toRole) return null;
+      if (!fromRole || fromRole === toRole || toRole === "director") return null;
+      const existingPair = conversationTimeline.querySelector(
+        `[data-marvis-handoff][data-native-from-role='${{CSS.escape(fromRole)}}'][data-native-to-role='${{CSS.escape(toRole)}}']`
+      );
+      if (existingPair) return existingPair;
       const handoffKey = key || `handoff:${{toRole}}`;
       let node = conversationTimeline.querySelector(`[data-native-key='${{CSS.escape(handoffKey)}}']`);
       if (node) return node;
@@ -6867,8 +6892,10 @@ def _relay_task_detail_page(
       node.dataset.marvisHandoff = "";
       node.dataset.nativeKind = "handoff";
       node.dataset.nativeRole = toRole;
+      node.dataset.nativeFromRole = fromRole;
+      node.dataset.nativeToRole = toRole;
       node.dataset.nativeKey = handoffKey;
-      node.textContent = `Marvis拍了拍 ${{marvisHandoffRoleLabel(toRole)}}，说开干吧`;
+      node.textContent = marvisHandoffText(fromRole, toRole);
       conversationTimeline.appendChild(node);
       nativeTranscriptNodes.set(handoffKey, node);
       scrollNativeConversationToEnd();
@@ -7199,9 +7226,10 @@ def _relay_task_detail_page(
     source.addEventListener("handoff.created", (event) => {{
       const payload = parseRelayEvent(event);
       const toRole = payload.to_role || payload.handoff_to;
+      const fromRole = payload.from_role || "";
       if (toRole) setRoleStatus(toRole, "queued");
-      const handoffKey = `handoff:${{payload.from_role || ""}}:${{toRole || ""}}:${{payload.artifact_id || payload.summary || event.lastEventId || ""}}`;
-      appendMarvisConversationHandoff(toRole, handoffKey);
+      const handoffKey = `handoff:${{fromRole}}:${{toRole || ""}}:${{payload.artifact_id || payload.summary || event.lastEventId || ""}}`;
+      appendMarvisConversationHandoff(toRole, handoffKey, fromRole);
       appendActivity(`${{labelForRole(payload.from_role)}} 已交接给 ${{labelForRole(toRole)}}：${{payload.summary || "等待下一角色处理"}}`);
     }});
     source.addEventListener("role.status", (event) => {{
@@ -7503,8 +7531,10 @@ def _relay_projected_conversation_rows(
                     "artifact_type": str(payload.get("artifact_type") or ""),
                     "status": str(payload.get("status") or ""),
                     "handoff_to": str(payload.get("handoff_to") or ""),
+                    "display_summary": _relay_concrete_payload_summary(payload),
                 }
             )
+    _relay_enrich_generic_final_summary_rows(projected_rows)
     blocked_role = _relay_first_blocked_role(role_jobs)
     if blocked_role:
         projected_rows.append(
@@ -7608,7 +7638,128 @@ def _relay_conversation_row_from_artifact(
         "artifact_type": str(payload.get("artifact_type") or ""),
         "status": str(payload.get("status") or ""),
         "handoff_to": str(payload.get("handoff_to") or ""),
+        "display_summary": _relay_concrete_payload_summary(payload),
     }
+
+
+def _relay_enrich_generic_final_summary_rows(rows: list[dict[str, str]]) -> None:
+    prior_rows: list[dict[str, str]] = []
+    for row in rows:
+        is_director_final = (
+            str(row.get("kind") or "") == "role_envelope"
+            and str(row.get("role") or "") == "director"
+            and str(row.get("artifact_type") or "") == "final_summary"
+        )
+        if is_director_final and _relay_summary_text_is_generic(str(row.get("body") or "")):
+            replacement = _relay_synthesize_final_summary_from_role_rows(prior_rows)
+            if replacement:
+                row["body"] = replacement
+        prior_rows.append(row)
+
+
+def _relay_synthesize_final_summary_from_role_rows(rows: list[dict[str, str]]) -> str:
+    concrete_by_role: dict[str, str] = {}
+    role_order: list[str] = []
+    for row in rows:
+        if str(row.get("kind") or "") != "role_envelope":
+            continue
+        role = str(row.get("role") or "")
+        if not role or role == "director":
+            continue
+        candidate = str(row.get("display_summary") or "").strip()
+        if not candidate:
+            candidate = _relay_conclusion_from_humanized_body(str(row.get("body") or ""))
+        if _relay_summary_text_is_generic(candidate):
+            continue
+        if role not in role_order:
+            role_order.append(role)
+        concrete_by_role[role] = candidate
+
+    if not concrete_by_role:
+        return "结论：任务已完成，但最终摘要缺少可展示的具体变更；详细过程见工作日志。"
+
+    parts: list[str] = []
+    for role in role_order:
+        candidate = concrete_by_role.get(role, "")
+        if not candidate:
+            continue
+        if role == "auditor" and not candidate.startswith(("审核", "审计")):
+            parts.append(f"审核工程师确认：{candidate}")
+        else:
+            parts.append(candidate)
+    if not parts:
+        return ""
+    return "结论：" + "；".join(parts[:3])
+
+
+def _relay_concrete_payload_summary(payload: dict[str, Any]) -> str:
+    candidates: list[str] = []
+    for field in ("summary", "reason"):
+        value = str(payload.get(field) or "").strip()
+        if value:
+            candidates.append(value)
+    acceptance = _relay_join_text_list(payload.get("acceptance_criteria"))
+    if acceptance:
+        candidates.append(acceptance)
+
+    for candidate in candidates:
+        value = _relay_humanize_display_text(candidate).strip()
+        value = _relay_sanitize_protocol_leak_text(str(payload.get("role") or ""), value)
+        if not _relay_summary_text_is_generic(value):
+            return value
+    return ""
+
+
+def _relay_conclusion_from_humanized_body(body: str) -> str:
+    for line in str(body or "").splitlines():
+        value = line.strip()
+        if not value.startswith("结论："):
+            continue
+        value = value.removeprefix("结论：").strip()
+        if not _relay_summary_text_is_generic(value):
+            return value
+    return ""
+
+
+def _relay_summary_text_is_generic(text: str) -> bool:
+    value = _relay_humanize_display_text(str(text or "")).strip()
+    if not value:
+        return True
+    value = re.sub(r"\s+", "", value).strip("。；;,.，")
+    if not value:
+        return True
+    if _relay_text_needs_chinese_fallback(value):
+        return True
+    exact = {
+        "completed",
+        "done",
+        "passed",
+        "implemented",
+        "success",
+        "结论：已完成任务",
+        "结论：任务已完成",
+        "结论：该角色已返回结构化结果，详情见结构化数据",
+        "角色已返回结构化结果",
+        "该角色已返回结构化结果，详情见结构化数据",
+        "已完成任务",
+        "任务已完成",
+        "已完成",
+        "搞定，有请下一位",
+        "修复完成，交给审核",
+        "交给审核",
+        "交回总工程师收尾",
+        "无需返工；可以进入用户验收或收尾",
+        "下一步见结构化数据",
+        "验收依据见结构化数据",
+    }
+    if value.lower() in exact or value in exact:
+        return True
+    generic_fragments = (
+        "详情见结构化数据",
+        "有请下一位",
+        "进入用户验收或收尾",
+    )
+    return any(fragment in value for fragment in generic_fragments)
 
 
 def _marvis_relay_conversation_html(
@@ -7640,45 +7791,56 @@ def _marvis_relay_conversation_html(
         if to_role:
             handoffs_by_role.setdefault(to_role, []).append(row)
     rendered_handoffs: set[str] = set()
+    rendered_handoff_pairs: set[tuple[str, str]] = set()
+
+    def append_handoff_once(handoff: dict[str, str]) -> bool:
+        key = str(handoff.get("key") or "")
+        pair = _marvis_relay_handoff_pair(handoff)
+        if pair is None:
+            return False
+        if pair in rendered_handoff_pairs:
+            return True
+        if key and key in rendered_handoffs:
+            return True
+        html = _marvis_relay_handoff_html(handoff)
+        if not html:
+            return False
+        html_rows.append(html)
+        rendered_handoff_pairs.add(pair)
+        if key:
+            rendered_handoffs.add(key)
+        return True
+
     for row in rows:
         role = str(row.get("role") or "")
         kind = str(row.get("kind") or "")
         if kind == "handoff":
-            key = str(row.get("key") or "")
-            if key not in rendered_handoffs:
-                html_rows.append(_marvis_relay_handoff_html(row))
-                rendered_handoffs.add(key)
             continue
-        if role and kind not in {"user_message", "status"}:
+        if (
+            kind == "role_envelope"
+            and previous_role
+            and role
+            and role != previous_role
+        ):
             for handoff in handoffs_by_role.get(role, []):
-                key = str(handoff.get("key") or "")
-                if key in rendered_handoffs:
-                    continue
-                html_rows.append(_marvis_relay_handoff_html(handoff))
-                rendered_handoffs.add(key)
+                if _marvis_relay_handoff_pair(handoff) == (previous_role, role):
+                    append_handoff_once(handoff)
         if (
             kind == "role_envelope"
             and previous_role == "director"
             and role
             and role != "director"
-            and not any(
-                str(handoff.get("key") or "") in rendered_handoffs
-                for handoff in handoffs_by_role.get(role, [])
-            )
+            and (previous_role, role) not in rendered_handoff_pairs
         ):
             synthetic_key = f"synthetic-handoff:{previous_role}:{role}"
-            if synthetic_key not in rendered_handoffs:
-                html_rows.append(
-                    _marvis_relay_handoff_html(
-                        {
-                            "from_role": previous_role,
-                            "to_role": role,
-                            "role": role,
-                            "key": synthetic_key,
-                        }
-                    )
-                )
-                rendered_handoffs.add(synthetic_key)
+            append_handoff_once(
+                {
+                    "from_role": previous_role,
+                    "to_role": role,
+                    "role": role,
+                    "key": synthetic_key,
+                }
+            )
         html_rows.append(_marvis_relay_message_html(row))
         if kind == "role_envelope":
             previous_role = role
@@ -7686,13 +7848,30 @@ def _marvis_relay_conversation_html(
 
 
 def _marvis_relay_handoff_html(row: dict[str, str]) -> str:
-    to_role = str(row.get("to_role") or row.get("role") or "")
-    name = _marvis_relay_handoff_role_label(to_role)
+    pair = _marvis_relay_handoff_pair(row)
+    if pair is None:
+        return ""
+    from_role, to_role = pair
+    key = str(row.get("key") or "")
+    text = _marvis_relay_handoff_text(from_role, to_role)
     return (
-        '<div class="marvis-relay-handoff" data-marvis-handoff>'
-        f"Marvis拍了拍 {escape(name)}，说开干吧"
+        '<div class="marvis-relay-handoff" data-marvis-handoff '
+        f'data-native-kind="handoff" data-native-from-role="{escape(from_role)}" '
+        f'data-native-to-role="{escape(to_role)}" data-native-role="{escape(to_role)}" '
+        f'data-native-key="{escape(key)}">'
+        f"{escape(text)}"
         "</div>"
     )
+
+
+def _marvis_relay_handoff_pair(row: dict[str, str]) -> tuple[str, str] | None:
+    from_role = str(row.get("from_role") or "").strip()
+    to_role = str(row.get("to_role") or row.get("role") or "").strip()
+    if not from_role or not to_role:
+        return None
+    if from_role == to_role or to_role == "director":
+        return None
+    return from_role, to_role
 
 
 def _marvis_relay_empty_conversation_html() -> str:

@@ -1576,6 +1576,16 @@ async def test_relay_task_detail_projects_saved_handoff_when_native_rows_are_ear
         dispatch_verified=True,
     )
     service._store.update_role_status(task.id, "implementer", "passed")
+    service._store.update_role_metadata(
+        task.id,
+        "auditor",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-auditor-handoff",
+        agent_run_id=803,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "auditor", "passed")
     service._store.save_handoff_packet(
         task.id,
         from_role="director",
@@ -1588,6 +1598,48 @@ async def test_relay_task_detail_projects_saved_handoff_when_native_rows_are_ear
             open_questions=[],
             evidence_refs=[],
             next_action="implement",
+        ),
+    )
+    service._store.save_handoff_packet(
+        task.id,
+        from_role="director",
+        to_role="implementer",
+        packet=HandoffPacket(
+            from_role="director",
+            to_role="implementer",
+            summary="重复交接事件不应在主会话重复展示。",
+            confirmed_facts=[],
+            open_questions=[],
+            evidence_refs=[],
+            next_action="implement",
+        ),
+    )
+    service._store.save_handoff_packet(
+        task.id,
+        from_role="director",
+        to_role="director",
+        packet=HandoffPacket(
+            from_role="director",
+            to_role="director",
+            summary="总工程师自交接不应展示。",
+            confirmed_facts=[],
+            open_questions=[],
+            evidence_refs=[],
+            next_action="continue",
+        ),
+    )
+    service._store.save_handoff_packet(
+        task.id,
+        from_role="auditor",
+        to_role="implementer",
+        packet=HandoffPacket(
+            from_role="auditor",
+            to_role="implementer",
+            summary="审核回炉交接不应伪装成 Marvis 派发标语。",
+            confirmed_facts=[],
+            open_questions=[],
+            evidence_refs=[],
+            next_action="rework",
         ),
     )
     service._store.save_artifact(
@@ -1628,6 +1680,38 @@ async def test_relay_task_detail_projects_saved_handoff_when_native_rows_are_ear
         },
         summary="修复完成，交给审核。",
     )
+    service._store.save_handoff_packet(
+        task.id,
+        from_role="implementer",
+        to_role="auditor",
+        packet=HandoffPacket(
+            from_role="implementer",
+            to_role="auditor",
+            summary="开发完成后交给审核工程师复核。",
+            confirmed_facts=[],
+            open_questions=[],
+            evidence_refs=[],
+            next_action="audit",
+        ),
+    )
+    service._store.save_artifact(
+        task.id,
+        "auditor",
+        "audit_report",
+        {
+            "relay_role": "auditor",
+            "status": "passed",
+            "reason": "审核通过。",
+            "role": "auditor",
+            "artifact_type": "audit_report",
+            "summary": "审核通过。",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交回总工程师收尾。",
+        },
+        summary="审核通过。",
+    )
     _append_runtime_event(
         runtime_store,
         agent_run_id=802,
@@ -1648,10 +1732,108 @@ async def test_relay_task_detail_projects_saved_handoff_when_native_rows_are_ear
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
-    assert "Marvis拍了拍 开发工程师，说开干吧" in conversation_html
+    assert conversation_html.count("Marvis拍了拍 开发工程师，说开干吧") == 1
+    assert "开发工程师交给审核工程师复核" in conversation_html
+    assert "Marvis拍了拍 审核工程师，说开干吧" not in conversation_html
+    assert "Marvis拍了拍 Marvis，说开干吧" not in conversation_html
     assert conversation_html.index("Marvis拍了拍 开发工程师") < conversation_html.index(
         "修复完成，交给审核。"
     )
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_replaces_generic_final_summary_with_role_closure(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Concrete final closure task",
+        prompt="修复交互不一致 bug。",
+        workspace="/repo",
+        provider="codex",
+    )
+    for role in ("director", "implementer", "auditor"):
+        service._store.update_role_metadata(
+            task.id,
+            role,
+            provider="codex",
+            model="gpt-5",
+            native_session_id=f"native-{role}-closure",
+            agent_run_id=900 + len(role),
+            dispatch_verified=True,
+        )
+        service._store.update_role_status(task.id, role, "passed")
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "relay_role": "implementer",
+            "status": "passed",
+            "reason": "修复了交互不一致 bug，圆形控件改成椭圆形。",
+            "role": "implementer",
+            "artifact_type": "implementation_report",
+            "summary": "修复了交互不一致 bug，圆形控件改成椭圆形。",
+            "handoff_to": "auditor",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给审核工程师复核。",
+        },
+        summary="修复了交互不一致 bug，圆形控件改成椭圆形。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "auditor",
+        "audit_report",
+        {
+            "relay_role": "auditor",
+            "status": "passed",
+            "reason": "审核通过，交互展示与预期一致。",
+            "role": "auditor",
+            "artifact_type": "audit_report",
+            "summary": "审核通过，交互展示与预期一致。",
+            "handoff_to": "director",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交回总工程师收尾。",
+        },
+        summary="审核通过，交互展示与预期一致。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "status": "passed",
+            "reason": "completed",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": "已完成任务",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "",
+        },
+        summary="已完成任务",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "结论：已完成任务" not in conversation_html
+    assert "该角色已返回结构化结果" not in conversation_html
+    assert "修复了交互不一致 bug，圆形控件改成椭圆形" in conversation_html
+    assert "审核通过，交互展示与预期一致" in conversation_html
 
 
 @pytest.mark.asyncio
@@ -2645,7 +2827,9 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     assert "renderRoleEnvelope" in envelope_handler
     handoff_handler = response.split('source.addEventListener("handoff.created"', 1)[1]
     handoff_handler = handoff_handler.split('source.addEventListener("role.status"', 1)[0]
-    assert "appendMarvisConversationHandoff(toRole, handoffKey);" in handoff_handler
+    assert "appendMarvisConversationHandoff(toRole, handoffKey, fromRole);" in handoff_handler
+    assert "data-native-from-role" in response
+    assert "data-native-to-role" in response
     assert "clearRolePreview(role);" in response
 
 
