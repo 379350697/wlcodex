@@ -481,6 +481,7 @@ class WorkerLiveStreamServer:
             if parsed.path in (
                 "/native/workflows",
                 "/native/workflows/relay",
+                "/native/workflows/relay/chat",
                 "/native/workflows/relay/config",
                 "/native/workflows/relay/office",
             ) or parsed.path.startswith("/native/workflows/relay/tasks/"):
@@ -1229,12 +1230,26 @@ class WorkerLiveStreamServer:
                 ),
             )
             return
-        if path in ("/native/workflows/relay", "/native/workflows/relay/config"):
+        if path in (
+            "/native/workflows/relay",
+            "/native/workflows/relay/chat",
+            "/native/workflows/relay/config",
+        ):
             project_rows = _relay_project_rows()
             selected_workspace = _relay_selected_workspace(
                 str((query.get("workspace") or [""])[0] or ""),
                 project_rows,
             )
+        if path == "/native/workflows/relay/chat":
+            await self._send_html(
+                writer,
+                200,
+                _relay_chat_home_page(
+                    selected_workspace=selected_workspace,
+                    access_token=token,
+                ),
+            )
+            return
         if path == "/native/workflows/relay":
             summaries = (
                 self._relay_service.list_tasks(
@@ -3520,7 +3535,7 @@ def _relay_task_list_page(
           <section class="relay-empty-state">
             <h2>还没有接力任务</h2>
             <p>创建一个大任务后，总工程师会先接收并调度架构、开发、测试和审计角色。</p>
-            <p>当前工作区还没有接力任务，可以从页面顶部创建第一个任务。</p>
+            <p>当前工作区还没有接力任务，可以从底部导航的对话开始第一个任务。</p>
           </section>
         """
     task_count = len(sorted_summaries)
@@ -3543,12 +3558,11 @@ def _relay_task_list_page(
           <a class="marvis-relay-icon-button" href="/native/workflows/relay/office{token_suffix}" aria-label="Marvis办公室">
             <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
           </a>
-          <button class="relay-primary marvis-relay-primary" id="new-task-button" type="button" data-open-new-task>新接力任务</button>
         """,
     )
-    bottom_nav_html = _marvis_relay_bottom_nav("tasks")
-    composer_html = _marvis_relay_task_composer(
-        token_suffix=token_suffix,
+    bottom_nav_html = _marvis_relay_bottom_nav(
+        "tasks",
+        access_token=access_token,
         selected_workspace=selected_workspace,
     )
     return _replace_html_icons(f"""<!doctype html>
@@ -3568,7 +3582,6 @@ def _relay_task_list_page(
     h1 {{ font-size: 22px; }}
     main {{ display: grid; gap: 18px; width: min(1120px, 100%); margin: 0 auto; padding: 18px; box-sizing: border-box; }}
     .relay-shell {{ display: grid; gap: 18px; align-items: start; }}
-    body.relay-modal-open {{ overflow: hidden; }}
     .relay-toolbar {{ display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }}
     .relay-secondary {{ min-height: 38px; border: 1px solid var(--border-subtle); border-radius: 6px; background: transparent; color: var(--text-primary); padding: 0 12px; text-decoration: none; display: inline-grid; place-items: center; }}
     .relay-workspace-nav {{ display: grid; gap: 8px; border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 12px; }}
@@ -3610,12 +3623,6 @@ def _relay_task_list_page(
     .relay-empty-state {{ display: grid; justify-items: start; gap: 10px; border: 1px dashed var(--border-subtle); border-radius: 8px; padding: 18px; color: var(--text-muted); }}
     .relay-empty-state h2 {{ color: var(--text-primary); font-size: 18px; }}
     .relay-empty-state p {{ margin: 0; max-width: 58ch; line-height: 1.55; }}
-    .relay-create-modal[hidden] {{ display: none; }}
-    .relay-create-modal {{ position: fixed; inset: 0; z-index: 20; display: grid; grid-template-rows: auto 1fr; background: var(--bg-canvas); color: var(--text-primary); overflow: auto; }}
-    .relay-modal-head {{ position: sticky; top: 0; z-index: 1; display: grid; grid-template-columns: 48px 1fr; gap: 12px; align-items: center; padding: 12px 18px; background: rgba(5,5,8,.94); border-bottom: 1px solid var(--border-header); }}
-    .relay-modal-body {{ display: grid; align-content: start; gap: 16px; width: min(860px, 100%); margin: 0 auto; padding: 22px 18px 34px; box-sizing: border-box; }}
-    .relay-modal-intro {{ display: grid; gap: 6px; }}
-    .relay-modal-current {{ display: grid; gap: 6px; border: 1px solid var(--border-card); border-radius: 8px; padding: 12px; background: var(--bg-surface); min-width: 0; }}
     @media (max-width: 760px) {{ header {{ grid-template-columns: 48px 1fr; }} .relay-toolbar {{ grid-column: 1 / -1; justify-content: stretch; }} .relay-primary, .relay-secondary {{ width: 100%; }} .relay-card-head {{ grid-template-columns: 1fr; }} .relay-card-meta {{ justify-content: flex-start; }} .relay-card-open {{ width: auto; }} .relay-config-row {{ grid-template-columns: 1fr; }} main {{ padding: 12px; }} .relay-modal-head {{ padding: 12px; }} .relay-modal-body {{ padding: 14px 12px 28px; }} }}
   </style>
 </head>
@@ -3642,59 +3649,11 @@ def _relay_task_list_page(
       </section>
     </div>
   </main>
-  {composer_html}
   <nav class="marvis-relay-bottom-nav" aria-label="Marvis relay navigation">
     {bottom_nav_html}
   </nav>
   </div>
-  <section class="relay-create-modal" id="new-task-modal" hidden role="dialog" aria-modal="true" aria-label="new relay task">
-    <div class="relay-modal-head">
-      <button class="circle" type="button" data-close-new-task aria-label="关闭新接力任务">‹</button>
-      <h2>新接力任务</h2>
-    </div>
-    <div class="relay-modal-body">
-      <div class="relay-modal-intro">
-        <p class="relay-muted">创建一个绑定当前工作区的大任务，由总工程师先接收并调度五个角色。</p>
-      </div>
-      <section class="relay-modal-current" aria-label="relay task workspace">
-        <h3>当前工作区</h3>
-        <span class="relay-muted">{escape(selected_workspace)}</span>
-      </section>
-      <form class="relay-form" method="post" action="/api/relay/tasks{token_suffix}">
-        <label>任务标题<input name="title" placeholder="例如：修复流式接力历史页"></label>
-        <label>任务目标<textarea name="prompt" placeholder="描述要接力完成的大任务、验收标准和限制"></textarea></label>
-        <input type="hidden" name="workspace" value="{escape(selected_workspace)}">
-        <button type="submit">开始接力</button>
-      </form>
-    </div>
-  </section>
   <script>
-    const TOKEN_SUFFIX = {json.dumps(token_suffix)};
-    const modal = document.getElementById("new-task-modal");
-    const main = document.querySelector("main");
-    function openNewTaskPanel() {{
-      if (!modal) return;
-      modal.hidden = false;
-      document.body.classList.add("relay-modal-open");
-      main?.setAttribute("aria-hidden", "true");
-      modal.querySelector("input, textarea")?.focus();
-    }}
-    function closeNewTaskPanel() {{
-      if (!modal) return;
-      modal.hidden = true;
-      document.body.classList.remove("relay-modal-open");
-      main?.removeAttribute("aria-hidden");
-      document.getElementById("new-task-button")?.focus();
-    }}
-    document.querySelectorAll("[data-open-new-task]").forEach((button) => {{
-      button.addEventListener("click", openNewTaskPanel);
-    }});
-    document.querySelectorAll("[data-close-new-task]").forEach((button) => {{
-      button.addEventListener("click", closeNewTaskPanel);
-    }});
-    document.addEventListener("keydown", (event) => {{
-      if (event.key === "Escape" && modal && !modal.hidden) closeNewTaskPanel();
-    }});
     document.querySelectorAll("[data-filter]").forEach((button) => {{
       button.addEventListener("click", () => {{
         const filter = button.dataset.filter || "all";
@@ -3704,20 +3663,66 @@ def _relay_task_list_page(
         }});
       }});
     }});
-    const form = document.querySelector(".relay-form");
-    form?.addEventListener("submit", async (event) => {{
-      event.preventDefault();
-      const data = Object.fromEntries(new FormData(form).entries());
-      const response = await fetch(`/api/relay/tasks${{TOKEN_SUFFIX}}`, {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify(data),
-      }});
-      const payload = await response.json();
-      if (payload?.task?.id) {{
-        window.location.href = `/native/workflows/relay/tasks/${{encodeURIComponent(payload.task.id)}}${{TOKEN_SUFFIX}}`;
-      }}
-    }});
+  </script>
+</body>
+</html>""")
+
+
+def _relay_chat_home_page(
+    *,
+    selected_workspace: str = "",
+    access_token: str = "",
+) -> str:
+    token_suffix = _token_suffix(access_token)
+    selected_workspace = str(selected_workspace or "")
+    workspace_label = Path(selected_workspace).name or selected_workspace or "wlcodex"
+    topbar_html = _marvis_relay_topbar(
+        title="Marvis",
+        subtitle=workspace_label,
+        back_href=f"/native{token_suffix}",
+        right_html=f"""
+          <a class="marvis-relay-icon-button" href="/native/workflows/relay/office{token_suffix}" aria-label="Marvis办公室">
+            <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
+          </a>
+          <a class="marvis-relay-icon-button" href="{escape(_relay_workspace_href(selected_workspace, access_token))}" aria-label="任务">
+            <span class="marvis-relay-icon-list" aria-hidden="true"></span>
+          </a>
+        """,
+    )
+    bottom_nav_html = _marvis_relay_bottom_nav(
+        "chat",
+        access_token=access_token,
+        selected_workspace=selected_workspace,
+    )
+    composer_html = _marvis_relay_task_composer(
+        token_suffix=token_suffix,
+        selected_workspace=selected_workspace,
+        placeholder="请在此输入任务",
+    )
+    return _replace_html_icons(f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light only">
+  <title>Marvis 对话</title>
+  <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
+</head>
+<body data-marvis-relay-view="chat">
+  <div class="marvis-relay-phone">
+    {topbar_html}
+    <main class="marvis-relay-chat-home">
+      <span class="marvis-relay-avatar marvis-relay-avatar-marvis marvis-relay-hero-avatar" aria-hidden="true"></span>
+      <h2>你好，今天想做什么？</h2>
+    </main>
+    {composer_html}
+    <nav class="marvis-relay-bottom-nav" aria-label="Marvis relay navigation">
+      {bottom_nav_html}
+    </nav>
+  </div>
+  <script>
+    const TOKEN_SUFFIX = {json.dumps(token_suffix)};
     const marvisComposer = document.querySelector("[data-marvis-task-composer]");
     marvisComposer?.addEventListener("submit", async (event) => {{
       event.preventDefault();
@@ -4002,22 +4007,54 @@ def _marvis_relay_topbar(
     """
 
 
-def _marvis_relay_bottom_nav(active: str = "chat") -> str:
+def _marvis_relay_bottom_nav(
+    active: str = "chat",
+    *,
+    access_token: str = "",
+    selected_workspace: str = "",
+) -> str:
+    token_suffix = _token_suffix(access_token)
+    workspace_query = ""
+    if selected_workspace:
+        joiner = "&" if token_suffix else "?"
+        workspace_query = f"{joiner}workspace={quote(selected_workspace, safe='/')}"
+    hrefs = {
+        "chat": f"/native/workflows/relay/chat{token_suffix}{workspace_query}",
+        "tasks": f"/native/workflows/relay{token_suffix}{workspace_query}",
+    }
     items = [
         ("chat", "对话", "chat"),
         ("tasks", "任务", "clock"),
         ("skills", "技能", "tool"),
         ("profile", "我的", "person"),
     ]
-    return "\n".join(
-        f"""
-        <button class="marvis-relay-nav-item{' active' if key == active else ''}" type="button" data-marvis-nav="{escape(key)}">
-          <span class="marvis-relay-nav-icon marvis-relay-nav-icon-{escape(icon)}" aria-hidden="true"></span>
+    rows = []
+    for key, label, icon in items:
+        class_name = f"marvis-relay-nav-item{' active' if key == active else ''}"
+        current = ' aria-current="page"' if key == active else ""
+        icon_html = (
+            f'<span class="marvis-relay-nav-icon marvis-relay-nav-icon-{escape(icon)}" '
+            'aria-hidden="true"></span>'
+        )
+        if key in hrefs:
+            rows.append(
+                f"""
+        <a class="{class_name}" href="{escape(hrefs[key])}" data-marvis-nav="{escape(key)}"{current}>
+          {icon_html}
+          <span>{escape(label)}</span>
+        </a>
+        """
+            )
+        else:
+            rows.append(
+                f"""
+        <button class="{class_name}" type="button" data-marvis-nav="{escape(key)}"{current}>
+          {icon_html}
           <span>{escape(label)}</span>
         </button>
         """
-        for key, label, icon in items
-    )
+            )
+    return "\n".join(rows)
 
 
 def _marvis_relay_task_composer(
@@ -4028,7 +4065,7 @@ def _marvis_relay_task_composer(
 ) -> str:
     return f"""
     <form class="marvis-relay-composer" data-marvis-task-composer action="/api/relay/tasks{token_suffix}">
-      <button class="marvis-relay-plus" type="button" data-open-new-task aria-label="新接力任务">+</button>
+      <button class="marvis-relay-plus" type="button" aria-label="添加">+</button>
       <input name="title" autocomplete="off" placeholder="{escape(placeholder)}">
       <input type="hidden" name="prompt" value="">
       <input type="hidden" name="workspace" value="{escape(selected_workspace)}">
@@ -5151,10 +5188,6 @@ def _relay_task_detail_page(
     board = detail.board
     task = detail.task
     back_href = _relay_workspace_href(str(task.workspace or ""), access_token)
-    conversation_href = _relay_task_view_href(int(task.id), access_token, "conversation")
-    board_href = _relay_task_view_href(int(task.id), access_token, "board")
-    conversation_active = "true" if view == "conversation" else "false"
-    board_active = "true" if view == "board" else "false"
     task_status_label = _relay_task_status_label(str(task.status or ""))
     phase_label = _relay_phase_label(str(board.phase or task.phase or "director"))
     current_dispatch_label = _relay_current_dispatch_label(board)
@@ -5171,7 +5204,11 @@ def _relay_task_detail_page(
           <button class="relay-action marvis-relay-interrupt" data-interrupt-url="/api/relay/tasks/{task.id}/interrupt" type="button">中断任务</button>
         """,
     )
-    bottom_nav_html = _marvis_relay_bottom_nav("chat")
+    bottom_nav_html = _marvis_relay_bottom_nav(
+        "chat",
+        access_token=access_token,
+        selected_workspace=str(task.workspace or ""),
+    )
     board_panel_inner = f"""
       {routing_html}
       <section class="relay-board" aria-label="任务进度">
@@ -5293,15 +5330,7 @@ def _relay_task_detail_page(
   <div class="marvis-relay-phone">
   {topbar_html}
   <main>
-    <section class="marvis-relay-task-title" aria-label="当前任务">
-      <h2>{escape(task.title)}</h2>
-      <p>{escape(task.workspace)} · <span data-task-status>{escape(task_status_label)}</span> · {escape(_native_provider_display_name(str(task.provider)))}</p>
-    </section>
-    <nav class="relay-view-switch" aria-label="Relay 视图切换">
-      <a class="relay-view-tab" data-view-tab="conversation" data-view-active="{conversation_active}" href="{escape(conversation_href)}">会话流</a>
-      <a class="relay-view-tab" data-view-tab="board" data-view-active="{board_active}" href="{escape(board_href)}">任务状态</a>
-    </nav>
-    <section class="relay-view relay-conversation-panel" data-view-panel="conversation" aria-label="会话流">
+    <section class="relay-view relay-conversation-panel" data-view-panel="conversation" aria-label="会话">
       <div class="relay-conversation" data-native-conversation-timeline>
         {native_conversation_html}
       </div>

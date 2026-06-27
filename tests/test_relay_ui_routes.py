@@ -248,22 +248,27 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert '<meta name="color-scheme" content="light only">' in response
     assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-persona-avatars">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
-    assert 'class="marvis-relay-composer"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
-    assert "请输入任务" in response
+    assert (
+        'href="/native/workflows/relay/chat?token=secret&amp;workspace=/Users/wl/projects/wlcodex"'
+        in response
+    )
+    assert 'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex"' in response
+    assert 'data-marvis-nav="tasks" aria-current="page"' in response
+    assert 'class="marvis-relay-composer"' not in response
+    assert "请输入任务" not in response
     assert "任务历史" in response
-    assert response.count('data-open-new-task>新接力任务</button>') == 1
+    assert "新接力任务" not in response
     assert "配置" not in response
     assert '<a class="relay-secondary" href="/native/workflows/relay/config' not in response
     assert 'href="/native/workflows/relay/config' not in response
     assert "新聊天" not in response
     assert "relay-create-panel" not in response
-    assert '<section class="relay-create-modal" id="new-task-modal" hidden role="dialog"' in response
-    assert 'aria-label="new relay task"' in response
-    assert 'data-close-new-task aria-label="关闭新接力任务"' in response
-    assert '<h2>新接力任务</h2>' in response
-    assert "当前工作区" in response
+    assert "relay-create-modal" not in response
+    assert 'aria-label="new relay task"' not in response
+    assert 'data-close-new-task aria-label="关闭新接力任务"' not in response
+    assert "wlcodex" in response
     assert "将快照以下五角色 provider 配置" not in response
     assert "发布大任务" not in response
     assert "暂无任务" not in response
@@ -278,7 +283,6 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "wlcodex" in response
     assert "工作区（可选）" not in response
     assert '<option value="">不指定工作区</option>' not in response
-    assert f'<input type="hidden" name="workspace" value="{default_workspace}">' in response
     assert 'aria-label="relay role provider configuration"' not in response
     assert "Provider 应用于全部角色" not in response
     assert "默认角色配置" not in response
@@ -309,7 +313,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         "Host: test\r\nConnection: close\r\n\r\n",
         relay_service=service,
     )
-    assert '<input type="hidden" name="workspace" value="/repo">' in populated
+    assert 'href="/native/workflows/relay/chat?token=secret&amp;workspace=/repo"' in populated
     assert "Default workspace relay" not in populated
     assert "Other workspace relay" not in populated
 
@@ -371,6 +375,38 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "2026-06-16T07:51:57.510982123+00:00" not in polished
     assert "最近接棒：" not in polished
     assert "按完整五角色接力处理" not in polished
+
+
+@pytest.mark.asyncio
+async def test_marvis_relay_chat_home_is_the_only_new_task_entry(
+    tmp_path: Path,
+) -> None:
+    response, _service = await _request(
+        tmp_path,
+        "GET /native/workflows/relay/chat?token=secret&workspace=%2Frepo HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'data-marvis-relay-view="chat"' in response
+    assert '<meta name="color-scheme" content="light only">' in response
+    assert 'class="marvis-relay-topbar"' in response
+    assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis marvis-relay-hero-avatar"' in response
+    assert "你好，今天想做什么？" in response
+    assert "GitHub热门项目收集" not in response
+    assert "曼谷旅行路线书网页" not in response
+    assert "同花顺股票信息查询" not in response
+    assert "个人信息文件归档" not in response
+    assert 'class="marvis-relay-suggestion"' not in response
+    assert 'class="marvis-relay-composer"' in response
+    assert 'action="/api/relay/tasks?token=secret"' in response
+    assert '<input name="title" autocomplete="off" placeholder="请在此输入任务">' in response
+    assert '<input type="hidden" name="prompt" value="">' in response
+    assert '<input type="hidden" name="workspace" value="/repo">' in response
+    assert 'data-marvis-nav="chat" aria-current="page"' in response
+    assert 'href="/native/workflows/relay?token=secret&amp;workspace=/repo"' in response
+    assert "新接力任务" not in response
+    assert "relay-create-modal" not in response
 
 
 @pytest.mark.asyncio
@@ -759,18 +795,14 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "data-marvis-snapshot-routing-summary" in response
     assert "data-marvis-snapshot-board-next-step" in response
     assert 'data-relay-view="conversation"' in response
-    assert 'data-view-tab="conversation" data-view-active="true"' in response
-    assert 'data-view-tab="board" data-view-active="false"' in response
-    assert "会话流" in response
-    assert "任务状态" in response
-    assert (
-        f'href="/native/workflows/relay/tasks/{task.id}?token=secret&amp;view=conversation"'
-        in response
-    )
-    assert (
-        f'href="/native/workflows/relay/tasks/{task.id}?token=secret&amp;view=board"'
-        in response
-    )
+    assert 'class="marvis-relay-task-title"' not in response
+    assert 'class="relay-view-switch"' not in response
+    assert 'data-view-tab="conversation"' not in response
+    assert 'data-view-tab="board"' not in response
+    assert "会话流" not in response
+    assert 'aria-label="任务状态"' in response
+    assert "你好，今天想做什么？" not in response
+    assert "marvis-relay-hero-avatar" not in response
     assert 'class="relay-conversation"' in response
     assert 'data-native-conversation-timeline' in response
     assert 'class="relay-native-stack"' not in response
@@ -1820,22 +1852,14 @@ async def test_relay_task_detail_board_view_activates_status_cards(
 
     assert "HTTP/1.1 200 OK" in response
     assert 'data-relay-view="board"' in response
-    assert 'data-view-tab="conversation" data-view-active="false"' in response
-    assert 'data-view-tab="board" data-view-active="true"' in response
-    assert "任务状态" in response
+    assert 'data-view-tab="conversation"' not in response
+    assert 'data-view-tab="board"' not in response
+    assert 'class="relay-view-switch"' not in response
     assert "任务进度" in response
     assert "五角色进度" in response
     assert "交接摘要" in response
     assert "待确认问题" in response
     assert "原生会话" in response
-    assert (
-        f'href="/native/workflows/relay/tasks/{task.id}?token=secret&amp;view=conversation"'
-        in response
-    )
-    assert (
-        f'href="/native/workflows/relay/tasks/{task.id}?token=secret&amp;view=board"'
-        in response
-    )
 
 
 @pytest.mark.asyncio
