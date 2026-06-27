@@ -1246,6 +1246,110 @@ def test_followup_completion_uses_current_native_turn_delta_not_old_completed_te
     assert "旧 turn" not in followup_responses[-1]["text"]
 
 
+def test_active_runtime_scan_ignores_old_turn_completion_for_pending_followup(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "completed")
+    asyncio.run(service.add_user_message(task.id, "第三次接续验证"))
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="claude",
+        provider_engine="sdk-test",
+        native_session_id="native-1",
+        agent_run_id=201,
+        turn_id="turn-current",
+        active_turn_id="turn-current",
+        turn_running=True,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "streaming")
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_MESSAGE_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"text": "旧 turn 的最终回复", "native_turn_id": "turn-old"},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+
+    projected = asyncio.run(service.scan_active_native_runtime_events(runtime_store))
+
+    detail = service.get_task(task.id)
+    followup_responses = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "followup_response"
+    ]
+    assert projected == 0
+    assert followup_responses == []
+    assert detail.task.status == "running"
+
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"delta": "最终正常", "native_turn_id": "turn-current"},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={
+                "action": "turn_completed",
+                "status": "completed",
+                "native_turn_id": "turn-current",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+
+    projected = asyncio.run(service.scan_active_native_runtime_events(runtime_store))
+
+    detail = service.get_task(task.id)
+    followup_responses = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "followup_response"
+    ]
+    assert projected == 2
+    assert followup_responses[-1]["text"] == "最终正常"
+    assert followup_responses[-1]["runtime_event_id"] == completed.id
+    assert followup_responses[-1]["native_turn_id"] == "turn-current"
+
+
 def test_scan_stale_native_role_does_not_close_pending_followup_from_old_session_read(
     tmp_path,
 ) -> None:

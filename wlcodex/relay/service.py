@@ -1267,6 +1267,12 @@ class RelayService:
             return None
         task_id, role = mapping
         event_id = int(getattr(runtime_event, "id", 0) or 0)
+        if not self._runtime_event_matches_current_role_turn(
+            runtime_event,
+            task_id,
+            role,
+        ):
+            return None
         if self._project_runtime_delta(runtime_event, task_id=task_id, role=role):
             return None
         if _is_runtime_failure(runtime_event):
@@ -1338,6 +1344,27 @@ class RelayService:
         )
         return latest_followup_id > latest_response_id
 
+    def _runtime_event_matches_current_role_turn(
+        self,
+        runtime_event: Any,
+        task_id: int,
+        role: str,
+    ) -> bool:
+        try:
+            detail = self._store.get_task_detail(task_id)
+        except KeyError:
+            return True
+        job = next(
+            (candidate for candidate in detail.role_jobs if candidate.role == role),
+            None,
+        )
+        if job is None:
+            return True
+        return _runtime_event_matches_turn(
+            runtime_event,
+            job.active_turn_id or job.turn_id,
+        )
+
     async def _handle_plain_followup_response(
         self,
         task_id: int,
@@ -1351,15 +1378,26 @@ class RelayService:
         if runtime_event_id > 0:
             self._handled_runtime_completion_ids.add(runtime_event_id)
         clean_text = text.strip()
+        response_payload = {
+            "text": clean_text,
+            "target_role": "user",
+            "status": "passed",
+            "runtime_event_id": runtime_event_id,
+        }
+        if runtime_event_id > 0:
+            try:
+                runtime_store = RuntimeEventStore(self._store._ledger._conn)
+                runtime_event = runtime_store.get_by_id(runtime_event_id)
+                turn_id = _runtime_event_turn_id(runtime_event)
+            except KeyError:
+                turn_id = ""
+            if turn_id:
+                response_payload["native_turn_id"] = turn_id
         response_artifact = self._store.save_artifact(
             task_id,
             role,
             "followup_response",
-            {
-                "text": clean_text,
-                "target_role": "user",
-                "status": "passed",
-            },
+            response_payload,
             summary=clean_text,
         )
         self._store.update_role_status(task_id, role, "passed")
@@ -1413,10 +1451,13 @@ class RelayService:
                     after_id=after_id,
                     limit=limit,
                 )
+                current_turn_id = job.active_turn_id or job.turn_id
                 for event in events:
                     self._runtime_projection_cursors[agent_run_id] = int(
                         getattr(event, "id", 0) or 0
                     )
+                    if not _runtime_event_matches_turn(event, current_turn_id):
+                        continue
                     self._project_native_event(
                         event,
                         task_id=task_detail.task.id,
@@ -1494,6 +1535,7 @@ class RelayService:
                     provider_name=job.provider,
                     native_session_id=job.native_session_id,
                     allow_read_session=not pending_followup_response,
+                    current_turn_id=job.active_turn_id or job.turn_id,
                 ):
                     changed += 1
                     continue
@@ -1722,6 +1764,7 @@ class RelayService:
         provider_name: str = "",
         native_session_id: str = "",
         allow_read_session: bool = True,
+        current_turn_id: str = "",
     ) -> bool:
         if after_id > 0:
             events = runtime_store.list_by_agent_run_after(
@@ -1731,6 +1774,12 @@ class RelayService:
             )
         else:
             events = runtime_store.list_by_agent_run_tail(agent_run_id, limit=5000)
+        if current_turn_id:
+            events = [
+                event
+                for event in events
+                if _runtime_event_matches_turn(event, current_turn_id)
+            ]
         completed = _completed_role_envelope_event(events)
         if completed is not None:
             await self.handle_role_completion_event(
@@ -2308,6 +2357,13 @@ def _runtime_event_turn_id(runtime_event: Any) -> str:
         or payload.get("active_turn_id")
         or ""
     ).strip()
+
+
+def _runtime_event_matches_turn(runtime_event: Any, turn_id: str) -> bool:
+    expected_turn_id = str(turn_id or "").strip()
+    if not expected_turn_id:
+        return True
+    return _runtime_event_turn_id(runtime_event) == expected_turn_id
 
 
 def _latest_artifact_id(
