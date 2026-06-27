@@ -24,7 +24,7 @@ def test_relay_roles_match_design_spec() -> None:
         "架构工程师",
         "开发工程师",
         "测试工程师",
-        "审计工程师",
+        "审核工程师",
     ]
 
 

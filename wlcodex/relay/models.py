@@ -15,7 +15,7 @@ RELAY_ROLES: tuple[RelayRoleDefinition, ...] = (
     RelayRoleDefinition("architect", "架构工程师"),
     RelayRoleDefinition("implementer", "开发工程师"),
     RelayRoleDefinition("tester", "测试工程师"),
-    RelayRoleDefinition("auditor", "审计工程师"),
+    RelayRoleDefinition("auditor", "审核工程师"),
 )
 RELAY_ROLE_IDS = tuple(role.role for role in RELAY_ROLES)
 RELAY_ROLE_DISPLAY_NAMES = {role.role: role.display_name for role in RELAY_ROLES}

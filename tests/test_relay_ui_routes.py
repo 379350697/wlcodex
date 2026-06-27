@@ -670,19 +670,21 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert '"architect":{"role":"architect","display_name":"架构工程师","title":"架构工程师","provider"' in response
     assert '"implementer":{"role":"implementer","display_name":"开发工程师","title":"开发工程师","provider"' in response
     assert '"tester":{"role":"tester","display_name":"测试工程师","title":"测试工程师","provider"' in response
-    assert '"auditor":{"role":"auditor","display_name":"审计工程师","title":"审计工程师","provider"' in response
+    assert '"auditor":{"role":"auditor","display_name":"审核工程师","title":"审核工程师","provider"' in response
     assert re.search(r'"director":\{[^}]*"display_name":"总工程师"[^}]*"avatar":"marvis"', response)
-    assert re.search(r'"architect":\{[^}]*"display_name":"架构工程师"[^}]*"avatar":"computer-agent"', response)
-    assert re.search(r'"implementer":\{[^}]*"display_name":"开发工程师"[^}]*"avatar":"search-agent"', response)
-    assert re.search(r'"tester":\{[^}]*"display_name":"测试工程师"[^}]*"avatar":"app-agent"', response)
-    assert re.search(r'"auditor":\{[^}]*"display_name":"审计工程师"[^}]*"avatar":"browser-agent"', response)
-    assert '"avatar":"file-agent"' not in response
+    assert re.search(r'"architect":\{[^}]*"display_name":"架构工程师"[^}]*"avatar":"architect"', response)
+    assert re.search(r'"implementer":\{[^}]*"display_name":"开发工程师"[^}]*"avatar":"implementer"', response)
+    assert re.search(r'"tester":\{[^}]*"display_name":"测试工程师"[^}]*"avatar":"tester"', response)
+    assert re.search(r'"auditor":\{[^}]*"display_name":"审核工程师"[^}]*"avatar":"auditor"', response)
     assert "data-persona-name" in response
     assert "Team Leader" not in response
-    assert "Computer Agent" not in response
-    assert "File Agent" not in response
-    assert "Browser Agent" not in response
-    assert "Search Agent" not in response
+    for legacy_role_name in [
+        " ".join(("Computer", "Agent")),
+        " ".join(("File", "Agent")),
+        " ".join(("Browser", "Agent")),
+        " ".join(("Search", "Agent")),
+    ]:
+        assert legacy_role_name not in response
     assert "设置大脑" in response
     assert "设置大模型" not in response
     assert "marvis-persona-model-panel" in response
@@ -694,15 +696,25 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "总消耗Token" in response
     assert "今日节省Token" not in response
     assert "marvis-token-beans" in response
+    legacy_avatar_slugs = [
+        "-".join(("app", "agent")),
+        "-".join(("computer", "agent")),
+        "-".join(("search", "agent")),
+        "-".join(("file", "agent")),
+        "-".join(("browser", "agent")),
+    ]
+    for legacy_avatar_slug in legacy_avatar_slugs:
+        assert legacy_avatar_slug not in response
     avatar_assets = [
         "persona-avatar-marvis.png",
-        "persona-avatar-app-agent.png",
-        "persona-avatar-computer-agent.png",
-        "persona-avatar-search-agent.png",
-        "persona-avatar-file-agent.png",
-        "persona-avatar-browser-agent.png",
+        "persona-avatar-architect.png",
+        "persona-avatar-implementer.png",
+        "persona-avatar-tester.png",
+        "persona-avatar-auditor.png",
     ]
     css = Path("wlcodex/live_stream/static/relay_marvis.css").read_text()
+    for legacy_avatar_slug in legacy_avatar_slugs:
+        assert legacy_avatar_slug not in css
     for asset in avatar_assets:
         assert Path("wlcodex/live_stream/static/marvis", asset).exists()
         assert f"/static/marvis/{asset}" in css
@@ -811,7 +823,7 @@ async def test_marvis_relay_office_occupancy_follows_configured_roles(
             {"role": "architect", "display_name": "架构工程师"},
             {"role": "implementer", "display_name": "开发工程师"},
             {"role": "tester", "display_name": "测试工程师"},
-            {"role": "auditor", "display_name": "审计工程师"},
+            {"role": "auditor", "display_name": "审核工程师"},
         ],
         "providers": [],
         "assignments": {"architect": "codex", "implementer": "claude"},
@@ -858,7 +870,7 @@ async def test_relay_config_has_dedicated_page(tmp_path: Path) -> None:
     assert "架构工程师" in response
     assert "开发工程师" in response
     assert "测试工程师" in response
-    assert "审计工程师" in response
+    assert "审核工程师" in response
     assert "Codex" in response
     assert "Claude" in response
     assert "Antigravity" in response
@@ -911,7 +923,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
         agent_run_id=101,
         event_type=EventType.USER_MESSAGE_RECEIVED,
         payload={
-            "text": "让审计工程师确认一下",
+            "text": "让审核工程师确认一下",
             "native_thread_id": "native-director-1",
             "native_turn_id": "turn-director-1",
             "itemId": "director-user-1",
@@ -1043,7 +1055,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "<iframe" not in response
     conversation_html = _relay_view_panel_html(response, "conversation")
     work_log_html = _relay_work_log_html(response)
-    assert "让审计工程师确认一下" in conversation_html
+    assert "让审核工程师确认一下" in conversation_html
     assert "我会先确认风险。" not in conversation_html
     assert "架构侧继续补齐影响面。" in conversation_html
     assert "结论：本任务判定无需派发，由总工程师直接完成。" in conversation_html
@@ -1065,7 +1077,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "open native session" not in response
     assert ">interrupt<" not in response
     assert ">send<" not in response
-    for display_name in ["Marvis", "Computer Agent"]:
+    for display_name in ["Marvis", "架构工程师"]:
         assert display_name in response
     assert 'data-marvis-work-log-role="director"' in work_log_html
     assert 'data-marvis-work-log-role="architect"' in work_log_html
@@ -1338,6 +1350,11 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
     tmp_path: Path,
 ) -> None:
     server, service, runtime_store = _server(tmp_path)
+    legacy_implementer_name = " ".join(("App", "Agent"))
+    legacy_search_name = " ".join(("Search", "Agent"))
+    legacy_browser_name = " ".join(("Browser", "Agent"))
+    legacy_implementer_slug = "-".join(("app", "agent"))
+    legacy_search_slug = "-".join(("search", "agent"))
     task = service.create_task(
         title="Marvis interaction task",
         prompt="手机办公室看不到其他小马",
@@ -1374,15 +1391,15 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
             "reason": "needs app window inspection",
             "role": "director",
             "artifact_type": "routing_decision",
-            "summary": "问题收到了，先派 App Agent 查看窗口。",
+            "summary": f"问题收到了，先派 {legacy_implementer_name} 查看窗口。",
             "route": "core_relay",
             "required_roles": ["director", "implementer"],
             "handoff_to": "implementer",
             "evidence_refs": [],
             "open_questions": [],
-            "next_action": "交给 App Agent 查看窗口状态。",
+            "next_action": f"交给 {legacy_implementer_name} 查看窗口状态。",
         },
-        summary="问题收到了，先派 App Agent 查看窗口。",
+        summary=f"问题收到了，先派 {legacy_implementer_name} 查看窗口。",
     )
     service._store.save_artifact(
         task.id,
@@ -1412,13 +1429,13 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
             "reason": "window scope checked",
             "role": "director",
             "artifact_type": "final_summary",
-            "summary": "App Agent 那边反馈 Marvis 本身不在可操作应用范围内，后面要从办公室入口或应用权限方向继续排查。",
+            "summary": f"{legacy_implementer_name} 那边反馈 Marvis 本身不在可操作应用范围内，后面要从办公室入口或应用权限方向继续排查。",
             "handoff_to": "",
             "evidence_refs": [],
             "open_questions": [],
             "next_action": "等待用户补充办公室页面信息。",
         },
-        summary="App Agent 那边反馈 Marvis 本身不在可操作应用范围内，后面要从办公室入口或应用权限方向继续排查。",
+        summary=f"{legacy_implementer_name} 那边反馈 Marvis 本身不在可操作应用范围内，后面要从办公室入口或应用权限方向继续排查。",
     )
     _append_runtime_event(
         runtime_store,
@@ -1450,6 +1467,7 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
             "tool_name": "list windows",
             "native_turn_id": "turn-marvis-2",
             "itemId": "marvis-tool-1",
+            "output": f"{legacy_implementer_name} used {legacy_implementer_slug}; {legacy_search_slug} idle; {legacy_browser_name} checked.",
         },
         occurred_at="2026-06-14T12:10:03+00:00",
     )
@@ -1487,11 +1505,21 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
     )[-1]
     assert "手机办公室看不到其他小马" in conversation_html
     assert "Marvis" in conversation_html
-    assert "dispatch task 已完成" in conversation_html
-    assert "Marvis拍了拍 App Agent" in conversation_html
-    assert "App Agent" in conversation_html
+    assert "任务分配 已完成" in conversation_html
+    assert "Marvis拍了拍 开发工程师" in conversation_html
+    assert "开发工程师" in conversation_html
     assert "搞定，有请下一位。" in conversation_html
-    assert "App Agent 那边反馈 Marvis 本身不在可操作应用范围内" in conversation_html
+    assert "开发工程师 那边反馈 Marvis 本身不在可操作应用范围内" in conversation_html
+    for forbidden_role_name in [
+        legacy_implementer_name,
+        " ".join(("Computer", "Agent")),
+        legacy_search_name,
+        " ".join(("File", "Agent")),
+        legacy_browser_name,
+        legacy_implementer_slug,
+        legacy_search_slug,
+    ]:
+        assert forbidden_role_name not in response
     assert "list windows" not in conversation_html
     assert "tool.call" not in conversation_html
     for forbidden in [
@@ -1620,8 +1648,8 @@ async def test_relay_task_detail_projects_saved_handoff_when_native_rows_are_ear
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
-    assert "Marvis拍了拍 App Agent，说开干吧" in conversation_html
-    assert conversation_html.index("Marvis拍了拍 App Agent") < conversation_html.index(
+    assert "Marvis拍了拍 开发工程师，说开干吧" in conversation_html
+    assert conversation_html.index("Marvis拍了拍 开发工程师") < conversation_html.index(
         "修复完成，交给审核。"
     )
 
@@ -1631,6 +1659,7 @@ async def test_relay_work_log_projects_native_events_in_call_order(
     tmp_path: Path,
 ) -> None:
     server, service, runtime_store = _server(tmp_path)
+    legacy_search_name = " ".join(("Search", "Agent"))
     task = service.create_task(
         title="Marvis full native log task",
         prompt="整理 Steam 游戏并生成网页",
@@ -1669,7 +1698,7 @@ async def test_relay_work_log_projects_native_events_in_call_order(
             "handoff_to": "tester",
             "required_roles": ["director", "tester", "implementer"],
             "open_questions": [],
-            "next_action": "派 Search Agent 检索。",
+            "next_action": f"派 {legacy_search_name} 检索。",
         },
         summary="先获取 Mac 配置，再全盘检索 Steam 热门 macOS 游戏。",
     )
@@ -1701,7 +1730,7 @@ async def test_relay_work_log_projects_native_events_in_call_order(
         agent_run_id=801,
         event_type=EventType.MODEL_MESSAGE_COMPLETED,
         payload={
-            "text": "配置到手：Apple M4 / 32GB / 10核GPU / macOS 26.5。现在派 Search Agent 去做 Steam 全量检索。",
+            "text": f"配置到手：Apple M4 / 32GB / 10核GPU / macOS 26.5。现在派 {legacy_search_name} 去做 Steam 全量检索。",
             "native_turn_id": "turn-director-config",
             "itemId": "assistant-config",
         },
@@ -2602,6 +2631,7 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     assert "已接收 ${value.length} 字" not in response
     assert "正在处理任务，完成后展示结果" in response
     assert "function clearAllRolePreviews" in response
+    assert "function appendMarvisConversationHandoff" in response
     assert "const seenPreviewEventKeys = new Set" in response
     assert "function previewEventKey" in response
     assert "renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);" in response
@@ -2613,6 +2643,9 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     envelope_handler = response.split('source.addEventListener("role.envelope"', 1)[1]
     envelope_handler = envelope_handler.split('source.addEventListener("handoff.created"', 1)[0]
     assert "renderRoleEnvelope" in envelope_handler
+    handoff_handler = response.split('source.addEventListener("handoff.created"', 1)[1]
+    handoff_handler = handoff_handler.split('source.addEventListener("role.status"', 1)[0]
+    assert "appendMarvisConversationHandoff(toRole, handoffKey);" in handoff_handler
     assert "clearRolePreview(role);" in response
 
 

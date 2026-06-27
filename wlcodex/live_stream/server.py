@@ -4002,10 +4002,24 @@ def _marvis_relay_avatar_html(role: str, *, label: str = "") -> str:
 
 _MARVIS_RELAY_ROLE_PERSONAS: dict[str, tuple[str, str]] = {
     "director": ("marvis", "Marvis"),
-    "implementer": ("app-agent", "App Agent"),
-    "architect": ("computer-agent", "Computer Agent"),
-    "tester": ("search-agent", "Search Agent"),
-    "auditor": ("file-agent", "File Agent"),
+    "implementer": ("implementer", "开发工程师"),
+    "architect": ("architect", "架构工程师"),
+    "tester": ("tester", "测试工程师"),
+    "auditor": ("auditor", "审核工程师"),
+}
+
+_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "implementer": (("App", "Agent"),),
+    "architect": (("Computer", "Agent"),),
+    "tester": (("Search", "Agent"),),
+    "auditor": (("File", "Agent"), ("Browser", "Agent")),
+}
+
+_MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "implementer": (("app", "agent"),),
+    "architect": (("computer", "agent"),),
+    "tester": (("search", "agent"),),
+    "auditor": (("file", "agent"), ("browser", "agent")),
 }
 
 
@@ -4014,6 +4028,37 @@ def _marvis_relay_public_role(role: str) -> tuple[str, str]:
         str(role or "").strip(),
         ("marvis", "Marvis"),
     )
+
+
+def _marvis_relay_handoff_role_label(role: str) -> str:
+    return _marvis_relay_public_role(role)[1]
+
+
+def _marvis_relay_legacy_persona_label(role: str) -> str:
+    labels = _MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS.get(str(role or "").strip(), ())
+    return " ".join(labels[0]) if labels else ""
+
+
+def _relay_replace_legacy_role_display_names(text: str) -> str:
+    value = str(text or "")
+    for role in RELAY_ROLE_IDS:
+        current_label = _marvis_relay_public_role(role)[1]
+        for label_parts in _MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS.get(role, ()):
+            legacy_label = " ".join(label_parts)
+            if legacy_label and legacy_label != current_label:
+                value = value.replace(legacy_label, current_label)
+    return value
+
+
+def _relay_replace_legacy_role_identifiers(text: str) -> str:
+    value = _relay_replace_legacy_role_display_names(text)
+    for role in RELAY_ROLE_IDS:
+        current_slug = _marvis_relay_public_role(role)[0]
+        for slug_parts in _MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS.get(role, ()):
+            legacy_slug = "-".join(slug_parts)
+            if legacy_slug and legacy_slug != current_slug:
+                value = value.replace(legacy_slug, current_slug)
+    return value
 
 
 def _marvis_relay_role_status_label(status: str) -> str:
@@ -4034,10 +4079,10 @@ def _marvis_relay_role_status_label(status: str) -> str:
 def _marvis_relay_action_label(role: str, payload: dict[str, Any] | None = None) -> str:
     artifact_type = str((payload or {}).get("artifact_type") or "").strip()
     if role == "director":
-        return "dispatch task"
+        return "任务分配"
     if artifact_type:
-        return artifact_type.replace("_", " ")
-    return "task"
+        return _marvis_relay_role_status_label(artifact_type) if artifact_type in {"passed", "failed", "blocked", "completed"} else artifact_type.replace("_", " ")
+    return "任务"
 
 
 def _marvis_relay_topbar(
@@ -4234,7 +4279,7 @@ _MARVIS_OFFICE_PERSONAS: dict[str, dict[str, Any]] = {
         "skills": ("跑测试", "回归验证", "边界用例", "复现问题"),
     },
     "auditor": {
-        "title": "审计工程师",
+        "title": "审核工程师",
         "intro": "负责最后审一遍风险、遗漏和上线边界，确认改动没有影响 Codex、Claude、Antigravity 等其他页面。",
         "skills": ("代码审查", "风险检查", "上线把关", "回滚判断"),
     },
@@ -4242,10 +4287,10 @@ _MARVIS_OFFICE_PERSONAS: dict[str, dict[str, Any]] = {
 
 _MARVIS_OFFICE_AVATARS: dict[str, str] = {
     "director": "marvis",
-    "architect": "computer-agent",
-    "implementer": "search-agent",
-    "tester": "app-agent",
-    "auditor": "browser-agent",
+    "architect": "architect",
+    "implementer": "implementer",
+    "tester": "tester",
+    "auditor": "auditor",
 }
 
 
@@ -5023,21 +5068,24 @@ def _marvis_relay_work_log_entry_html(entry: WorkLogEntry) -> str:
     if entry.failed:
         classes.append("is-failed")
     key_attr = f' data-marvis-work-log-entry-key="{escape(entry.key)}"' if entry.key else ""
+    chip = _relay_replace_legacy_role_identifiers(entry.chip)
+    text = _relay_replace_legacy_role_identifiers(entry.text)
+    output = _relay_replace_legacy_role_identifiers(entry.output)
     chip_html = (
-        f'<span class="marvis-work-log-tool-chip">{escape(entry.chip)}</span>' if entry.chip else ""
+        f'<span class="marvis-work-log-tool-chip">{escape(chip)}</span>' if chip else ""
     )
     output_html = ""
-    if entry.output:
+    if output:
         output_html = (
             '<details class="marvis-work-log-output" data-marvis-work-log-output>'
             "<summary>查看输出</summary>"
-            f"<pre>{escape(entry.output)}</pre>"
+            f"<pre>{escape(output)}</pre>"
             "</details>"
         )
     return f"""
       <div class="{' '.join(classes)}" data-marvis-work-log-entry="{escape(entry.kind)}"{key_attr}>
         {chip_html}
-        <p>{escape(entry.text)}</p>
+        <p>{escape(text)}</p>
         {output_html}
       </div>
     """
@@ -5425,7 +5473,7 @@ def _relay_routing_route_label(route: str) -> str:
 
 
 def _relay_humanize_display_text(text: str, *, english_fallback: str = "") -> str:
-    value = str(text or "")
+    value = _relay_replace_legacy_role_identifiers(text)
     replacements = (
         ("路由为director_only", "由总工程师直接处理"),
         ("director_only", "总工程师直接处理"),
@@ -5446,15 +5494,15 @@ def _relay_humanize_display_text(text: str, *, english_fallback: str = "") -> st
 
 
 def _relay_text_needs_chinese_fallback(text: str) -> bool:
-    value = str(text or "").strip()
+    value = _relay_replace_legacy_role_identifiers(text).strip()
     if not value:
         return False
     normalized = value
     for public_name in (
-        "App Agent",
-        "Computer Agent",
-        "Search Agent",
-        "File Agent",
+        "开发工程师",
+        "架构工程师",
+        "测试工程师",
+        "审核工程师",
         "Marvis",
     ):
         normalized = normalized.replace(public_name, "")
@@ -6016,6 +6064,9 @@ def _relay_task_detail_page(
     const ROLE_LABELS = {json.dumps({role: _relay_role_label(role) for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
     const MARVIS_WORK_LOG_ROLE_LABELS = {json.dumps({role: _marvis_relay_public_role(role)[1] for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
     const MARVIS_WORK_LOG_ROLE_PERSONAS = {json.dumps({role: _marvis_relay_public_role(role)[0] for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
+    const MARVIS_HANDOFF_ROLE_LABELS = {json.dumps({role: _marvis_relay_handoff_role_label(role) for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
+    const MARVIS_LEGACY_ROLE_LABEL_PARTS = {json.dumps(_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS, ensure_ascii=False)};
+    const MARVIS_LEGACY_ROLE_SLUG_PARTS = {json.dumps(_MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS, ensure_ascii=False)};
     const STATUS_LABELS = {json.dumps({
         "idle": "未调度",
         "queued": "排队中",
@@ -6080,6 +6131,31 @@ def _relay_task_detail_page(
     }});
     function labelForRole(role) {{
       return ROLE_LABELS[role] || role || "角色";
+    }}
+    function marvisHandoffRoleLabel(role) {{
+      return MARVIS_HANDOFF_ROLE_LABELS[role] || labelForRole(role);
+    }}
+    function marvisLegacyPersonaLabels(role) {{
+      return (MARVIS_LEGACY_ROLE_LABEL_PARTS[role] || []).map((parts) => parts.join(" "));
+    }}
+    function relayReplaceLegacyRoleDisplayNames(text) {{
+      let value = String(text || "");
+      Object.keys(MARVIS_WORK_LOG_ROLE_PERSONAS).forEach((role) => {{
+        const currentLabel = MARVIS_WORK_LOG_ROLE_LABELS[role] || "";
+        marvisLegacyPersonaLabels(role).forEach((legacyLabel) => {{
+          if (!legacyLabel || !currentLabel || legacyLabel === currentLabel) return;
+          value = value.split(legacyLabel).join(currentLabel);
+        }});
+      }});
+      Object.keys(MARVIS_LEGACY_ROLE_SLUG_PARTS).forEach((role) => {{
+        const currentSlug = MARVIS_WORK_LOG_ROLE_PERSONAS[role] || "";
+        (MARVIS_LEGACY_ROLE_SLUG_PARTS[role] || []).forEach((parts) => {{
+          const legacySlug = parts.join("-");
+          if (!legacySlug || !currentSlug || legacySlug === currentSlug) return;
+          value = value.split(legacySlug).join(currentSlug);
+        }});
+      }});
+      return value;
     }}
     function labelForStatus(status) {{
       return STATUS_LABELS[status] || status || "未知";
@@ -6212,13 +6288,13 @@ def _relay_task_detail_page(
       return labels[route] || route || "";
     }}
     function relayTextNeedsChineseFallback(text) {{
-      const value = String(text || "").trim();
+      const value = relayReplaceLegacyRoleDisplayNames(text).trim();
       if (!/[A-Za-z]{{3,}}/.test(value)) return false;
       if (!/[一-龥]/.test(value)) return true;
       return /[A-Za-z]{{3,}}(?:[ -]+[A-Za-z]{{2,}}){{1,}}/.test(value);
     }}
     function relayHumanizeDisplayText(text, englishFallback = "") {{
-      let value = String(text || "");
+      let value = relayReplaceLegacyRoleDisplayNames(text);
       const replacements = [
         [/路由为director_only/g, "由总工程师直接处理"],
         [/director_only/g, "总工程师直接处理"],
@@ -6527,17 +6603,19 @@ def _relay_task_detail_page(
       }}
       node.classList.toggle("is-failed", Boolean(entry.failed));
       if (entry.chip) {{
+        const chipText = relayReplaceLegacyRoleDisplayNames(entry.chip);
         let chip = node.querySelector(".marvis-work-log-tool-chip");
         if (!chip) {{
           chip = document.createElement("span");
           chip.className = "marvis-work-log-tool-chip";
           node.insertBefore(chip, node.firstChild);
         }}
-        chip.textContent = entry.chip;
+        chip.textContent = chipText;
       }}
       const paragraph = node.querySelector("p") || node.appendChild(document.createElement("p"));
       if (entry.text) {{
-        paragraph.textContent = entry.replaceText ? entry.text : `${{paragraph.textContent || ""}}${{entry.text}}`;
+        const entryText = relayReplaceLegacyRoleDisplayNames(entry.text);
+        paragraph.textContent = entry.replaceText ? entryText : `${{paragraph.textContent || ""}}${{entryText}}`;
         const cleaned = marvisWorkLogCleanProtocolSummary(paragraph.textContent);
         if (cleaned && cleaned !== paragraph.textContent) {{
           paragraph.textContent = cleaned;
@@ -6559,8 +6637,9 @@ def _relay_task_detail_page(
           node.appendChild(details);
         }}
         const pre = details.querySelector("pre");
-        if (pre && !pre.textContent.includes(entry.output)) {{
-          pre.textContent = pre.textContent ? `${{pre.textContent}}\\n${{entry.output}}` : entry.output;
+        const entryOutput = relayReplaceLegacyRoleDisplayNames(entry.output);
+        if (pre && !pre.textContent.includes(entryOutput)) {{
+          pre.textContent = pre.textContent ? `${{pre.textContent}}\\n${{entryOutput}}` : entryOutput;
         }}
       }}
       marvisWorkLogBody?.scrollTo({{ top: marvisWorkLogBody.scrollHeight, behavior: "smooth" }});
@@ -6727,7 +6806,7 @@ def _relay_task_detail_page(
       title.textContent = "Marvis";
       const action = document.createElement("span");
       action.className = "marvis-relay-agent-action";
-      action.textContent = "| dispatch task 进行中";
+      action.textContent = "| 任务分配 进行中";
       head.append(title, document.createTextNode(" "), action);
       const bubble = document.createElement("div");
       bubble.className = "marvis-relay-agent-bubble";
@@ -6763,7 +6842,7 @@ def _relay_task_detail_page(
         title.textContent = labelForRole(role);
         const action = document.createElement("span");
         action.className = "marvis-relay-agent-action";
-        action.textContent = `| dispatch task ${{labelForStatus(status) || "已完成"}}`;
+        action.textContent = `| 任务分配 ${{labelForStatus(status) || "已完成"}}`;
         head.append(title, document.createTextNode(" "), action);
         const bubble = document.createElement("div");
         bubble.className = "marvis-relay-agent-bubble";
@@ -6774,6 +6853,25 @@ def _relay_task_detail_page(
       }}
       setNativeBodyText(node, text);
       if (key) nativeTranscriptNodes.set(key, node);
+      return node;
+    }}
+    function appendMarvisConversationHandoff(toRole, key = "") {{
+      if (!conversationTimeline || !toRole) return null;
+      const handoffKey = key || `handoff:${{toRole}}`;
+      let node = conversationTimeline.querySelector(`[data-native-key='${{CSS.escape(handoffKey)}}']`);
+      if (node) return node;
+      const empty = conversationTimeline.querySelector("[data-native-empty]");
+      if (empty) empty.remove();
+      node = document.createElement("div");
+      node.className = "marvis-relay-handoff";
+      node.dataset.marvisHandoff = "";
+      node.dataset.nativeKind = "handoff";
+      node.dataset.nativeRole = toRole;
+      node.dataset.nativeKey = handoffKey;
+      node.textContent = `Marvis拍了拍 ${{marvisHandoffRoleLabel(toRole)}}，说开干吧`;
+      conversationTimeline.appendChild(node);
+      nativeTranscriptNodes.set(handoffKey, node);
+      scrollNativeConversationToEnd();
       return node;
     }}
     function renderRelayNativeEvent(role, nativeEvent, runtimeEventId = "") {{
@@ -7102,6 +7200,8 @@ def _relay_task_detail_page(
       const payload = parseRelayEvent(event);
       const toRole = payload.to_role || payload.handoff_to;
       if (toRole) setRoleStatus(toRole, "queued");
+      const handoffKey = `handoff:${{payload.from_role || ""}}:${{toRole || ""}}:${{payload.artifact_id || payload.summary || event.lastEventId || ""}}`;
+      appendMarvisConversationHandoff(toRole, handoffKey);
       appendActivity(`${{labelForRole(payload.from_role)}} 已交接给 ${{labelForRole(toRole)}}：${{payload.summary || "等待下一角色处理"}}`);
     }});
     source.addEventListener("role.status", (event) => {{
@@ -7587,7 +7687,7 @@ def _marvis_relay_conversation_html(
 
 def _marvis_relay_handoff_html(row: dict[str, str]) -> str:
     to_role = str(row.get("to_role") or row.get("role") or "")
-    _persona, name = _marvis_relay_public_role(to_role)
+    name = _marvis_relay_handoff_role_label(to_role)
     return (
         '<div class="marvis-relay-handoff" data-marvis-handoff>'
         f"Marvis拍了拍 {escape(name)}，说开干吧"

@@ -53,7 +53,7 @@ body[data-marvis-relay-view] .marvis-relay-topbar {
   width: min(100%, 430px);
   box-sizing: border-box;
   transform: translateX(-50%);
-  padding: 28px 22px 12px;
+  padding: calc(28px + env(safe-area-inset-top, 0px)) 22px 12px;
   background: #f3f3f3;
   border: 0;
 }
@@ -594,30 +594,20 @@ body[data-marvis-relay-view] .marvis-relay-avatar-system {
   background-image: url("/static/marvis/persona-avatar-marvis.png");
 }
 
-body[data-marvis-relay-view] .marvis-relay-avatar-app-agent,
-body[data-marvis-relay-view] .marvis-relay-avatar-developer,
 body[data-marvis-relay-view] .marvis-relay-avatar-implementer {
-  background-image: url("/static/marvis/persona-avatar-app-agent.png");
+  background-image: url("/static/marvis/persona-avatar-implementer.png");
 }
 
-body[data-marvis-relay-view] .marvis-relay-avatar-computer-agent,
 body[data-marvis-relay-view] .marvis-relay-avatar-architect {
-  background-image: url("/static/marvis/persona-avatar-computer-agent.png");
+  background-image: url("/static/marvis/persona-avatar-architect.png");
 }
 
-body[data-marvis-relay-view] .marvis-relay-avatar-search-agent,
 body[data-marvis-relay-view] .marvis-relay-avatar-tester {
-  background-image: url("/static/marvis/persona-avatar-search-agent.png");
+  background-image: url("/static/marvis/persona-avatar-tester.png");
 }
 
-body[data-marvis-relay-view] .marvis-relay-avatar-file-agent,
 body[data-marvis-relay-view] .marvis-relay-avatar-auditor {
-  background-image: url("/static/marvis/persona-avatar-file-agent.png");
-}
-
-body[data-marvis-relay-view] .marvis-relay-avatar-browser-agent,
-body[data-marvis-relay-view] .marvis-relay-avatar-browser {
-  background-image: url("/static/marvis/persona-avatar-browser-agent.png");
+  background-image: url("/static/marvis/persona-avatar-auditor.png");
 }
 
 body[data-marvis-relay-view] .marvis-relay-composer {
@@ -834,7 +824,7 @@ body[data-marvis-relay-view="chat"] .marvis-relay-chat-home {
   justify-items: start;
   gap: 34px;
   min-height: calc(100dvh - 230px);
-  padding: 44px 26px 230px;
+  padding: calc(140px + env(safe-area-inset-top, 0px)) 26px 230px;
   box-sizing: border-box;
 }
 

@@ -497,7 +497,7 @@ def test_malformed_director_routing_recovers_explicit_full_relay(tmp_path) -> No
         title="Relay",
         prompt=(
             "请按完整五角色接力流程审查，不要修改任何文件，不要提交，不要部署。"
-            "总工程师、架构工程师、开发工程师、测试工程师、审计工程师都要参与。"
+            "总工程师、架构工程师、开发工程师、测试工程师、审核工程师都要参与。"
         ),
         workspace="/repo",
         provider="claude",
@@ -871,7 +871,7 @@ def test_role_cannot_handoff_to_role_outside_routing_decision(tmp_path) -> None:
     assert detail.task.status == "blocked"
     assert jobs["implementer"].status == "blocked"
     assert jobs["implementer"].error_message == (
-        "handoff_to 审计工程师 before required role 测试工程师 completed"
+        "handoff_to 审核工程师 before required role 测试工程师 completed"
     )
     assert jobs["auditor"].status == "idle"
 
