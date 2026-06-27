@@ -12,7 +12,7 @@ from wlcodex.native_agents.models import (
 )
 from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.relay.models import HandoffPacket
-from wlcodex.relay.service import RelayService
+from wlcodex.relay.service import RelayService, _plain_followup_visible_text
 from wlcodex.relay.store import RelayStore
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import (
@@ -1348,6 +1348,16 @@ def test_active_runtime_scan_ignores_old_turn_completion_for_pending_followup(
     assert followup_responses[-1]["text"] == "最终正常"
     assert followup_responses[-1]["runtime_event_id"] == completed.id
     assert followup_responses[-1]["native_turn_id"] == "turn-current"
+
+
+def test_plain_followup_visible_text_extracts_fused_protocol_summary() -> None:
+    text = (
+        '{"artifact_type":"final_summary","evidence_refs":[],"handoff_to":"",'
+        '"next_actionopen_questionsreason接续验证。'
+        'roledirectorstatuspassedsummary已修复"}'
+    )
+
+    assert _plain_followup_visible_text(text) == "已修复"
 
 
 def test_scan_stale_native_role_does_not_close_pending_followup_from_old_session_read(

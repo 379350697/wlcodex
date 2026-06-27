@@ -7907,7 +7907,11 @@ def _relay_followup_response_display_text(role: str, text: str) -> str:
     except json.JSONDecodeError:
         parsed = None
     if isinstance(parsed, dict) and _relay_dict_looks_like_role_envelope(parsed):
-        return _relay_humanize_role_envelope(parsed)
+        display_text = _relay_humanize_role_envelope(parsed)
+        extracted = _relay_extract_pseudo_envelope_human_text(value)
+        if display_text == "角色已返回结构化结果。" and extracted:
+            return extracted
+        return display_text
 
     humanized = _relay_humanize_display_text(value)
     extracted = _relay_extract_pseudo_envelope_human_text(humanized)
@@ -7931,6 +7935,10 @@ def _relay_extract_pseudo_envelope_human_text(text: str) -> str:
         )
         if match:
             candidates.append(match.group(1))
+            continue
+        marker_index = normalized.rfind(field)
+        if marker_index >= 0:
+            candidates.append(normalized[marker_index + len(field) :])
 
     for candidate in candidates:
         cut_at = len(candidate)
@@ -7953,7 +7961,7 @@ def _relay_extract_pseudo_envelope_human_text(text: str) -> str:
         cleaned = _relay_humanize_display_text(cleaned)
         if _relay_text_needs_chinese_fallback(cleaned):
             continue
-        if len(cleaned) >= 4:
+        if len(cleaned) >= 2:
             return cleaned
     return ""
 

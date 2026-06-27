@@ -321,6 +321,56 @@ async def test_relay_task_detail_humanizes_pseudo_envelope_followup_response(
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_humanizes_fused_json_followup_response(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    assert service is not None
+    task = service.create_task(
+        prompt="确认 task28 是否能继续对话",
+        workspace="/tmp/project-a",
+        title="Follow-up display",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {"text": "部署后接续验证：请只回复“接续已修复”。"},
+        summary="部署后接续验证：请只回复“接续已修复”。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "followup_response",
+        {
+            "text": (
+                '{"artifact_type":"final_summary","evidence_refs":[],'
+                '"handoff_to":"","next_actionopen_questionsreason接续验证。'
+                'roledirectorstatuspassedsummary已修复"}'
+            ),
+            "target_role": "user",
+        },
+        summary="已修复",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "部署后接续验证" in conversation_html
+    assert "已修复" in conversation_html
+    assert "next_actionopen_questionsreason" not in conversation_html
+
+
+@pytest.mark.asyncio
 async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path) -> None:
     response, _service = await _request(
         tmp_path,

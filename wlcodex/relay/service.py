@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import json
+import re
 from typing import Any
 
 from wlcodex.live_stream.models import stream_event_from_runtime
@@ -1377,7 +1378,7 @@ class RelayService:
             return None
         if runtime_event_id > 0:
             self._handled_runtime_completion_ids.add(runtime_event_id)
-        clean_text = text.strip()
+        clean_text = _plain_followup_visible_text(text.strip())
         response_payload = {
             "text": clean_text,
             "target_role": "user",
@@ -2364,6 +2365,64 @@ def _runtime_event_matches_turn(runtime_event: Any, turn_id: str) -> bool:
     if not expected_turn_id:
         return True
     return _runtime_event_turn_id(runtime_event) == expected_turn_id
+
+
+def _plain_followup_visible_text(text: str) -> str:
+    value = text.strip()
+    if not value:
+        return ""
+    parsed: Any = None
+    if value.startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = None
+    if isinstance(parsed, dict):
+        for field in ("summary", "reason", "message", "text", "output"):
+            field_value = str(parsed.get(field) or "").strip()
+            if field_value:
+                return _trim_protocol_field_value(field_value)
+        fused = " ".join(str(key) for key in parsed.keys())
+        extracted = _extract_protocol_field_value(fused, "summary")
+        if extracted:
+            return extracted
+        extracted = _extract_protocol_field_value(fused, "reason")
+        if extracted:
+            return extracted
+    for field in ("summary", "reason"):
+        extracted = _extract_protocol_field_value(value, field)
+        if extracted:
+            return extracted
+    return value
+
+
+def _extract_protocol_field_value(text: str, field: str) -> str:
+    match = re.search(rf"(?:^|[{{,\s\"]){field}(?:[\"\s:=：]*)(.+)", text)
+    if match:
+        return _trim_protocol_field_value(match.group(1))
+    marker_index = text.rfind(field)
+    if marker_index < 0:
+        return ""
+    return _trim_protocol_field_value(text[marker_index + len(field) :])
+
+
+def _trim_protocol_field_value(text: str) -> str:
+    cut_at = len(text)
+    for marker in (
+        "role",
+        "status",
+        "handoff_to",
+        "next_action",
+        "open_questions",
+        "evidence_refs",
+        "artifact_type",
+        "summary",
+        "reason",
+    ):
+        marker_index = text.find(marker)
+        if marker_index > 0:
+            cut_at = min(cut_at, marker_index)
+    return text[:cut_at].strip(" ,，。\"{}")
 
 
 def _latest_artifact_id(
