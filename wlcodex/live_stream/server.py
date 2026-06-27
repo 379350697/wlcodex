@@ -5485,7 +5485,13 @@ def _relay_routing_route_label(route: str) -> str:
 
 
 def _relay_humanize_display_text(text: str, *, english_fallback: str = "") -> str:
-    value = _relay_replace_legacy_role_identifiers(text)
+    value = str(text or "")
+    value = re.sub(
+        r"(?:Marvis/)?(?:App|File|Search|Computer|Browser)(?:/(?:App|File|Search|Computer|Browser))+ Agent",
+        "英文角色名",
+        value,
+    )
+    value = _relay_replace_legacy_role_identifiers(value)
     replacements = (
         ("路由为director_only", "由总工程师直接处理"),
         ("director_only", "总工程师直接处理"),
@@ -5497,6 +5503,9 @@ def _relay_humanize_display_text(text: str, *, english_fallback: str = "") -> st
         ("complete directly after routing", "由总工程师直接处理"),
         ("complete directly", "直接处理"),
         ("dispatch next role", "交给下一位角色处理"),
+        ("dispatch task", "任务分配"),
+        ("safe-area-inset-top", "顶部安全区"),
+        ("safe-area", "安全区"),
     )
     for source, target in replacements:
         value = value.replace(source, target)

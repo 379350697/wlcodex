@@ -1837,6 +1837,72 @@ async def test_relay_task_detail_replaces_generic_final_summary_with_role_closur
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_keeps_mixed_language_final_summary_as_human_closure(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Mixed final closure task",
+        prompt="头像被挡住，英文角色名也要改掉。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-mixed-final",
+        agent_run_id=951,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "status": "passed",
+            "reason": "completed",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": (
+                "已完成两个问题的处理：1. Marvis 的头像和问候语整体下移，并兼容顶部 safe-area，"
+                "避免被顶部遮挡；2. 执行过程中显示的 Marvis/File/Search/Computer Agent 和 "
+                "dispatch task 已替换为更自然的中文角色与动作展示。审核已通过。"
+            ),
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "",
+        },
+        summary="已完成两个问题的处理。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "头像和问候语整体下移" in conversation_html
+    assert "兼容顶部 安全区" in conversation_html
+    assert "英文角色名" in conversation_html
+    assert "任务分配" in conversation_html
+    assert "该角色已返回结构化结果" not in conversation_html
+    assert "safe-area" not in conversation_html
+    assert "dispatch task" not in conversation_html
+    assert "File/Search/Computer Agent" not in conversation_html
+
+
+@pytest.mark.asyncio
 async def test_relay_work_log_projects_native_events_in_call_order(
     tmp_path: Path,
 ) -> None:
