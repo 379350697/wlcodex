@@ -1023,7 +1023,8 @@ body[data-marvis-relay-view="office"] .marvis-persona-modal {
   min-height: 350px;
   transform: translate(-50%, -48%);
   border-radius: 18px;
-  overflow: hidden;
+  max-height: min(86vh, 720px);
+  overflow: auto;
   background: #fff;
   box-shadow: none;
   padding: 28px 26px 26px;
@@ -1140,6 +1141,67 @@ body[data-marvis-relay-view="office"] .marvis-persona-skills span {
   color: #7a4a3f;
   font-size: 15px;
   font-weight: 600;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-actions {
+  display: grid;
+  gap: 9px;
+  margin-top: 22px;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-model-button {
+  width: 100%;
+  min-height: 52px;
+  border: 0;
+  border-radius: 999px;
+  background: #050505;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-model-status {
+  color: #999;
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: center;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-model-panel {
+  display: grid;
+  gap: 11px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(17, 17, 17, .07);
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-model-panel[hidden] {
+  display: none !important;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-model-options {
+  display: grid;
+  gap: 10px;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-model-option {
+  min-height: 44px;
+  border: 0;
+  border-radius: 12px;
+  background: #f5f1ef;
+  color: #7a4a3f;
+  font-size: 15px;
+  font-weight: 700;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+body[data-marvis-relay-view="office"] .marvis-persona-model-option.selected {
+  background: #050505;
+  color: #fff;
 }
 
 body.marvis-office-modal-open {

@@ -226,7 +226,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-total-tokens">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-model-config">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-composer"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
@@ -234,13 +234,9 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "请输入任务" in response
     assert "任务历史" in response
     assert response.count('data-open-new-task>新接力任务</button>') == 1
-    assert "配置" in response
+    assert "配置" not in response
     assert '<a class="relay-secondary" href="/native/workflows/relay/config' not in response
-    assert (
-        '<a class="relay-open" href="/native/workflows/relay/config?token=secret&amp;'
-        'workspace=/Users/wl/projects/wlcodex">配置</a>'
-    ) in response
-    assert 'href="/native/workflows/relay/config?token=secret&amp;workspace=/Users/wl/projects/wlcodex"' in response
+    assert 'href="/native/workflows/relay/config' not in response
     assert "新聊天" not in response
     assert "relay-create-panel" not in response
     assert '<section class="relay-create-modal" id="new-task-modal" hidden role="dialog"' in response
@@ -248,7 +244,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert 'data-close-new-task aria-label="关闭新接力任务"' in response
     assert '<h2>新接力任务</h2>' in response
     assert "当前工作区" in response
-    assert "将快照以下五角色 provider 配置" in response
+    assert "将快照以下五角色 provider 配置" not in response
     assert "发布大任务" not in response
     assert "暂无任务" not in response
     assert "relay-group" not in response
@@ -265,9 +261,11 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert f'<input type="hidden" name="workspace" value="{default_workspace}">' in response
     assert 'aria-label="relay role provider configuration"' not in response
     assert "Provider 应用于全部角色" not in response
-    assert "默认角色配置" in response
-    assert "总工程师 ·" in response
-    assert "开发工程师 ·" in response
+    assert "默认角色配置" not in response
+    assert 'aria-label="relay role provider summary"' not in response
+    assert "角色 provider 快照" not in response
+    assert "总工程师 ·" not in response
+    assert "开发工程师 ·" not in response
     assert "gitnexus-impact-analysis" not in response
     assert "test-driven-development" not in response
     assert 'aria-label="relay task history"' in response
@@ -310,11 +308,10 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "relay-task-card" in populated
     assert "marvis-relay-task-card" in populated
     assert 'class="relay-status-badge"' in populated
-    assert "总工程师" in populated
-    assert "架构工程师" in populated
-    assert "开发工程师" in populated
-    assert "测试工程师" in populated
-    assert "审计工程师" in populated
+    assert 'class="relay-role-chips"' not in populated
+    assert "总工程师 · 阻塞 · Codex" not in populated
+    assert "架构工程师 · 未调度 · Antigravity" not in populated
+    assert "开发工程师 · 未调度 · Claude" not in populated
     assert "等待总工程师接收" in populated
     assert "打开任务" in populated
     assert "open task" not in populated
@@ -335,7 +332,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-total-tokens">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-model-config">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png" in response
@@ -348,6 +345,12 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert '"implementer":{"role":"implementer","display_name":"开发工程师"' in response
     assert "data-persona-name" in response
     assert "Team Leader" in response
+    assert "设置大模型" in response
+    assert "marvis-persona-model-panel" in response
+    assert 'data-provider-option="codex"' in response
+    assert 'data-provider-option="claude"' in response
+    assert 'data-provider-option="antigravity"' in response
+    assert "/api/relay/config${TOKEN_SUFFIX}" in response
     assert "今日消耗Token" in response
     assert "总消耗Token" in response
     assert "今日节省Token" not in response
@@ -654,7 +657,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-total-tokens">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-model-config">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response

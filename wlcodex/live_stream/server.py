@@ -140,7 +140,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office-total-tokens"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office-model-config"
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
@@ -3495,10 +3495,6 @@ def _relay_task_list_page(
         key=lambda summary: str(getattr(summary, "last_activity_at", "") or ""),
         reverse=True,
     )
-    config_providers = relay_config.get("providers")
-    provider_rows = (
-        config_providers if isinstance(config_providers, list) and config_providers else providers
-    )
     filters = ["running", "waiting_user", "blocked", "completed", "interrupted"]
     counts = {status: 0 for status in filters}
     for summary in sorted_summaries:
@@ -3536,8 +3532,6 @@ def _relay_task_list_page(
         selected_workspace=selected_workspace,
         access_token=access_token,
     )
-    role_summary_html = _relay_role_summary_html(relay_config, provider_rows)
-    config_href = _relay_config_href(selected_workspace, access_token)
     workspace_label = Path(selected_workspace).name or selected_workspace or "wlcodex"
     topbar_html = _marvis_relay_topbar(
         title="Marvis",
@@ -3579,7 +3573,6 @@ def _relay_task_list_page(
     .relay-workspace-row {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
     .relay-workspace-link {{ min-height: 34px; display: inline-grid; place-items: center; border: 1px solid var(--border-subtle); border-radius: 999px; padding: 0 11px; color: var(--text-muted); text-decoration: none; }}
     .relay-workspace-link.active {{ border-color: var(--color-link); color: var(--text-primary); background: rgba(88, 166, 255, .1); }}
-    .relay-config-summary {{ display: grid; gap: 8px; border: 1px solid var(--border-card); border-radius: 8px; background: var(--bg-surface); padding: 12px; }}
     .relay-form {{ display: grid; gap: 10px; }}
     .relay-form label {{ display: grid; gap: 6px; color: var(--text-muted); font-size: 13px; }}
     .relay-form input, .relay-form textarea, .relay-form select {{ width: 100%; box-sizing: border-box; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px; background: rgba(255,255,255,.04); color: var(--text-primary); }}
@@ -3611,8 +3604,6 @@ def _relay_task_list_page(
     .relay-muted {{ color: var(--text-muted); font-size: 13px; }}
     .relay-summary {{ color: var(--text-primary); font-size: 14px; line-height: 1.45; }}
     .relay-status-badge {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: var(--text-primary); background: rgba(255,255,255,.05); white-space: nowrap; }}
-    .relay-role-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
-    .relay-chip {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; white-space: nowrap; color: var(--text-muted); }}
     .relay-empty-state {{ display: grid; justify-items: start; gap: 10px; border: 1px dashed var(--border-subtle); border-radius: 8px; padding: 18px; color: var(--text-muted); }}
     .relay-empty-state h2 {{ color: var(--text-primary); font-size: 18px; }}
     .relay-empty-state p {{ margin: 0; max-width: 58ch; line-height: 1.55; }}
@@ -3622,7 +3613,6 @@ def _relay_task_list_page(
     .relay-modal-body {{ display: grid; align-content: start; gap: 16px; width: min(860px, 100%); margin: 0 auto; padding: 22px 18px 34px; box-sizing: border-box; }}
     .relay-modal-intro {{ display: grid; gap: 6px; }}
     .relay-modal-current {{ display: grid; gap: 6px; border: 1px solid var(--border-card); border-radius: 8px; padding: 12px; background: var(--bg-surface); min-width: 0; }}
-    .relay-modal-snapshot {{ display: grid; gap: 8px; border: 1px solid var(--border-card); border-radius: 8px; padding: 12px; background: var(--bg-surface); }}
     @media (max-width: 760px) {{ header {{ grid-template-columns: 48px 1fr; }} .relay-toolbar {{ grid-column: 1 / -1; justify-content: stretch; }} .relay-primary, .relay-secondary {{ width: 100%; }} .relay-card-head {{ grid-template-columns: 1fr; }} .relay-card-meta {{ justify-content: flex-start; }} .relay-config-row {{ grid-template-columns: 1fr; }} main {{ padding: 12px; }} .relay-modal-head {{ padding: 12px; }} .relay-modal-body {{ padding: 14px 12px 28px; }} }}
   </style>
 </head>
@@ -3632,16 +3622,6 @@ def _relay_task_list_page(
   <main>
     <div class="relay-shell">
       {workspace_nav}
-      <section class="relay-config-summary" aria-label="relay role provider summary">
-        <div class="relay-history-head">
-          <div class="relay-history-title">
-            <h2>默认角色配置</h2>
-            <span class="relay-muted">新任务会快照当前五角色 provider。</span>
-          </div>
-          <a class="relay-open" href="{escape(config_href)}">配置</a>
-        </div>
-        <div class="relay-role-chips">{role_summary_html}</div>
-      </section>
       <section class="relay-history-list" aria-label="relay task history">
         <div class="relay-history-head">
           <div class="relay-history-title">
@@ -3676,11 +3656,6 @@ def _relay_task_list_page(
       <section class="relay-modal-current" aria-label="relay task workspace">
         <h3>当前工作区</h3>
         <span class="relay-muted">{escape(selected_workspace)}</span>
-      </section>
-      <section class="relay-modal-snapshot" aria-label="relay role provider snapshot">
-        <h3>角色 provider 快照</h3>
-        <p class="relay-muted">开始接力时，将快照以下五角色 provider 配置。</p>
-        <div class="relay-role-chips">{role_summary_html}</div>
       </section>
       <form class="relay-form" method="post" action="/api/relay/tasks{token_suffix}">
         <label>任务标题<input name="title" placeholder="例如：修复流式接力历史页"></label>
@@ -4131,13 +4106,16 @@ def _marvis_relay_office_persona(
 ) -> dict[str, Any]:
     persona = _MARVIS_OFFICE_PERSONAS.get(role, {})
     title = str(persona.get("title") or "Relay Agent")
-    provider_label = provider.strip()
+    provider_id = provider.strip()
+    provider_label = _native_provider_display_name(provider_id)
     if provider_label:
         title = f"{title} · {provider_label}"
     return {
         "role": role,
         "display_name": display_name,
         "title": title,
+        "provider": provider_id,
+        "provider_label": provider_label,
         "intro": str(persona.get("intro") or f"{display_name}正在处理分配给自己的接力任务。"),
         "skills": list(persona.get("skills") or (display_name,)),
         "avatar": "marvis" if role == "director" else role,
@@ -4159,12 +4137,62 @@ def _marvis_relay_office_page(
     total_consumed_label = _format_marvis_token_count(total_consumed_tokens)
     assignment_map = config.get("assignments")
     assignments = assignment_map if isinstance(assignment_map, dict) else {}
+    assignment_payload = {
+        role: str(assignments.get(role) or "")
+        for role in RELAY_ROLE_IDS
+    }
+    provider_rows = config.get("providers")
+    provider_source = provider_rows if isinstance(provider_rows, list) else []
+    provider_options: list[dict[str, str]] = []
+    seen_providers: set[str] = set()
+    for provider in provider_source:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = str(provider.get("provider") or "").strip()
+        if not provider_id or provider_id in seen_providers:
+            continue
+        seen_providers.add(provider_id)
+        provider_options.append(
+            {
+                "provider": provider_id,
+                "label": _native_provider_display_name(provider_id),
+            }
+        )
+    for provider_id in assignment_payload.values():
+        provider_id = str(provider_id or "").strip()
+        if provider_id and provider_id not in seen_providers:
+            seen_providers.add(provider_id)
+            provider_options.append(
+                {
+                    "provider": provider_id,
+                    "label": _native_provider_display_name(provider_id),
+                }
+            )
+    if not provider_options:
+        provider_options.append({"provider": "codex", "label": "Codex"})
+        assignment_payload = {role: "codex" for role in RELAY_ROLE_IDS}
+    provider_options_html = "\n".join(
+        '<button class="marvis-persona-model-option" type="button" '
+        f'data-provider-option="{escape(option["provider"])}">'
+        f'{escape(option["label"])}</button>'
+        for option in provider_options
+    )
+    provider_options_json = json.dumps(
+        provider_options,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
+    assignment_json = json.dumps(
+        assignment_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
     active_roles = _marvis_relay_office_roles(relay_config)
     role_personas = {
         role["role"]: _marvis_relay_office_persona(
             role["role"],
             display_name=role["display_name"],
-            provider=str(assignments.get(role["role"]) or ""),
+            provider=str(assignment_payload.get(role["role"]) or ""),
         )
         for role in active_roles
     }
@@ -4245,12 +4273,25 @@ def _marvis_relay_office_page(
         <p class="marvis-persona-intro" data-persona-intro></p>
         <p class="marvis-persona-label">技能:</p>
         <div class="marvis-persona-skills" data-persona-skills></div>
+        <div class="marvis-persona-actions">
+          <button class="marvis-persona-model-button" type="button" data-persona-model-toggle>设置大模型</button>
+          <span class="marvis-persona-model-status" data-persona-model-status></span>
+        </div>
+        <section class="marvis-persona-model-panel" data-persona-model-panel hidden aria-label="设置角色大模型">
+          <p class="marvis-persona-label">大模型:</p>
+          <div class="marvis-persona-model-options" data-persona-model-options>
+            {provider_options_html}
+          </div>
+        </section>
       </div>
     </section>
   </div>
   <script>
     (() => {{
+      const TOKEN_SUFFIX = {json.dumps(token_suffix)};
       const personas = {role_personas_json};
+      const providers = {provider_options_json};
+      let assignments = {assignment_json};
       const openButtons = document.querySelectorAll("[data-marvis-persona-open]");
       const modal = document.querySelector("[data-marvis-persona-modal]");
       const backdrop = document.querySelector("[data-marvis-persona-backdrop]");
@@ -4260,9 +4301,37 @@ def _marvis_relay_office_page(
       const title = document.querySelector("[data-persona-title]");
       const intro = document.querySelector("[data-persona-intro]");
       const skills = document.querySelector("[data-persona-skills]");
+      const modelToggle = document.querySelector("[data-persona-model-toggle]");
+      const modelPanel = document.querySelector("[data-persona-model-panel]");
+      const modelStatus = document.querySelector("[data-persona-model-status]");
+      const modelOptions = document.querySelector("[data-persona-model-options]");
+      let activeRole = "";
+      const providerLabel = (provider) => {{
+        const found = providers.find((item) => item.provider === provider);
+        return found ? found.label : (provider || "Native");
+      }};
+      const updatePersonaProvider = (role, provider) => {{
+        const persona = personas[role];
+        if (!persona) return;
+        persona.provider = provider;
+        persona.provider_label = providerLabel(provider);
+        const baseTitle = (persona.title || "Relay Agent").split(" · ")[0];
+        persona.title = `${{baseTitle}} · ${{persona.provider_label}}`;
+      }};
+      const renderProviderOptions = () => {{
+        if (!modelOptions || !activeRole) return;
+        const selected = assignments[activeRole] || "";
+        modelOptions.querySelectorAll("[data-provider-option]").forEach((button) => {{
+          const provider = button.getAttribute("data-provider-option") || "";
+          button.classList.toggle("selected", provider === selected);
+          button.setAttribute("aria-pressed", provider === selected ? "true" : "false");
+        }});
+        if (modelStatus) modelStatus.textContent = selected ? `当前：${{providerLabel(selected)}}` : "当前：未设置";
+      }};
       const renderPersona = (role) => {{
         const persona = personas[role];
         if (!persona) return false;
+        activeRole = role;
         if (avatar) avatar.className = `marvis-persona-avatar marvis-relay-avatar marvis-relay-avatar-${{persona.avatar || role}}`;
         if (name) name.textContent = persona.display_name || role;
         if (title) title.textContent = persona.title || "Relay Agent";
@@ -4275,6 +4344,8 @@ def _marvis_relay_office_page(
             skills.appendChild(chip);
           }});
         }}
+        if (modelPanel) modelPanel.hidden = true;
+        renderProviderOptions();
         return true;
       }};
       const setOpen = (isOpen) => {{
@@ -4291,6 +4362,34 @@ def _marvis_relay_office_page(
       closeButtons.forEach((button) => button.addEventListener("click", () => setOpen(false)));
       window.addEventListener("keydown", (event) => {{
         if (event.key === "Escape") setOpen(false);
+      }});
+      modelToggle?.addEventListener("click", () => {{
+        if (!modelPanel) return;
+        modelPanel.hidden = !modelPanel.hidden;
+        renderProviderOptions();
+      }});
+      modelOptions?.addEventListener("click", async (event) => {{
+        const target = event.target instanceof HTMLElement ? event.target.closest("[data-provider-option]") : null;
+        if (!target || !activeRole) return;
+        const provider = target.getAttribute("data-provider-option") || "";
+        if (!provider) return;
+        const nextAssignments = {{...assignments, [activeRole]: provider}};
+        if (modelStatus) modelStatus.textContent = "保存中...";
+        try {{
+          const response = await fetch(`/api/relay/config${{TOKEN_SUFFIX}}`, {{
+            method: "POST",
+            headers: {{"Content-Type": "application/json"}},
+            body: JSON.stringify({{assignments: nextAssignments}}),
+          }});
+          if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+          const payload = await response.json();
+          assignments = payload.assignments || nextAssignments;
+          updatePersonaProvider(activeRole, assignments[activeRole]);
+          if (title) title.textContent = personas[activeRole]?.title || "Relay Agent";
+          renderProviderOptions();
+        }} catch (error) {{
+          if (modelStatus) modelStatus.textContent = "保存失败，请重试";
+        }}
       }});
       const tokenStats = document.querySelector("[data-marvis-token-stats]");
       const consumed = document.querySelector("[data-token-consumed]");
@@ -4465,13 +4564,6 @@ def _relay_role_config_html(
 
 
 def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
-    role_providers = getattr(summary, "role_providers", {}) or {}
-    chips = "\n".join(
-        f'<span class="relay-chip">{escape(_relay_role_label(str(role)))} · '
-        f'{escape(_relay_role_status_label(str(status)))} · '
-        f'{escape(_native_provider_display_name(str(role_providers.get(role, ""))))}</span>'
-        for role, status in summary.role_statuses.items()
-    )
     status = str(summary.status)
     status_label = _relay_task_status_label(status)
     activity = _relay_activity_label(str(summary.last_activity_at))
@@ -4499,7 +4591,6 @@ def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
           </div>
         </div>
         <div class="relay-summary">总工程师：{escape(decision)}</div>
-        <div class="relay-role-chips">{chips}</div>
         {handoff_html}
       </article>
     """
