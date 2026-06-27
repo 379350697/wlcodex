@@ -142,7 +142,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-marvis-scale"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-header-icons"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4105,7 +4105,7 @@ def _marvis_relay_topbar(
     right_html: str = "",
 ) -> str:
     left = (
-        f'<a class="marvis-relay-menu" href="{escape(back_href)}" aria-label="返回">'
+        f'<a class="marvis-relay-menu is-back" href="{escape(back_href)}" aria-label="返回上一级">'
         '<span></span><span></span><span></span></a>'
         if back_href
         else '<button class="marvis-relay-menu" type="button" aria-label="菜单"><span></span><span></span><span></span></button>'

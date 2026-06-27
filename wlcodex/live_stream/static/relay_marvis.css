@@ -25,15 +25,15 @@ body[data-marvis-relay-view] {
   --marvis-s25-title-size: 22px;
   --marvis-s25-device-size: 13px;
   --marvis-s25-device-dot: 7px;
-  --marvis-s25-top-icon-box: 34px;
-  --marvis-s25-top-icon-gap: 18px;
-  --marvis-s25-top-icon-stroke: 3px;
-  --marvis-s25-devices-icon-width: 28px;
-  --marvis-s25-devices-icon-height: 26px;
+  --marvis-s25-top-icon-box: 32px;
+  --marvis-s25-top-icon-gap: 17px;
+  --marvis-s25-top-icon-stroke: 2.35px;
+  --marvis-s25-devices-icon-width: 30px;
+  --marvis-s25-devices-icon-height: 27px;
   --marvis-s25-devices-screen-width: 22px;
-  --marvis-s25-devices-screen-height: 16px;
+  --marvis-s25-devices-screen-height: 17px;
   --marvis-s25-devices-phone-width: 11px;
-  --marvis-s25-devices-phone-height: 19px;
+  --marvis-s25-devices-phone-height: 18px;
   --marvis-s25-list-line-height: 2px;
   --marvis-s25-task-main-top: 126px;
   --marvis-s25-task-main-x: 20px;
@@ -129,6 +129,42 @@ body[data-marvis-relay-view] .marvis-relay-menu span {
   background: #111;
 }
 
+body[data-marvis-relay-view] .marvis-relay-menu.is-back {
+  position: relative;
+  align-content: center;
+  gap: 0;
+}
+
+body[data-marvis-relay-view] .marvis-relay-menu.is-back span {
+  display: none;
+}
+
+body[data-marvis-relay-view] .marvis-relay-menu.is-back::before,
+body[data-marvis-relay-view] .marvis-relay-menu.is-back::after {
+  content: "";
+  position: absolute;
+}
+
+body[data-marvis-relay-view] .marvis-relay-menu.is-back::before {
+  top: 17px;
+  left: 5px;
+  width: 27px;
+  height: 2.4px;
+  background: #111;
+  border-radius: 999px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-menu.is-back::after {
+  top: 11px;
+  left: 5px;
+  width: 12px;
+  height: 12px;
+  border-left: 2.4px solid #111;
+  border-bottom: 2.4px solid #111;
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+
 body[data-marvis-relay-view] .marvis-relay-brand h1 {
   margin: 0;
   color: #111;
@@ -201,7 +237,7 @@ body[data-marvis-relay-view] .marvis-relay-icon-devices::before {
   width: var(--marvis-s25-devices-screen-width);
   height: var(--marvis-s25-devices-screen-height);
   border: var(--marvis-s25-top-icon-stroke) solid #111;
-  border-radius: 5px;
+  border-radius: 4px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-icon-devices::after {
@@ -212,11 +248,13 @@ body[data-marvis-relay-view] .marvis-relay-icon-devices::after {
   width: var(--marvis-s25-devices-phone-width);
   height: var(--marvis-s25-devices-phone-height);
   border: var(--marvis-s25-top-icon-stroke) solid #111;
-  border-radius: 5px;
+  border-radius: 4px;
   background: #f3f3f3;
 }
 
 body[data-marvis-relay-view] .marvis-relay-icon-list {
+  width: 26px;
+  height: 26px;
   border: var(--marvis-s25-top-icon-stroke) solid #111;
   border-radius: 6px;
   box-sizing: border-box;
@@ -810,43 +848,6 @@ body[data-marvis-relay-view] .marvis-relay-submit {
   background: #111;
   color: #fff;
   transition: transform 150ms ease, opacity 150ms ease;
-}
-
-body[data-marvis-relay-view] .marvis-relay-composer:has(input[name="title"]:placeholder-shown) .marvis-relay-submit:not(.is-stop),
-body[data-marvis-relay-view] .marvis-relay-composer:has(textarea[name="text"]:placeholder-shown) .marvis-relay-submit:not(.is-stop) {
-  background: transparent;
-  color: #111;
-}
-
-body[data-marvis-relay-view] .marvis-relay-composer:has(input[name="title"]:placeholder-shown) .marvis-relay-submit:not(.is-stop) .marvis-relay-submit-arrow,
-body[data-marvis-relay-view] .marvis-relay-composer:has(textarea[name="text"]:placeholder-shown) .marvis-relay-submit:not(.is-stop) .marvis-relay-submit-arrow {
-  display: none;
-}
-
-body[data-marvis-relay-view] .marvis-relay-composer:has(input[name="title"]:placeholder-shown) .marvis-relay-submit:not(.is-stop)::before,
-body[data-marvis-relay-view] .marvis-relay-composer:has(textarea[name="text"]:placeholder-shown) .marvis-relay-submit:not(.is-stop)::before {
-  content: "";
-  position: absolute;
-  top: 7px;
-  left: 14px;
-  width: 12px;
-  height: 19px;
-  border: 3px solid #111;
-  border-radius: 999px;
-  background: transparent;
-}
-
-body[data-marvis-relay-view] .marvis-relay-composer:has(input[name="title"]:placeholder-shown) .marvis-relay-submit:not(.is-stop)::after,
-body[data-marvis-relay-view] .marvis-relay-composer:has(textarea[name="text"]:placeholder-shown) .marvis-relay-submit:not(.is-stop)::after {
-  content: "";
-  position: absolute;
-  left: 10px;
-  bottom: 7px;
-  width: 20px;
-  height: 13px;
-  border: 3px solid #111;
-  border-top: 0;
-  border-radius: 0 0 999px 999px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-submit:active {
