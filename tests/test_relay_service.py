@@ -1246,6 +1246,80 @@ def test_followup_completion_uses_current_native_turn_delta_not_old_completed_te
     assert "旧 turn" not in followup_responses[-1]["text"]
 
 
+def test_scan_stale_native_role_does_not_close_pending_followup_from_old_session_read(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "completed")
+    asyncio.run(service.add_user_message(task.id, "继续说明 task28 是否能对话"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    now = datetime(2026, 6, 16, 8, 0, 0, tzinfo=timezone.utc)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.INTERNAL,
+            payload={
+                "action": "turn_started",
+                "status": "running",
+                "native_turn_id": "turn-current",
+            },
+            occurred_at=(now - timedelta(seconds=301)).isoformat(),
+            agent_run_id=201,
+        )
+    )
+    old_completed_text = """
+    {
+      "status": "passed",
+      "reason": "old result",
+      "role": "director",
+      "artifact_type": "final_summary",
+      "handoff_to": "",
+      "summary": "旧 session 读取结果",
+      "evidence_refs": [],
+      "open_questions": [],
+      "next_action": ""
+    }
+    """
+
+    async def read_session(native_session_id: str):
+        provider.calls.append(("read_session", native_session_id))
+        return {
+            "thread": {"native_session_id": native_session_id},
+            "turns": [{"role": "assistant", "text": old_completed_text}],
+        }
+
+    provider.read_session = read_session
+
+    changed = asyncio.run(
+        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
+    )
+
+    detail = service.get_task(task.id)
+    followup_responses = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "followup_response"
+    ]
+    assert changed == 0
+    assert ("read_session", "native-1") not in provider.calls
+    assert followup_responses == []
+    assert detail.task.status == "running"
+    assert {job.role: job.status for job in detail.role_jobs}["director"] == "streaming"
+
+
 def test_scan_stale_native_role_syncs_then_blocks_without_assistant_output(
     tmp_path,
 ) -> None:

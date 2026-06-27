@@ -1481,16 +1481,23 @@ class RelayService:
                     "streaming",
                 }:
                     continue
+                pending_followup_response = self._should_accept_plain_followup_response(
+                    task_detail.task.id,
+                    job.role,
+                )
                 if await self._complete_stale_native_delta_if_ready(
                     runtime_store,
                     task_id=task_detail.task.id,
                     role=job.role,
                     agent_run_id=int(job.agent_run_id),
-                    after_id=0,
+                    after_id=last_event_id,
                     provider_name=job.provider,
                     native_session_id=job.native_session_id,
+                    allow_read_session=not pending_followup_response,
                 ):
                     changed += 1
+                    continue
+                if pending_followup_response:
                     continue
                 completion_error = self._stale_native_completion_error(
                     runtime_store,
@@ -1714,6 +1721,7 @@ class RelayService:
         after_id: int,
         provider_name: str = "",
         native_session_id: str = "",
+        allow_read_session: bool = True,
     ) -> bool:
         if after_id > 0:
             events = runtime_store.list_by_agent_run_after(
@@ -1732,24 +1740,34 @@ class RelayService:
                 output=_runtime_event_text(completed),
             )
             return True
-        read_session_output = await self._read_native_session_role_envelope(
-            provider_name=provider_name,
-            native_session_id=native_session_id,
-        )
-        if read_session_output:
-            await self.handle_role_completion_event(
-                task_id,
-                role,
-                runtime_event_id=0,
-                output=read_session_output,
+        if allow_read_session:
+            read_session_output = await self._read_native_session_role_envelope(
+                provider_name=provider_name,
+                native_session_id=native_session_id,
             )
-            return True
+            if read_session_output:
+                await self.handle_role_completion_event(
+                    task_id,
+                    role,
+                    runtime_event_id=0,
+                    output=read_session_output,
+                )
+                return True
         delta_events = [event for event in events if _is_runtime_model_text_delta(event)]
         if not delta_events:
             return False
         output = "".join(_runtime_event_text(event) for event in delta_events)
         parse_result = parse_role_envelope(output)
         if not parse_result.ok:
+            if self._should_accept_plain_followup_response(task_id, role):
+                runtime_event_id = int(getattr(delta_events[-1], "id", 0) or 0)
+                await self._handle_plain_followup_response(
+                    task_id,
+                    role,
+                    runtime_event_id=runtime_event_id,
+                    text=output,
+                )
+                return True
             if await self._recover_director_routing_decision(
                 task_id,
                 role,
