@@ -255,6 +255,35 @@ def _relay_message_bodies_html(panel_html: str) -> str:
 
 
 @pytest.mark.asyncio
+async def test_marvis_relay_composer_has_real_attachment_sheet(
+    tmp_path: Path,
+) -> None:
+    response, _service = await _request(
+        tmp_path,
+        "GET /native/workflows/relay/chat?token=secret HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert 'data-marvis-attachment-sheet' in response
+    assert 'data-marvis-attach-open' in response
+    assert 'data-marvis-image-input' in response
+    assert 'data-marvis-file-input' in response
+    assert "添加到对话" in response
+    assert "相册" in response
+    assert "本地文件" in response
+    assert "我的技能" in response
+    assert "添加技能" in response
+    assert "readRelayImageAttachment" in response
+    assert "readRelayTextAttachment" in response
+    css_response, _service = await _request(
+        tmp_path,
+        "GET /static/relay_marvis.css HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+    assert "--marvis-s25-bottom-nav-item-gap: 1px" in css_response
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_projects_followup_turns_into_marvis_chat(
     tmp_path: Path,
 ) -> None:
@@ -309,6 +338,62 @@ async def test_relay_task_detail_projects_followup_turns_into_marvis_chat(
     assert "function appendMarvisConversationUser" in response
     assert 'source.addEventListener("user.followup"' in response
     assert 'source.addEventListener("role.followup_response"' in response
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_projects_followup_attachments_into_user_bubble(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Follow-up with attachments",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {
+            "text": "看这个截图和日志",
+            "target_role": "director",
+            "images": [
+                {
+                    "filename": "screen.png",
+                    "mime_type": "image/png",
+                    "url": "data:image/png;base64,aGVsbG8=",
+                }
+            ],
+            "files": [
+                {
+                    "filename": "trace.log",
+                    "mime_type": "text/plain",
+                    "text": "line 1\nline 2",
+                    "size": 13,
+                }
+            ],
+        },
+        summary="看这个截图和日志",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "看这个截图和日志" in conversation_html
+    assert "screen.png" in conversation_html
+    assert "trace.log" in conversation_html
+    assert 'class="marvis-relay-attachment-list"' in conversation_html
+    assert "line 1" not in conversation_html
 
 
 @pytest.mark.asyncio
@@ -479,7 +564,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-header-icons">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
@@ -655,7 +740,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-header-icons">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png?v=20260627-red-director" in response
@@ -725,7 +810,7 @@ def test_marvis_relay_task_topbar_is_fixed_above_scroll_content() -> None:
 
     assert "body[data-marvis-relay-view] .marvis-relay-topbar {\n  position: fixed;" in css
     assert "--marvis-s25-title-size: 22px;" in css
-    assert "--marvis-s25-top-icon-stroke: 2.35px;" in css
+    assert "--marvis-s25-top-icon-stroke: 2.1px;" in css
     assert "--marvis-s25-composer-bottom: 84px;" in css
     assert "--marvis-s25-bottom-nav-height: 78px;" in css
     assert "body[data-marvis-relay-view] .marvis-relay-menu.is-back::after {" in css
@@ -1038,7 +1123,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-header-icons">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-menu is-back" href="/native/workflows/relay?token=secret&amp;workspace=/repo" aria-label="返回上一级"' in response
     assert 'class="marvis-relay-bottom-nav"' in response

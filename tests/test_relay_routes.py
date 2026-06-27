@@ -390,6 +390,71 @@ async def test_create_relay_task_rejects_empty_workspace(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_relay_message_route_accepts_image_and_text_file_attachments(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    provider = FakeProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    )
+    task = service.create_task(
+        title="Attachment follow-up",
+        prompt="Initial",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    body = json.dumps(
+        {
+            "text": "继续看附件",
+            "images": [
+                {
+                    "filename": "screen.png",
+                    "mime_type": "image/png",
+                    "url": "data:image/png;base64,aGVsbG8=",
+                }
+            ],
+            "files": [
+                {
+                    "filename": "note.md",
+                    "mime_type": "text/markdown",
+                    "text": "# title\nbody",
+                    "size": 12,
+                }
+            ],
+        }
+    )
+
+    response = await _request_relay(
+        tmp_path,
+        f"POST /api/relay/tasks/{task.id}/message HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert provider.calls[-1][0] == "continue_session"
+    assert provider.calls[-1][3]["images"][0]["filename"] == "screen.png"
+    assert "note.md" in provider.calls[-1][2]
+    assert "# title" in provider.calls[-1][2]
+    payload = _json_body(response)
+    followups = [
+        artifact
+        for artifact in payload["artifacts"]
+        if artifact["artifact_type"] == "user_followup"
+    ]
+    assert followups[-1]["files"][0]["filename"] == "note.md"
+
+
+@pytest.mark.asyncio
 async def test_relay_run_aliases_match_task_routes(tmp_path: Path) -> None:
     service = _relay_service(tmp_path)
     task = service.create_task(

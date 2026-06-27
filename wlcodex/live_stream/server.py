@@ -52,6 +52,9 @@ _REQUEST_TIMEOUT_SECONDS = 30.0
 _MAX_HEADER_BYTES = 16 * 1024
 _MAX_BODY_BYTES = 24 * 1024 * 1024
 _MAX_NATIVE_IMAGE_ATTACHMENTS = 8
+_MAX_RELAY_TEXT_ATTACHMENTS = 5
+_MAX_RELAY_TEXT_ATTACHMENT_CHARS = 80_000
+_MAX_RELAY_TOTAL_TEXT_ATTACHMENT_CHARS = 180_000
 _MAX_PLUGIN_ICON_BYTES = 128 * 1024
 _NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS = 0.05
 _NATIVE_SESSION_WATCH_INTERVAL_SECONDS = 1.0
@@ -142,7 +145,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-header-icons"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-attachment-sheet"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -1427,6 +1430,8 @@ class WorkerLiveStreamServer:
                             if isinstance(body.get("role_providers"), dict)
                             else None
                         ),
+                        images=_safe_image_attachments(body.get("images")),
+                        files=_safe_relay_file_attachments(body.get("files")),
                     )
                     await self._relay_service.dispatch_role(task.id, "director")
                     await self._send_json(
@@ -1497,6 +1502,8 @@ class WorkerLiveStreamServer:
                 await self._relay_service.add_user_message(
                     task_id,
                     str(body.get("text") or body.get("prompt") or ""),
+                    images=_safe_image_attachments(body.get("images")),
+                    files=_safe_relay_file_attachments(body.get("files")),
                 )
                 await self._send_json(
                     writer,
@@ -3214,6 +3221,41 @@ def _safe_image_attachments(value: object) -> list[dict[str, Any]] | None:
     return images or None
 
 
+def _safe_relay_file_attachments(value: object) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    files: list[dict[str, Any]] = []
+    used_chars = 0
+    for raw in value[:_MAX_RELAY_TEXT_ATTACHMENTS]:
+        if not isinstance(raw, dict):
+            continue
+        text = raw.get("text")
+        if not isinstance(text, str):
+            continue
+        remaining = _MAX_RELAY_TOTAL_TEXT_ATTACHMENT_CHARS - used_chars
+        if remaining <= 0:
+            break
+        clipped = text[: min(_MAX_RELAY_TEXT_ATTACHMENT_CHARS, remaining)]
+        used_chars += len(clipped)
+        filename = raw.get("filename")
+        clean: dict[str, Any] = {
+            "filename": (
+                filename.strip()[:160]
+                if isinstance(filename, str) and filename.strip()
+                else "attachment.txt"
+            ),
+            "text": clipped,
+        }
+        mime_type = raw.get("mime_type") or raw.get("mimeType")
+        if isinstance(mime_type, str) and mime_type.strip():
+            clean["mime_type"] = mime_type.strip()[:120]
+        size = raw.get("size")
+        if isinstance(size, int) and size >= 0:
+            clean["size"] = size
+        files.append(clean)
+    return files or None
+
+
 def _is_loopback_peer(writer: asyncio.StreamWriter) -> bool:
     peer = writer.get_extra_info("peername")
     if not isinstance(peer, tuple) or not peer:
@@ -3753,15 +3795,20 @@ def _relay_chat_home_page(
     </nav>
   </div>
   <script>
+    {_marvis_relay_attachment_script()}
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
     const marvisComposer = document.querySelector("[data-marvis-task-composer]");
     marvisComposer?.addEventListener("submit", async (event) => {{
       event.preventDefault();
       const data = Object.fromEntries(new FormData(marvisComposer).entries());
-      const title = String(data.title || "").trim();
+      const attachments = window.marvisRelayAttachments?.payload() || {{}};
+      const hasAttachments = Boolean((attachments.images || []).length || (attachments.files || []).length);
+      const title = String(data.title || "").trim() || (hasAttachments ? "请查看附件" : "");
       if (!title) return;
       data.title = title;
       data.prompt = title;
+      if ((attachments.images || []).length) data.images = attachments.images;
+      if ((attachments.files || []).length) data.files = attachments.files;
       const response = await fetch(`/api/relay/tasks${{TOKEN_SUFFIX}}`, {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
@@ -3769,6 +3816,7 @@ def _relay_chat_home_page(
       }});
       const payload = await response.json();
       if (payload?.task?.id) {{
+        window.marvisRelayAttachments?.clear();
         window.location.href = `/native/workflows/relay/tasks/${{encodeURIComponent(payload.task.id)}}${{TOKEN_SUFFIX}}`;
       }}
     }});
@@ -4206,7 +4254,7 @@ def _marvis_relay_task_composer(
     return f"""
     {workspace_dock}
     <form class="marvis-relay-composer" data-marvis-task-composer action="/api/relay/tasks{token_suffix}">
-      <button class="marvis-relay-plus" type="button" aria-label="添加">+</button>
+      <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
       <input name="title" autocomplete="off" placeholder="{escape(placeholder)}">
       <input type="hidden" name="prompt" value="">
       <input type="hidden" name="workspace" value="{escape(selected_workspace)}">
@@ -4214,7 +4262,9 @@ def _marvis_relay_task_composer(
         <span class="marvis-relay-submit-arrow" aria-hidden="true">↑</span>
         <span class="marvis-relay-submit-stop" aria-hidden="true">■</span>
       </button>
+      <div class="marvis-relay-composer-attachments" data-marvis-attachment-strip hidden></div>
     </form>
+    {_marvis_relay_attachment_sheet_html()}
     """
 
 
@@ -4231,6 +4281,223 @@ def _marvis_relay_workspace_dock(workspace: str, *, access_token: str = "") -> s
         <span class="marvis-relay-workspace-action">选择</span>
       </a>
     </div>
+    """
+
+
+def _marvis_relay_attachment_sheet_html() -> str:
+    return """
+    <div class="marvis-relay-attachment-backdrop" data-marvis-attachment-backdrop hidden></div>
+    <section class="marvis-relay-attachment-sheet" data-marvis-attachment-sheet hidden aria-modal="true" role="dialog" aria-label="添加到对话">
+      <button class="marvis-relay-attachment-close" type="button" aria-label="关闭" data-marvis-attachment-close>×</button>
+      <h2>添加到对话</h2>
+      <div class="marvis-relay-attachment-grid" aria-label="附件类型">
+        <button class="marvis-relay-attachment-tile" type="button" data-marvis-pick-image>
+          <span class="marvis-relay-sheet-icon marvis-relay-sheet-icon-image" aria-hidden="true"></span>
+          <span>相册</span>
+        </button>
+        <button class="marvis-relay-attachment-tile" type="button" data-marvis-pick-file>
+          <span class="marvis-relay-sheet-icon marvis-relay-sheet-icon-file" aria-hidden="true"></span>
+          <span>本地文件</span>
+        </button>
+      </div>
+      <div class="marvis-relay-skill-section">
+        <p>我的技能</p>
+        <button class="marvis-relay-skill-row" type="button" aria-label="添加技能">
+          <span class="marvis-relay-sheet-icon marvis-relay-sheet-icon-skills" aria-hidden="true"></span>
+          <span class="marvis-relay-skill-text">
+            <strong>添加技能</strong>
+            <small>有200+技能可供使用</small>
+          </span>
+          <span class="marvis-relay-skill-chevron" aria-hidden="true">›</span>
+        </button>
+      </div>
+      <input type="file" accept="image/*" multiple hidden data-marvis-image-input>
+      <input type="file" accept=".txt,.md,.markdown,.json,.jsonl,.log,.csv,.tsv,.yaml,.yml,.toml,.ini,.py,.js,.ts,.tsx,.jsx,.css,.html,.xml,.sh,.zsh,.sql,text/*,application/json" multiple hidden data-marvis-file-input>
+    </section>
+    """
+
+
+def _marvis_relay_attachment_script() -> str:
+    return r"""
+    function setupMarvisRelayAttachments() {
+      const composer = document.querySelector("[data-marvis-task-composer], [data-marvis-followup-composer]");
+      const sheet = document.querySelector("[data-marvis-attachment-sheet]");
+      if (!composer || !sheet) {
+        return { payload: () => ({}), clear: () => {}, hasAttachments: () => false };
+      }
+      const backdrop = document.querySelector("[data-marvis-attachment-backdrop]");
+      const openButton = composer.querySelector("[data-marvis-attach-open]");
+      const closeButton = sheet.querySelector("[data-marvis-attachment-close]");
+      const imageInput = sheet.querySelector("[data-marvis-image-input]");
+      const fileInput = sheet.querySelector("[data-marvis-file-input]");
+      const strip = composer.querySelector("[data-marvis-attachment-strip]");
+      const state = { images: [], files: [] };
+      const textFilePattern = /\.(txt|md|markdown|json|jsonl|log|csv|tsv|yaml|yml|toml|ini|py|js|ts|tsx|jsx|css|html|xml|sh|zsh|sql)$/i;
+      function openSheet() {
+        sheet.hidden = false;
+        backdrop.hidden = false;
+        requestAnimationFrame(() => {
+          sheet.classList.add("open");
+          backdrop.classList.add("visible");
+        });
+      }
+      function closeSheet() {
+        sheet.classList.remove("open");
+        backdrop.classList.remove("visible");
+        window.setTimeout(() => {
+          sheet.hidden = true;
+          backdrop.hidden = true;
+        }, 180);
+      }
+      function readRelayImageAttachment(file) {
+        return new Promise((resolve, reject) => {
+          if (!file || !String(file.type || "").startsWith("image/")) {
+            reject(new Error("请选择图片文件"));
+            return;
+          }
+          const reader = new FileReader();
+          reader.onload = () => resolve({
+            filename: file.name || "image",
+            mime_type: file.type || "image/*",
+            size: file.size || 0,
+            url: String(reader.result || "")
+          });
+          reader.onerror = () => reject(new Error("图片读取失败"));
+          reader.readAsDataURL(file);
+        });
+      }
+      function readRelayTextAttachment(file) {
+        return new Promise((resolve, reject) => {
+          if (!file) {
+            reject(new Error("请选择文件"));
+            return;
+          }
+          const mime = String(file.type || "");
+          const name = String(file.name || "attachment.txt");
+          if (mime && !mime.startsWith("text/") && mime !== "application/json" && !textFilePattern.test(name)) {
+            reject(new Error(`${name} 暂只支持文本/代码文件`));
+            return;
+          }
+          if (file.size > 1024 * 1024) {
+            reject(new Error(`${name} 超过 1MB，请拆小后再上传`));
+            return;
+          }
+          const reader = new FileReader();
+          reader.onload = () => resolve({
+            filename: name,
+            mime_type: mime || "text/plain",
+            size: file.size || 0,
+            text: String(reader.result || "")
+          });
+          reader.onerror = () => reject(new Error("文件读取失败"));
+          reader.readAsText(file);
+        });
+      }
+      function renderRelayAttachmentStrip() {
+        if (!strip) return;
+        strip.innerHTML = "";
+        const items = [
+          ...state.images.map((item, index) => ({...item, type: "image", index})),
+          ...state.files.map((item, index) => ({...item, type: "file", index}))
+        ];
+        strip.hidden = items.length === 0;
+        items.forEach((item) => {
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = `marvis-relay-composer-attachment is-${item.type}`;
+          chip.title = item.filename || (item.type === "image" ? "图片" : "文件");
+          chip.innerHTML = '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span><span></span><b aria-hidden="true">×</b>';
+          chip.querySelector("span:nth-child(2)").textContent = item.filename || (item.type === "image" ? "图片" : "文件");
+          chip.addEventListener("click", () => {
+            if (item.type === "image") state.images.splice(item.index, 1);
+            else state.files.splice(item.index, 1);
+            renderRelayAttachmentStrip();
+          });
+          strip.appendChild(chip);
+        });
+        document.dispatchEvent(new CustomEvent("marvis-relay-attachments-changed"));
+      }
+      function addErrorChip(message) {
+        if (!strip || !message) return;
+        strip.hidden = false;
+        const chip = document.createElement("span");
+        chip.className = "marvis-relay-composer-attachment is-error";
+        chip.textContent = message;
+        strip.appendChild(chip);
+        window.setTimeout(() => {
+          chip.remove();
+          if (!strip.children.length) strip.hidden = true;
+        }, 3500);
+      }
+      openButton?.addEventListener("click", openSheet);
+      closeButton?.addEventListener("click", closeSheet);
+      backdrop?.addEventListener("click", closeSheet);
+      sheet.querySelector("[data-marvis-pick-image]")?.addEventListener("click", () => imageInput?.click());
+      sheet.querySelector("[data-marvis-pick-file]")?.addEventListener("click", () => fileInput?.click());
+      imageInput?.addEventListener("change", async () => {
+        for (const file of Array.from(imageInput.files || [])) {
+          try {
+            state.images.push(await readRelayImageAttachment(file));
+          } catch (error) {
+            addErrorChip(error?.message || "图片读取失败");
+          }
+        }
+        imageInput.value = "";
+        renderRelayAttachmentStrip();
+        closeSheet();
+      });
+      fileInput?.addEventListener("change", async () => {
+        for (const file of Array.from(fileInput.files || [])) {
+          try {
+            state.files.push(await readRelayTextAttachment(file));
+          } catch (error) {
+            addErrorChip(error?.message || "文件读取失败");
+          }
+        }
+        fileInput.value = "";
+        renderRelayAttachmentStrip();
+        closeSheet();
+      });
+      const api = {
+        payload() {
+          return {
+            images: state.images.map((item) => ({...item})),
+            files: state.files.map((item) => ({...item}))
+          };
+        },
+        clear() {
+          state.images = [];
+          state.files = [];
+          renderRelayAttachmentStrip();
+        },
+        hasAttachments() {
+          return state.images.length > 0 || state.files.length > 0;
+        }
+      };
+      window.readRelayImageAttachment = readRelayImageAttachment;
+      window.readRelayTextAttachment = readRelayTextAttachment;
+      window.marvisRelayAttachments = api;
+      return api;
+    }
+    function appendMarvisAttachmentList(parent, attachments = {}) {
+      if (!parent) return;
+      const images = Array.isArray(attachments.images) ? attachments.images : [];
+      const files = Array.isArray(attachments.files) ? attachments.files : [];
+      if (!images.length && !files.length) return;
+      const list = document.createElement("div");
+      list.className = "marvis-relay-attachment-list";
+      const addChip = (item, type) => {
+        const chip = document.createElement("span");
+        chip.className = `marvis-relay-attachment-chip marvis-relay-attachment-chip-${type}`;
+        chip.innerHTML = '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span><span></span>';
+        chip.querySelector("span:last-child").textContent = item.filename || (type === "image" ? "图片" : "文件");
+        list.appendChild(chip);
+      };
+      images.forEach((item) => addChip(item, "image"));
+      files.forEach((item) => addChip(item, "file"));
+      parent.appendChild(list);
+    }
+    setupMarvisRelayAttachments();
     """
 
 
@@ -4678,13 +4945,15 @@ def _marvis_relay_followup_composer(
     return f"""
     {workspace_dock}
     <form class="marvis-relay-composer" data-marvis-followup-composer data-task-status-value="{escape(task_status)}" data-interrupt-url="/api/relay/tasks/{task_id}/interrupt" method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
-      <button class="marvis-relay-plus" type="button" aria-label="添加">+</button>
+      <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
       <textarea name="text" placeholder="{escape(placeholder)}" aria-label="继续补充给总工程师"></textarea>
       <button class="marvis-relay-submit" type="submit" aria-label="发送补充" data-marvis-submit>
         <span class="marvis-relay-submit-arrow" aria-hidden="true">↑</span>
         <span class="marvis-relay-submit-stop" aria-hidden="true">■</span>
       </button>
+      <div class="marvis-relay-composer-attachments" data-marvis-attachment-strip hidden></div>
     </form>
+    {_marvis_relay_attachment_sheet_html()}
     """
 
 
@@ -6079,6 +6348,7 @@ def _relay_task_detail_page(
   </div>
   {work_log_html}
   <script>
+    {_marvis_relay_attachment_script()}
     const TASK_ID = {json.dumps(str(task.id))};
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
     const EVENTS_SUFFIX = {json.dumps(events_suffix)};
@@ -6780,13 +7050,16 @@ def _relay_task_detail_page(
       if (role === "auditor") return "file";
       return "marvis";
     }}
-    function appendMarvisConversationUser(text, key = "", pending = false) {{
+    function appendMarvisConversationUser(text, key = "", pending = false, attachments = {{}}) {{
       if (!conversationTimeline) return null;
       const body = relayHumanizeUserMessage(text);
       const normalizedBody = relayNormalizeConversationText(body);
-      if (!normalizedBody || relayUserMessageIsRetryOrContext(body)) return null;
-      if (conversationUserBodies.has(normalizedBody)) return null;
-      conversationUserBodies.add(normalizedBody);
+      const hasAttachments = Boolean((attachments.images || []).length || (attachments.files || []).length);
+      if ((!normalizedBody && !hasAttachments) || relayUserMessageIsRetryOrContext(body)) return null;
+      if (normalizedBody) {{
+        if (conversationUserBodies.has(normalizedBody)) return null;
+        conversationUserBodies.add(normalizedBody);
+      }}
       const empty = conversationTimeline.querySelector("[data-native-empty]");
       if (empty) empty.remove();
       const node = document.createElement("article");
@@ -6798,8 +7071,9 @@ def _relay_task_detail_page(
       const bubble = document.createElement("div");
       bubble.className = "marvis-relay-user-bubble";
       bubble.dataset.nativeMessageBody = "";
-      bubble.textContent = body;
+      bubble.textContent = body || "已添加附件";
       node.appendChild(bubble);
+      appendMarvisAttachmentList(node, attachments);
       conversationTimeline.appendChild(node);
       if (key) nativeTranscriptNodes.set(key, node);
       scrollNativeConversationToEnd();
@@ -7107,9 +7381,12 @@ def _relay_task_detail_page(
     function relayFollowupHasText() {{
       return Boolean(String(followupTextInput?.value || "").trim());
     }}
+    function relayFollowupHasAttachments() {{
+      return Boolean(window.marvisRelayAttachments?.hasAttachments?.());
+    }}
     function updateRelayComposerAction() {{
       if (!followupSubmitButton) return;
-      const showStop = relayTaskIsRunning() && !relayFollowupHasText();
+      const showStop = relayTaskIsRunning() && !relayFollowupHasText() && !relayFollowupHasAttachments();
       followupSubmitButton.classList.toggle("is-stop", showStop);
       followupSubmitButton.setAttribute("aria-label", showStop ? "中断任务" : "发送补充");
     }}
@@ -7155,7 +7432,10 @@ def _relay_task_detail_page(
     source.addEventListener("user.followup", (event) => {{
       const payload = parseRelayEvent(event);
       const key = payload.artifact_id ? `user_followup:${{payload.artifact_id}}` : `user_followup:${{payload.context_packet_id || Date.now()}}`;
-      appendMarvisConversationUser(payload.text || payload.latest_user_input || "", key, false);
+      appendMarvisConversationUser(payload.text || payload.latest_user_input || "", key, false, {{
+        images: payload.images || [],
+        files: payload.files || []
+      }});
       appendMarvisConversationWaiting();
       updateTaskStatus("running");
       setRoleStatus("director", "queued");
@@ -7258,12 +7538,15 @@ def _relay_task_detail_page(
       appendActivity("任务已中断。");
     }});
     followupTextInput?.addEventListener("input", updateRelayComposerAction);
+    document.addEventListener("marvis-relay-attachments-changed", updateRelayComposerAction);
     updateRelayComposerAction();
     followupComposer?.addEventListener("submit", async (event) => {{
       event.preventDefault();
       const form = event.currentTarget;
       const data = Object.fromEntries(new FormData(form).entries());
-      if (!String(data.text || "").trim()) {{
+      const attachments = window.marvisRelayAttachments?.payload() || {{}};
+      const hasAttachments = Boolean((attachments.images || []).length || (attachments.files || []).length);
+      if (!String(data.text || "").trim() && !hasAttachments) {{
         if (!followupSubmitButton?.classList.contains("is-stop") || !relayTaskIsRunning()) return;
         const response = await fetch(`${{form.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{
           method: "POST",
@@ -7281,8 +7564,10 @@ def _relay_task_detail_page(
         }}
         return;
       }}
+      if ((attachments.images || []).length) data.images = attachments.images;
+      if ((attachments.files || []).length) data.files = attachments.files;
       const localKey = `local-followup:${{Date.now()}}`;
-      appendMarvisConversationUser(data.text, localKey, true);
+      appendMarvisConversationUser(data.text || "已添加附件", localKey, true, attachments);
       appendMarvisConversationWaiting();
       updateTaskStatus("running");
       setRoleStatus("director", "queued");
@@ -7299,6 +7584,7 @@ def _relay_task_detail_page(
         return;
       }}
       form.reset();
+      window.marvisRelayAttachments?.clear();
       updateRelayComposerAction();
     }});
     document.querySelector("[data-interrupt-url]")?.addEventListener("click", async (event) => {{
@@ -7579,6 +7865,8 @@ def _relay_conversation_row_from_artifact(
             "meta": "",
             "body": _relay_humanize_user_message(text),
             "key": f"user_followup:{artifact_key}",
+            "images": list(artifact.get("images") or []),
+            "files": list(artifact.get("files") or []),
         }
     if artifact_type == "relay_board":
         text = str(artifact.get("latest_user_input") or "").strip()
@@ -7913,9 +8201,11 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
     body = str(row.get("body") or "")
     key = str(row.get("key") or "")
     if kind == "user_message":
+        attachment_html = _marvis_relay_attachment_list_html(row)
         return f"""
       <article class="marvis-relay-user-message" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(key)}">
         <div class="marvis-relay-user-bubble" data-native-message-body>{escape(body)}</div>
+        {attachment_html}
       </article>
         """
     persona, display_name = _marvis_relay_public_role(role)
@@ -7953,6 +8243,33 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
         </div>
       </article>
     """
+
+
+def _marvis_relay_attachment_list_html(row: dict[str, Any]) -> str:
+    items: list[str] = []
+    for raw in list(row.get("images") or [])[:_MAX_NATIVE_IMAGE_ATTACHMENTS]:
+        if not isinstance(raw, dict):
+            continue
+        filename = str(raw.get("filename") or "图片")
+        items.append(
+            '<span class="marvis-relay-attachment-chip marvis-relay-attachment-chip-image">'
+            '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span>'
+            f"<span>{escape(filename)}</span>"
+            "</span>"
+        )
+    for raw in list(row.get("files") or [])[:_MAX_RELAY_TEXT_ATTACHMENTS]:
+        if not isinstance(raw, dict):
+            continue
+        filename = str(raw.get("filename") or "文件")
+        items.append(
+            '<span class="marvis-relay-attachment-chip marvis-relay-attachment-chip-file">'
+            '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span>'
+            f"<span>{escape(filename)}</span>"
+            "</span>"
+        )
+    if not items:
+        return ""
+    return '<div class="marvis-relay-attachment-list">' + "".join(items) + "</div>"
 
 
 def _relay_native_conversation_html(

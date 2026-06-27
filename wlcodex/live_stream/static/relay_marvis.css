@@ -14,7 +14,7 @@ body[data-marvis-relay-view] {
   --marvis-s25-phone-width: 430px;
   --marvis-s25-page-bg: #f3f3f3;
   --marvis-s25-topbar-pad-top: 28px;
-  --marvis-s25-topbar-pad-x: 26px;
+  --marvis-s25-topbar-pad-x: 24px;
   --marvis-s25-topbar-pad-bottom: 12px;
   --marvis-s25-topbar-menu-col: 42px;
   --marvis-s25-topbar-gap: 8px;
@@ -25,15 +25,15 @@ body[data-marvis-relay-view] {
   --marvis-s25-title-size: 22px;
   --marvis-s25-device-size: 13px;
   --marvis-s25-device-dot: 7px;
-  --marvis-s25-top-icon-box: 32px;
-  --marvis-s25-top-icon-gap: 17px;
-  --marvis-s25-top-icon-stroke: 2.35px;
-  --marvis-s25-devices-icon-width: 30px;
-  --marvis-s25-devices-icon-height: 27px;
-  --marvis-s25-devices-screen-width: 22px;
-  --marvis-s25-devices-screen-height: 17px;
-  --marvis-s25-devices-phone-width: 11px;
-  --marvis-s25-devices-phone-height: 18px;
+  --marvis-s25-top-icon-box: 30px;
+  --marvis-s25-top-icon-gap: 16px;
+  --marvis-s25-top-icon-stroke: 2.1px;
+  --marvis-s25-devices-icon-width: 29px;
+  --marvis-s25-devices-icon-height: 25px;
+  --marvis-s25-devices-screen-width: 21px;
+  --marvis-s25-devices-screen-height: 15px;
+  --marvis-s25-devices-phone-width: 10px;
+  --marvis-s25-devices-phone-height: 17px;
   --marvis-s25-list-line-height: 2px;
   --marvis-s25-task-main-top: 126px;
   --marvis-s25-task-main-x: 20px;
@@ -63,6 +63,7 @@ body[data-marvis-relay-view] {
   --marvis-s25-bottom-nav-height: 78px;
   --marvis-s25-bottom-nav-icon: 24px;
   --marvis-s25-bottom-nav-text: 12px;
+  --marvis-s25-bottom-nav-item-gap: 1px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-phone {
@@ -233,7 +234,7 @@ body[data-marvis-relay-view] .marvis-relay-icon-devices::before {
   content: "";
   position: absolute;
   right: 0;
-  top: 3px;
+  top: 2px;
   width: var(--marvis-s25-devices-screen-width);
   height: var(--marvis-s25-devices-screen-height);
   border: var(--marvis-s25-top-icon-stroke) solid #111;
@@ -244,7 +245,7 @@ body[data-marvis-relay-view] .marvis-relay-icon-devices::after {
   content: "";
   position: absolute;
   left: 0;
-  top: 8px;
+  top: 7px;
   width: var(--marvis-s25-devices-phone-width);
   height: var(--marvis-s25-devices-phone-height);
   border: var(--marvis-s25-top-icon-stroke) solid #111;
@@ -253,10 +254,10 @@ body[data-marvis-relay-view] .marvis-relay-icon-devices::after {
 }
 
 body[data-marvis-relay-view] .marvis-relay-icon-list {
-  width: 26px;
-  height: 26px;
+  width: 27px;
+  height: 25px;
   border: var(--marvis-s25-top-icon-stroke) solid #111;
-  border-radius: 6px;
+  border-radius: 7px;
   box-sizing: border-box;
 }
 
@@ -731,6 +732,115 @@ body[data-marvis-relay-view] .marvis-relay-composer {
   box-shadow: 0 -2px 18px rgba(0, 0, 0, .03);
 }
 
+body[data-marvis-relay-view] .marvis-relay-composer-attachments {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: calc(100% + 8px);
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding: 2px 0;
+  scrollbar-width: none;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-attachments[hidden] {
+  display: none;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-attachments::-webkit-scrollbar {
+  display: none;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-attachment,
+body[data-marvis-relay-view] .marvis-relay-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 168px;
+  min-height: 30px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 15px;
+  background: rgba(255,255,255,.92);
+  color: #111;
+  padding: 0 9px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 1px 5px rgba(0,0,0,.06);
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-attachment span:nth-child(2),
+body[data-marvis-relay-view] .marvis-relay-attachment-chip span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-attachment b {
+  font-size: 14px;
+  font-weight: 400;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-attachment.is-error {
+  color: #b42318;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-list {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+  max-width: 76%;
+  margin: 7px 0 0 auto;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-icon {
+  position: relative;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-chip-image .marvis-relay-attachment-icon,
+body[data-marvis-relay-view] .marvis-relay-composer-attachment.is-image .marvis-relay-attachment-icon {
+  border: 1.8px solid #111;
+  border-radius: 2px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-chip-image .marvis-relay-attachment-icon::before,
+body[data-marvis-relay-view] .marvis-relay-composer-attachment.is-image .marvis-relay-attachment-icon::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  bottom: 3px;
+  width: 8px;
+  height: 6px;
+  border-left: 1.8px solid #111;
+  border-bottom: 1.8px solid #111;
+  transform: rotate(45deg);
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-chip-file .marvis-relay-attachment-icon,
+body[data-marvis-relay-view] .marvis-relay-composer-attachment.is-file .marvis-relay-attachment-icon {
+  border: 1.8px solid #111;
+  border-radius: 2px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-chip-file .marvis-relay-attachment-icon::before,
+body[data-marvis-relay-view] .marvis-relay-composer-attachment.is-file .marvis-relay-attachment-icon::before {
+  content: "";
+  position: absolute;
+  top: -1.8px;
+  right: -1.8px;
+  width: 6px;
+  height: 6px;
+  border-left: 1.8px solid #111;
+  border-bottom: 1.8px solid #111;
+  background: #fff;
+}
+
 body[data-marvis-relay-view] .marvis-relay-workspace-dock {
   display: none;
 }
@@ -892,9 +1002,11 @@ body[data-marvis-relay-view] .marvis-relay-bottom-nav {
 body[data-marvis-relay-view] .marvis-relay-nav-item {
   display: grid;
   place-items: center;
-  gap: 4px;
+  grid-template-rows: 30px 18px;
+  align-content: center;
+  gap: var(--marvis-s25-bottom-nav-item-gap);
   min-height: var(--marvis-s25-bottom-nav-height);
-  padding: 11px 0 9px;
+  padding: 8px 0 7px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -944,6 +1056,219 @@ body[data-marvis-relay-view] .marvis-relay-nav-icon {
 body[data-marvis-relay-view] .marvis-relay-nav-icon svg {
   width: var(--marvis-s25-bottom-nav-icon);
   height: var(--marvis-s25-bottom-nav-icon);
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 21;
+  background: rgba(0, 0, 0, .34);
+  opacity: 0;
+  transition: opacity .2s ease;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-backdrop.visible {
+  opacity: 1;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-sheet {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  z-index: 22;
+  width: min(var(--marvis-s25-phone-width), 100%);
+  min-height: 392px;
+  box-sizing: border-box;
+  transform: translate(-50%, 105%);
+  border-radius: 20px 20px 0 0;
+  background: #fff;
+  padding: 23px 20px 42px;
+  transition: transform .22s ease;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-sheet.open {
+  transform: translate(-50%, 0);
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-sheet h2 {
+  margin: 0 42px 24px;
+  color: #111;
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 800;
+  text-align: center;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-close {
+  position: absolute;
+  right: 22px;
+  top: 22px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: #111;
+  padding: 0;
+  font-size: 28px;
+  line-height: 1;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-attachment-tile {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 13px;
+  min-height: 102px;
+  border: 0;
+  border-radius: 10px;
+  background: #f5f5f5;
+  color: #111;
+  padding: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+body[data-marvis-relay-view] .marvis-relay-skill-section {
+  display: grid;
+  gap: 26px;
+  margin-top: 26px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-skill-section p {
+  margin: 0;
+  color: #9b9b9b;
+  font-size: 16px;
+  line-height: 1;
+}
+
+body[data-marvis-relay-view] .marvis-relay-skill-row {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 14px;
+  min-height: 70px;
+  border: 0;
+  background: transparent;
+  color: #111;
+  padding: 0;
+  text-align: left;
+}
+
+body[data-marvis-relay-view] .marvis-relay-skill-row > .marvis-relay-sheet-icon {
+  width: 70px;
+  height: 70px;
+  border-radius: 13px;
+  background: #f5f5f5;
+}
+
+body[data-marvis-relay-view] .marvis-relay-skill-text {
+  display: grid;
+  gap: 7px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-skill-text strong {
+  font-size: 18px;
+  line-height: 1;
+}
+
+body[data-marvis-relay-view] .marvis-relay-skill-text small {
+  color: #9b9b9b;
+  font-size: 13px;
+  line-height: 1;
+}
+
+body[data-marvis-relay-view] .marvis-relay-skill-chevron {
+  color: #111;
+  font-size: 26px;
+  line-height: 1;
+}
+
+body[data-marvis-relay-view] .marvis-relay-sheet-icon {
+  position: relative;
+  display: block;
+  width: 28px;
+  height: 28px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-image {
+  border: 2px solid #111;
+  border-radius: 2px;
+  box-sizing: border-box;
+}
+
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-image::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 5px;
+  width: 5px;
+  height: 5px;
+  border: 2px solid #111;
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-image::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  bottom: 5px;
+  width: 16px;
+  height: 11px;
+  border-left: 2px solid #111;
+  border-bottom: 2px solid #111;
+  transform: rotate(45deg);
+}
+
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-file {
+  border: 2px solid #111;
+  border-radius: 3px;
+  box-sizing: border-box;
+}
+
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-file::before {
+  content: "";
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 9px;
+  height: 9px;
+  border-left: 2px solid #111;
+  border-bottom: 2px solid #111;
+  background: #f5f5f5;
+}
+
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-file::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  bottom: 6px;
+  width: 8px;
+  height: 8px;
+  border-left: 2px solid #111;
+  border-top: 2px solid #111;
+  transform: rotate(45deg);
+}
+
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-skills::before,
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-skills::after {
+  content: "";
+  position: absolute;
+  inset: 18px;
+  background:
+    linear-gradient(#111 0 0) 0 0 / 16px 16px no-repeat,
+    linear-gradient(#111 0 0) 22px 0 / 16px 16px no-repeat,
+    linear-gradient(#111 0 0) 0 22px / 16px 16px no-repeat,
+    linear-gradient(#111 0 0) 22px 22px / 16px 16px no-repeat;
+  border-radius: 4px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-backdrop {

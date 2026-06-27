@@ -63,6 +63,130 @@ _HIGH_RISK_INTENT_KEYWORDS = (
     "remove",
     "rm ",
 )
+_RELAY_MAX_TEXT_ATTACHMENTS = 5
+_RELAY_MAX_TEXT_ATTACHMENT_CHARS = 80_000
+_RELAY_MAX_TOTAL_TEXT_ATTACHMENT_CHARS = 180_000
+
+
+def _relay_clean_image_attachments(
+    images: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    if not images:
+        return cleaned
+    for raw in list(images)[:8]:
+        if not isinstance(raw, dict):
+            continue
+        url = raw.get("url") or raw.get("data_url")
+        if not isinstance(url, str) or not url.startswith("data:image/") or "," not in url:
+            continue
+        item = {"url": url}
+        filename = raw.get("filename")
+        if isinstance(filename, str) and filename.strip():
+            item["filename"] = filename.strip()[:160]
+        mime_type = raw.get("mime_type") or raw.get("mimeType")
+        if isinstance(mime_type, str) and mime_type.startswith("image/"):
+            item["mime_type"] = mime_type[:80]
+        cleaned.append(item)
+    return cleaned
+
+
+def _relay_clean_text_file_attachments(
+    files: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    if not files:
+        return cleaned
+    used_chars = 0
+    for raw in list(files)[:_RELAY_MAX_TEXT_ATTACHMENTS]:
+        if not isinstance(raw, dict):
+            continue
+        text = raw.get("text")
+        if not isinstance(text, str):
+            continue
+        remaining = _RELAY_MAX_TOTAL_TEXT_ATTACHMENT_CHARS - used_chars
+        if remaining <= 0:
+            break
+        clipped = text[: min(_RELAY_MAX_TEXT_ATTACHMENT_CHARS, remaining)]
+        used_chars += len(clipped)
+        filename = raw.get("filename")
+        clean: dict[str, Any] = {
+            "filename": (
+                filename.strip()[:160]
+                if isinstance(filename, str) and filename.strip()
+                else "attachment.txt"
+            ),
+            "text": clipped,
+        }
+        mime_type = raw.get("mime_type") or raw.get("mimeType")
+        if isinstance(mime_type, str) and mime_type.strip():
+            clean["mime_type"] = mime_type.strip()[:120]
+        size = raw.get("size")
+        if isinstance(size, int) and size >= 0:
+            clean["size"] = size
+        cleaned.append(clean)
+    return cleaned
+
+
+def _relay_attachment_prompt_suffix(
+    *,
+    images: list[dict[str, Any]],
+    files: list[dict[str, Any]],
+) -> str:
+    parts: list[str] = []
+    if images:
+        parts.append("用户附带图片：")
+        for index, image in enumerate(images, start=1):
+            filename = str(image.get("filename") or f"image-{index}")
+            mime_type = str(image.get("mime_type") or "image")
+            parts.append(f"- {filename} ({mime_type})")
+    if files:
+        parts.append("用户附带文本文件：")
+        for file in files:
+            filename = str(file.get("filename") or "attachment.txt")
+            mime_type = str(file.get("mime_type") or "text/plain")
+            parts.append(f"- {filename} ({mime_type})")
+            parts.append(str(file.get("text") or ""))
+    return "\n".join(parts).strip()
+
+
+def _relay_user_input_with_attachments(
+    text: str,
+    *,
+    images: list[dict[str, Any]],
+    files: list[dict[str, Any]],
+) -> str:
+    base = str(text or "").strip()
+    suffix = _relay_attachment_prompt_suffix(images=images, files=files)
+    if base and suffix:
+        return f"{base}\n\n{suffix}"
+    return base or suffix
+
+
+def _relay_attachment_payload(
+    *,
+    images: list[dict[str, Any]],
+    files: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if images:
+        payload["images"] = images
+    if files:
+        payload["files"] = files
+    return payload
+
+
+def _relay_images_for_role(artifacts: list[dict[str, Any]], role: str) -> list[dict[str, Any]]:
+    if role != "director":
+        return []
+    for artifact in reversed(artifacts):
+        artifact_type = str(artifact.get("artifact_type") or "")
+        if artifact_type not in {"user_followup", "user_attachments"}:
+            continue
+        images = _relay_clean_image_attachments(artifact.get("images"))
+        if images:
+            return images
+    return []
 
 
 class RelayNativeRunWatchdog:
@@ -154,7 +278,11 @@ class RelayService:
         workspace: str,
         provider: str = "",
         role_providers: dict[str, str] | None = None,
+        images: list[dict[str, Any]] | None = None,
+        files: list[dict[str, Any]] | None = None,
     ) -> RelayTask:
+        clean_images = _relay_clean_image_attachments(images)
+        clean_files = _relay_clean_text_file_attachments(files)
         base_provider = provider or self._default_provider
         assignments = (
             self._normalize_assignments(role_providers)
@@ -168,6 +296,45 @@ class RelayService:
             provider=base_provider,
             role_providers=assignments,
         )
+        if clean_images or clean_files:
+            self._store.save_artifact(
+                task.id,
+                "director",
+                "user_attachments",
+                {
+                    "source": "initial_task",
+                    "text": prompt,
+                    **_relay_attachment_payload(images=clean_images, files=clean_files),
+                },
+                summary=", ".join(
+                    [
+                        *[
+                            str(image.get("filename") or "image")
+                            for image in clean_images
+                        ],
+                        *[
+                            str(file.get("filename") or "file")
+                            for file in clean_files
+                        ],
+                    ]
+                )
+                or "用户附件",
+            )
+            detail = self._store.get_task_detail(task.id)
+            self._store.save_artifact(
+                task.id,
+                "director",
+                "relay_board",
+                {
+                    **detail.board.to_json_dict(),
+                    "latest_user_input": _relay_user_input_with_attachments(
+                        prompt,
+                        images=clean_images,
+                        files=clean_files,
+                    ),
+                },
+                summary="RelayBoard initialized with attachments",
+            )
         director_job = next(job for job in self._store.get_task_detail(task.id).role_jobs if job.role == "director")
         self._events.emit(task.id, "task.created", payload={"title": title})
         self._events.emit(
@@ -330,10 +497,13 @@ class RelayService:
             artifacts=detail.artifacts,
         )
         context_record = self._store.save_context_packet(task_id, role, packet)
+        images = _relay_images_for_role(detail.artifacts, role)
+        provider_kwargs = {"images": images} if images else {}
         try:
             result = await provider.start_session(
                 detail.task.workspace,
                 context_record.prompt_text,
+                **provider_kwargs,
             )
         except Exception as exc:
             await self._mark_role_fallback(
@@ -1091,8 +1261,22 @@ class RelayService:
             self._handled_runtime_completion_ids.add(runtime_event_id)
         return await self.handle_role_output(task_id, role, output)
 
-    async def add_user_message(self, task_id: int, text: str) -> None:
+    async def add_user_message(
+        self,
+        task_id: int,
+        text: str,
+        *,
+        images: list[dict[str, Any]] | None = None,
+        files: list[dict[str, Any]] | None = None,
+    ) -> None:
         detail = self._store.get_task_detail(task_id)
+        clean_images = _relay_clean_image_attachments(images)
+        clean_files = _relay_clean_text_file_attachments(files)
+        prompt_text = _relay_user_input_with_attachments(
+            text,
+            images=clean_images,
+            files=clean_files,
+        )
         board = detail.board
         self._store.save_artifact(
             task_id,
@@ -1100,7 +1284,7 @@ class RelayService:
             "relay_board",
             {
                 **board.to_json_dict(),
-                "latest_user_input": text,
+                "latest_user_input": prompt_text,
                 "current_dispatch": "director",
                 "next_step": "director review latest user input",
             },
@@ -1130,6 +1314,7 @@ class RelayService:
                 "text": text,
                 "target_role": "director",
                 "context_packet_id": int(getattr(context_record, "id", 0) or 0),
+                **_relay_attachment_payload(images=clean_images, files=clean_files),
             },
             summary=text,
         )
@@ -1141,6 +1326,7 @@ class RelayService:
                 "role": "user",
                 "text": text,
                 "target_role": "director",
+                **_relay_attachment_payload(images=clean_images, files=clean_files),
                 "artifact_id": int(getattr(followup, "id", 0) or 0),
                 "context_packet_id": int(getattr(context_record, "id", 0) or 0),
             },
@@ -1149,7 +1335,7 @@ class RelayService:
             task_id,
             "role.queued",
             role="director",
-            payload={"latest_user_input": text},
+            payload={"latest_user_input": prompt_text},
         )
         director = next(
             (job for job in detail.role_jobs if job.role == "director"),
@@ -1165,6 +1351,7 @@ class RelayService:
             can_steer = bool(getattr(capabilities, "can_steer_active_turn", False))
             active_turn_id = director.active_turn_id or director.turn_id
             can_continue = bool(getattr(capabilities, "can_continue_session", False))
+            provider_kwargs = {"images": clean_images} if clean_images else {}
             if (can_steer and director.turn_running and active_turn_id) or can_continue:
                 try:
                     if can_steer and director.turn_running and active_turn_id:
@@ -1172,11 +1359,13 @@ class RelayService:
                             director.native_session_id,
                             active_turn_id,
                             context_record.prompt_text,
+                            **provider_kwargs,
                         )
                     else:
                         result = await provider.continue_session(
                             director.native_session_id,
                             context_record.prompt_text,
+                            **provider_kwargs,
                         )
                 except Exception as exc:
                     self._events.emit(

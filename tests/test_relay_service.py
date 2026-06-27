@@ -1010,6 +1010,53 @@ def test_user_followup_routes_to_director_only(tmp_path) -> None:
     assert "Build it" in provider.calls[1][2]
 
 
+def test_user_followup_persists_and_forwards_attachments(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+
+    asyncio.run(
+        service.add_user_message(
+            task.id,
+            "看附件处理",
+            images=[
+                {
+                    "filename": "screen.png",
+                    "mime_type": "image/png",
+                    "url": "data:image/png;base64,aGVsbG8=",
+                }
+            ],
+            files=[
+                {
+                    "filename": "trace.log",
+                    "mime_type": "text/plain",
+                    "text": "first line\nsecond line",
+                    "size": 22,
+                }
+            ],
+        )
+    )
+
+    assert provider.calls[1][0] == "continue_session"
+    assert "看附件处理" in provider.calls[1][2]
+    assert "trace.log" in provider.calls[1][2]
+    assert "first line" in provider.calls[1][2]
+    assert provider.calls[1][3]["images"][0]["filename"] == "screen.png"
+    detail = service.get_task(task.id)
+    followup = next(
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "user_followup"
+    )
+    assert followup["images"][0]["filename"] == "screen.png"
+    assert followup["files"][0]["filename"] == "trace.log"
+
+
 def test_user_followup_moves_waiting_task_back_to_running(tmp_path) -> None:
     service, _provider = _service(tmp_path)
     task = service.create_task(
