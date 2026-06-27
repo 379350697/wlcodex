@@ -20,7 +20,7 @@ body[data-marvis-relay-view] .marvis-relay-phone {
   margin: 0 auto;
   background: #f3f3f3 !important;
   color-scheme: light only;
-  overflow: hidden;
+  overflow: clip;
 }
 
 body[data-marvis-relay-view] .marvis-relay-phone::after {
@@ -631,7 +631,7 @@ body[data-marvis-relay-view] .marvis-relay-composer {
   border: 1px solid #dfdfdf;
   border-radius: 30px;
   background: rgba(255, 255, 255, .94);
-  padding: 0 10px;
+  padding: 8px 9px;
   box-shadow: 0 -2px 18px rgba(0, 0, 0, .03);
 }
 
@@ -714,17 +714,22 @@ body[data-marvis-relay-view] .marvis-relay-workspace-action {
 
 body[data-marvis-relay-view] .marvis-relay-composer input,
 body[data-marvis-relay-view] .marvis-relay-composer textarea {
+  display: block;
   width: 100%;
-  min-height: 38px;
+  height: 42px;
+  min-height: 42px;
   max-height: 84px;
+  box-sizing: border-box;
   border: 0;
   outline: 0;
   resize: none;
   background: transparent;
   color: #111;
+  padding: 9px 0;
   font: inherit;
   font-size: 18px;
-  line-height: 1.35;
+  line-height: 24px;
+  overflow-y: auto;
 }
 
 body[data-marvis-relay-view] .marvis-relay-composer input::placeholder,
@@ -733,38 +738,54 @@ body[data-marvis-relay-view] .marvis-relay-composer textarea::placeholder {
 }
 
 body[data-marvis-relay-view] .marvis-relay-plus,
-body[data-marvis-relay-view] .marvis-relay-mic {
+body[data-marvis-relay-view] .marvis-relay-submit {
   position: relative;
+  display: grid;
+  place-items: center;
   width: 42px;
   height: 42px;
   border: 0;
   background: transparent;
   color: #111;
-  font-size: 40px;
+  padding: 0;
+  font-size: 34px;
   line-height: 1;
 }
 
-body[data-marvis-relay-view] .marvis-relay-mic::before {
-  content: "";
-  position: absolute;
-  left: 15px;
-  top: 7px;
-  width: 11px;
-  height: 20px;
-  border: 4px solid #111;
-  border-radius: 11px;
+body[data-marvis-relay-view] .marvis-relay-plus {
+  font-family: Arial, Helvetica, sans-serif;
+  font-weight: 300;
+  line-height: 42px;
 }
 
-body[data-marvis-relay-view] .marvis-relay-mic::after {
-  content: "";
-  position: absolute;
-  left: 20px;
-  top: 31px;
-  width: 3px;
-  height: 8px;
-  border-radius: 2px;
+body[data-marvis-relay-view] .marvis-relay-submit {
+  border-radius: 50%;
   background: #111;
-  box-shadow: -8px -8px 0 -5px #111, 8px -8px 0 -5px #111;
+  color: #fff;
+  transition: transform 150ms ease, opacity 150ms ease;
+}
+
+body[data-marvis-relay-view] .marvis-relay-submit:active {
+  transform: scale(.96);
+}
+
+body[data-marvis-relay-view] .marvis-relay-submit svg {
+  width: 24px;
+  height: 24px;
+  stroke-width: 2.4;
+}
+
+body[data-marvis-relay-view] .marvis-relay-submit-stop {
+  display: none;
+}
+
+body[data-marvis-relay-view] .marvis-relay-submit.is-stop .marvis-relay-submit-arrow {
+  display: none;
+}
+
+body[data-marvis-relay-view] .marvis-relay-submit.is-stop .marvis-relay-submit-stop {
+  display: grid;
+  place-items: center;
 }
 
 body[data-marvis-relay-view] .marvis-relay-bottom-nav {
@@ -775,25 +796,32 @@ body[data-marvis-relay-view] .marvis-relay-bottom-nav {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   width: min(430px, 100%);
-  height: 76px;
+  min-height: 72px;
+  padding: 0 0 env(safe-area-inset-bottom);
   transform: translateX(-50%);
-  background: #f3f3f3;
+  background: #fff;
+  border-top: 1px solid #edebe8;
+  box-shadow: 0 -2px 10px rgba(0,0,0,.03);
 }
 
 body[data-marvis-relay-view] .marvis-relay-nav-item {
   display: grid;
-  justify-items: center;
-  align-content: center;
-  gap: 5px;
+  place-items: center;
+  gap: 4px;
+  min-height: 72px;
+  padding: 10px 0 8px;
   border: 0;
+  border-radius: 0;
   background: transparent;
-  color: #999;
-  font-size: 14px;
+  color: #a09b95;
+  font-size: 11px;
+  font-weight: 500;
   text-decoration: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 body[data-marvis-relay-view] .marvis-relay-nav-item.active {
-  color: #111;
+  color: #1a1a1a;
 }
 
 body[data-marvis-relay-view="chat"] .marvis-relay-chat-home {
@@ -822,77 +850,15 @@ body[data-marvis-relay-view="chat"] .marvis-relay-chat-home h2 {
 }
 
 body[data-marvis-relay-view] .marvis-relay-nav-icon {
-  position: relative;
-  display: block;
-  width: 29px;
-  height: 27px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
 }
 
-body[data-marvis-relay-view] .marvis-relay-nav-icon-chat {
-  border-radius: 7px;
-  background: currentColor;
-}
-
-body[data-marvis-relay-view] .marvis-relay-nav-icon-chat::after {
-  content: "";
-  position: absolute;
-  left: 3px;
-  bottom: -4px;
-  border-width: 7px 7px 0 0;
-  border-style: solid;
-  border-color: currentColor transparent transparent transparent;
-}
-
-body[data-marvis-relay-view] .marvis-relay-nav-icon-clock {
-  border: 5px solid currentColor;
-  border-radius: 50%;
-  box-sizing: border-box;
-}
-
-body[data-marvis-relay-view] .marvis-relay-nav-icon-clock::before {
-  content: "";
-  position: absolute;
-  left: 12px;
-  top: 4px;
-  width: 4px;
-  height: 10px;
-  background: currentColor;
-  transform-origin: bottom;
-  transform: rotate(25deg);
-}
-
-body[data-marvis-relay-view] .marvis-relay-nav-icon-tool::before {
-  content: "";
-  position: absolute;
-  left: 8px;
-  top: 0;
-  width: 11px;
-  height: 27px;
-  border-radius: 6px;
-  background: currentColor;
-  transform: rotate(45deg);
-}
-
-body[data-marvis-relay-view] .marvis-relay-nav-icon-person::before {
-  content: "";
-  position: absolute;
-  left: 8px;
-  top: 0;
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-body[data-marvis-relay-view] .marvis-relay-nav-icon-person::after {
-  content: "";
-  position: absolute;
-  left: 3px;
-  bottom: 0;
-  width: 23px;
-  height: 15px;
-  border-radius: 14px 14px 5px 5px;
-  background: currentColor;
+body[data-marvis-relay-view] .marvis-relay-nav-icon svg {
+  width: 24px;
+  height: 24px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-backdrop {

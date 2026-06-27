@@ -37,6 +37,12 @@ _ARTIFACT_TYPE_ALIASES = {
     "implementation": "implementation_report",
     "implementation_patch": "implementation_report",
 }
+_ROLE_OUTPUT_ARTIFACT_TYPES = {
+    "architect": "architecture_plan",
+    "implementer": "implementation_report",
+    "tester": "test_report",
+    "auditor": "audit_report",
+}
 
 
 def default_handoff_target(role: str) -> str | None:
@@ -118,6 +124,12 @@ def _normalize_role_envelope_payload(payload: dict[str, Any]) -> dict[str, Any]:
     alias = _ARTIFACT_TYPE_ALIASES.get(artifact_type)
     if alias:
         normalized["artifact_type"] = alias
+    elif artifact_type == "relay artifact type":
+        role_artifact_type = _ROLE_OUTPUT_ARTIFACT_TYPES.get(
+            str(normalized.get("role") or "").strip()
+        )
+        if role_artifact_type:
+            normalized["artifact_type"] = role_artifact_type
     return normalized
 
 

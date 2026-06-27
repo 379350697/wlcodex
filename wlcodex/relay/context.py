@@ -30,6 +30,12 @@ _DIRECTOR_FINAL_SUMMARY_CONSTRAINTS = [
     "Do not invent task-specific artifact_type values such as weather_answer, code_answer, or analysis_answer.",
     "Use final_summary.summary for the user-facing answer or closure summary.",
 ]
+_ROLE_OUTPUT_ARTIFACT_TYPES = {
+    "architect": "architecture_plan",
+    "implementer": "implementation_report",
+    "tester": "test_report",
+    "auditor": "audit_report",
+}
 
 
 def build_relay_board(
@@ -111,7 +117,7 @@ def _default_expected_output_envelope(role: str) -> dict[str, Any]:
         "status": "passed|failed|blocked|waiting",
         "reason": "brief reason",
         "role": role,
-        "artifact_type": "relay artifact type",
+        "artifact_type": _ROLE_OUTPUT_ARTIFACT_TYPES.get(role, "final_summary"),
         "handoff_to": "next role or empty string",
         "summary": "compact result summary",
         "evidence_refs": [],

@@ -122,3 +122,54 @@ def test_director_after_routing_decision_requires_final_summary() -> None:
     assert "Do not invent task-specific artifact_type values" in constraints
     assert packet.expected_output_envelope["artifact_type"] == "final_summary"
     assert packet.expected_output_envelope["handoff_to"] == ""
+
+
+def test_worker_context_uses_concrete_role_artifact_type() -> None:
+    board = build_relay_board(
+        _task(),
+        latest_user_input="修复聊天页输入框。",
+        handoffs=[
+            HandoffPacket(
+                from_role="director",
+                to_role="implementer",
+                summary="请开发工程师实现修复。",
+                confirmed_facts=[],
+                open_questions=[],
+                evidence_refs=[],
+                next_action="implement",
+            )
+        ],
+    )
+
+    implementer_packet = build_role_context_packet(
+        task=_task(),
+        role="implementer",
+        board=board,
+        handoffs=[],
+        artifacts=[
+            {
+                "artifact_type": "routing_decision",
+                "relay_role": "director",
+                "summary": "进入开发。",
+            }
+        ],
+    )
+    auditor_packet = build_role_context_packet(
+        task=_task(),
+        role="auditor",
+        board=board,
+        handoffs=[],
+        artifacts=[
+            {
+                "artifact_type": "implementation_report",
+                "relay_role": "implementer",
+                "summary": "已实现。",
+            }
+        ],
+    )
+
+    assert implementer_packet.expected_output_envelope["artifact_type"] == (
+        "implementation_report"
+    )
+    assert auditor_packet.expected_output_envelope["artifact_type"] == "audit_report"
+    assert "relay artifact type" not in str(implementer_packet.to_json_dict())

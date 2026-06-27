@@ -622,6 +622,7 @@ class RelayService:
                 to_role=next_role,
                 packet=handoff,
             )
+            self._store.update_task_status(task_id, "running")
             self._store.update_role_status(task_id, next_role, "queued")
             self._events.emit(
                 task_id,
@@ -1781,6 +1782,15 @@ class RelayService:
                 for event in events
                 if _runtime_event_matches_turn(event, current_turn_id)
             ]
+        if current_turn_id and not events:
+            tail_events = runtime_store.list_by_agent_run_tail(agent_run_id, limit=5000)
+            current_turn_events = [
+                event
+                for event in tail_events
+                if _runtime_event_matches_turn(event, current_turn_id)
+            ]
+            if any(_is_runtime_completion_event(event) for event in current_turn_events):
+                events = current_turn_events
         completed = _completed_role_envelope_event(events)
         if completed is not None:
             await self.handle_role_completion_event(
@@ -2260,6 +2270,14 @@ def _is_runtime_model_message_completed(runtime_event: Any) -> bool:
     }
 
 
+def _is_runtime_completion_event(runtime_event: Any) -> bool:
+    return (
+        _is_runtime_model_message_completed(runtime_event)
+        or _is_turn_completed_activity(runtime_event)
+        or _is_agent_run_completed_event(runtime_event)
+    )
+
+
 def _completed_role_envelope_event(events: list[Any]) -> Any | None:
     for event in reversed(events):
         if not _is_runtime_model_message_completed(event):
@@ -2389,11 +2407,66 @@ def _plain_followup_visible_text(text: str) -> str:
         extracted = _extract_protocol_field_value(fused, "reason")
         if extracted:
             return extracted
+    prefix_text = _readable_text_before_protocol_payload(value)
+    if prefix_text:
+        return prefix_text
     for field in ("summary", "reason"):
         extracted = _extract_protocol_field_value(value, field)
         if extracted:
             return extracted
     return value
+
+
+def _readable_text_before_protocol_payload(text: str) -> str:
+    protocol_index = text.find('{"artifact_type"')
+    if protocol_index <= 0:
+        protocol_index = text.find('{"role_envelope"')
+    if protocol_index <= 0:
+        return ""
+    prefix = text[:protocol_index].strip()
+    if len(prefix) < 12 or not re.search(r"[\u4e00-\u9fff]", prefix):
+        return ""
+    result_tail = _readable_result_tail(prefix)
+    if result_tail:
+        return result_tail
+    sentences = re.findall(r"[^。！？!?]+[。！？!?]", prefix)
+    if sentences:
+        return sentences[-1].strip()
+    return prefix
+
+
+def _readable_result_tail(text: str) -> str:
+    css_result_index = text.rfind("CSS 已经")
+    if css_result_index >= 0:
+        return text[css_result_index:].strip()
+    markers = (
+        "验证通过",
+        "编译确认",
+        "已修复",
+        "已完成",
+        "已更新",
+        "已收口",
+        "已经收口",
+        "完成",
+    )
+    positions = [text.rfind(marker) for marker in markers]
+    marker_index = max(positions)
+    if marker_index < 0:
+        return ""
+    start = max(
+        text.rfind("。", 0, marker_index),
+        text.rfind("！", 0, marker_index),
+        text.rfind("？", 0, marker_index),
+        text.rfind("\n", 0, marker_index),
+    )
+    if start >= 0:
+        start += 1
+    else:
+        start = marker_index
+        css_index = text.rfind("CSS ", 0, marker_index + 8)
+        if css_index >= 0:
+            start = css_index
+    return text[start:].strip()
 
 
 def _extract_protocol_field_value(text: str, field: str) -> str:

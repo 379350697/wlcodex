@@ -1360,6 +1360,30 @@ def test_plain_followup_visible_text_extracts_fused_protocol_summary() -> None:
     assert _plain_followup_visible_text(text) == "已修复"
 
 
+def test_plain_followup_visible_text_prefers_readable_text_over_fragmented_summary() -> None:
+    text = (
+        "我会先修输入框对齐，再替换底部导航图标。"
+        "CSS 已经收口，旧伪元素已删除，编译确认通过。"
+        '{"artifact_type":"final_summary","evidence_refs":["python -m py_compile"],'
+        '"handoff_to":"","next_actionopen_questions":[],"reason完成交互本地'
+        'roledirectorstatuspassedsummary区“请输入”椭圆麦克风 风格为空可更新 缓存版本"}'
+    )
+
+    assert _plain_followup_visible_text(text) == "CSS 已经收口，旧伪元素已删除，编译确认通过。"
+
+
+def test_plain_followup_visible_text_uses_result_tail_before_protocol_payload() -> None:
+    text = (
+        "我会先修输入框对齐。"
+        "中间过程文字很多，没有完整断句"
+        "CSS 已经收口形mar-relay-nav-icon-chatclock/tool/person已删编译确认确实提交双数据"
+        '{"artifact_type":"final_summary","evidence_refs":[],'
+        '"reason完成交互本地roledirectorstatuspassedsummary区“请输入”椭圆麦克风"}'
+    )
+
+    assert _plain_followup_visible_text(text).startswith("CSS 已经收口")
+
+
 def test_scan_stale_native_role_does_not_close_pending_followup_from_old_session_read(
     tmp_path,
 ) -> None:
@@ -2285,6 +2309,79 @@ def test_implementer_frontend_patch_envelope_normalizes_to_implementation_report
     assert [call[0] for call in provider.calls] == ["start_session", "start_session"]
 
 
+def test_implementer_placeholder_artifact_type_normalizes_and_dispatches_auditor(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="修复聊天页输入后没有反馈的问题",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "core relay required",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "implementer",
+              "summary": "需要开发工程师修复后交给审核工程师。",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "implementer implement",
+              "complexity": "medium",
+              "risk": "medium",
+              "route": "core_relay",
+              "required_roles": ["director", "implementer", "auditor"],
+              "acceptance_criteria": ["接续对话可见反馈"],
+              "stop_conditions": [],
+              "requires_user_approval": false
+            }
+            """,
+        )
+    )
+    service._store.update_task_status(task.id, "blocked")
+    service._store.update_role_status(task.id, "implementer", "blocked")
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "implementer",
+            """
+            {
+              "status": "passed",
+              "reason": "implemented",
+              "role": "implementer",
+              "artifact_type": "relay artifact type",
+              "handoff_to": "",
+              "summary": "已修复接续对话没有反馈的问题。",
+              "evidence_refs": ["wlcodex/live_stream/server.py"],
+              "open_questions": [],
+              "next_action": "audit"
+            }
+            """,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    implementation = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "implementation_report"
+    ]
+    assert jobs["implementer"].status == "passed"
+    assert jobs["auditor"].status == "streaming"
+    assert detail.task.status == "running"
+    assert implementation[-1]["summary"] == "已修复接续对话没有反馈的问题。"
+    assert [call[0] for call in provider.calls] == ["start_session", "start_session"]
+
+
 def test_codex_native_turn_completed_folds_text_deltas_into_routing_decision(
     tmp_path,
 ) -> None:
@@ -2453,6 +2550,153 @@ def test_codex_native_turn_completed_recovers_core_relay_routing_decision(
         and "已按明确语义恢复路由" in str(artifact.get("summary") or "")
         for artifact in detail.artifacts
     )
+
+
+def test_stale_scan_folds_current_turn_delta_consumed_before_completion(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="修复会话页顶栏滚动问题",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "needs implementation",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "implementer",
+              "summary": "交给开发修复，再交给审核。",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "implementer implement",
+              "complexity": "medium",
+              "risk": "medium",
+              "route": "core_relay",
+              "required_roles": ["director", "implementer", "auditor"],
+              "acceptance_criteria": ["顶栏滚动时保持可见"],
+              "stop_conditions": [],
+              "requires_user_approval": false
+            }
+            """,
+        )
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "implementer",
+            """
+            {
+              "status": "passed",
+              "reason": "implemented",
+              "role": "implementer",
+              "artifact_type": "implementation_report",
+              "handoff_to": "",
+              "summary": "已修复顶栏滚动问题。",
+              "evidence_refs": ["wlcodex/live_stream/static/relay_marvis.css:23"],
+              "open_questions": [],
+              "next_action": "audit"
+            }
+            """,
+        )
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "auditor",
+        provider="codex",
+        provider_engine="app-server",
+        native_session_id="native-auditor",
+        agent_run_id=301,
+        turn_id="turn-audit",
+        active_turn_id="turn-audit",
+        turn_running=True,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "auditor", "streaming")
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    for delta in (
+        '{"artifact_type":"audit_report","evidence_refs":["css:23"],',
+        '"handoff_to":"","next_action":"complete task",',
+        '"open_questions":[],"reason":"审核通过",',
+        '"role":"auditor","status":"passed",',
+        '"summary":"审核通过，可以交付。"}',
+    ):
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.MODEL_TEXT_DELTA,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id="301",
+                correlation_id="corr-301",
+                source=EventSource.CODEX,
+                actor="codex_native",
+                visibility=Visibility.USER,
+                payload={
+                    "delta": delta,
+                    "native_turn_id": "turn-audit",
+                    "source_kind": "codex_native",
+                    "provider": "codex",
+                    "provider_engine": "app-server",
+                },
+                occurred_at=now_iso(),
+                agent_run_id=301,
+            )
+        )
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="301",
+            correlation_id="corr-301",
+            source=EventSource.CODEX,
+            actor="codex_native",
+            visibility=Visibility.USER,
+            payload={
+                "action": "turn_completed",
+                "status": "completed",
+                "native_turn_id": "turn-audit",
+                "turnId": "turn-audit",
+                "source_kind": "codex_native",
+                "provider": "codex",
+                "provider_engine": "app-server",
+            },
+            occurred_at=(datetime.now(timezone.utc) - timedelta(seconds=301)).isoformat(),
+            agent_run_id=301,
+        )
+    )
+
+    changed = asyncio.run(
+        service._complete_stale_native_delta_if_ready(
+            runtime_store,
+            task_id=task.id,
+            role="auditor",
+            agent_run_id=301,
+            after_id=int(completed.id),
+            provider_name="codex",
+            native_session_id="native-auditor",
+            allow_read_session=False,
+            current_turn_id="turn-audit",
+        )
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    audit_reports = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "audit_report"
+    ]
+    assert changed is True
+    assert jobs["auditor"].status == "passed"
+    assert audit_reports[-1]["summary"] == "审核通过，可以交付。"
 
 
 def test_director_final_summary_requires_prior_routing_decision(tmp_path) -> None:

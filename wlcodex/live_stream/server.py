@@ -142,7 +142,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-followup-chat"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-composer-icons"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4103,10 +4103,7 @@ def _marvis_relay_bottom_nav(
     for key, label, icon in items:
         class_name = f"marvis-relay-nav-item{' active' if key == active else ''}"
         current = ' aria-current="page"' if key == active else ""
-        icon_html = (
-            f'<span class="marvis-relay-nav-icon marvis-relay-nav-icon-{escape(icon)}" '
-            'aria-hidden="true"></span>'
-        )
+        icon_html = _marvis_relay_nav_icon_html(icon)
         if key in hrefs:
             rows.append(
                 f"""
@@ -4128,6 +4125,16 @@ def _marvis_relay_bottom_nav(
     return "\n".join(rows)
 
 
+def _marvis_relay_nav_icon_html(icon: str) -> str:
+    icons = {
+        "chat": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+        "clock": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+        "tool": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
+        "person": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+    }
+    return f'<span class="marvis-relay-nav-icon" aria-hidden="true">{icons.get(icon, icons["chat"])}</span>'
+
+
 def _marvis_relay_task_composer(
     *,
     token_suffix: str,
@@ -4146,7 +4153,10 @@ def _marvis_relay_task_composer(
       <input name="title" autocomplete="off" placeholder="{escape(placeholder)}">
       <input type="hidden" name="prompt" value="">
       <input type="hidden" name="workspace" value="{escape(selected_workspace)}">
-      <button class="marvis-relay-mic" type="submit" aria-label="发送任务"></button>
+      <button class="marvis-relay-submit" type="submit" aria-label="发送任务" data-marvis-submit>
+        <span class="marvis-relay-submit-arrow" aria-hidden="true">↑</span>
+        <span class="marvis-relay-submit-stop" aria-hidden="true">■</span>
+      </button>
     </form>
     """
 
@@ -4602,6 +4612,7 @@ def _marvis_relay_followup_composer(
     placeholder: str = "请输入任务",
     workspace: str = "",
     access_token: str = "",
+    task_status: str = "",
 ) -> str:
     workspace_dock = _marvis_relay_workspace_dock(
         workspace,
@@ -4609,10 +4620,13 @@ def _marvis_relay_followup_composer(
     )
     return f"""
     {workspace_dock}
-    <form class="marvis-relay-composer" data-marvis-followup-composer method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
+    <form class="marvis-relay-composer" data-marvis-followup-composer data-task-status-value="{escape(task_status)}" data-interrupt-url="/api/relay/tasks/{task_id}/interrupt" method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
       <button class="marvis-relay-plus" type="button" aria-label="添加">+</button>
       <textarea name="text" placeholder="{escape(placeholder)}" aria-label="继续补充给总工程师"></textarea>
-      <button class="marvis-relay-mic" type="submit" aria-label="发送补充"></button>
+      <button class="marvis-relay-submit" type="submit" aria-label="发送补充" data-marvis-submit>
+        <span class="marvis-relay-submit-arrow" aria-hidden="true">↑</span>
+        <span class="marvis-relay-submit-stop" aria-hidden="true">■</span>
+      </button>
     </form>
     """
 
@@ -5935,6 +5949,7 @@ def _relay_task_detail_page(
         task_id=int(task.id),
         workspace=str(task.workspace or ""),
         access_token=access_token,
+        task_status=str(task.status or ""),
     )
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
@@ -6904,11 +6919,30 @@ def _relay_task_detail_page(
       item.querySelector("span:last-child").textContent = text;
       log.prepend(item);
     }}
+    const followupComposer = document.querySelector("[data-marvis-followup-composer]");
+    const followupTextInput = followupComposer?.querySelector("textarea[name='text']");
+    const followupSubmitButton = followupComposer?.querySelector("[data-marvis-submit]");
+    let relayTaskStatus = followupComposer?.dataset.taskStatusValue || "";
+    function relayTaskIsRunning() {{
+      return ["queued", "running", "streaming"].includes(String(relayTaskStatus || "").trim());
+    }}
+    function relayFollowupHasText() {{
+      return Boolean(String(followupTextInput?.value || "").trim());
+    }}
+    function updateRelayComposerAction() {{
+      if (!followupSubmitButton) return;
+      const showStop = relayTaskIsRunning() && !relayFollowupHasText();
+      followupSubmitButton.classList.toggle("is-stop", showStop);
+      followupSubmitButton.setAttribute("aria-label", showStop ? "中断任务" : "发送补充");
+    }}
     function updateTaskStatus(status) {{
       if (!status) return;
+      relayTaskStatus = String(status || "");
+      if (followupComposer) followupComposer.dataset.taskStatusValue = relayTaskStatus;
       document.querySelectorAll("[data-task-status]").forEach((node) => {{
         node.textContent = TASK_STATUS_LABELS[status] || status;
       }});
+      updateRelayComposerAction();
     }}
     function updateNativeLink(role, provider, nativeSessionId) {{
       const lane = document.querySelector(`[data-role="${{role}}"]`);
@@ -7042,11 +7076,28 @@ def _relay_task_detail_page(
       clearAllRolePreviews();
       appendActivity("任务已中断。");
     }});
-    document.querySelector("[data-marvis-followup-composer]")?.addEventListener("submit", async (event) => {{
+    followupTextInput?.addEventListener("input", updateRelayComposerAction);
+    updateRelayComposerAction();
+    followupComposer?.addEventListener("submit", async (event) => {{
       event.preventDefault();
       const form = event.currentTarget;
       const data = Object.fromEntries(new FormData(form).entries());
-      if (!data.text) return;
+      if (!String(data.text || "").trim()) {{
+        if (!followupSubmitButton?.classList.contains("is-stop")) return;
+        const response = await fetch(`${{form.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{}}),
+        }});
+        if (response.ok) {{
+          updateTaskStatus("interrupted");
+          clearAllRolePreviews();
+          appendActivity("你已中断任务。");
+        }} else {{
+          appendActivity("中断失败，请稍后重试。");
+        }}
+        return;
+      }}
       const localKey = `local-followup:${{Date.now()}}`;
       appendMarvisConversationUser(data.text, localKey, true);
       appendMarvisConversationWaiting();
@@ -7065,6 +7116,7 @@ def _relay_task_detail_page(
         return;
       }}
       form.reset();
+      updateRelayComposerAction();
     }});
     document.querySelector("[data-interrupt-url]")?.addEventListener("click", async (event) => {{
       const target = event.currentTarget;
@@ -7361,6 +7413,21 @@ def _relay_conversation_row_from_artifact(
             "body": _relay_humanize_user_message(text),
             "key": f"relay_board_followup:{artifact_key}",
         }
+    if artifact_type == "handoff_packet":
+        from_role = str(artifact.get("from_role") or artifact.get("relay_role") or "")
+        to_role = str(artifact.get("to_role") or artifact.get("handoff_to") or "")
+        if not from_role or not to_role:
+            return None
+        return {
+            "role": to_role,
+            "kind": "handoff",
+            "speaker": _relay_role_label(from_role),
+            "meta": "",
+            "body": str(artifact.get("summary") or ""),
+            "key": f"handoff:{from_role}:{to_role}:{artifact_key}",
+            "from_role": from_role,
+            "to_role": to_role,
+        }
     if artifact_type in {"role_dispatch_metadata", "role_error"}:
         return None
     if artifact_type == "followup_response":
@@ -7419,23 +7486,67 @@ def _marvis_relay_conversation_html(
         return _marvis_relay_empty_conversation_html()
     html_rows: list[str] = []
     previous_role = ""
+    handoffs_by_role: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        if str(row.get("kind") or "") != "handoff":
+            continue
+        to_role = str(row.get("to_role") or row.get("role") or "")
+        if to_role:
+            handoffs_by_role.setdefault(to_role, []).append(row)
+    rendered_handoffs: set[str] = set()
     for row in rows:
         role = str(row.get("role") or "")
         kind = str(row.get("kind") or "")
+        if kind == "handoff":
+            key = str(row.get("key") or "")
+            if key not in rendered_handoffs:
+                html_rows.append(_marvis_relay_handoff_html(row))
+                rendered_handoffs.add(key)
+            continue
+        if role and kind not in {"user_message", "status"}:
+            for handoff in handoffs_by_role.get(role, []):
+                key = str(handoff.get("key") or "")
+                if key in rendered_handoffs:
+                    continue
+                html_rows.append(_marvis_relay_handoff_html(handoff))
+                rendered_handoffs.add(key)
         if (
             kind == "role_envelope"
             and previous_role == "director"
             and role
             and role != "director"
-        ):
-            _persona, name = _marvis_relay_public_role(role)
-            html_rows.append(
-                f'<div class="marvis-relay-handoff" data-marvis-handoff>Marvis拍了拍 {escape(name)}，说干活吧</div>'
+            and not any(
+                str(handoff.get("key") or "") in rendered_handoffs
+                for handoff in handoffs_by_role.get(role, [])
             )
+        ):
+            synthetic_key = f"synthetic-handoff:{previous_role}:{role}"
+            if synthetic_key not in rendered_handoffs:
+                html_rows.append(
+                    _marvis_relay_handoff_html(
+                        {
+                            "from_role": previous_role,
+                            "to_role": role,
+                            "role": role,
+                            "key": synthetic_key,
+                        }
+                    )
+                )
+                rendered_handoffs.add(synthetic_key)
         html_rows.append(_marvis_relay_message_html(row))
         if kind == "role_envelope":
             previous_role = role
     return "\n".join(html_rows)
+
+
+def _marvis_relay_handoff_html(row: dict[str, str]) -> str:
+    to_role = str(row.get("to_role") or row.get("role") or "")
+    _persona, name = _marvis_relay_public_role(to_role)
+    return (
+        '<div class="marvis-relay-handoff" data-marvis-handoff>'
+        f"Marvis拍了拍 {escape(name)}，说开干吧"
+        "</div>"
+    )
 
 
 def _marvis_relay_empty_conversation_html() -> str:

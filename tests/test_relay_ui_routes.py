@@ -18,6 +18,7 @@ from wlcodex.live_stream.server import (
 )
 from wlcodex.native_agents.models import NativeAgentCapabilities
 from wlcodex.native_agents.provider import NativeAgentRegistry
+from wlcodex.relay.models import HandoffPacket
 from wlcodex.relay.service import RelayService
 from wlcodex.relay.store import RelayStore
 from wlcodex.runtime_event_store import RuntimeEventStore
@@ -436,7 +437,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-followup-chat">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-composer-icons">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
@@ -612,7 +613,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-followup-chat">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-composer-icons">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png?v=20260627-red-director" in response
@@ -965,7 +966,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-followup-chat">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-composer-icons">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
@@ -1029,11 +1030,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "等待总工程师接收并形成决策摘要" not in response
     assert f"/api/relay/tasks/{task.id}/message" in response
     assert 'data-marvis-followup-composer' in response
-    assert (
-        'document.querySelector("[data-marvis-followup-composer]")'
-        '?.addEventListener("submit"'
-        in response
-    )
+    assert 'followupComposer?.addEventListener("submit"' in response
     assert 'document.querySelector(".relay-composer")?.addEventListener("submit"' not in response
     assert "relay-board-grid" not in response.split("<script", 1)[0]
     assert "relay-progress" not in response.split("<script", 1)[0]
@@ -1467,7 +1464,115 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
     assert 'data-marvis-work-log-role="implementer"' in work_log_html
     assert "12K" in work_log_html
     assert "list windows 已完成" in work_log_html
-    assert "marvis-work-log-tool-chip" in work_log_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_projects_saved_handoff_when_native_rows_are_earlier(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Marvis handoff task",
+        prompt="修复聊天页输入没有反馈。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-handoff",
+        agent_run_id=801,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_role_metadata(
+        task.id,
+        "implementer",
+        provider="claude",
+        model="sonnet",
+        native_session_id="native-implementer-handoff",
+        agent_run_id=802,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "implementer", "passed")
+    service._store.save_handoff_packet(
+        task.id,
+        from_role="director",
+        to_role="implementer",
+        packet=HandoffPacket(
+            from_role="director",
+            to_role="implementer",
+            summary="需要开发工程师修复输入反馈。",
+            confirmed_facts=[],
+            open_questions=[],
+            evidence_refs=[],
+            next_action="implement",
+        ),
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "relay_role": "director",
+            "status": "passed",
+            "reason": "needs implementation",
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "summary": "收到，交给开发工程师处理。",
+            "route": "core_relay",
+            "required_roles": ["director", "implementer", "auditor"],
+            "handoff_to": "implementer",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "implement",
+        },
+        summary="收到，交给开发工程师处理。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "relay_role": "implementer",
+            "status": "passed",
+            "reason": "implemented",
+            "role": "implementer",
+            "artifact_type": "implementation_report",
+            "summary": "修复完成，交给审核。",
+            "handoff_to": "auditor",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "audit",
+        },
+        summary="修复完成，交给审核。",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=802,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={"text": "修复完成，交给审核。"},
+        occurred_at="2026-06-14T12:09:59+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "Marvis拍了拍 App Agent，说开干吧" in conversation_html
+    assert conversation_html.index("Marvis拍了拍 App Agent") < conversation_html.index(
+        "修复完成，交给审核。"
+    )
 
 
 @pytest.mark.asyncio
