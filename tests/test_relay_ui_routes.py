@@ -226,7 +226,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-model-config">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-task-card-action">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-composer"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
@@ -275,7 +275,9 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "relay-task-card" in response
     assert "marvis-relay-task-card" in response
     assert 'class="relay-status-badge"' in response
-    assert "等待总工程师接收" in response
+    assert 'class="relay-open relay-card-open"' in response
+    assert "总工程师：" not in response
+    assert "等待总工程师接收" not in response
     assert "打开任务" in response
     assert "open task" not in response
     assert f'/native/workflows/relay/tasks/{task.id}?token=secret' in response
@@ -312,7 +314,9 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "总工程师 · 阻塞 · Codex" not in populated
     assert "架构工程师 · 未调度 · Antigravity" not in populated
     assert "开发工程师 · 未调度 · Claude" not in populated
-    assert "等待总工程师接收" in populated
+    assert 'class="relay-open relay-card-open"' in populated
+    assert "总工程师：" not in populated
+    assert "等待总工程师接收" not in populated
     assert "打开任务" in populated
     assert "open task" not in populated
     assert f'/native/workflows/relay/tasks/{repo_task.id}?token=secret' in populated
@@ -332,7 +336,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-model-config">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-task-card-action">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png" in response
@@ -657,7 +661,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-office-model-config">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-task-card-action">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response

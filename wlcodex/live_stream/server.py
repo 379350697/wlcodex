@@ -140,7 +140,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-office-model-config"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-task-card-action"
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
@@ -3600,6 +3600,7 @@ def _relay_task_list_page(
     .relay-task-card {{ display: grid; gap: 10px; border: 1px solid var(--border-card); border-radius: 8px; padding: 14px; background: var(--bg-surface); min-width: 0; overflow-wrap: anywhere; }}
     .relay-card-head {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }}
     .relay-card-meta {{ display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }}
+    .relay-card-open {{ white-space: nowrap; }}
     .relay-title {{ font-size: 17px; font-weight: var(--weight-bold); }}
     .relay-muted {{ color: var(--text-muted); font-size: 13px; }}
     .relay-summary {{ color: var(--text-primary); font-size: 14px; line-height: 1.45; }}
@@ -3613,7 +3614,7 @@ def _relay_task_list_page(
     .relay-modal-body {{ display: grid; align-content: start; gap: 16px; width: min(860px, 100%); margin: 0 auto; padding: 22px 18px 34px; box-sizing: border-box; }}
     .relay-modal-intro {{ display: grid; gap: 6px; }}
     .relay-modal-current {{ display: grid; gap: 6px; border: 1px solid var(--border-card); border-radius: 8px; padding: 12px; background: var(--bg-surface); min-width: 0; }}
-    @media (max-width: 760px) {{ header {{ grid-template-columns: 48px 1fr; }} .relay-toolbar {{ grid-column: 1 / -1; justify-content: stretch; }} .relay-primary, .relay-secondary {{ width: 100%; }} .relay-card-head {{ grid-template-columns: 1fr; }} .relay-card-meta {{ justify-content: flex-start; }} .relay-config-row {{ grid-template-columns: 1fr; }} main {{ padding: 12px; }} .relay-modal-head {{ padding: 12px; }} .relay-modal-body {{ padding: 14px 12px 28px; }} }}
+    @media (max-width: 760px) {{ header {{ grid-template-columns: 48px 1fr; }} .relay-toolbar {{ grid-column: 1 / -1; justify-content: stretch; }} .relay-primary, .relay-secondary {{ width: 100%; }} .relay-card-head {{ grid-template-columns: 1fr; }} .relay-card-meta {{ justify-content: flex-start; }} .relay-card-open {{ width: auto; }} .relay-config-row {{ grid-template-columns: 1fr; }} main {{ padding: 12px; }} .relay-modal-head {{ padding: 12px; }} .relay-modal-body {{ padding: 14px 12px 28px; }} }}
   </style>
 </head>
 <body data-marvis-relay-view="tasks">
@@ -4569,7 +4570,6 @@ def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
     activity = _relay_activity_label(str(summary.last_activity_at))
     workspace = str(summary.workspace or "未指定工作目录")
     phase = _relay_phase_label(str(summary.phase or "director"))
-    decision = summary.director_decision_summary or "等待总工程师接收"
     handoff = summary.latest_handoff_summary or ""
     handoff_html = (
         f'<div class="relay-muted">最近接棒：{escape(handoff)}</div>'
@@ -4584,13 +4584,12 @@ def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
             <div class="relay-title">{escape(summary.title)}</div>
             <div class="relay-muted">{escape(workspace)} · 当前阶段：{escape(phase)}</div>
           </div>
+          <a class="relay-open relay-card-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">打开任务</a>
           <div class="relay-card-meta">
             <span class="relay-status-badge">{escape(status_label)}</span>
             <span class="relay-muted">{escape(activity)}</span>
-            <a class="relay-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">打开任务</a>
           </div>
         </div>
-        <div class="relay-summary">总工程师：{escape(decision)}</div>
         {handoff_html}
       </article>
     """

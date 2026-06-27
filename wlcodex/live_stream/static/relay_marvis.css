@@ -269,7 +269,7 @@ body[data-marvis-relay-view] .relay-task-card {
 
 body[data-marvis-relay-view] .relay-card-head {
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr);
+  grid-template-columns: 46px minmax(0, 1fr) auto;
   gap: 8px 12px;
   align-items: start;
   min-width: 0;
@@ -291,6 +291,14 @@ body[data-marvis-relay-view] .relay-card-meta {
   min-width: 0;
 }
 
+body[data-marvis-relay-view] .relay-card-open {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: center;
+  justify-self: end;
+  white-space: nowrap;
+}
+
 body[data-marvis-relay-view] .relay-title {
   color: #111;
   font-size: 18px;
@@ -303,6 +311,19 @@ body[data-marvis-relay-view] .relay-summary {
   color: #222;
   font-size: 15px;
   line-height: 1.65;
+}
+
+@media (max-width: 420px) {
+  body[data-marvis-relay-view] .relay-card-head {
+    grid-template-columns: 46px minmax(0, 1fr);
+  }
+
+  body[data-marvis-relay-view] .relay-card-open {
+    grid-column: 2;
+    grid-row: 3;
+    justify-self: end;
+    margin-top: -2px;
+  }
 }
 
 body[data-marvis-relay-view] .marvis-relay-task-title {
