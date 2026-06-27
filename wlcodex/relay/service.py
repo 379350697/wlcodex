@@ -266,6 +266,32 @@ class RelayService:
     def role_for_agent_run(self, agent_run_id: int) -> tuple[int, str] | None:
         return self._store.find_role_by_agent_run_id(agent_run_id)
 
+    async def resume_role(self, task_id: int, role: str) -> None:
+        if role not in RELAY_ROLE_IDS:
+            raise ValueError(f"unknown relay role: {role}")
+        detail = self._store.get_task_detail(task_id)
+        job = next((candidate for candidate in detail.role_jobs if candidate.role == role), None)
+        if job is None:
+            raise ValueError(f"unknown relay role: {role}")
+        if job.status in {"running", "streaming", "queued"}:
+            return
+        self._store.update_task_status(task_id, "running")
+        self._store.update_role_status(task_id, role, "queued")
+        self._store.save_artifact(
+            task_id,
+            role,
+            "role_resume",
+            {"role": role, "previous_status": job.status},
+            summary=f"{RELAY_ROLE_DISPLAY_NAMES.get(role, role)}重新派发",
+        )
+        self._events.emit(
+            task_id,
+            "role.queued",
+            role=role,
+            payload={"role": role, "reason": "resume_role"},
+        )
+        await self.dispatch_role(task_id, role)
+
     async def dispatch_role(self, task_id: int, role: str) -> None:
         detail = self._store.get_task_detail(task_id)
         provider_name = (

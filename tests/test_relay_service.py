@@ -246,6 +246,40 @@ def test_dispatch_role_uses_native_agent_registry_provider(tmp_path) -> None:
     assert director.status == "streaming"
 
 
+def test_resume_role_redispatches_blocked_role(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_task_status(task.id, "blocked")
+    service._store.update_role_status(task.id, "implementer", "blocked")
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "role_error",
+        {"error": "temporary provider stopped"},
+        summary="temporary provider stopped",
+    )
+
+    asyncio.run(service.resume_role(task.id, "implementer"))
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.task.status == "running"
+    assert jobs["implementer"].status == "streaming"
+    assert jobs["implementer"].provider == "claude"
+    assert jobs["implementer"].native_session_id == "native-1"
+    assert provider.calls[0][0] == "start_session"
+    assert [event.event_type for event in service.events_for_task(task.id)][-3:] == [
+        "role.queued",
+        "role.streaming",
+        "dispatch.verified",
+    ]
+
+
 def test_create_task_snapshots_role_providers_and_dispatches_each_role_provider(
     tmp_path,
 ) -> None:

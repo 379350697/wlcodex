@@ -1504,6 +1504,31 @@ class WorkerLiveStreamServer:
                     self._relay_service.get_task(task_id).to_dict(),
                 )
                 return
+            if suffix == "/resume":
+                if method != "POST":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                body = await self._read_request_json(writer, reader, headers)
+                if body is None:
+                    return
+                role = _optional_nonempty_string(body.get("role"))
+                if not role:
+                    detail = self._relay_service.get_task(task_id)
+                    role = _relay_first_blocked_role(detail.role_jobs)
+                if not role:
+                    await self._send_json(
+                        writer,
+                        400,
+                        {"error": "relay task has no blocked role to resume"},
+                    )
+                    return
+                await self._relay_service.resume_role(task_id, role)
+                await self._send_json(
+                    writer,
+                    200,
+                    self._relay_service.get_task(task_id).to_dict(),
+                )
+                return
             if suffix == "/interrupt":
                 if method != "POST":
                     await self._send_json(writer, 405, {"error": "method not allowed"})
