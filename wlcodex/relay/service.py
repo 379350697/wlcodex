@@ -438,14 +438,14 @@ class RelayService:
     ):
         result = parse_role_envelope(output)
         if not result.ok or result.envelope is None:
-            if dispatch_next and await self._retry_role_envelope_format(
+            if dispatch_next and await self._recover_director_routing_decision(
                 task_id,
                 role,
                 error=result.error or "invalid role envelope",
                 output=output,
             ):
                 return result
-            if dispatch_next and await self._recover_director_routing_decision(
+            if dispatch_next and await self._retry_role_envelope_format(
                 task_id,
                 role,
                 error=result.error or "invalid role envelope",
@@ -1286,7 +1286,13 @@ class RelayService:
             return None
         if not self._is_runtime_completion(runtime_event):
             return None
-        text = self._runtime_completion_text(runtime_event)
+        text = await self._runtime_completion_text_from_native_session(
+            task_id,
+            role,
+            runtime_event,
+        )
+        if not text:
+            text = self._runtime_completion_text(runtime_event)
         if not text.strip():
             if _is_agent_run_completed_event(runtime_event):
                 self._block_role_with_error(
@@ -1299,6 +1305,7 @@ class RelayService:
         if (
             not parse_result.ok
             and self._should_accept_plain_followup_response(task_id, role)
+            and not _looks_like_relay_protocol_attempt(text)
         ):
             return await self._handle_plain_followup_response(
                 task_id,
@@ -1765,6 +1772,38 @@ class RelayService:
             if _is_runtime_model_text_delta(event)
         )
 
+    async def _runtime_completion_text_from_native_session(
+        self,
+        task_id: int,
+        role: str,
+        runtime_event: Any,
+    ) -> str:
+        try:
+            detail = self._store.get_task_detail(task_id)
+        except KeyError:
+            return ""
+        job = next(
+            (candidate for candidate in detail.role_jobs if candidate.role == role),
+            None,
+        )
+        if job is None or not job.provider or not job.native_session_id:
+            return ""
+        expected_turn_id = _runtime_event_turn_id(runtime_event)
+        if self._should_accept_plain_followup_response(task_id, role) and not expected_turn_id:
+            return ""
+        try:
+            provider = self._registry.get(job.provider)
+        except KeyError:
+            return ""
+        if getattr(provider, "read_session", None) is None:
+            return ""
+        await self._sync_stale_native_role(job)
+        return await self._read_native_session_completion_text(
+            provider_name=job.provider,
+            native_session_id=job.native_session_id,
+            expected_turn_id=expected_turn_id,
+        )
+
     async def _complete_stale_native_delta_if_ready(
         self,
         runtime_store: RuntimeEventStore,
@@ -1811,9 +1850,10 @@ class RelayService:
             )
             return True
         if allow_read_session:
-            read_session_output = await self._read_native_session_role_envelope(
+            read_session_output = await self._read_native_session_completion_text(
                 provider_name=provider_name,
                 native_session_id=native_session_id,
+                expected_turn_id=current_turn_id,
             )
             if read_session_output:
                 await self.handle_role_completion_event(
@@ -1829,7 +1869,10 @@ class RelayService:
         output = "".join(_runtime_event_text(event) for event in delta_events)
         parse_result = parse_role_envelope(output)
         if not parse_result.ok:
-            if self._should_accept_plain_followup_response(task_id, role):
+            if self._should_accept_plain_followup_response(
+                task_id,
+                role,
+            ) and not _looks_like_relay_protocol_attempt(output):
                 runtime_event_id = int(getattr(delta_events[-1], "id", 0) or 0)
                 await self._handle_plain_followup_response(
                     task_id,
@@ -1899,11 +1942,12 @@ class RelayService:
         except Exception:
             return
 
-    async def _read_native_session_role_envelope(
+    async def _read_native_session_completion_text(
         self,
         *,
         provider_name: str,
         native_session_id: str,
+        expected_turn_id: str = "",
     ) -> str:
         if not provider_name or not native_session_id:
             return ""
@@ -1918,7 +1962,10 @@ class RelayService:
             payload = await read_session(native_session_id)
         except Exception:
             return ""
-        return _session_assistant_role_envelope_text(payload)
+        return _session_assistant_completion_text(
+            payload,
+            expected_turn_id=expected_turn_id,
+        )
 
     @staticmethod
     def _last_native_role_activity_at(
@@ -2395,6 +2442,38 @@ def _runtime_event_matches_turn(runtime_event: Any, turn_id: str) -> bool:
     return _runtime_event_turn_id(runtime_event) == expected_turn_id
 
 
+def _looks_like_relay_protocol_attempt(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    lowered = value.lower()
+    protocol_markers = (
+        "artifact_type",
+        "role_envelope",
+        "routing_decision",
+        "final_summary",
+        "handoff_to",
+        "required_roles",
+        "evidence_refs",
+        "acceptance_criteria",
+        "stop_conditions",
+        "requires_user_approval",
+    )
+    if any(marker in lowered for marker in protocol_markers):
+        return True
+    fused_markers = (
+        "routing_decisioncomplexity",
+        "routecore_relay",
+        "routefull_relay",
+        "routedirector_only",
+        "statuspassedsummary",
+        "roledirectorstatus",
+        "handoff_toimplementer",
+        "required_rolesdirector",
+    )
+    return any(marker in lowered for marker in fused_markers)
+
+
 def _plain_followup_visible_text(text: str) -> str:
     value = text.strip()
     if not value:
@@ -2524,16 +2603,23 @@ def _latest_artifact_id(
     return latest
 
 
-def _session_assistant_role_envelope_text(payload: Any) -> str:
+def _session_assistant_completion_text(
+    payload: Any,
+    *,
+    expected_turn_id: str = "",
+) -> str:
     if not isinstance(payload, dict):
         return ""
     turns = payload.get("turns")
     if not isinstance(turns, list):
         return ""
+    expected = str(expected_turn_id or "").strip()
     for turn in reversed(turns):
         if not isinstance(turn, dict):
             continue
         if str(turn.get("role") or "").strip().lower() != "assistant":
+            continue
+        if expected and _native_session_turn_id(turn) != expected:
             continue
         text = str(
             turn.get("text")
@@ -2542,9 +2628,19 @@ def _session_assistant_role_envelope_text(payload: Any) -> str:
             or turn.get("output")
             or ""
         )
-        if text.strip() and parse_role_envelope(text).ok:
+        if text.strip():
             return text
     return ""
+
+
+def _native_session_turn_id(turn: dict[str, Any]) -> str:
+    return str(
+        turn.get("native_turn_id")
+        or turn.get("turnId")
+        or turn.get("turn_id")
+        or turn.get("id")
+        or ""
+    ).strip()
 
 
 def _result_agent_run_id(result: Any) -> int | None:

@@ -14,8 +14,11 @@ from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.server import (
     WorkerLiveStreamServer,
     _marvis_relay_clean_artifact_summary,
+    _marvis_relay_work_log_entry_from_event,
+    _marvis_relay_work_log_entry_html,
     _relay_activity_label,
 )
+from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.native_agents.models import NativeAgentCapabilities
 from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.relay.models import HandoffPacket
@@ -81,6 +84,45 @@ def test_marvis_work_log_cleans_escaped_protocol_summary_fragment() -> None:
     assert _marvis_relay_clean_artifact_summary(raw) == (
         "截至查询时，今日国际现货黄金约为 4,088.60 美元/盎司。"
     )
+
+
+def test_marvis_work_log_collapses_long_message_output() -> None:
+    long_text = (
+        "现在生成页面代码：\n"
+        "```html\n"
+        "<!doctype html>\n"
+        "<html><body><pre>"
+        + "x" * 900
+        + "</pre></body></html>\n"
+        "```"
+    )
+    event = WorkerStreamEvent(
+        id=1,
+        type=EventType.MODEL_MESSAGE_COMPLETED,
+        kind="message_completed",
+        agent_run_id=101,
+        conversation_id=None,
+        occurred_at="2026-06-14T12:10:00+00:00",
+        source="codex",
+        actor="codex_native",
+        visibility="user",
+        payload={
+            "text": long_text,
+            "native_turn_id": "turn-long-message",
+            "itemId": "assistant-long-message",
+        },
+    )
+
+    entry = _marvis_relay_work_log_entry_from_event("director", event)
+    assert entry is not None
+    assert entry.text == "输出较长，已折叠。"
+    assert entry.output == long_text
+    html = _marvis_relay_work_log_entry_html(entry)
+    paragraph_html = html.split("<details", 1)[0]
+    assert "输出较长，已折叠。" in paragraph_html
+    assert "<!doctype html>" not in paragraph_html
+    assert "查看输出" in html
+    assert "&lt;!doctype html&gt;" in html
 
 
 async def _read_response(host: str, port: int, request: str) -> str:

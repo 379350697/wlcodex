@@ -1155,6 +1155,85 @@ def test_director_followup_plain_text_completion_is_visible_and_completes_turn(
     assert followup_responses[-1]["text"] == "问题在主会话投影层，"
 
 
+def test_followup_malformed_routing_envelope_recovers_instead_of_plain_response(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="给聊天框上方增加工作区显示和选择入口",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "completed")
+    asyncio.run(service.add_user_message(task.id, "继续按开发审核流程处理"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    bad_protocol_text = (
+        '{"artifact_type":"routing_decisioncomplexitymedium'
+        'routecore_relayrequired_rolesdirectorimplementerauditor'
+        'statuspassedsummary core：先清理，再残行为一致结果"}'
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"delta": bad_protocol_text},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"status": "completed"},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    followup_responses = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "followup_response"
+    ]
+    assert followup_responses == []
+    assert detail.task.status == "running"
+    assert detail.routing_decision is not None
+    assert detail.routing_decision["route"] == "core_relay"
+    assert detail.routing_decision["required_roles"] == [
+        "director",
+        "implementer",
+        "auditor",
+    ]
+    assert jobs["director"].status == "passed"
+    assert jobs["implementer"].status == "streaming"
+    assert any(call[0] == "start_session" for call in provider.calls)
+    assert any(
+        artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "director"
+        and artifact.get("recovered_as") == "routing_decision"
+        for artifact in detail.artifacts
+    )
+
+
 def test_followup_completion_uses_current_native_turn_delta_not_old_completed_text(
     tmp_path,
 ) -> None:
@@ -1348,6 +1427,227 @@ def test_active_runtime_scan_ignores_old_turn_completion_for_pending_followup(
     assert followup_responses[-1]["text"] == "最终正常"
     assert followup_responses[-1]["runtime_event_id"] == completed.id
     assert followup_responses[-1]["native_turn_id"] == "turn-current"
+
+
+def test_runtime_completion_uses_provider_read_session_before_bad_delta(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="给聊天框上方增加工作区显示和选择入口",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"delta": '{"artifact_type":"routing_decision","role"'},
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+    completed_text = json.dumps(
+        {
+            "status": "passed",
+            "reason": "implementation and audit required",
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "handoff_to": "",
+            "summary": "Use provider read_session transcript.",
+            "evidence_refs": ["provider.read_session"],
+            "open_questions": [],
+            "next_action": "implement then audit",
+            "complexity": "medium",
+            "risk": "medium",
+            "route": "core_relay",
+            "required_roles": ["director", "implementer", "auditor"],
+            "acceptance_criteria": ["implemented", "audited"],
+            "stop_conditions": [],
+            "requires_user_approval": False,
+        },
+        ensure_ascii=False,
+    )
+
+    async def read_session(native_session_id: str):
+        provider.calls.append(("read_session", native_session_id))
+        return {
+            "thread": {"native_session_id": native_session_id},
+            "turns": [
+                {"role": "assistant", "text": completed_text, "native_turn_id": "turn-1"}
+            ],
+        }
+
+    provider.read_session = read_session
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"status": "completed"},
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert ("sync_session", "native-1") in provider.calls
+    assert ("read_session", "native-1") in provider.calls
+    assert detail.routing_decision is not None
+    assert detail.routing_decision["summary"] == "Use provider read_session transcript."
+    assert jobs["director"].status == "passed"
+    assert jobs["implementer"].status == "streaming"
+
+
+def test_followup_plain_text_can_complete_from_provider_read_session(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "completed")
+    asyncio.run(service.add_user_message(task.id, "继续解释为什么没有显示"))
+    completed_text = "问题在主会话投影层，现在已按同任务多轮接续展示。"
+
+    async def read_session(native_session_id: str):
+        provider.calls.append(("read_session", native_session_id))
+        return {
+            "thread": {"native_session_id": native_session_id},
+            "turns": [
+                {
+                    "role": "assistant",
+                    "text": completed_text,
+                    "native_turn_id": "turn-followup",
+                }
+            ],
+        }
+
+    provider.read_session = read_session
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"status": "completed", "native_turn_id": "turn-followup"},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    followup_responses = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "followup_response"
+    ]
+    assert ("sync_session", "native-1") in provider.calls
+    assert ("read_session", "native-1") in provider.calls
+    assert detail.task.status == "completed"
+    assert {job.role: job.status for job in detail.role_jobs}["director"] == "passed"
+    assert followup_responses[-1]["text"] == completed_text
+    assert followup_responses[-1]["native_turn_id"] == "turn-followup"
+
+
+def test_followup_malformed_read_session_protocol_recovers_not_plain_response(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="给聊天框上方增加工作区显示和选择入口",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "completed")
+    asyncio.run(service.add_user_message(task.id, "继续按开发审核流程处理"))
+    bad_protocol_text = (
+        '{"artifact_type":"routing_decisioncomplexitymedium'
+        'routecore_relayrequired_rolesdirectorimplementerauditor'
+        'statuspassedsummary core：先清理，再残行为一致结果"}'
+    )
+
+    async def read_session(native_session_id: str):
+        provider.calls.append(("read_session", native_session_id))
+        return {
+            "thread": {"native_session_id": native_session_id},
+            "turns": [
+                {
+                    "role": "assistant",
+                    "text": bad_protocol_text,
+                    "native_turn_id": "turn-followup",
+                }
+            ],
+        }
+
+    provider.read_session = read_session
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"status": "completed", "native_turn_id": "turn-followup"},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    followup_responses = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "followup_response"
+    ]
+    assert followup_responses == []
+    assert detail.task.status == "running"
+    assert detail.routing_decision is not None
+    assert detail.routing_decision["route"] == "core_relay"
+    assert detail.routing_decision["required_roles"] == [
+        "director",
+        "implementer",
+        "auditor",
+    ]
+    assert jobs["director"].status == "passed"
+    assert jobs["implementer"].status == "streaming"
 
 
 def test_plain_followup_visible_text_extracts_fused_protocol_summary() -> None:

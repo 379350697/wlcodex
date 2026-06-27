@@ -5069,19 +5069,23 @@ def _marvis_relay_work_log_entry_from_event(
         text = _relay_native_event_text(worker_event)
         if not text or _marvis_relay_work_log_text_is_protocol_noise(text):
             return None
+        compact_text, output = _marvis_relay_compact_work_log_text(text)
         return WorkLogEntry(
             kind="message",
             key=_relay_native_message_key(role, worker_event, bucket="assistant"),
-            text=_relay_sanitize_protocol_leak_text(role, text),
+            text=_relay_sanitize_protocol_leak_text(role, compact_text),
+            output=output,
         )
     if kind == "message_completed":
         text = _relay_native_event_text(worker_event).strip()
         if not text or _marvis_relay_work_log_text_is_protocol_noise(text):
             return None
+        compact_text, output = _marvis_relay_compact_work_log_text(text)
         return WorkLogEntry(
             kind="message",
             key=_relay_native_message_key(role, worker_event, bucket="assistant"),
-            text=_relay_sanitize_protocol_leak_text(role, text),
+            text=_relay_sanitize_protocol_leak_text(role, compact_text),
+            output=output,
             replace_text=True,
         )
     if kind.startswith("tool_call"):
@@ -5139,6 +5143,29 @@ def _marvis_relay_work_log_entry_from_event(
             failed=kind == "failed",
         )
     return None
+
+
+def _marvis_relay_compact_work_log_text(text: str) -> tuple[str, str]:
+    value = str(text or "").strip()
+    if not value:
+        return "", ""
+    if not _marvis_relay_should_fold_work_log_text(value):
+        return value, ""
+    return "输出较长，已折叠。", value
+
+
+def _marvis_relay_should_fold_work_log_text(text: str) -> bool:
+    value = str(text or "")
+    if len(value) > 600:
+        return True
+    if "```" in value:
+        return True
+    stripped = value.lstrip()
+    if stripped.startswith(("{", "[")) and len(value) > 240:
+        return True
+    if re.search(r"(?is)<(?:!doctype|html|body|script|style|pre|div|section)\\b", value):
+        return True
+    return any(len(line) > 220 for line in value.splitlines())
 
 
 def _marvis_relay_work_log_text_is_protocol_noise(text: str) -> bool:
@@ -6359,6 +6386,21 @@ def _relay_task_detail_page(
       cleaned = String(cleaned || "").trim();
       return cleaned && !marvisWorkLogTextIsProtocolNoise(cleaned) ? cleaned : "";
     }}
+    function marvisWorkLogShouldFoldText(text) {{
+      const value = String(text || "");
+      if (value.length > 600) return true;
+      if (value.includes("```")) return true;
+      const stripped = value.trimStart();
+      if ((stripped.startsWith("{{") || stripped.startsWith("[")) && value.length > 240) return true;
+      if (/<(?:!doctype|html|body|script|style|pre|div|section)\\b/i.test(value)) return true;
+      return value.split(/\\r?\\n/).some((line) => line.length > 220);
+    }}
+    function marvisWorkLogCompactText(text) {{
+      const value = String(text || "").trim();
+      if (!value) return {{ text: "", output: "" }};
+      if (!marvisWorkLogShouldFoldText(value)) return {{ text: value, output: "" }};
+      return {{ text: "输出较长，已折叠。", output: value }};
+    }}
     function marvisWorkLogEntryFromNativeEvent(role, nativeEvent) {{
       const kind = marvisWorkLogNativeKind(nativeEvent);
       const type = nativeEvent?.type || "";
@@ -6372,10 +6414,12 @@ def _relay_task_detail_page(
           if (kind === "message_completed") return {{ removeKey: key }};
           return null;
         }}
+        const compact = marvisWorkLogCompactText(text);
         return {{
           kind: "message",
           key,
-          text: relaySanitizeProtocolLeakText(role, text),
+          text: relaySanitizeProtocolLeakText(role, compact.text),
+          output: compact.output,
           replaceText: kind === "message_completed",
         }};
       }}
