@@ -1522,7 +1522,11 @@ class WorkerLiveStreamServer:
                         {"error": "relay task has no blocked role to resume"},
                     )
                     return
-                await self._relay_service.resume_role(task_id, role)
+                await self._relay_service.resume_role(
+                    task_id,
+                    role,
+                    force=bool(body.get("force")),
+                )
                 await self._send_json(
                     writer,
                     200,

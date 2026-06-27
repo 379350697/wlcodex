@@ -281,6 +281,26 @@ def test_resume_role_redispatches_blocked_role(tmp_path) -> None:
     ]
 
 
+def test_resume_role_force_redispatches_streaming_role(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "implementer"))
+
+    asyncio.run(service.resume_role(task.id, "implementer", force=True))
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.task.status == "running"
+    assert jobs["implementer"].status == "streaming"
+    assert jobs["implementer"].native_session_id == "native-2"
+    assert [call[0] for call in provider.calls] == ["start_session", "start_session"]
+
+
 def test_create_task_snapshots_role_providers_and_dispatches_each_role_provider(
     tmp_path,
 ) -> None:
