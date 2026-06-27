@@ -141,7 +141,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-task-card-action"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-task-card-polish"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4569,15 +4569,9 @@ def _relay_role_config_html(
 def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
     status = str(summary.status)
     status_label = _relay_task_status_label(status)
-    activity = _relay_activity_label(str(summary.last_activity_at))
+    activity = _relay_activity_label(summary.last_activity_at)
     workspace = str(summary.workspace or "未指定工作目录")
     phase = _relay_phase_label(str(summary.phase or "director"))
-    handoff = summary.latest_handoff_summary or ""
-    handoff_html = (
-        f'<div class="relay-muted">最近接棒：{escape(handoff)}</div>'
-        if handoff
-        else ""
-    )
     return f"""
       <article class="relay-task-card marvis-relay-task-card" data-status="{escape(status)}">
         <div class="relay-card-head">
@@ -4586,13 +4580,14 @@ def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
             <div class="relay-title">{escape(summary.title)}</div>
             <div class="relay-muted">{escape(workspace)} · 当前阶段：{escape(phase)}</div>
           </div>
-          <a class="relay-open relay-card-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">打开任务</a>
+        </div>
+        <div class="marvis-relay-task-card-footer">
           <div class="relay-card-meta">
             <span class="relay-status-badge">{escape(status_label)}</span>
             <span class="relay-muted">{escape(activity)}</span>
           </div>
+          <a class="relay-open relay-card-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">打开任务</a>
         </div>
-        {handoff_html}
       </article>
     """
 
@@ -4689,14 +4684,24 @@ def _relay_phase_label(phase: str) -> str:
     }.get(phase, phase or "总工程师接收")
 
 
-def _relay_activity_label(value: str) -> str:
-    timestamp = str(value or "").strip()
-    if not timestamp:
+def _relay_activity_label(value: Any) -> str:
+    if not value:
         return "暂无活动"
-    try:
-        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except ValueError:
-        return f"最近活动 {timestamp}"
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        timestamp = str(value).strip()
+        if not timestamp:
+            return "暂无活动"
+        normalized = re.sub(
+            r"(\.\d{6})\d+([+-]\d\d:\d\d|Z)?$",
+            r"\1\2",
+            timestamp,
+        )
+        try:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        except ValueError:
+            return "最近活动未知"
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_RELAY_ACTIVITY_DISPLAY_TZ)
     return f"最近活动 {parsed.astimezone(_RELAY_ACTIVITY_DISPLAY_TZ):%m-%d %H:%M}"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,18 @@ def test_relay_activity_label_formats_iso_timestamp_for_mobile_cards() -> None:
 
     assert label == "最近活动 06-16 20:20"
     assert "T12:20:06.297146+00:00" not in label
+
+    microsecond_label = _relay_activity_label("2026-06-16T07:51:57.510982+00:00")
+    assert microsecond_label == "最近活动 06-16 15:51"
+
+    datetime_label = _relay_activity_label(
+        datetime(2026, 6, 16, 7, 58, 48, tzinfo=timezone.utc)
+    )
+    assert datetime_label == "最近活动 06-16 15:58"
+
+    fallback_label = _relay_activity_label("2026-06-16T07:51:57.510982123+00:00")
+    assert fallback_label == "最近活动 06-16 15:51"
+    assert "2026-06-16T" not in fallback_label
 
 
 async def _read_response(host: str, port: int, request: str) -> str:
@@ -233,7 +246,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-task-card-action">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-task-card-polish">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-composer"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
@@ -329,6 +342,36 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert f'/native/workflows/relay/tasks/{repo_task.id}?token=secret' in populated
     assert f'/native/workflows/relay/tasks/{other.id}?token=secret' not in populated
 
+    service._store.save_artifact(
+        repo_task.id,
+        "director",
+        "handoff_packet",
+        {
+            "relay_role": "director",
+            "summary": "按完整五角色接力处理：先由架构工程师审查。",
+        },
+        summary="按完整五角色接力处理：先由架构工程师审查。",
+    )
+    service._store._ledger._conn.execute(
+        "UPDATE team_runs SET updated_at = ? WHERE id = ?",
+        ("2026-06-16T07:51:57.510982123+00:00", repo_task.id),
+    )
+    service._store._ledger._conn.commit()
+    polished, _ = await _request(
+        tmp_path,
+        "GET /native/workflows/relay?token=secret&workspace=%2Frepo HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        relay_service=service,
+    )
+    assert 'class="marvis-relay-task-card-footer"' in polished
+    assert polished.index('class="relay-status-badge"') < polished.index(
+        'class="relay-open relay-card-open"'
+    )
+    assert "最近活动 06-16 15:51" in polished
+    assert "2026-06-16T07:51:57.510982123+00:00" not in polished
+    assert "最近接棒：" not in polished
+    assert "按完整五角色接力处理" not in polished
+
 
 @pytest.mark.asyncio
 async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal(
@@ -343,7 +386,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-task-card-action">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-task-card-polish">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png" in response
@@ -668,7 +711,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-task-card-action">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-task-card-polish">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
