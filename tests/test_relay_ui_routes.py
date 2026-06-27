@@ -983,6 +983,117 @@ async def test_relay_task_detail_hides_native_activity_from_conversation(
 
 
 @pytest.mark.asyncio
+async def test_relay_work_log_hides_internal_native_activity_for_director_only(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="查今日金价",
+        prompt="查今日金价",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-gold",
+        agent_run_id=278,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "relay_role": "director",
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "status": "passed",
+            "route": "director_only",
+            "summary": "选择director_only处理今日金价查询，直接查询实时来源并返回结果。",
+            "handoff_to": "",
+            "required_roles": ["director"],
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "总工程师直接完成。",
+        },
+        summary="选择director_only处理今日金价查询，直接查询实时来源并返回结果。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "status": "passed",
+            "summary": "截至查询时，今日国际现货黄金约为 4,088.60 美元/盎司。",
+            "handoff_to": "",
+            "evidence_refs": ["https://www.kitco.com/charts/gold"],
+            "open_questions": [],
+            "next_action": "",
+        },
+        summary="截至查询时，今日国际现货黄金约为 4,088.60 美元/盎司。",
+    )
+    for index, payload in enumerate(
+        [
+            {"action": "thread_started", "threadId": "thread-gold"},
+            {"action": "thread_status_changed", "threadId": "thread-gold"},
+            {
+                "action": "turn_started",
+                "threadId": "thread-gold",
+                "turnId": "turn-gold",
+            },
+        ],
+        start=1,
+    ):
+        _append_runtime_event(
+            runtime_store,
+            agent_run_id=278,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            payload=payload,
+            occurred_at=f"2026-06-27T08:25:0{index}+00:00",
+        )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=278,
+        event_type=EventType.MODEL_USAGE_UPDATED,
+        payload={"total_tokens": 47215},
+        occurred_at="2026-06-27T08:25:04+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=278,
+        event_type=EventType.AGENT_RUN_COMPLETED,
+        payload={"status": "completed", "native_turn_id": "turn-gold"},
+        occurred_at="2026-06-27T08:25:05+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    work_log_html = _relay_work_log_html(response)
+    assert "47K" in work_log_html
+    assert "activity" not in work_log_html
+    assert "thread_started" not in work_log_html
+    assert "thread_status_changed" not in work_log_html
+    assert "turn_started" not in work_log_html
+    assert "completed" not in work_log_html
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
     tmp_path: Path,
 ) -> None:

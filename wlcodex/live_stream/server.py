@@ -4729,9 +4729,16 @@ def _marvis_relay_work_log_event_item(worker_event: WorkerStreamEvent) -> str:
             chip=f"{label} {_marvis_relay_event_status_label(kind)}",
         )
     if kind in {"activity", "lifecycle", "completed", "failed"}:
-        text = _relay_native_event_text(worker_event).strip() or str(
-            payload.get("status") or kind
-        )
+        text = _relay_native_event_text(worker_event).strip()
+        if not text and kind == "failed":
+            text = str(
+                payload.get("error")
+                or payload.get("reason")
+                or payload.get("status")
+                or "调用失败"
+            ).strip()
+        if not text:
+            return ""
         return _marvis_relay_work_log_text_item(text)
     return ""
 
