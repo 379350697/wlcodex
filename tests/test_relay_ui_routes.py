@@ -402,11 +402,12 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert '"implementer":{"role":"implementer","display_name":"开发工程师","title":"开发工程师","provider"' in response
     assert '"tester":{"role":"tester","display_name":"测试工程师","title":"测试工程师","provider"' in response
     assert '"auditor":{"role":"auditor","display_name":"审计工程师","title":"审计工程师","provider"' in response
-    assert '"avatar":"marvis"' in response
-    assert '"avatar":"computer-agent"' in response
-    assert '"avatar":"app-agent"' in response
-    assert '"avatar":"search-agent"' in response
-    assert '"avatar":"file-agent"' in response
+    assert re.search(r'"director":\{[^}]*"display_name":"总工程师"[^}]*"avatar":"marvis"', response)
+    assert re.search(r'"architect":\{[^}]*"display_name":"架构工程师"[^}]*"avatar":"computer-agent"', response)
+    assert re.search(r'"implementer":\{[^}]*"display_name":"开发工程师"[^}]*"avatar":"search-agent"', response)
+    assert re.search(r'"tester":\{[^}]*"display_name":"测试工程师"[^}]*"avatar":"app-agent"', response)
+    assert re.search(r'"auditor":\{[^}]*"display_name":"审计工程师"[^}]*"avatar":"browser-agent"', response)
+    assert '"avatar":"file-agent"' not in response
     assert "data-persona-name" in response
     assert "Team Leader" not in response
     assert "Computer Agent" not in response

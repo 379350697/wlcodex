@@ -4103,9 +4103,9 @@ _MARVIS_OFFICE_PERSONAS: dict[str, dict[str, Any]] = {
 _MARVIS_OFFICE_AVATARS: dict[str, str] = {
     "director": "marvis",
     "architect": "computer-agent",
-    "implementer": "app-agent",
-    "tester": "search-agent",
-    "auditor": "file-agent",
+    "implementer": "search-agent",
+    "tester": "app-agent",
+    "auditor": "browser-agent",
 }
 
 
