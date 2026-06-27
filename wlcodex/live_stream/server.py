@@ -8683,6 +8683,16 @@ __MARVIS_CSS_LINK__  <style>
     .attachment-chip img { width: 42px; height: 38px; border-radius: 8px; object-fit: cover; background: var(--bg-canvas); }
     .attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 12px; }
     .attachment-remove { width: 26px; min-height: 26px; padding: 0; border-radius: 50%; background: var(--bg-remove-btn); color: var(--btn-primary-bg); font-size: 15px; }
+    .workspace-bar { display: flex; align-items: center; gap: 8px; min-height: 36px; }
+    .workspace-bar[hidden] { display: none; }
+    .workspace-bar-icon { width: 18px; height: 14px; flex: 0 0 auto; border: 2px solid var(--text-dim); border-radius: 3px 3px 0 0; border-bottom: 0; position: relative; }
+    .workspace-bar-icon:before { content: ""; position: absolute; top: -5px; left: 50%; width: 8px; height: 5px; border: 2px solid var(--text-dim); border-bottom: 0; border-radius: 3px 3px 0 0; transform: translateX(-50%); }
+    .workspace-bar-label { color: var(--text-dim); font-size: 12px; font-weight: var(--weight-extrabold); white-space: nowrap; }
+    .workspace-bar-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 32px; padding: 0 12px; border: 1px solid var(--border-subtle); border-radius: 16px; background: var(--bg-pill); color: var(--text-primary); font-size: 14px; font-weight: var(--weight-extrabold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
+    button.workspace-bar-chip:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-pill-hover); border-color: var(--border-default); }
+    .workspace-bar-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .workspace-bar-chip-chevron { color: var(--text-dim); font-size: 11px; flex: 0 0 auto; }
+    .workspace-bar-none { color: var(--text-dim); font-size: 13px; font-style: italic; }
     .start-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; }
     body[data-native-view="home"] .start-row,
     body[data-native-view="history"] .start-row { grid-template-columns: minmax(0, 1fr) auto; }
@@ -8836,6 +8846,14 @@ __MARVIS_CSS_LINK__  <style>
       <div class="plugin-list" id="pluginList"__PLUGIN_MENU_HIDDEN__></div>
     </div>
     <div class="plugin-autocomplete" id="pluginAutocomplete" hidden></div>
+    <div class="workspace-bar" id="workspaceBar">
+      <span class="workspace-bar-icon" aria-hidden="true"></span>
+      <span class="workspace-bar-label">工作区</span>
+      <button class="workspace-bar-chip" id="workspaceBarChip" type="button">
+        <span class="workspace-bar-chip-name" id="workspaceBarChipName">选择项目</span>
+        <span class="workspace-bar-chip-chevron">⌄</span>
+      </button>
+    </div>
     <div class="start-row">
       <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片"></button>
       <input id="imageInput" type="file" accept="image/*" multiple hidden>
@@ -8946,6 +8964,9 @@ __ICONS_JS__
     const planModeCheck = document.getElementById("planModeCheck");
     const planModeChip = document.getElementById("planModeChip");
     const planModeChipCancel = document.getElementById("planModeChipCancel");
+    const workspaceBar = document.getElementById("workspaceBar");
+    const workspaceBarChip = document.getElementById("workspaceBarChip");
+    const workspaceBarChipName = document.getElementById("workspaceBarChipName");
     let startingChat = false;
 
     async function api(path, options = {}) {
@@ -9732,6 +9753,25 @@ __ICONS_JS__
       composeHero.hidden = viewMode !== "compose";
       promptEl.placeholder = viewMode === "compose" ? "接下来我们该写什么代码？" : "搜索聊天";
       renderComposeProject();
+      renderWorkspaceBar();
+    }
+
+    function renderWorkspaceBar() {
+      if (viewMode === "home") {
+        workspaceBar.hidden = true;
+        return;
+      }
+      workspaceBar.hidden = false;
+      if (selectedProjectCwd) {
+        workspaceBarChipName.textContent = lastPath(selectedProjectCwd);
+        workspaceBarChip.style.color = "";
+      } else if (noProjectSelected) {
+        workspaceBarChipName.textContent = "无项目";
+        workspaceBarChip.style.color = "var(--text-dim)";
+      } else {
+        workspaceBarChipName.textContent = "选择项目";
+        workspaceBarChip.style.color = "var(--text-dim)";
+      }
     }
 
     function renderComposeProject() {
@@ -9793,6 +9833,7 @@ __ICONS_JS__
       noProjectSelected = !selectedProjectCwd;
       closeProjectPicker();
       renderComposeProject();
+      renderWorkspaceBar();
       updateContextHint();
       updateStartControls();
     }
@@ -10184,6 +10225,13 @@ __ICONS_JS__
     });
     chatRow.onclick = () => openHistory("", "聊天");
     composeProjectButton.onclick = openProjectPicker;
+    workspaceBarChip.onclick = () => {
+      if (viewMode !== "compose") {
+        openCompose(selectedProjectCwd);
+        return;
+      }
+      openProjectPicker();
+    };
     projectPickerCancel.onclick = closeProjectPicker;
     projectNewChat.onclick = handleProjectNewChat;
     attachmentButton.onclick = toggleComposerActionMenu;

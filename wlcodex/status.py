@@ -496,6 +496,43 @@ def render_workspace_list(
     return "选择工作区"
 
 
+def render_current_workspace(
+    workspaces: Sequence[object],
+    *,
+    active_alias: str = "",
+    conversation_title: str = "",
+) -> str:
+    """Show current workspace prominently — the indicator above the chat input."""
+    if not workspaces:
+        return "当前没有可用工作区。请检查配置。"
+
+    active = active_alias or "未设置"
+    lines = [
+        "📍 当前工作区",
+        "",
+        f"工作区：{active}",
+    ]
+
+    # Show workspace path if available
+    for ws in workspaces:
+        alias = str(getattr(ws, "alias", "")).strip()
+        if alias == active_alias:
+            path = str(getattr(ws, "path", ""))
+            if path:
+                lines.append(f"路径：{path}")
+            writable = getattr(ws, "allow_write", True)
+            if not writable:
+                lines.append("状态：只读")
+            break
+
+    if conversation_title:
+        lines.append(f"对话：{_trim(conversation_title, 40)}")
+
+    lines.append("")
+    lines.append("点击下方按钮切换工作区：")
+    return "\n".join(lines)
+
+
 def _format_dt(value: object) -> str:
     if value is None:
         return "未知时间"

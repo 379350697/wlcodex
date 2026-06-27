@@ -23,14 +23,13 @@ from wlcodex.conversation_state_machine import (
     route_message,
     MID_RUN_ACKNOWLEDGEMENT,
     build_workspace_busy_buttons,
-    decode_busy_callback,
     BUSY_APPEND,
     BUSY_INTERRUPT,
     BUSY_QUEUE,
     BUSY_CANCEL,
     BUSY_NEW_SESSION,
 )
-from wlcodex.conversation import default_title, mode_from_command
+from wlcodex.conversation import default_title
 from wlcodex.conversation_callback import (
     CARRY_CANCEL,
     CARRY_REFRESH,
@@ -43,9 +42,7 @@ from wlcodex.conversation_callback import (
     RETRY,
     STATUS,
     VERIFY,
-    AUTO_CALLBACK_ACTIONS,
     ConversationCallback,
-    decode_conversation_callback,
     encode_conversation_callback,
 )
 from wlcodex.context_packets import (
@@ -99,7 +96,6 @@ from wlcodex.auto_workflow import (
     ROLE_AUTO_CODEX_TAKEOVER,
     auto_stage_label,
     build_auto_stage_buttons,
-    is_active_auto_stage,
     is_auto_collecting_context,
 )
 from wlcodex.codex_thread_policy import (
@@ -150,6 +146,7 @@ from wlcodex.router import (
     VerifyCommand,
     WorkbenchHistoryCommand,
     WorkspaceListCommand,
+    WorkspaceStatusCommand,
     parse_command,
 )
 from wlcodex.status import (
@@ -164,12 +161,10 @@ from wlcodex.status import (
     render_team_artifact_summary,
     render_team_status_summary,
     render_workspace_list,
+    render_current_workspace,
 )
 from wlcodex.models import ConversationMode
-from wlcodex.status import (
-    render_health_card,
-    render_help,
-)
+from wlcodex.status import render_health_card
 from wlcodex.task_service import TaskService
 from wlcodex.auto_digest_llm import (
     DeepSeekDigestUsage,
@@ -1256,6 +1251,9 @@ class CommandController:
                     ),
                 )
 
+            elif isinstance(command, WorkspaceStatusCommand):
+                return await self.handle_current_workspace(telegram_context)
+
             # --- New conversation commands ---
 
             elif isinstance(command, NewConversationCommand):
@@ -2205,15 +2203,24 @@ class CommandController:
             workspace_alias=self._default_workspace,
         )
         mode_label = MODE_LABELS.get(self._default_mode, self._default_mode)
-        buttons: list[list[dict[str, str]]] = [[
-            {"text": "查看状态", "callback_data": encode_conversation_callback(convo.id, CONTINUE)},
-            {"text": "切换模式", "callback_data": encode_conversation_callback(convo.id, NEW_CONVO)},
-        ]]
+        workspaces = list(self._service._workspaces.values())
+        buttons: list[list[dict[str, str]]] = [
+            [
+                {"text": "查看状态", "callback_data": encode_conversation_callback(convo.id, CONTINUE)},
+                {"text": "切换模式", "callback_data": encode_conversation_callback(convo.id, NEW_CONVO)},
+            ],
+        ]
+        # Add workspace quick-switch buttons
+        ws_buttons = self._workspace_selection_buttons(
+            workspaces, active_alias=convo.workspace_alias
+        )
+        buttons.extend(ws_buttons)
         return ControllerResponse(
             f"新工作台已创建：「{convo.title}」\n"
             f"模式：{mode_label}\n"
             f"工作区：{convo.workspace_alias}\n\n"
-            f"直接发消息继续这个工作台，或用 /codex /claude /auto 切换执行模式。",
+            f"直接发消息继续这个工作台，或用 /codex /claude /auto 切换执行模式。\n\n"
+            f"💡 切换工作区：点击下方按钮",
             buttons=buttons,
         )
 
@@ -3791,9 +3798,7 @@ class CommandController:
             )
             if gate_response is not None:
                 return gate_response
-        goal = orch_run.goal
         chat_id = convo.chat_id
-        budget = ContextBudget()
 
         # Update orchestration run to claude_running
         self._ledger.update_orchestration_run(
@@ -4204,7 +4209,6 @@ class CommandController:
         goal = orch_run.goal
         codex_analysis = orch_run.last_codex_analysis or ""
         claude_summary = orch_run.last_claude_summary or ""
-        conversation_summary = convo.conversation_summary
         verify_round = orch_run.verify_round + 1
 
         task_id = self._implementation_evidence_task_id(convo, orch_run)
@@ -4546,7 +4550,6 @@ class CommandController:
             current_step=AUTO_CODEX_TAKEOVER_RUNNING,
         )
 
-        budget = ContextBudget()
         prompt = (
             f"GPT 开发工程师接管修复任务\n\n"
             f"原始目标：{goal}\n\n"
@@ -5533,6 +5536,32 @@ class CommandController:
             f"对话「{updated.title}」工作区已切换至 {command.workspace_alias}。"
         )
 
+    async def handle_current_workspace(
+        self, ctx: dict[str, Any] | None = None
+    ) -> ControllerResponse:
+        """Show current workspace with quick-switch buttons — the workspace
+        indicator the user wants above the chat input."""
+        if self._ledger is None:
+            return ControllerResponse("系统未完全初始化。请检查配置。")
+
+        chat_id = ctx.get("chat_id", 0) if ctx else 0
+        active = self._ledger.get_active_conversation(chat_id)
+        workspaces = list(self._service._workspaces.values())
+
+        active_alias = active.workspace_alias if active is not None else ""
+        title = active.title if active is not None else ""
+
+        return ControllerResponse(
+            render_current_workspace(
+                workspaces,
+                active_alias=active_alias,
+                conversation_title=title,
+            ),
+            buttons=self._workspace_selection_buttons(
+                workspaces, active_alias=active_alias
+            ),
+        )
+
     async def handle_claude_permission(
         self,
         command: ClaudePermissionCommand,
@@ -6245,9 +6274,6 @@ class CommandController:
                 )
                 continue
 
-            from wlcodex.router import AutoModeCommand
-            cmd = AutoModeCommand(prompt=goal)
-            from wlcodex.models import ConversationMode
             cid = self._new_correlation_id()
 
             orch_run = self._ledger.create_orchestration_run(

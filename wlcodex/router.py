@@ -170,6 +170,12 @@ class WorkspaceListCommand:
 
 
 @dataclass(frozen=True)
+class WorkspaceStatusCommand:
+    """Show current workspace with quick-switch buttons (/workspace, singular)."""
+    pass
+
+
+@dataclass(frozen=True)
 class CarryWorkbenchCommand:
     query: str = ""
 
@@ -238,6 +244,7 @@ ParsedCommand = (
     | SettingsCommand
     | WorkbenchHistoryCommand
     | WorkspaceListCommand
+    | WorkspaceStatusCommand
     | CarryWorkbenchCommand
 )
 
@@ -316,6 +323,8 @@ def parse_command(text: str) -> ParsedCommand:
         return CodexSessionsCommand()
     if stripped == "/workbenches" or stripped == "/history":
         return WorkbenchHistoryCommand()
+    if stripped == "/workspace":
+        return WorkspaceStatusCommand()
     if stripped == "/workspaces":
         return WorkspaceListCommand()
 
