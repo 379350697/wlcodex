@@ -13,6 +13,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DERIVED_DIR = REPO_ROOT / "wlcodex" / "live_stream" / "static" / "marvis"
 ORIGINALS_DIR = REPO_ROOT / "wlcodex" / "live_stream" / "static" / "marvis_originals"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+OFFICE_SLOT_POSITIONS = (
+    (84, 0),
+    (580, 0),
+    (84, 396),
+    (580, 396),
+    (84, 792),
+    (580, 792),
+)
+
+# The first relay role is the director, so the first visible station must use
+# the red Marvis worker. The second role is the architect and uses green.
+OFFICE_WORKER_ORDER = (2, 1, 3, 4, 5, 6)
 
 
 def image_files(path: Path) -> list[Path]:
@@ -84,12 +96,50 @@ def restore() -> int:
     return verify()
 
 
+def generate_office() -> int:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError:
+        print(
+            "Pillow is required for generate-office. Use the bundled Codex Python "
+            "runtime or install Pillow in the active environment."
+        )
+        return 1
+
+    if not ORIGINALS_DIR.is_dir():
+        print(f"missing originals directory: {ORIGINALS_DIR}")
+        return 1
+    DERIVED_DIR.mkdir(parents=True, exist_ok=True)
+
+    base_path = ORIGINALS_DIR / "office-scene-roles-0.png"
+    if not base_path.is_file():
+        print(f"missing office base image: {base_path}")
+        return 1
+
+    shutil.copy2(base_path, DERIVED_DIR / "office-scene-roles-0.png")
+
+    for count in range(1, len(OFFICE_SLOT_POSITIONS) + 1):
+        scene = Image.open(base_path).convert("RGBA")
+        for slot_index in range(count):
+            worker_index = OFFICE_WORKER_ORDER[slot_index]
+            worker_path = ORIGINALS_DIR / f"office-worker-cutout-{worker_index}.png"
+            if not worker_path.is_file():
+                print(f"missing office worker image: {worker_path}")
+                return 1
+            worker = Image.open(worker_path).convert("RGBA")
+            scene.alpha_composite(worker, OFFICE_SLOT_POSITIONS[slot_index])
+        scene.save(DERIVED_DIR / f"office-scene-roles-{count}.png")
+
+    print("generated office-scene-roles-0.png through office-scene-roles-6.png")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("verify", "restore"),
-        help="verify asset coverage or restore derived assets from originals",
+        choices=("verify", "restore", "generate-office"),
+        help="verify coverage, restore images, or generate derived office scenes",
     )
     args = parser.parse_args()
 
@@ -97,6 +147,8 @@ def main() -> int:
         return verify()
     if args.command == "restore":
         return restore()
+    if args.command == "generate-office":
+        return generate_office()
     raise AssertionError(args.command)
 
 

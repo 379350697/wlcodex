@@ -11,4 +11,5 @@ Useful commands:
 ```sh
 scripts/marvis-assets verify
 scripts/marvis-assets restore
+scripts/marvis-assets generate-office
 ```

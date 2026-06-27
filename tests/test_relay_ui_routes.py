@@ -389,7 +389,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-persona-avatars">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
-    assert "/static/marvis/office-scene-roles-5.png" in response
+    assert "/static/marvis/office-scene-roles-5.png?v=20260627-red-director" in response
     assert response.count("data-marvis-office-role=") == 5
     assert "/static/marvis/office-worker-cutout-" not in response
     assert "/static/marvis/office-desk-empty-slot.png" not in response
@@ -555,7 +555,7 @@ async def test_marvis_relay_office_occupancy_follows_configured_roles(
     assert 'data-marvis-office-role="architect"' in response
     assert 'data-marvis-office-role="implementer"' in response
     assert response.count("data-marvis-persona-open=") == 2
-    assert "/static/marvis/office-scene-roles-2.png" in response
+    assert "/static/marvis/office-scene-roles-2.png?v=20260627-red-director" in response
     assert "/static/marvis/office-worker-cutout-" not in response
     assert "/static/marvis/office-desk-empty-slot.png" not in response
     assert "/static/marvis/office-worker-cutout-3.png" not in response

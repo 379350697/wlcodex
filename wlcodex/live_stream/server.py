@@ -4249,7 +4249,7 @@ def _marvis_relay_office_page(
     </header>
     <main class="marvis-office-main">
       <section class="marvis-office-scene" aria-label="Marvis办公室工位">
-        <img class="marvis-office-scene-img" src="/static/marvis/office-scene-roles-{role_count}.png" alt="" loading="eager">
+        <img class="marvis-office-scene-img" src="/static/marvis/office-scene-roles-{role_count}.png?v=20260627-red-director" alt="" loading="eager">
         <div class="marvis-office-layer">
           {office_slots_html}
         </div>
