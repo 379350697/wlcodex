@@ -269,6 +269,58 @@ async def test_relay_task_detail_projects_followup_turns_into_marvis_chat(
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_humanizes_pseudo_envelope_followup_response(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    assert service is not None
+    task = service.create_task(
+        prompt="确认 task28 是否能继续对话",
+        workspace="/tmp/project-a",
+        title="Follow-up display",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {"text": "接续验证：请用一句话说明 task28 现在可以继续对话。"},
+        summary="接续验证：请用一句话说明 task28 现在可以继续对话。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "followup_response",
+        {
+            "text": (
+                '{"artifact_type":"final_summary","reason接续验证一句话回复。'
+                "roledirectorstatuspassedsummary task28 现在可以继续对话\"}"
+            ),
+            "target_role": "user",
+        },
+        summary=(
+            '{"artifact_type":"final_summary","reason接续验证一句话回复。'
+            "roledirectorstatuspassedsummary task28 现在可以继续对话\"}"
+        ),
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "接续验证：请用一句话说明 task28 现在可以继续对话。" in conversation_html
+    assert "task28 现在可以继续对话" in conversation_html
+    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" not in conversation_html
+
+
+@pytest.mark.asyncio
 async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path) -> None:
     response, _service = await _request(
         tmp_path,

@@ -7373,7 +7373,7 @@ def _relay_conversation_row_from_artifact(
             "kind": "followup_response",
             "speaker": _relay_role_label(role),
             "meta": "passed",
-            "body": _relay_sanitize_protocol_leak_text(role, text),
+            "body": _relay_followup_response_display_text(role, text),
             "key": f"followup_response:{artifact_key}",
             "status": "passed",
         }
@@ -7896,6 +7896,66 @@ def _relay_sanitize_protocol_leak_text(role: str, text: str) -> str:
     if "{" in value and any(marker in value for marker in markers):
         return _relay_protocol_output_hidden_text(role)
     return value
+
+
+def _relay_followup_response_display_text(role: str, text: str) -> str:
+    value = text.strip()
+    if not value:
+        return ""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and _relay_dict_looks_like_role_envelope(parsed):
+        return _relay_humanize_role_envelope(parsed)
+
+    humanized = _relay_humanize_display_text(value)
+    extracted = _relay_extract_pseudo_envelope_human_text(humanized)
+    if extracted:
+        return extracted
+    return _relay_sanitize_protocol_leak_text(role, value)
+
+
+def _relay_extract_pseudo_envelope_human_text(text: str) -> str:
+    if not text or "{" not in text:
+        return ""
+    if not any(marker in text for marker in ("artifact_type", "summary", "reason")):
+        return ""
+
+    normalized = re.sub(r"\s+", " ", text).strip()
+    candidates: list[str] = []
+    for field in ("summary", "reason"):
+        match = re.search(
+            rf"(?:^|[{{,\\s\"]){field}(?:[\"\\s:=：]*)(.+)",
+            normalized,
+        )
+        if match:
+            candidates.append(match.group(1))
+
+    for candidate in candidates:
+        cut_at = len(candidate)
+        for marker in (
+            "role",
+            "status",
+            "handoff_to",
+            "next_action",
+            "open_questions",
+            "evidence_refs",
+            "artifact_type",
+        ):
+            marker_index = candidate.find(marker)
+            if marker_index > 0:
+                cut_at = min(cut_at, marker_index)
+        cleaned = candidate[:cut_at]
+        cleaned = cleaned.strip(" ,，。\"{}")
+        if not cleaned:
+            continue
+        cleaned = _relay_humanize_display_text(cleaned)
+        if _relay_text_needs_chinese_fallback(cleaned):
+            continue
+        if len(cleaned) >= 4:
+            return cleaned
+    return ""
 
 
 def _relay_dict_looks_like_role_envelope(payload: dict[str, Any]) -> bool:
