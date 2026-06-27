@@ -4575,7 +4575,7 @@ def _format_marvis_relay_token_count(value: int) -> str:
 
 def _marvis_relay_followup_composer(*, task_id: int, placeholder: str = "请输入任务") -> str:
     return f"""
-    <form class="marvis-relay-composer" method="post" action="/api/relay/tasks/{task_id}/message">
+    <form class="marvis-relay-composer" data-marvis-followup-composer method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
       <button class="marvis-relay-plus" type="button" aria-label="添加">+</button>
       <textarea name="text" placeholder="{escape(placeholder)}" aria-label="继续补充给总工程师"></textarea>
       <button class="marvis-relay-mic" type="submit" aria-label="发送补充"></button>
@@ -6873,7 +6873,7 @@ def _relay_task_detail_page(
       clearAllRolePreviews();
       appendActivity("任务已中断。");
     }});
-    document.querySelector(".relay-composer")?.addEventListener("submit", async (event) => {{
+    document.querySelector("[data-marvis-followup-composer]")?.addEventListener("submit", async (event) => {{
       event.preventDefault();
       const form = event.currentTarget;
       const data = Object.fromEntries(new FormData(form).entries());

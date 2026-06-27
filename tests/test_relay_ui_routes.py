@@ -869,6 +869,13 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "执行问题：invalid json: Expecting value" in work_log_html
     assert "等待总工程师接收并形成决策摘要" not in response
     assert f"/api/relay/tasks/{task.id}/message" in response
+    assert 'data-marvis-followup-composer' in response
+    assert (
+        'document.querySelector("[data-marvis-followup-composer]")'
+        '?.addEventListener("submit"'
+        in response
+    )
+    assert 'document.querySelector(".relay-composer")?.addEventListener("submit"' not in response
     assert "relay-board-grid" not in response.split("<script", 1)[0]
     assert "relay-progress" not in response.split("<script", 1)[0]
     assert "relay-activity-log" not in response.split("<script", 1)[0]
