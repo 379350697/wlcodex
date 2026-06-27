@@ -7,6 +7,7 @@ import json
 import re
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -141,6 +142,7 @@ _STATIC_CONTENT_TYPES = {
     ".webp": "image/webp",
 }
 _RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-task-card-action"
+_RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
@@ -4688,9 +4690,16 @@ def _relay_phase_label(phase: str) -> str:
 
 
 def _relay_activity_label(value: str) -> str:
-    if not value:
+    timestamp = str(value or "").strip()
+    if not timestamp:
         return "暂无活动"
-    return f"最近活动 {value}"
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return f"最近活动 {timestamp}"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_RELAY_ACTIVITY_DISPLAY_TZ)
+    return f"最近活动 {parsed.astimezone(_RELAY_ACTIVITY_DISPLAY_TZ):%m-%d %H:%M}"
 
 
 def _relay_current_dispatch_label(board: Any) -> str:

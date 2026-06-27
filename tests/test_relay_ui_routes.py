@@ -10,7 +10,7 @@ import pytest
 
 from wlcodex.db import Ledger
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
-from wlcodex.live_stream.server import WorkerLiveStreamServer
+from wlcodex.live_stream.server import WorkerLiveStreamServer, _relay_activity_label
 from wlcodex.native_agents.models import NativeAgentCapabilities
 from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.relay.service import RelayService
@@ -44,6 +44,13 @@ class FakeCodexProvider(FakeProvider):
 class FakeAntigravityProvider(FakeProvider):
     provider = "antigravity"
     provider_engine = "cli-local"
+
+
+def test_relay_activity_label_formats_iso_timestamp_for_mobile_cards() -> None:
+    label = _relay_activity_label("2026-06-16T12:20:06.297146+00:00")
+
+    assert label == "最近活动 06-16 20:20"
+    assert "T12:20:06.297146+00:00" not in label
 
 
 async def _read_response(host: str, port: int, request: str) -> str:
