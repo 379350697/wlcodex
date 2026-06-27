@@ -1688,6 +1688,13 @@ class RelayService:
             )
         else:
             events = runtime_store.list_by_agent_run_tail(int(agent_run_id), limit=5000)
+        current_turn_id = _runtime_event_turn_id(runtime_event)
+        if current_turn_id:
+            events = [
+                event
+                for event in events
+                if _runtime_event_turn_id(event) == current_turn_id
+            ]
         completed = _completed_role_envelope_text(events)
         if completed is not None:
             return completed
@@ -2272,6 +2279,17 @@ def _runtime_event_text(runtime_event: Any) -> str:
         or payload.get("chunk")
         or ""
     )
+
+
+def _runtime_event_turn_id(runtime_event: Any) -> str:
+    payload = dict(getattr(runtime_event, "payload", {}) or {})
+    return str(
+        payload.get("native_turn_id")
+        or payload.get("turnId")
+        or payload.get("turn_id")
+        or payload.get("active_turn_id")
+        or ""
+    ).strip()
 
 
 def _latest_artifact_id(

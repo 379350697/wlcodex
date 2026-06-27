@@ -1155,6 +1155,97 @@ def test_director_followup_plain_text_completion_is_visible_and_completes_turn(
     assert followup_responses[-1]["text"] == "问题在主会话投影层，"
 
 
+def test_followup_completion_uses_current_native_turn_delta_not_old_completed_text(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "completed")
+    asyncio.run(service.add_user_message(task.id, "继续说明 task28 是否能对话"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    old_completed_text = json.dumps(
+        {
+            "role_envelope": {
+                "artifact_type": "final_summary",
+                "role": "director",
+                "status": "passed",
+                "summary": "旧 turn 的 workspace 结论",
+                "handoff_to": "",
+                "next_action": "",
+                "open_questions": [],
+                "evidence_refs": [],
+            }
+        },
+        ensure_ascii=False,
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_MESSAGE_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"text": old_completed_text, "native_turn_id": "turn-old"},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={
+                "delta": "task28 现在可以继续对话。",
+                "native_turn_id": "turn-current",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"status": "completed", "native_turn_id": "turn-current"},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    followup_responses = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "followup_response"
+    ]
+    assert detail.task.status == "completed"
+    assert followup_responses[-1]["text"] == "task28 现在可以继续对话。"
+    assert "旧 turn" not in followup_responses[-1]["text"]
+
+
 def test_scan_stale_native_role_syncs_then_blocks_without_assistant_output(
     tmp_path,
 ) -> None:
