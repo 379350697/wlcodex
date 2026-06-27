@@ -1062,7 +1062,13 @@ async def test_relay_work_log_hides_internal_native_activity_for_director_only(
         runtime_store,
         agent_run_id=278,
         event_type=EventType.MODEL_USAGE_UPDATED,
-        payload={"total_tokens": 47215},
+        payload={
+            "input_tokens": 45907,
+            "output_tokens": 1308,
+            "cached_input_tokens": 5504,
+            "reasoning_output_tokens": 1096,
+            "total_tokens": 47215,
+        },
         occurred_at="2026-06-27T08:25:04+00:00",
     )
     _append_runtime_event(

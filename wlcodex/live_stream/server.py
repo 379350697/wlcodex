@@ -4588,29 +4588,45 @@ def _marvis_relay_token_text_from_events(
     hub: WorkerLiveStreamHub | None,
 ) -> str:
     total = 0
-    token_keys = {
-        "total_tokens",
-        "tokens",
-        "consumed_tokens",
-        "input_tokens",
-        "output_tokens",
-        "cached_input_tokens",
-    }
     for _occurred_at, _event_id, _role, _display_name, worker_event in _relay_worker_events_for_roles(
         role_jobs,
         hub=hub,
     ):
-        payload = dict(worker_event.payload or {})
-        usage = payload.get("usage")
-        if isinstance(usage, dict):
-            payload = {**payload, **usage}
-        for key in token_keys:
-            value = payload.get(key)
+        total += _marvis_relay_usage_event_total(dict(worker_event.payload or {}))
+    return _format_marvis_relay_token_count(total)
+
+
+def _marvis_relay_usage_event_total(payload: dict[str, Any]) -> int:
+    usage = payload.get("usage")
+    total_usage = payload.get("total")
+    candidates = [payload]
+    if isinstance(usage, dict):
+        candidates.append(usage)
+        nested_total = usage.get("total")
+        if isinstance(nested_total, dict):
+            candidates.append(nested_total)
+    if isinstance(total_usage, dict):
+        candidates.append(total_usage)
+
+    for candidate in candidates:
+        for key in ("total_tokens", "tokens", "consumed_tokens"):
+            value = candidate.get(key)
             if isinstance(value, bool):
                 continue
             if isinstance(value, (int, float)) and value > 0:
-                total += int(value)
-    return _format_marvis_relay_token_count(total)
+                return int(value)
+
+    fallback_total = 0
+    for candidate in candidates:
+        for key in ("input_tokens", "output_tokens", "reasoning_output_tokens"):
+            value = candidate.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)) and value > 0:
+                fallback_total += int(value)
+        if fallback_total > 0:
+            return fallback_total
+    return 0
 
 
 def _marvis_relay_work_log_body_html(
