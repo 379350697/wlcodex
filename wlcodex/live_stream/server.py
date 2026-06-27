@@ -145,7 +145,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-attachment-sheet"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-attachment-sheet-v2"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4292,11 +4292,11 @@ def _marvis_relay_attachment_sheet_html() -> str:
       <h2>添加到对话</h2>
       <div class="marvis-relay-attachment-grid" aria-label="附件类型">
         <button class="marvis-relay-attachment-tile" type="button" data-marvis-pick-image>
-          <span class="marvis-relay-sheet-icon marvis-relay-sheet-icon-image" aria-hidden="true"></span>
+          <span class="marvis-relay-sheet-icon marvis-relay-sheet-icon-album" aria-hidden="true"></span>
           <span>相册</span>
         </button>
         <button class="marvis-relay-attachment-tile" type="button" data-marvis-pick-file>
-          <span class="marvis-relay-sheet-icon marvis-relay-sheet-icon-file" aria-hidden="true"></span>
+          <span class="marvis-relay-sheet-icon marvis-relay-sheet-icon-local-file" aria-hidden="true"></span>
           <span>本地文件</span>
         </button>
       </div>

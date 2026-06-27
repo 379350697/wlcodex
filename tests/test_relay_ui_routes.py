@@ -281,6 +281,15 @@ async def test_marvis_relay_composer_has_real_attachment_sheet(
         "Host: test\r\nConnection: close\r\n\r\n",
     )
     assert "--marvis-s25-bottom-nav-item-gap: 1px" in css_response
+    assert "--marvis-s25-attachment-sheet-height: 487px" in css_response
+    assert "--marvis-s25-attachment-tile-height: 121px" in css_response
+    assert "--marvis-s25-attachment-skill-icon: 82px" in css_response
+    assert "background: rgba(0, 0, 0, .45)" in css_response
+    assert ".marvis-relay-sheet-icon-album" in css_response
+    assert ".marvis-relay-sheet-icon-local-file" in css_response
+    assert ".marvis-relay-sheet-icon-skills" in css_response
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css_response
+    assert "gap: 20px" in css_response
 
 
 @pytest.mark.asyncio
@@ -564,7 +573,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet-v2">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
@@ -740,7 +749,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet-v2">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png?v=20260627-red-director" in response
@@ -810,7 +819,7 @@ def test_marvis_relay_task_topbar_is_fixed_above_scroll_content() -> None:
 
     assert "body[data-marvis-relay-view] .marvis-relay-topbar {\n  position: fixed;" in css
     assert "--marvis-s25-title-size: 22px;" in css
-    assert "--marvis-s25-top-icon-stroke: 2.1px;" in css
+    assert "--marvis-s25-top-icon-stroke: 2.4px;" in css
     assert "--marvis-s25-composer-bottom: 84px;" in css
     assert "--marvis-s25-bottom-nav-height: 78px;" in css
     assert "body[data-marvis-relay-view] .marvis-relay-menu.is-back::after {" in css
@@ -1123,7 +1132,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet-v2">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-menu is-back" href="/native/workflows/relay?token=secret&amp;workspace=/repo" aria-label="返回上一级"' in response
     assert 'class="marvis-relay-bottom-nav"' in response

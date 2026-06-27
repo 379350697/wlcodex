@@ -25,16 +25,19 @@ body[data-marvis-relay-view] {
   --marvis-s25-title-size: 22px;
   --marvis-s25-device-size: 13px;
   --marvis-s25-device-dot: 7px;
-  --marvis-s25-top-icon-box: 30px;
-  --marvis-s25-top-icon-gap: 16px;
-  --marvis-s25-top-icon-stroke: 2.1px;
-  --marvis-s25-devices-icon-width: 29px;
-  --marvis-s25-devices-icon-height: 25px;
-  --marvis-s25-devices-screen-width: 21px;
-  --marvis-s25-devices-screen-height: 15px;
-  --marvis-s25-devices-phone-width: 10px;
-  --marvis-s25-devices-phone-height: 17px;
-  --marvis-s25-list-line-height: 2px;
+  --marvis-s25-top-icon-box: 38px;
+  --marvis-s25-top-icon-gap: 18px;
+  --marvis-s25-top-icon-stroke: 2.4px;
+  --marvis-s25-devices-icon-width: 37px;
+  --marvis-s25-devices-icon-height: 31px;
+  --marvis-s25-devices-screen-width: 26px;
+  --marvis-s25-devices-screen-height: 20px;
+  --marvis-s25-devices-phone-width: 14px;
+  --marvis-s25-devices-phone-height: 22px;
+  --marvis-s25-list-line-height: 2.6px;
+  --marvis-s25-attachment-sheet-height: 487px;
+  --marvis-s25-attachment-tile-height: 121px;
+  --marvis-s25-attachment-skill-icon: 82px;
   --marvis-s25-task-main-top: 126px;
   --marvis-s25-task-main-x: 20px;
   --marvis-s25-task-main-bottom: 210px;
@@ -238,26 +241,26 @@ body[data-marvis-relay-view] .marvis-relay-icon-devices::before {
   width: var(--marvis-s25-devices-screen-width);
   height: var(--marvis-s25-devices-screen-height);
   border: var(--marvis-s25-top-icon-stroke) solid #111;
-  border-radius: 4px;
+  border-radius: 6px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-icon-devices::after {
   content: "";
   position: absolute;
   left: 0;
-  top: 7px;
+  top: 9px;
   width: var(--marvis-s25-devices-phone-width);
   height: var(--marvis-s25-devices-phone-height);
   border: var(--marvis-s25-top-icon-stroke) solid #111;
-  border-radius: 4px;
+  border-radius: 5px;
   background: #f3f3f3;
 }
 
 body[data-marvis-relay-view] .marvis-relay-icon-list {
-  width: 27px;
-  height: 25px;
+  width: 33px;
+  height: 31px;
   border: var(--marvis-s25-top-icon-stroke) solid #111;
-  border-radius: 7px;
+  border-radius: 9px;
   box-sizing: border-box;
 }
 
@@ -265,19 +268,19 @@ body[data-marvis-relay-view] .marvis-relay-icon-list::before,
 body[data-marvis-relay-view] .marvis-relay-icon-list::after {
   content: "";
   position: absolute;
-  left: 6px;
-  right: 6px;
+  left: 8px;
+  right: 8px;
   height: var(--marvis-s25-list-line-height);
   border-radius: 2px;
   background: #111;
 }
 
 body[data-marvis-relay-view] .marvis-relay-icon-list::before {
-  top: 7px;
+  top: 9px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-icon-list::after {
-  bottom: 7px;
+  bottom: 9px;
 }
 
 body[data-marvis-relay-view] main {
@@ -1062,7 +1065,7 @@ body[data-marvis-relay-view] .marvis-relay-attachment-backdrop {
   position: fixed;
   inset: 0;
   z-index: 21;
-  background: rgba(0, 0, 0, .34);
+  background: rgba(0, 0, 0, .45);
   opacity: 0;
   transition: opacity .2s ease;
 }
@@ -1077,12 +1080,12 @@ body[data-marvis-relay-view] .marvis-relay-attachment-sheet {
   bottom: 0;
   z-index: 22;
   width: min(var(--marvis-s25-phone-width), 100%);
-  min-height: 392px;
+  min-height: var(--marvis-s25-attachment-sheet-height);
   box-sizing: border-box;
   transform: translate(-50%, 105%);
-  border-radius: 20px 20px 0 0;
+  border-radius: 24px 24px 0 0;
   background: #fff;
-  padding: 23px 20px 42px;
+  padding: 31px 24px 42px;
   transition: transform .22s ease;
 }
 
@@ -1091,9 +1094,9 @@ body[data-marvis-relay-view] .marvis-relay-attachment-sheet.open {
 }
 
 body[data-marvis-relay-view] .marvis-relay-attachment-sheet h2 {
-  margin: 0 42px 24px;
+  margin: 0 50px 32px;
   color: #111;
-  font-size: 20px;
+  font-size: 22px;
   line-height: 1.2;
   font-weight: 800;
   text-align: center;
@@ -1101,60 +1104,61 @@ body[data-marvis-relay-view] .marvis-relay-attachment-sheet h2 {
 
 body[data-marvis-relay-view] .marvis-relay-attachment-close {
   position: absolute;
-  right: 22px;
-  top: 22px;
+  right: 28px;
+  top: 29px;
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 31px;
+  height: 31px;
   border: 0;
   background: transparent;
   color: #111;
   padding: 0;
-  font-size: 28px;
+  font-size: 38px;
+  font-weight: 300;
   line-height: 1;
 }
 
 body[data-marvis-relay-view] .marvis-relay-attachment-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: 20px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-attachment-tile {
   display: grid;
   place-items: center;
   align-content: center;
-  gap: 13px;
-  min-height: 102px;
+  gap: 16px;
+  min-height: var(--marvis-s25-attachment-tile-height);
   border: 0;
   border-radius: 10px;
   background: #f5f5f5;
   color: #111;
   padding: 0;
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 500;
 }
 
 body[data-marvis-relay-view] .marvis-relay-skill-section {
   display: grid;
-  gap: 26px;
-  margin-top: 26px;
+  gap: 31px;
+  margin-top: 33px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-skill-section p {
   margin: 0;
   color: #9b9b9b;
-  font-size: 16px;
+  font-size: 17px;
   line-height: 1;
 }
 
 body[data-marvis-relay-view] .marvis-relay-skill-row {
   display: grid;
-  grid-template-columns: 70px minmax(0, 1fr) 20px;
+  grid-template-columns: var(--marvis-s25-attachment-skill-icon) minmax(0, 1fr) 24px;
   align-items: center;
-  gap: 14px;
-  min-height: 70px;
+  gap: 18px;
+  min-height: var(--marvis-s25-attachment-skill-icon);
   border: 0;
   background: transparent;
   color: #111;
@@ -1163,25 +1167,25 @@ body[data-marvis-relay-view] .marvis-relay-skill-row {
 }
 
 body[data-marvis-relay-view] .marvis-relay-skill-row > .marvis-relay-sheet-icon {
-  width: 70px;
-  height: 70px;
-  border-radius: 13px;
+  width: var(--marvis-s25-attachment-skill-icon);
+  height: var(--marvis-s25-attachment-skill-icon);
+  border-radius: 14px;
   background: #f5f5f5;
 }
 
 body[data-marvis-relay-view] .marvis-relay-skill-text {
   display: grid;
-  gap: 7px;
+  gap: 8px;
 }
 
 body[data-marvis-relay-view] .marvis-relay-skill-text strong {
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1;
 }
 
 body[data-marvis-relay-view] .marvis-relay-skill-text small {
   color: #9b9b9b;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1;
 }
 
@@ -1194,80 +1198,84 @@ body[data-marvis-relay-view] .marvis-relay-skill-chevron {
 body[data-marvis-relay-view] .marvis-relay-sheet-icon {
   position: relative;
   display: block;
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
 }
 
-body[data-marvis-relay-view] .marvis-relay-sheet-icon-image {
-  border: 2px solid #111;
-  border-radius: 2px;
-  box-sizing: border-box;
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-album {
+  width: 34px;
+  height: 34px;
 }
 
-body[data-marvis-relay-view] .marvis-relay-sheet-icon-image::before {
-  content: "";
-  position: absolute;
-  left: 6px;
-  top: 5px;
-  width: 5px;
-  height: 5px;
-  border: 2px solid #111;
-  border-radius: 50%;
-  box-sizing: border-box;
-}
-
-body[data-marvis-relay-view] .marvis-relay-sheet-icon-image::after {
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-album::before {
   content: "";
   position: absolute;
   left: 5px;
-  bottom: 5px;
-  width: 16px;
-  height: 11px;
-  border-left: 2px solid #111;
-  border-bottom: 2px solid #111;
-  transform: rotate(45deg);
+  top: 2px;
+  width: 22px;
+  height: 29px;
+  border: 2.4px solid #111;
+  border-radius: 2px;
+  box-sizing: border-box;
+  transform: skewY(-18deg);
 }
 
-body[data-marvis-relay-view] .marvis-relay-sheet-icon-file {
-  border: 2px solid #111;
-  border-radius: 3px;
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-album::after {
+  content: "";
+  position: absolute;
+  left: 15px;
+  top: 10px;
+  width: 12px;
+  height: 13px;
+  border-left: 2.4px solid #111;
+  border-bottom: 2.4px solid #111;
+  border-radius: 1px;
+  transform: rotate(45deg);
   box-sizing: border-box;
 }
 
-body[data-marvis-relay-view] .marvis-relay-sheet-icon-file::before {
-  content: "";
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  width: 9px;
-  height: 9px;
-  border-left: 2px solid #111;
-  border-bottom: 2px solid #111;
-  background: #f5f5f5;
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-local-file {
+  width: 34px;
+  height: 34px;
 }
 
-body[data-marvis-relay-view] .marvis-relay-sheet-icon-file::after {
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-local-file::before {
   content: "";
   position: absolute;
-  left: 10px;
-  bottom: 6px;
-  width: 8px;
-  height: 8px;
-  border-left: 2px solid #111;
-  border-top: 2px solid #111;
-  transform: rotate(45deg);
-}
-
-body[data-marvis-relay-view] .marvis-relay-sheet-icon-skills::before,
-body[data-marvis-relay-view] .marvis-relay-sheet-icon-skills::after {
-  content: "";
-  position: absolute;
-  inset: 18px;
+  left: 6px;
+  top: 2px;
+  width: 22px;
+  height: 29px;
+  border: 2.4px solid #111;
+  border-radius: 2px;
   background:
-    linear-gradient(#111 0 0) 0 0 / 16px 16px no-repeat,
-    linear-gradient(#111 0 0) 22px 0 / 16px 16px no-repeat,
-    linear-gradient(#111 0 0) 0 22px / 16px 16px no-repeat,
-    linear-gradient(#111 0 0) 22px 22px / 16px 16px no-repeat;
+    linear-gradient(#111 0 0) 50% 9px / 2.4px 17px no-repeat,
+    #f5f5f5;
+  box-sizing: border-box;
+}
+
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-local-file::after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  top: 12px;
+  width: 10px;
+  height: 11px;
+  border-left: 2.4px solid #111;
+  border-top: 2.4px solid #111;
+  transform: rotate(45deg);
+  box-sizing: border-box;
+}
+
+body[data-marvis-relay-view] .marvis-relay-sheet-icon-skills::before {
+  content: "";
+  position: absolute;
+  inset: 21px;
+  background:
+    linear-gradient(#111 0 0) 0 0 / 17px 17px no-repeat,
+    linear-gradient(#111 0 0) 22px 0 / 17px 17px no-repeat,
+    linear-gradient(#111 0 0) 0 22px / 17px 17px no-repeat,
+    linear-gradient(#111 0 0) 22px 22px / 17px 17px no-repeat;
   border-radius: 4px;
 }
 
