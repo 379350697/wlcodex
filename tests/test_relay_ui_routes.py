@@ -414,7 +414,8 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "File Agent" not in response
     assert "Browser Agent" not in response
     assert "Search Agent" not in response
-    assert "设置大模型" in response
+    assert "设置大脑" in response
+    assert "设置大模型" not in response
     assert "marvis-persona-model-panel" in response
     assert 'data-provider-option="codex"' in response
     assert 'data-provider-option="claude"' in response

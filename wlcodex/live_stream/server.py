@@ -4283,11 +4283,11 @@ def _marvis_relay_office_page(
         <p class="marvis-persona-label">技能:</p>
         <div class="marvis-persona-skills" data-persona-skills></div>
         <div class="marvis-persona-actions">
-          <button class="marvis-persona-model-button" type="button" data-persona-model-toggle>设置大模型</button>
+          <button class="marvis-persona-model-button" type="button" data-persona-model-toggle>设置大脑</button>
           <span class="marvis-persona-model-status" data-persona-model-status></span>
         </div>
-        <section class="marvis-persona-model-panel" data-persona-model-panel hidden aria-label="设置角色大模型">
-          <p class="marvis-persona-label">大模型:</p>
+        <section class="marvis-persona-model-panel" data-persona-model-panel hidden aria-label="设置角色大脑">
+          <p class="marvis-persona-label">大脑:</p>
           <div class="marvis-persona-model-options" data-persona-model-options>
             {provider_options_html}
           </div>
