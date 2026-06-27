@@ -7452,6 +7452,14 @@ def _relay_conversation_row_is_task_status_noise(row: dict[str, str]) -> bool:
     if kind == "user_message" and _relay_user_message_is_retry_or_context(body):
         return True
     status_markers = (
+        "<tool_use_error>",
+        "Directory does not exist",
+        "Found 1 file",
+        "No files found",
+        "Task #",
+        "The file /",
+        "Tool permission request failed",
+        "Updated task #",
         "输出格式异常",
         "任务已阻塞",
         "invalid json",
