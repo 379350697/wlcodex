@@ -14,6 +14,7 @@ _KIND_BY_EVENT_TYPE = {
     EventType.MODEL_TEXT_DELTA: "text_delta",
     EventType.MODEL_MESSAGE_COMPLETED: "message_completed",
     EventType.MODEL_REASONING_DELTA: "reasoning_delta",
+    EventType.MODEL_USAGE_UPDATED: "usage_updated",
     EventType.TOOL_CALL_STARTED: "tool_call_started",
     EventType.TOOL_CALL_PROGRESS: "tool_call_progress",
     EventType.TOOL_CALL_COMPLETED: "tool_call_completed",

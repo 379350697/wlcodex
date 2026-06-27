@@ -11,7 +11,11 @@ import pytest
 
 from wlcodex.db import Ledger
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
-from wlcodex.live_stream.server import WorkerLiveStreamServer, _relay_activity_label
+from wlcodex.live_stream.server import (
+    WorkerLiveStreamServer,
+    _marvis_relay_clean_artifact_summary,
+    _relay_activity_label,
+)
 from wlcodex.native_agents.models import NativeAgentCapabilities
 from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.relay.service import RelayService
@@ -64,6 +68,18 @@ def test_relay_activity_label_formats_iso_timestamp_for_mobile_cards() -> None:
     fallback_label = _relay_activity_label("2026-06-16T07:51:57.510982123+00:00")
     assert fallback_label == "最近活动 06-16 15:51"
     assert "2026-06-16T" not in fallback_label
+
+
+def test_marvis_work_log_cleans_escaped_protocol_summary_fragment() -> None:
+    raw = (
+        'https://www.kitco.com/charts/gold\\",\\"handoff_to\\":\\"\\",'
+        '\\"reason\\":\\"已查询实时贵金属报价源\\",\\"role\\":\\"director\\",'
+        '\\"summary\\":\\"截至查询时，今日国际现货黄金约为 4,088.60 美元/盎司。\\"}'
+    )
+
+    assert _marvis_relay_clean_artifact_summary(raw) == (
+        "截至查询时，今日国际现货黄金约为 4,088.60 美元/盎司。"
+    )
 
 
 async def _read_response(host: str, port: int, request: str) -> str:
@@ -261,7 +277,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-work-log">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-native-work-log">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
@@ -437,7 +453,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-work-log">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-native-work-log">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png?v=20260627-red-director" in response
@@ -790,7 +806,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-work-log">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260627-native-work-log">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
@@ -1097,6 +1113,10 @@ async def test_relay_work_log_hides_internal_native_activity_for_director_only(
     assert "thread_status_changed" not in work_log_html
     assert "turn_started" not in work_log_html
     assert "completed" not in work_log_html
+    assert "final_summary" not in work_log_html
+    assert "relay_role" not in work_log_html
+    assert "evidence_refs" not in work_log_html
+    assert "今日国际现货黄金约为" in work_log_html
 
 
 @pytest.mark.asyncio
@@ -1282,6 +1302,258 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
     assert "12K" in work_log_html
     assert "list windows 已完成" in work_log_html
     assert "marvis-work-log-tool-chip" in work_log_html
+
+
+@pytest.mark.asyncio
+async def test_relay_work_log_projects_native_events_in_call_order(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Marvis full native log task",
+        prompt="整理 Steam 游戏并生成网页",
+        workspace="/repo",
+        provider="codex",
+    )
+    for role, agent_run_id in [
+        ("director", 801),
+        ("tester", 802),
+        ("director", 801),
+        ("implementer", 803),
+        ("director", 801),
+    ]:
+        service._store.update_role_metadata(
+            task.id,
+            role,
+            provider="codex",
+            model="gpt-5",
+            native_session_id=f"native-{role}-{agent_run_id}",
+            agent_run_id=agent_run_id,
+            dispatch_verified=True,
+        )
+        service._store.update_role_status(task.id, role, "passed")
+
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "relay_role": "director",
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "status": "passed",
+            "route": "core_relay",
+            "summary": "先获取 Mac 配置，再全盘检索 Steam 热门 macOS 游戏。",
+            "handoff_to": "tester",
+            "required_roles": ["director", "tester", "implementer"],
+            "open_questions": [],
+            "next_action": "派 Search Agent 检索。",
+        },
+        summary="先获取 Mac 配置，再全盘检索 Steam 热门 macOS 游戏。",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.COMMAND_STARTED,
+        payload={
+            "command": "shell executor",
+            "native_turn_id": "turn-director-config",
+            "itemId": "cmd-config",
+        },
+        occurred_at="2026-06-14T12:10:01+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.COMMAND_COMPLETED,
+        payload={
+            "command": "shell executor",
+            "native_turn_id": "turn-director-config",
+            "itemId": "cmd-config",
+            "output": "Apple M4 / 32GB / 10核GPU / macOS 26.5",
+        },
+        occurred_at="2026-06-14T12:10:02+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "配置到手：Apple M4 / 32GB / 10核GPU / macOS 26.5。现在派 Search Agent 去做 Steam 全量检索。",
+            "native_turn_id": "turn-director-config",
+            "itemId": "assistant-config",
+        },
+        occurred_at="2026-06-14T12:10:03+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=802,
+        event_type=EventType.TOOL_CALL_COMPLETED,
+        payload={
+            "tool_name": "search apps",
+            "native_turn_id": "turn-search",
+            "itemId": "tool-search",
+        },
+        occurred_at="2026-06-14T12:10:04+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=802,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "搞定，有请下一位",
+            "native_turn_id": "turn-search",
+            "itemId": "assistant-search",
+        },
+        occurred_at="2026-06-14T12:10:05+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": 'https://www.kitco.com/charts/gold\\",\\"handoff_to\\":\\"\\",',
+            "native_turn_id": "turn-director-gold",
+            "itemId": "assistant-gold",
+        },
+        occurred_at="2026-06-14T12:10:05.100000+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": '\\"summary\\":\\"截至查询时，今日国际现货黄金约为 4,088.60 美元/盎司。\\"}',
+            "native_turn_id": "turn-director-gold",
+            "itemId": "assistant-gold",
+        },
+        occurred_at="2026-06-14T12:10:05.200000+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.COMMAND_FAILED,
+        payload={
+            "command": "python executor",
+            "native_turn_id": "turn-director-html",
+            "itemId": "cmd-python",
+            "output": "Invalid control character at line 18 column 27",
+        },
+        occurred_at="2026-06-14T12:10:06+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "JSON 中有非标准格式，让我修复提取逻辑。",
+            "native_turn_id": "turn-director-html",
+            "itemId": "assistant-json-fix",
+        },
+        occurred_at="2026-06-14T12:10:07+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=803,
+        event_type=EventType.COMMAND_COMPLETED,
+        payload={
+            "command": "shell executor",
+            "native_turn_id": "turn-browser",
+            "itemId": "cmd-browser",
+            "output": "页面已打开，截图保存。",
+        },
+        occurred_at="2026-06-14T12:10:08+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=803,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "搞定，有请下一位",
+            "native_turn_id": "turn-browser",
+            "itemId": "assistant-browser",
+        },
+        occurred_at="2026-06-14T12:10:09+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "页面渲染正常，全部验证通过。",
+            "native_turn_id": "turn-director-final",
+            "itemId": "assistant-final",
+        },
+        occurred_at="2026-06-14T12:10:10+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.MODEL_USAGE_UPDATED,
+        payload={
+            "input_tokens": 28000,
+            "output_tokens": 1000,
+            "total_tokens": 29000,
+        },
+        occurred_at="2026-06-14T12:10:11+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.AGENT_RUN_ACTIVITY,
+        payload={
+            "action": "turn_started",
+            "native_turn_id": "turn-noise",
+        },
+        occurred_at="2026-06-14T12:10:12+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    visible_html = response.split("<script", 1)[0]
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
+
+    assert "python executor" not in conversation_html
+    assert "Invalid control character" not in conversation_html
+    assert "29K" in work_log_html
+    assert "shell executor 已完成" in work_log_html
+    assert "search apps 已完成" in work_log_html
+    assert "python executor 调用失败" in work_log_html
+    assert "Invalid control character at line 18 column 27" in work_log_html
+    assert "配置到手：Apple M4" in work_log_html
+    assert "今日国际现货黄金约为 4,088.60 美元/盎司" in work_log_html
+    assert "kitco.com/charts/gold" not in work_log_html
+    assert "handoff_to" not in work_log_html
+    assert "JSON 中有非标准格式" in work_log_html
+    assert "turn_started" not in work_log_html
+    assert "data-marvis-work-log-segment" in work_log_html
+    assert "data-marvis-work-log-entry" in work_log_html
+    assert "data-marvis-work-log-output" in work_log_html
+
+    segment_roles = re.findall(r'data-marvis-work-log-segment="([^"]+)"', work_log_html)
+    assert segment_roles[:5] == [
+        "director",
+        "tester",
+        "director",
+        "implementer",
+        "director",
+    ]
+    assert work_log_html.count('data-marvis-work-log-segment="director"') >= 3
+    assert "function renderMarvisWorkLogNativeEvent" in response
+    assert "function ensureMarvisWorkLogSegment" in response
+    assert "updateMarvisWorkLogTokenTotal" in response
+    assert "renderMarvisWorkLogNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);" in response
+    assert "marvis-work-log-shell" not in visible_html
 
 
 @pytest.mark.asyncio

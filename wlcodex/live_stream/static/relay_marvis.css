@@ -959,6 +959,11 @@ body[data-marvis-relay-view] .marvis-work-log-entry {
   min-width: 0;
 }
 
+body[data-marvis-relay-view] .marvis-work-log-entry.is-failed .marvis-work-log-tool-chip {
+  background: #f1e8e4;
+  color: #9b3f25;
+}
+
 body[data-marvis-relay-view] .marvis-work-log-entry p {
   margin: 0;
   color: #111;
@@ -994,6 +999,37 @@ body[data-marvis-relay-view] .marvis-work-log-tool-chip::before {
   font-weight: 800;
 }
 
+body[data-marvis-relay-view] .marvis-work-log-output {
+  min-width: 0;
+  width: 100%;
+  border-radius: 10px;
+  background: #f0efed;
+  color: #6f625b;
+  overflow: hidden;
+}
+
+body[data-marvis-relay-view] .marvis-work-log-output summary {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  cursor: pointer;
+  color: #8a7a71;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+body[data-marvis-relay-view] .marvis-work-log-output pre {
+  max-height: 220px;
+  margin: 0;
+  padding: 0 12px 12px;
+  overflow: auto;
+  color: #433b37;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 body[data-marvis-relay-view] .marvis-work-log-empty,
 body[data-marvis-relay-view] .marvis-work-log-artifacts p {
   margin: 0;
@@ -1011,6 +1047,35 @@ body[data-marvis-relay-view] .marvis-work-log-artifacts h3 {
   color: #111;
   font-size: 18px;
   font-weight: 800;
+}
+
+@media (min-width: 980px) {
+  body[data-marvis-relay-view] .marvis-relay-phone {
+    width: min(680px, calc(100vw - 430px));
+    max-width: 680px;
+    margin-left: max(18px, calc((100vw - 1110px) / 2));
+    margin-right: 430px;
+  }
+
+  body[data-marvis-relay-view] .marvis-relay-backdrop {
+    display: none;
+  }
+
+  body[data-marvis-relay-view] .marvis-work-log {
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: auto;
+    width: min(430px, 36vw);
+    max-height: 100dvh;
+    border-radius: 0;
+    transform: none;
+    box-shadow: -1px 0 0 rgba(0, 0, 0, .04);
+  }
+
+  body[data-marvis-relay-view] .marvis-work-log.open {
+    transform: none;
+  }
 }
 
 body[data-marvis-relay-view] .relay-create-modal {

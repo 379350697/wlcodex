@@ -7,6 +7,7 @@ import json
 import re
 import secrets
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
@@ -141,7 +142,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-work-log"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-native-work-log"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4553,14 +4554,35 @@ def _marvis_relay_followup_composer(*, task_id: int, placeholder: str = "请输�
     """
 
 
+@dataclass
+class WorkLogEntry:
+    kind: str
+    key: str
+    text: str = ""
+    chip: str = ""
+    output: str = ""
+    failed: bool = False
+    replace_text: bool = False
+
+
+@dataclass
+class WorkLogSegment:
+    role: str
+    persona: str
+    display_name: str
+    entries: list[WorkLogEntry]
+
+
 def _marvis_relay_work_log_html(
     *,
     body_html: str,
     token_text: str = "0",
+    token_total: int = 0,
+    max_event_id: int = 0,
 ) -> str:
     return f"""
     <div class="marvis-relay-backdrop" data-marvis-work-log-backdrop hidden></div>
-    <section class="marvis-work-log" data-marvis-work-log hidden aria-label="工作日志">
+    <section class="marvis-work-log" data-marvis-work-log data-marvis-work-log-max-event-id="{max(0, int(max_event_id))}" aria-label="工作日志">
       <button class="marvis-work-log-close" type="button" data-marvis-close-log aria-label="关闭">×</button>
       <div class="marvis-work-log-tabs">
         <button class="marvis-work-log-tab active" type="button">工作日志</button>
@@ -4574,12 +4596,40 @@ def _marvis_relay_work_log_html(
         </div>
         <div class="marvis-work-log-metrics">
           <span>空闲中...</span>
-          <strong>{escape(token_text)} ☕</strong>
+          <strong data-marvis-work-log-token-value data-token-total="{max(0, int(token_total))}">{escape(token_text)} ☕</strong>
         </div>
       </div>
-      <div class="marvis-work-log-body">{body_html}</div>
+      <div class="marvis-work-log-body" data-marvis-work-log-body>{body_html}</div>
     </section>
     """
+
+
+def _marvis_relay_token_total_from_events(
+    role_jobs: list[Any],
+    *,
+    hub: WorkerLiveStreamHub | None,
+) -> int:
+    total = 0
+    for _occurred_at, _event_id, _role, _display_name, worker_event in _relay_worker_events_for_roles(
+        role_jobs,
+        hub=hub,
+    ):
+        total += _marvis_relay_usage_event_total(dict(worker_event.payload or {}))
+    return total
+
+
+def _marvis_relay_max_event_id_from_events(
+    role_jobs: list[Any],
+    *,
+    hub: WorkerLiveStreamHub | None,
+) -> int:
+    max_event_id = 0
+    for _occurred_at, event_id, _role, _display_name, _worker_event in _relay_worker_events_for_roles(
+        role_jobs,
+        hub=hub,
+    ):
+        max_event_id = max(max_event_id, int(event_id))
+    return max_event_id
 
 
 def _marvis_relay_token_text_from_events(
@@ -4587,13 +4637,9 @@ def _marvis_relay_token_text_from_events(
     *,
     hub: WorkerLiveStreamHub | None,
 ) -> str:
-    total = 0
-    for _occurred_at, _event_id, _role, _display_name, worker_event in _relay_worker_events_for_roles(
-        role_jobs,
-        hub=hub,
-    ):
-        total += _marvis_relay_usage_event_total(dict(worker_event.payload or {}))
-    return _format_marvis_relay_token_count(total)
+    return _format_marvis_relay_token_count(
+        _marvis_relay_token_total_from_events(role_jobs, hub=hub)
+    )
 
 
 def _marvis_relay_usage_event_total(payload: dict[str, Any]) -> int:
@@ -4635,65 +4681,14 @@ def _marvis_relay_work_log_body_html(
     hub: WorkerLiveStreamHub | None,
     canonical_payloads: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    canonical_payloads = canonical_payloads or {}
-    events = _relay_worker_events_for_roles(detail.role_jobs, hub=hub)
-    events_by_role: dict[str, list[WorkerStreamEvent]] = {}
-    for _occurred_at, _event_id, role, _display_name, worker_event in events:
-        events_by_role.setdefault(role, []).append(worker_event)
-
+    segments = _marvis_relay_work_log_segments(
+        detail,
+        hub=hub,
+        canonical_payloads=canonical_payloads,
+    )
     rows: list[str] = []
-    for job in detail.role_jobs:
-        role = str(getattr(job, "role", "") or "")
-        if role not in RELAY_ROLE_IDS:
-            continue
-        role_events = events_by_role.get(role, [])
-        payload = canonical_payloads.get(role)
-        has_content = (
-            role_events
-            or payload is not None
-            or str(getattr(job, "error_message", "") or "").strip()
-            or str(getattr(job, "status", "") or "") != "idle"
-        )
-        if not has_content:
-            continue
-        persona, display_name = _marvis_relay_public_role(role)
-        timeline_items: list[str] = []
-        if payload is not None:
-            timeline_items.append(
-                _marvis_relay_work_log_text_item(
-                    _relay_humanize_role_envelope(payload),
-                    chip=f"{_marvis_relay_action_label(role, payload)} {_marvis_relay_role_status_label(str(payload.get('status') or getattr(job, 'status', '') or 'passed'))}",
-                )
-            )
-        error_message = str(getattr(job, "error_message", "") or "").strip()
-        if error_message:
-            timeline_items.append(
-                _marvis_relay_work_log_text_item(
-                    f"{_relay_role_label(role)}执行问题：{_relay_humanize_display_text(error_message)}",
-                    chip="调用失败",
-                )
-            )
-        for worker_event in role_events:
-            item = _marvis_relay_work_log_event_item(worker_event)
-            if item:
-                timeline_items.append(item)
-        if not timeline_items:
-            timeline_items.append(
-                _marvis_relay_work_log_text_item(
-                    f"{display_name} {_marvis_relay_role_status_label(str(getattr(job, 'status', '') or 'idle'))}"
-                )
-            )
-        rows.append(
-            f"""
-      <section class="marvis-work-log-role" data-marvis-work-log-role="{escape(role)}">
-        {_marvis_relay_avatar_html(persona, label=display_name)}
-        <div class="marvis-work-log-role-main">
-          <h3>{escape(display_name)}</h3>
-          <div class="marvis-work-log-line">{''.join(timeline_items)}</div>
-        </div>
-      </section>
-            """
-        )
+    for index, segment in enumerate(segments):
+        rows.append(_marvis_relay_work_log_segment_html(segment, index=index))
     if not rows:
         return '<p class="marvis-work-log-empty">暂无工作日志</p>'
     rows.append(
@@ -4707,42 +4702,346 @@ def _marvis_relay_work_log_body_html(
     return "\n".join(rows)
 
 
-def _marvis_relay_work_log_text_item(text: str, *, chip: str = "") -> str:
-    chip_html = (
-        f'<span class="marvis-work-log-tool-chip">{escape(chip)}</span>' if chip else ""
+def _marvis_relay_work_log_segments(
+    detail: Any,
+    *,
+    hub: WorkerLiveStreamHub | None,
+    canonical_payloads: dict[str, dict[str, Any]] | None = None,
+) -> list[WorkLogSegment]:
+    canonical_payloads = canonical_payloads or {}
+    role_errors = _marvis_relay_role_error_payloads_by_role(
+        getattr(detail, "artifacts", []) or []
     )
+    artifact_payloads = _marvis_relay_summary_payloads_by_role(
+        getattr(detail, "artifacts", []) or []
+    )
+    events = _relay_worker_events_for_roles(detail.role_jobs, hub=hub)
+    protocol_completed_keys = {
+        _relay_native_message_key(role, worker_event, bucket="assistant")
+        for _occurred_at, _event_id, role, _display_name, worker_event in events
+        if worker_event.kind == "message_completed"
+        and _marvis_relay_work_log_text_is_protocol_noise(
+            _relay_native_event_text(worker_event)
+        )
+    }
+    segments: list[WorkLogSegment] = []
+    entry_maps: list[dict[str, WorkLogEntry]] = []
+
+    def append_segment(role: str) -> WorkLogSegment:
+        persona, display_name = _marvis_relay_public_role(role)
+        segment = WorkLogSegment(
+            role=role,
+            persona=persona,
+            display_name=display_name,
+            entries=[],
+        )
+        segments.append(segment)
+        entry_maps.append({})
+        return segment
+
+    def append_entry(role: str, entry: WorkLogEntry) -> None:
+        if not role or role not in RELAY_ROLE_IDS:
+            return
+        segment = segments[-1] if segments and segments[-1].role == role else append_segment(role)
+        key_map = entry_maps[-1]
+        existing = key_map.get(entry.key) if entry.key else None
+        if existing is None:
+            segment.entries.append(entry)
+            if entry.key:
+                key_map[entry.key] = entry
+            return
+        _marvis_relay_merge_work_log_entry(existing, entry)
+
+    for _occurred_at, _event_id, role, _display_name, worker_event in events:
+        if (
+            worker_event.kind == "text_delta"
+            and _relay_native_message_key(role, worker_event, bucket="assistant")
+            in protocol_completed_keys
+        ):
+            continue
+        entry = _marvis_relay_work_log_entry_from_event(role, worker_event)
+        if entry is not None:
+            append_entry(role, entry)
+
+    _marvis_relay_finalize_work_log_segments(segments)
+    existing_roles = {segment.role for segment in segments}
+    for job in detail.role_jobs:
+        role = str(getattr(job, "role", "") or "")
+        if role not in RELAY_ROLE_IDS:
+            continue
+        if role in existing_roles:
+            payload = None
+        else:
+            payload = canonical_payloads.get(role) or artifact_payloads.get(role)
+            fallback_payload = artifact_payloads.get(role)
+            if (
+                payload is not None
+                and fallback_payload is not None
+                and _marvis_relay_work_log_text_is_protocol_noise(
+                    str(payload.get("summary") or payload.get("output") or "")
+                )
+            ):
+                payload = fallback_payload
+        role_error = role_errors.get(role) or {}
+        error_message = str(
+            getattr(job, "error_message", "")
+            or role_error.get("error")
+            or role_error.get("summary")
+            or role_error.get("message")
+            or ""
+        ).strip()
+        status = str(getattr(job, "status", "") or "")
+        if payload is not None:
+            append_entry(
+                role,
+                WorkLogEntry(
+                    kind="artifact",
+                    key=f"artifact:{role}",
+                    text=_relay_humanize_role_envelope(payload),
+                    chip=f"{_marvis_relay_action_label(role, payload)} {_marvis_relay_role_status_label(str(payload.get('status') or status or 'passed'))}",
+                ),
+            )
+            existing_roles.add(role)
+        if error_message:
+            append_entry(
+                role,
+                WorkLogEntry(
+                    kind="error",
+                    key=f"error:{role}",
+                    text=f"{_relay_role_label(role)}执行问题：{_relay_humanize_display_text(error_message)}",
+                    chip="调用失败",
+                    failed=True,
+                ),
+            )
+            existing_roles.add(role)
+        if (
+            role not in existing_roles
+            and status
+            and status not in {"idle", "passed", "completed"}
+        ):
+            _persona, display_name = _marvis_relay_public_role(role)
+            append_entry(
+                role,
+                WorkLogEntry(
+                    kind="status",
+                    key=f"status:{role}:{status}",
+                    text=f"{display_name} {_marvis_relay_role_status_label(status)}",
+                ),
+            )
+            existing_roles.add(role)
+
+    _marvis_relay_finalize_work_log_segments(segments)
+    return segments
+
+
+def _marvis_relay_role_error_payloads_by_role(
+    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, dict[str, Any]]:
+    errors: dict[str, dict[str, Any]] = {}
+    for artifact in artifacts:
+        payload = dict(artifact or {})
+        if str(payload.get("artifact_type") or "") != "role_error":
+            continue
+        role = str(payload.get("role") or payload.get("relay_role") or "")
+        if role:
+            errors[role] = payload
+    return errors
+
+
+def _marvis_relay_summary_payloads_by_role(
+    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, dict[str, Any]]:
+    payloads: dict[str, dict[str, Any]] = {}
+    for artifact in artifacts:
+        payload = dict(artifact or {})
+        artifact_type = str(payload.get("artifact_type") or "").strip()
+        if artifact_type not in {
+            "routing_decision",
+            "architecture_plan",
+            "implementation_report",
+            "test_report",
+            "audit_report",
+            "final_summary",
+        }:
+            continue
+        role = str(payload.get("role") or payload.get("relay_role") or "")
+        summary = str(
+            payload.get("summary")
+            or payload.get("output")
+            or payload.get("reason")
+            or ""
+        ).strip()
+        summary = _marvis_relay_clean_artifact_summary(summary)
+        if role and summary:
+            payloads[role] = {
+                "role": role,
+                "artifact_type": artifact_type,
+                "status": str(payload.get("status") or "passed"),
+                "summary": summary,
+                "next_action": str(payload.get("next_action") or ""),
+                "open_questions": payload.get("open_questions") or [],
+                "acceptance_criteria": payload.get("acceptance_criteria") or [],
+                "route": str(payload.get("route") or ""),
+                "risk": str(payload.get("risk") or ""),
+            }
+    return payloads
+
+
+def _marvis_relay_merge_work_log_entry(existing: WorkLogEntry, entry: WorkLogEntry) -> None:
+    if entry.chip:
+        existing.chip = entry.chip
+    if entry.text:
+        if entry.replace_text:
+            existing.text = entry.text
+        else:
+            existing.text += entry.text if existing.text else entry.text
+    if entry.output:
+        if existing.output and entry.output not in existing.output:
+            existing.output = f"{existing.output}\n{entry.output}"
+        elif not existing.output:
+            existing.output = entry.output
+    existing.failed = existing.failed or entry.failed
+
+
+def _marvis_relay_finalize_work_log_segments(segments: list[WorkLogSegment]) -> None:
+    kept_segments: list[WorkLogSegment] = []
+    for segment in segments:
+        entries: list[WorkLogEntry] = []
+        for entry in segment.entries:
+            if entry.kind == "message":
+                cleaned = _marvis_relay_clean_artifact_summary(entry.text)
+                if cleaned:
+                    entry.text = cleaned
+                elif _marvis_relay_work_log_text_is_protocol_noise(entry.text):
+                    continue
+            if entry.text or entry.chip or entry.output:
+                entries.append(entry)
+        segment.entries = entries
+        if segment.entries:
+            kept_segments.append(segment)
+    segments[:] = kept_segments
+
+
+def _marvis_relay_work_log_segment_html(segment: WorkLogSegment, *, index: int = 0) -> str:
+    timeline_items = "".join(
+        _marvis_relay_work_log_entry_html(entry)
+        for entry in segment.entries
+        if entry.text or entry.chip or entry.output
+    )
+    if not timeline_items:
+        return ""
     return f"""
-      <div class="marvis-work-log-entry">
+      <section class="marvis-work-log-role marvis-work-log-segment" data-marvis-work-log-role="{escape(segment.role)}" data-marvis-work-log-segment="{escape(segment.role)}" data-marvis-work-log-segment-index="{index}">
+        {_marvis_relay_avatar_html(segment.persona, label=segment.display_name)}
+        <div class="marvis-work-log-role-main">
+          <h3>{escape(segment.display_name)}</h3>
+          <div class="marvis-work-log-line">{timeline_items}</div>
+        </div>
+      </section>
+    """
+
+
+def _marvis_relay_work_log_entry_html(entry: WorkLogEntry) -> str:
+    classes = ["marvis-work-log-entry"]
+    if entry.failed:
+        classes.append("is-failed")
+    key_attr = f' data-marvis-work-log-entry-key="{escape(entry.key)}"' if entry.key else ""
+    chip_html = (
+        f'<span class="marvis-work-log-tool-chip">{escape(entry.chip)}</span>' if entry.chip else ""
+    )
+    output_html = ""
+    if entry.output:
+        output_html = (
+            '<details class="marvis-work-log-output" data-marvis-work-log-output>'
+            "<summary>查看输出</summary>"
+            f"<pre>{escape(entry.output)}</pre>"
+            "</details>"
+        )
+    return f"""
+      <div class="{' '.join(classes)}" data-marvis-work-log-entry="{escape(entry.kind)}"{key_attr}>
         {chip_html}
-        <p>{escape(text)}</p>
+        <p>{escape(entry.text)}</p>
+        {output_html}
       </div>
     """
 
 
+def _marvis_relay_work_log_text_item(text: str, *, chip: str = "") -> str:
+    return _marvis_relay_work_log_entry_html(
+        WorkLogEntry(kind="text", key="", text=text, chip=chip)
+    )
+
+
 def _marvis_relay_work_log_event_item(worker_event: WorkerStreamEvent) -> str:
+    entry = _marvis_relay_work_log_entry_from_event("", worker_event)
+    return _marvis_relay_work_log_entry_html(entry) if entry is not None else ""
+
+
+def _marvis_relay_work_log_entry_from_event(
+    role: str,
+    worker_event: WorkerStreamEvent,
+) -> WorkLogEntry | None:
     kind = str(worker_event.kind or "")
-    if kind in {"user_message", "text_delta", "reasoning_delta"}:
-        return ""
+    event_type = str(worker_event.type or "")
     payload = dict(worker_event.payload or {})
+    if kind == "user_message" or kind == "reasoning_delta":
+        return None
+    if event_type == "model.usage.updated":
+        return None
+    if kind == "text_delta":
+        text = _relay_native_event_text(worker_event)
+        if not text or _marvis_relay_work_log_text_is_protocol_noise(text):
+            return None
+        return WorkLogEntry(
+            kind="message",
+            key=_relay_native_message_key(role, worker_event, bucket="assistant"),
+            text=_relay_sanitize_protocol_leak_text(role, text),
+        )
     if kind == "message_completed":
         text = _relay_native_event_text(worker_event).strip()
-        if not text or _relay_text_looks_like_role_envelope(text):
-            return ""
-        return _marvis_relay_work_log_text_item(
-            _relay_sanitize_protocol_leak_text("", text),
-            chip="model 已完成",
+        if not text or _marvis_relay_work_log_text_is_protocol_noise(text):
+            return None
+        return WorkLogEntry(
+            kind="message",
+            key=_relay_native_message_key(role, worker_event, bucket="assistant"),
+            text=_relay_sanitize_protocol_leak_text(role, text),
+            replace_text=True,
         )
     if kind.startswith("tool_call"):
         label = _marvis_relay_tool_label(payload) or "tool"
-        return _marvis_relay_work_log_text_item(
-            "",
+        return WorkLogEntry(
+            kind="tool",
+            key=_marvis_relay_tool_or_command_key("tool", worker_event, label),
             chip=f"{label} {_marvis_relay_event_status_label(kind)}",
+            output=_marvis_relay_event_output_text(payload),
+            failed=kind.endswith("_failed"),
         )
     if kind.startswith("command"):
         label = _marvis_relay_command_label(payload) or "command"
-        return _marvis_relay_work_log_text_item(
-            "",
+        return WorkLogEntry(
+            kind="command",
+            key=_marvis_relay_tool_or_command_key("command", worker_event, label),
             chip=f"{label} {_marvis_relay_event_status_label(kind)}",
+            output=_marvis_relay_event_output_text(payload),
+            failed=kind.endswith("_failed"),
+        )
+    if kind in {"approval_requested", "approval_resolved"}:
+        text = _relay_native_event_text(worker_event).strip()
+        status = "等待审批" if kind == "approval_requested" else "审批已处理"
+        return WorkLogEntry(
+            kind="approval",
+            key=_marvis_relay_tool_or_command_key("approval", worker_event, status),
+            text=text,
+            chip=status,
+        )
+    if kind in {"file_changed", "diff_updated"}:
+        label = "文件变更" if kind == "file_changed" else "差异更新"
+        text = _marvis_relay_file_change_summary(payload)
+        return WorkLogEntry(
+            kind="file",
+            key=_marvis_relay_tool_or_command_key("file", worker_event, label),
+            text=text,
+            chip=f"{label} 已记录",
         )
     if kind in {"activity", "lifecycle", "completed", "failed"}:
         text = _relay_native_event_text(worker_event).strip()
@@ -4754,8 +5053,106 @@ def _marvis_relay_work_log_event_item(worker_event: WorkerStreamEvent) -> str:
                 or "调用失败"
             ).strip()
         if not text:
-            return ""
-        return _marvis_relay_work_log_text_item(text)
+            return None
+        return WorkLogEntry(
+            kind=kind,
+            key=_marvis_relay_tool_or_command_key(kind, worker_event, kind),
+            text=text,
+            chip="调用失败" if kind == "failed" else "",
+            failed=kind == "failed",
+        )
+    return None
+
+
+def _marvis_relay_work_log_text_is_protocol_noise(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return True
+    if _relay_text_looks_like_role_envelope(value):
+        return True
+    markers = (
+        "artifact_type",
+        "relay_role",
+        "final_summary",
+        "routing_decision",
+        "acceptance_criteria",
+        "evidence_refs",
+        "handoff_to",
+        "required_roles",
+    )
+    if any(marker in value for marker in markers) and (
+        "{" in value
+        or "}" in value
+        or '",' in value
+        or '":' in value
+        or value.startswith(('"', "["))
+    ):
+        return True
+    return False
+
+
+def _marvis_relay_clean_artifact_summary(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    if not _marvis_relay_work_log_text_is_protocol_noise(value):
+        return value
+    match = re.search(r'"summary"\s*:\s*"((?:\\.|[^"\\])*)"', value)
+    if match is None and '\\"summary\\"' in value:
+        normalized = value.replace('\\"', '"')
+        match = re.search(r'"summary"\s*:\s*"((?:\\.|[^"\\])*)"', normalized)
+    if match:
+        raw_summary = match.group(1)
+        try:
+            decoded = json.loads(f'"{raw_summary}"')
+        except json.JSONDecodeError:
+            decoded = raw_summary
+        cleaned = str(decoded or "").strip()
+        if cleaned and not _marvis_relay_work_log_text_is_protocol_noise(cleaned):
+            return cleaned
+    return ""
+
+
+def _marvis_relay_tool_or_command_key(
+    prefix: str,
+    worker_event: WorkerStreamEvent,
+    label: str,
+) -> str:
+    payload = dict(worker_event.payload or {})
+    stable = (
+        payload.get("itemId")
+        or payload.get("item_id")
+        or payload.get("call_id")
+        or payload.get("tool_call_id")
+        or payload.get("native_turn_id")
+        or payload.get("turnId")
+        or label
+        or worker_event.id
+    )
+    return f"{prefix}:{stable}"
+
+
+def _marvis_relay_event_output_text(payload: dict[str, Any]) -> str:
+    for key in ("output", "stderr", "stdout", "result", "message", "error", "delta", "chunk"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _marvis_relay_file_change_summary(payload: dict[str, Any]) -> str:
+    for key in ("path", "file", "filename", "summary", "message"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    files = payload.get("files")
+    if isinstance(files, list):
+        return "、".join(str(item) for item in files[:5] if str(item).strip())
     return ""
 
 
@@ -5458,7 +5855,8 @@ def _relay_task_detail_page(
         access_token=access_token,
         selected_workspace=str(task.workspace or ""),
     )
-    token_text = _marvis_relay_token_text_from_events(detail.role_jobs, hub=hub)
+    token_total = _marvis_relay_token_total_from_events(detail.role_jobs, hub=hub)
+    token_text = _format_marvis_relay_token_count(token_total)
     work_log_html = _marvis_relay_work_log_html(
         body_html=_marvis_relay_work_log_body_html(
             detail,
@@ -5466,6 +5864,8 @@ def _relay_task_detail_page(
             canonical_payloads=canonical_payloads,
         ),
         token_text=token_text,
+        token_total=token_total,
+        max_event_id=_marvis_relay_max_event_id_from_events(detail.role_jobs, hub=hub),
     )
     followup_composer_html = _marvis_relay_followup_composer(task_id=int(task.id))
     return _replace_html_icons(f"""<!doctype html>
@@ -5504,6 +5904,8 @@ def _relay_task_detail_page(
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
     const EVENTS_SUFFIX = {json.dumps(events_suffix)};
     const ROLE_LABELS = {json.dumps({role: _relay_role_label(role) for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
+    const MARVIS_WORK_LOG_ROLE_LABELS = {json.dumps({role: _marvis_relay_public_role(role)[1] for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
+    const MARVIS_WORK_LOG_ROLE_PERSONAS = {json.dumps({role: _marvis_relay_public_role(role)[0] for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
     const STATUS_LABELS = {json.dumps({
         "idle": "未调度",
         "queued": "排队中",
@@ -5527,23 +5929,31 @@ def _relay_task_detail_page(
     const roleOutputs = {{}};
     const marvisWorkLog = document.querySelector("[data-marvis-work-log]");
     const marvisWorkLogBackdrop = document.querySelector("[data-marvis-work-log-backdrop]");
+    function marvisWorkLogIsDesktop() {{
+      return window.matchMedia("(min-width: 980px)").matches;
+    }}
     function openMarvisWorkLog() {{
       if (!marvisWorkLog) return;
       marvisWorkLog.hidden = false;
-      if (marvisWorkLogBackdrop) marvisWorkLogBackdrop.hidden = false;
+      if (marvisWorkLogBackdrop && !marvisWorkLogIsDesktop()) marvisWorkLogBackdrop.hidden = false;
       requestAnimationFrame(() => {{
         marvisWorkLog.classList.add("open");
-        marvisWorkLogBackdrop?.classList.add("visible");
+        if (!marvisWorkLogIsDesktop()) marvisWorkLogBackdrop?.classList.add("visible");
       }});
     }}
     function closeMarvisWorkLog() {{
       if (!marvisWorkLog) return;
+      if (marvisWorkLogIsDesktop()) return;
       marvisWorkLog.classList.remove("open");
       marvisWorkLogBackdrop?.classList.remove("visible");
       setTimeout(() => {{
         marvisWorkLog.hidden = true;
         if (marvisWorkLogBackdrop) marvisWorkLogBackdrop.hidden = true;
       }}, 240);
+    }}
+    if (marvisWorkLog && marvisWorkLogIsDesktop()) {{
+      marvisWorkLog.hidden = false;
+      marvisWorkLog.classList.add("open");
     }}
     document.querySelectorAll("[data-marvis-open-log]").forEach((button) => {{
       button.addEventListener("click", openMarvisWorkLog);
@@ -5726,6 +6136,326 @@ def _relay_task_detail_page(
         return relayProtocolOutputHiddenText(role);
       }}
       return value;
+    }}
+    const marvisWorkLogBody = document.querySelector("[data-marvis-work-log-body]");
+    const marvisWorkLogTokenValue = document.querySelector("[data-marvis-work-log-token-value]");
+    const marvisWorkLogSeenRuntimeIds = new Set();
+    const marvisWorkLogInitialMaxEventId = Number(marvisWorkLog?.dataset.marvisWorkLogMaxEventId || "0");
+    let marvisWorkLogTokenTotal = Number(marvisWorkLogTokenValue?.dataset.tokenTotal || "0");
+    function marvisWorkLogRoleLabel(role) {{
+      return MARVIS_WORK_LOG_ROLE_LABELS[role] || labelForRole(role) || "Marvis";
+    }}
+    function marvisWorkLogRolePersona(role) {{
+      return MARVIS_WORK_LOG_ROLE_PERSONAS[role] || "marvis";
+    }}
+    function marvisWorkLogFormatTokens(value) {{
+      const count = Math.max(0, Math.round(Number(value || 0)));
+      if (count >= 1000) return `${{Math.round(count / 1000)}}K`;
+      return String(count);
+    }}
+    function marvisWorkLogUsageTotal(nativeEvent) {{
+      const payload = nativeEventPayload(nativeEvent);
+      const usage = payload.usage && typeof payload.usage === "object" ? payload.usage : null;
+      const total = payload.total && typeof payload.total === "object" ? payload.total : null;
+      const candidates = [payload];
+      if (usage) {{
+        candidates.push(usage);
+        if (usage.total && typeof usage.total === "object") candidates.push(usage.total);
+      }}
+      if (total) candidates.push(total);
+      for (const candidate of candidates) {{
+        for (const key of ["total_tokens", "tokens", "consumed_tokens"]) {{
+          const value = Number(candidate[key] || 0);
+          if (Number.isFinite(value) && value > 0) return Math.round(value);
+        }}
+      }}
+      for (const candidate of candidates) {{
+        let subtotal = 0;
+        for (const key of ["input_tokens", "output_tokens", "reasoning_output_tokens"]) {{
+          const value = Number(candidate[key] || 0);
+          if (Number.isFinite(value) && value > 0) subtotal += Math.round(value);
+        }}
+        if (subtotal > 0) return subtotal;
+      }}
+      return 0;
+    }}
+    function updateMarvisWorkLogTokenTotal(nativeEvent, runtimeEventId = "") {{
+      const numericId = Number(runtimeEventId || nativeEvent?.id || 0);
+      if (numericId && numericId <= marvisWorkLogInitialMaxEventId) return;
+      const usageTotal = marvisWorkLogUsageTotal(nativeEvent);
+      if (!usageTotal || !marvisWorkLogTokenValue) return;
+      marvisWorkLogTokenTotal += usageTotal;
+      marvisWorkLogTokenValue.dataset.tokenTotal = String(marvisWorkLogTokenTotal);
+      marvisWorkLogTokenValue.textContent = `${{marvisWorkLogFormatTokens(marvisWorkLogTokenTotal)}} ☕`;
+    }}
+    function marvisWorkLogNativeKind(nativeEvent) {{
+      if (nativeEvent?.kind) return nativeEvent.kind;
+      const type = nativeEvent?.type || "";
+      const map = {{
+        "model.text.delta": "text_delta",
+        "model.message.completed": "message_completed",
+        "model.reasoning.delta": "reasoning_delta",
+        "model.usage.updated": "usage_updated",
+        "tool.call.started": "tool_call_started",
+        "tool.call.progress": "tool_call_progress",
+        "tool.call.completed": "tool_call_completed",
+        "tool.call.failed": "tool_call_failed",
+        "command.started": "command_started",
+        "command.output.delta": "command_output",
+        "command.completed": "command_completed",
+        "command.failed": "command_failed",
+        "file.changed": "file_changed",
+        "diff.updated": "diff_updated",
+        "approval.requested": "approval_requested",
+        "approval.resolved": "approval_resolved",
+        "agent.run.activity": "activity",
+        "agent.run.started": "lifecycle",
+        "agent.run.heartbeat": "lifecycle",
+        "agent.run.completed": "completed",
+        "agent.run.failed": "failed",
+      }};
+      return map[type] || type || "event";
+    }}
+    function marvisWorkLogEventStatus(kind) {{
+      if (kind.endsWith("_completed") || kind === "completed") return "已完成";
+      if (kind.endsWith("_failed") || kind === "failed") return "调用失败";
+      return "进行中";
+    }}
+    function marvisWorkLogToolLabel(payload) {{
+      for (const key of ["tool_name", "name", "tool", "display_name", "action"]) {{
+        const value = String(payload[key] || "").trim();
+        if (value) return value;
+      }}
+      return "";
+    }}
+    function marvisWorkLogCommandLabel(payload) {{
+      const command = payload.command;
+      if (Array.isArray(command)) return command.slice(0, 3).map(String).join(" ");
+      return String(command || payload.cmd || payload.name || "").trim();
+    }}
+    function marvisWorkLogOutputText(payload) {{
+      for (const key of ["output", "stderr", "stdout", "result", "message", "error", "delta", "chunk"]) {{
+        const value = payload[key];
+        if (value === undefined || value === null) continue;
+        if (typeof value === "object") return JSON.stringify(value, null, 2);
+        const text = String(value || "").trim();
+        if (text) return text;
+      }}
+      return "";
+    }}
+    function marvisWorkLogStableKey(prefix, nativeEvent, label) {{
+      const payload = nativeEventPayload(nativeEvent);
+      const stable = payload.itemId || payload.item_id || payload.call_id || payload.tool_call_id || payload.message_id || payload.native_message_id || payload.native_turn_id || payload.turnId || label || nativeEvent?.id || `${{Date.now()}}:${{Math.random()}}`;
+      return `${{prefix}}:${{stable}}`;
+    }}
+    function marvisWorkLogTextIsProtocolNoise(text) {{
+      const value = String(text || "").trim();
+      if (!value) return true;
+      if (relayTextLooksLikeEnvelope(value)) return true;
+      const markers = ["artifact_type", "relay_role", "final_summary", "routing_decision", "acceptance_criteria", "evidence_refs", "handoff_to", "required_roles"];
+      if (markers.some((marker) => value.includes(marker)) && (value.includes("{{") || value.includes("}}") || value.includes('",') || value.includes('":') || value.startsWith('"') || value.startsWith("["))) {{
+        return true;
+      }}
+      return false;
+    }}
+    function marvisWorkLogCleanProtocolSummary(text) {{
+      const value = String(text || "").trim();
+      if (!value) return "";
+      if (!marvisWorkLogTextIsProtocolNoise(value)) return value;
+      let source = value;
+      let match = source.match(/"summary"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"/);
+      if (!match && source.includes('\\\\"summary\\\\"')) {{
+        source = source.replace(/\\\\"/g, '"');
+        match = source.match(/"summary"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"/);
+      }}
+      if (!match) return "";
+      let cleaned = match[1] || "";
+      try {{
+        cleaned = JSON.parse(`"${{cleaned}}"`);
+      }} catch (_error) {{}}
+      cleaned = String(cleaned || "").trim();
+      return cleaned && !marvisWorkLogTextIsProtocolNoise(cleaned) ? cleaned : "";
+    }}
+    function marvisWorkLogEntryFromNativeEvent(role, nativeEvent) {{
+      const kind = marvisWorkLogNativeKind(nativeEvent);
+      const type = nativeEvent?.type || "";
+      const payload = nativeEventPayload(nativeEvent);
+      if (kind === "usage_updated" || type === "model.usage.updated") return {{ usage: true }};
+      if (kind === "user_message" || kind === "reasoning_delta") return null;
+      if (kind === "text_delta" || kind === "message_completed") {{
+        const text = nativeEventText(nativeEvent);
+        const key = marvisWorkLogStableKey(`message:${{role || ""}}`, nativeEvent, "assistant");
+        if (marvisWorkLogTextIsProtocolNoise(text)) {{
+          if (kind === "message_completed") return {{ removeKey: key }};
+          return null;
+        }}
+        return {{
+          kind: "message",
+          key,
+          text: relaySanitizeProtocolLeakText(role, text),
+          replaceText: kind === "message_completed",
+        }};
+      }}
+      if (kind.startsWith("tool_call")) {{
+        const label = marvisWorkLogToolLabel(payload) || "tool";
+        return {{
+          kind: "tool",
+          key: marvisWorkLogStableKey("tool", nativeEvent, label),
+          chip: `${{label}} ${{marvisWorkLogEventStatus(kind)}}`,
+          output: marvisWorkLogOutputText(payload),
+          failed: kind.endsWith("_failed"),
+        }};
+      }}
+      if (kind.startsWith("command")) {{
+        const label = marvisWorkLogCommandLabel(payload) || "command";
+        return {{
+          kind: "command",
+          key: marvisWorkLogStableKey("command", nativeEvent, label),
+          chip: `${{label}} ${{marvisWorkLogEventStatus(kind)}}`,
+          output: marvisWorkLogOutputText(payload),
+          failed: kind.endsWith("_failed"),
+        }};
+      }}
+      if (kind === "approval_requested" || kind === "approval_resolved") {{
+        return {{
+          kind: "approval",
+          key: marvisWorkLogStableKey("approval", nativeEvent, kind),
+          chip: kind === "approval_requested" ? "等待审批" : "审批已处理",
+          text: nativeEventText(nativeEvent),
+        }};
+      }}
+      if (kind === "file_changed" || kind === "diff_updated") {{
+        const label = kind === "file_changed" ? "文件变更" : "差异更新";
+        const fileText = payload.path || payload.file || payload.filename || payload.summary || payload.message || "";
+        return {{
+          kind: "file",
+          key: marvisWorkLogStableKey("file", nativeEvent, label),
+          chip: `${{label}} 已记录`,
+          text: String(fileText || ""),
+        }};
+      }}
+      if (["activity", "lifecycle", "completed", "failed"].includes(kind)) {{
+        let text = nativeEventText(nativeEvent);
+        if (!text && kind === "failed") text = String(payload.error || payload.reason || payload.status || "调用失败");
+        if (!text) return null;
+        return {{
+          kind,
+          key: marvisWorkLogStableKey(kind, nativeEvent, kind),
+          text,
+          chip: kind === "failed" ? "调用失败" : "",
+          failed: kind === "failed",
+        }};
+      }}
+      return null;
+    }}
+    function createMarvisWorkLogAvatar(role) {{
+      const avatar = document.createElement("span");
+      avatar.className = `marvis-relay-avatar marvis-relay-avatar-${{marvisWorkLogRolePersona(role)}}`;
+      avatar.setAttribute("aria-label", marvisWorkLogRoleLabel(role));
+      return avatar;
+    }}
+    function ensureMarvisWorkLogSegment(role) {{
+      if (!marvisWorkLogBody) return null;
+      const empty = marvisWorkLogBody.querySelector(".marvis-work-log-empty");
+      if (empty) empty.remove();
+      const segments = Array.from(marvisWorkLogBody.querySelectorAll("[data-marvis-work-log-segment]"));
+      const artifact = marvisWorkLogBody.querySelector("[data-marvis-work-log-artifacts]");
+      const lastSegment = segments[segments.length - 1];
+      if (lastSegment && lastSegment.dataset.marvisWorkLogSegment === role) return lastSegment;
+      const section = document.createElement("section");
+      section.className = "marvis-work-log-role marvis-work-log-segment";
+      section.dataset.marvisWorkLogRole = role || "";
+      section.dataset.marvisWorkLogSegment = role || "";
+      section.dataset.marvisWorkLogSegmentIndex = String(segments.length);
+      const main = document.createElement("div");
+      main.className = "marvis-work-log-role-main";
+      const title = document.createElement("h3");
+      title.textContent = marvisWorkLogRoleLabel(role);
+      const line = document.createElement("div");
+      line.className = "marvis-work-log-line";
+      main.append(title, line);
+      section.append(createMarvisWorkLogAvatar(role), main);
+      if (artifact) marvisWorkLogBody.insertBefore(section, artifact);
+      else marvisWorkLogBody.appendChild(section);
+      return section;
+    }}
+    function renderMarvisWorkLogEntry(segment, entry) {{
+      if (!entry || entry.usage) return;
+      if (entry.removeKey) {{
+        document.querySelectorAll(`[data-marvis-work-log-entry-key="${{CSS.escape(entry.removeKey)}}"]`).forEach((node) => node.remove());
+        return;
+      }}
+      if (!segment) return;
+      const line = segment.querySelector(".marvis-work-log-line");
+      if (!line) return;
+      let node = entry.key ? line.querySelector(`[data-marvis-work-log-entry-key="${{CSS.escape(entry.key)}}"]`) : null;
+      if (!node) {{
+        node = document.createElement("div");
+        node.className = "marvis-work-log-entry";
+        node.dataset.marvisWorkLogEntry = entry.kind || "event";
+        if (entry.key) node.dataset.marvisWorkLogEntryKey = entry.key;
+        const paragraph = document.createElement("p");
+        node.appendChild(paragraph);
+        line.appendChild(node);
+      }}
+      node.classList.toggle("is-failed", Boolean(entry.failed));
+      if (entry.chip) {{
+        let chip = node.querySelector(".marvis-work-log-tool-chip");
+        if (!chip) {{
+          chip = document.createElement("span");
+          chip.className = "marvis-work-log-tool-chip";
+          node.insertBefore(chip, node.firstChild);
+        }}
+        chip.textContent = entry.chip;
+      }}
+      const paragraph = node.querySelector("p") || node.appendChild(document.createElement("p"));
+      if (entry.text) {{
+        paragraph.textContent = entry.replaceText ? entry.text : `${{paragraph.textContent || ""}}${{entry.text}}`;
+        const cleaned = marvisWorkLogCleanProtocolSummary(paragraph.textContent);
+        if (cleaned && cleaned !== paragraph.textContent) {{
+          paragraph.textContent = cleaned;
+        }} else if (entry.replaceText && marvisWorkLogTextIsProtocolNoise(paragraph.textContent)) {{
+          node.remove();
+          return;
+        }}
+      }}
+      if (entry.output) {{
+        let details = node.querySelector("[data-marvis-work-log-output]");
+        if (!details) {{
+          details = document.createElement("details");
+          details.className = "marvis-work-log-output";
+          details.dataset.marvisWorkLogOutput = "";
+          const summary = document.createElement("summary");
+          summary.textContent = "查看输出";
+          const pre = document.createElement("pre");
+          details.append(summary, pre);
+          node.appendChild(details);
+        }}
+        const pre = details.querySelector("pre");
+        if (pre && !pre.textContent.includes(entry.output)) {{
+          pre.textContent = pre.textContent ? `${{pre.textContent}}\\n${{entry.output}}` : entry.output;
+        }}
+      }}
+      marvisWorkLogBody?.scrollTo({{ top: marvisWorkLogBody.scrollHeight, behavior: "smooth" }});
+    }}
+    function renderMarvisWorkLogNativeEvent(role, nativeEvent, runtimeEventId = "") {{
+      if (!marvisWorkLogBody || !nativeEvent) return;
+      const numericId = Number(runtimeEventId || nativeEvent?.id || 0);
+      if (numericId && numericId <= marvisWorkLogInitialMaxEventId) return;
+      if (numericId && marvisWorkLogSeenRuntimeIds.has(numericId)) return;
+      if (numericId) marvisWorkLogSeenRuntimeIds.add(numericId);
+      const entry = marvisWorkLogEntryFromNativeEvent(role, nativeEvent);
+      if (!entry) return;
+      if (entry.usage) {{
+        updateMarvisWorkLogTokenTotal(nativeEvent, runtimeEventId);
+        return;
+      }}
+      if (entry.removeKey) {{
+        renderMarvisWorkLogEntry(null, entry);
+        return;
+      }}
+      const segment = ensureMarvisWorkLogSegment(role || "");
+      renderMarvisWorkLogEntry(segment, entry);
     }}
     function relayRiskLabel(risk) {{
       const labels = {{ low: "低", medium: "中", high: "高", critical: "关键" }};
@@ -6044,6 +6774,7 @@ def _relay_task_detail_page(
     source.addEventListener("role.native_event", (event) => {{
       const payload = parseRelayEvent(event);
       renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);
+      renderMarvisWorkLogNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);
     }});
     source.addEventListener("role.output_delta", (event) => {{
       const payload = parseRelayEvent(event);
