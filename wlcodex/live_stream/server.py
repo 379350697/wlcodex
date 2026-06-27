@@ -141,7 +141,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-task-card-polish"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-persona-avatars"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4074,30 +4074,38 @@ def _marvis_relay_office_roles(relay_config: dict[str, Any] | None) -> list[dict
 
 _MARVIS_OFFICE_PERSONAS: dict[str, dict[str, Any]] = {
     "director": {
-        "title": "Team Leader",
+        "title": "总工程师",
         "intro": "团队队长，全盘统筹，负责拆任务、派角色、收结果，并把接力过程汇成你能直接看的结论。",
         "skills": ("分派任务", "汇总结果呈现", "调度接力", "读写文档", "写代码"),
     },
     "architect": {
-        "title": "System Architect",
+        "title": "架构工程师",
         "intro": "负责把需求拆成结构、边界和风险点，先看清怎么做，再把可执行方案交给后续角色。",
         "skills": ("方案设计", "影响分析", "模块边界", "技术取舍"),
     },
     "implementer": {
-        "title": "Developer",
+        "title": "开发工程师",
         "intro": "负责把方案落到代码里，按现有工程风格实现功能、修复问题，并尽量保持改动范围收敛。",
         "skills": ("写代码", "改页面", "接 API", "修复缺陷"),
     },
     "tester": {
-        "title": "QA Engineer",
+        "title": "测试工程师",
         "intro": "负责验证行为是不是符合预期，补关键测试，复查手机端、路由、流式状态这些容易回归的地方。",
         "skills": ("跑测试", "回归验证", "边界用例", "复现问题"),
     },
     "auditor": {
-        "title": "Reviewer",
+        "title": "审计工程师",
         "intro": "负责最后审一遍风险、遗漏和上线边界，确认改动没有影响 Codex、Claude、Antigravity 等其他页面。",
         "skills": ("代码审查", "风险检查", "上线把关", "回滚判断"),
     },
+}
+
+_MARVIS_OFFICE_AVATARS: dict[str, str] = {
+    "director": "marvis",
+    "architect": "computer-agent",
+    "implementer": "app-agent",
+    "tester": "search-agent",
+    "auditor": "file-agent",
 }
 
 
@@ -4108,11 +4116,9 @@ def _marvis_relay_office_persona(
     provider: str = "",
 ) -> dict[str, Any]:
     persona = _MARVIS_OFFICE_PERSONAS.get(role, {})
-    title = str(persona.get("title") or "Relay Agent")
+    title = str(persona.get("title") or display_name or "接力角色")
     provider_id = provider.strip()
     provider_label = _native_provider_display_name(provider_id)
-    if provider_label:
-        title = f"{title} · {provider_label}"
     return {
         "role": role,
         "display_name": display_name,
@@ -4121,7 +4127,7 @@ def _marvis_relay_office_persona(
         "provider_label": provider_label,
         "intro": str(persona.get("intro") or f"{display_name}正在处理分配给自己的接力任务。"),
         "skills": list(persona.get("skills") or (display_name,)),
-        "avatar": "marvis" if role == "director" else role,
+        "avatar": _MARVIS_OFFICE_AVATARS.get(role, role),
     }
 
 
@@ -4266,7 +4272,7 @@ def _marvis_relay_office_page(
         <span class="marvis-persona-avatar marvis-relay-avatar marvis-relay-avatar-marvis" data-persona-avatar aria-hidden="true"></span>
         <div>
           <h2 data-persona-name>Marvis（马维斯）</h2>
-          <p data-persona-title>Team Leader</p>
+          <p data-persona-title>总工程师</p>
           <small>◷ 空闲中</small>
         </div>
       </header>
@@ -4318,8 +4324,6 @@ def _marvis_relay_office_page(
         if (!persona) return;
         persona.provider = provider;
         persona.provider_label = providerLabel(provider);
-        const baseTitle = (persona.title || "Relay Agent").split(" · ")[0];
-        persona.title = `${{baseTitle}} · ${{persona.provider_label}}`;
       }};
       const renderProviderOptions = () => {{
         if (!modelOptions || !activeRole) return;

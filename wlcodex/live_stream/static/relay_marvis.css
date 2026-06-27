@@ -474,15 +474,33 @@ body[data-marvis-relay-view] .marvis-relay-avatar {
 body[data-marvis-relay-view] .marvis-relay-avatar-marvis,
 body[data-marvis-relay-view] .marvis-relay-avatar-director,
 body[data-marvis-relay-view] .marvis-relay-avatar-system {
-  background-image: url("/static/marvis/marvis-avatar.png");
+  background-image: url("/static/marvis/persona-avatar-marvis.png");
 }
 
-body[data-marvis-relay-view] .marvis-relay-avatar-architect,
+body[data-marvis-relay-view] .marvis-relay-avatar-app-agent,
 body[data-marvis-relay-view] .marvis-relay-avatar-developer,
-body[data-marvis-relay-view] .marvis-relay-avatar-implementer,
-body[data-marvis-relay-view] .marvis-relay-avatar-tester,
+body[data-marvis-relay-view] .marvis-relay-avatar-implementer {
+  background-image: url("/static/marvis/persona-avatar-app-agent.png");
+}
+
+body[data-marvis-relay-view] .marvis-relay-avatar-computer-agent,
+body[data-marvis-relay-view] .marvis-relay-avatar-architect {
+  background-image: url("/static/marvis/persona-avatar-computer-agent.png");
+}
+
+body[data-marvis-relay-view] .marvis-relay-avatar-search-agent,
+body[data-marvis-relay-view] .marvis-relay-avatar-tester {
+  background-image: url("/static/marvis/persona-avatar-search-agent.png");
+}
+
+body[data-marvis-relay-view] .marvis-relay-avatar-file-agent,
 body[data-marvis-relay-view] .marvis-relay-avatar-auditor {
-  background-image: url("/static/marvis/app-agent-avatar.png");
+  background-image: url("/static/marvis/persona-avatar-file-agent.png");
+}
+
+body[data-marvis-relay-view] .marvis-relay-avatar-browser-agent,
+body[data-marvis-relay-view] .marvis-relay-avatar-browser {
+  background-image: url("/static/marvis/persona-avatar-browser-agent.png");
 }
 
 body[data-marvis-relay-view] .marvis-relay-composer {
