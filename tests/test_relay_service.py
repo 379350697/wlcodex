@@ -624,6 +624,191 @@ def test_successful_role_envelopes_dispatch_next_roles(tmp_path) -> None:
     assert "role: auditor" in start_calls[1][2]
 
 
+def test_core_relay_code_development_requires_auditor_after_implementer(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="给聊天框上方增加工作区显示和选择入口",
+        workspace="/repo",
+        provider="claude",
+    )
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "implementation required",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "",
+              "summary": "Core relay.",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "implement",
+              "complexity": "medium",
+              "risk": "medium",
+              "route": "core_relay",
+              "required_roles": ["director", "implementer"],
+              "acceptance_criteria": ["implemented", "reviewed"],
+              "stop_conditions": [],
+              "requires_user_approval": false
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    assert detail.routing_decision is not None
+    assert detail.routing_decision["required_roles"] == [
+        "director",
+        "implementer",
+        "auditor",
+    ]
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "implementer",
+            """
+            {
+              "status": "passed",
+              "reason": "implemented",
+              "role": "implementer",
+              "artifact_type": "implementation_report",
+              "handoff_to": "",
+              "summary": "Implementation ready",
+              "evidence_refs": ["x"],
+              "open_questions": [],
+              "next_action": "audit"
+            }
+            """,
+        )
+    )
+
+    jobs = {job.role: job for job in service.get_task(task.id).role_jobs}
+    assert jobs["implementer"].status == "passed"
+    assert jobs["auditor"].status == "streaming"
+    assert provider.calls[-1][0] == "start_session"
+    assert "role: auditor" in provider.calls[-1][2]
+
+
+def test_auditor_failed_review_returns_to_implementer_for_rework(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="实现一个 UI 修复，并由审核工程师复核。",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "implementation and review required",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "",
+              "summary": "Core relay.",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "implement",
+              "complexity": "medium",
+              "risk": "medium",
+              "route": "core_relay",
+              "required_roles": ["director", "implementer"],
+              "acceptance_criteria": ["implemented", "reviewed"],
+              "stop_conditions": [],
+              "requires_user_approval": false
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "implementer",
+            """
+            {
+              "status": "passed",
+              "reason": "implemented",
+              "role": "implementer",
+              "artifact_type": "implementation_report",
+              "handoff_to": "",
+              "summary": "Implementation ready",
+              "evidence_refs": ["x"],
+              "open_questions": [],
+              "next_action": "audit"
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "auditor",
+            """
+            {
+              "status": "failed",
+              "reason": "review found a regression",
+              "role": "auditor",
+              "artifact_type": "audit_report",
+              "handoff_to": "implementer",
+              "summary": "输入框遮挡最后一条消息，需要回炉。",
+              "evidence_refs": ["screenshot"],
+              "open_questions": [],
+              "next_action": "rework"
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.task.status == "running"
+    assert jobs["auditor"].status == "failed"
+    assert jobs["implementer"].status == "queued"
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "implementer",
+            """
+            {
+              "status": "passed",
+              "reason": "reworked",
+              "role": "implementer",
+              "artifact_type": "implementation_report",
+              "handoff_to": "",
+              "summary": "遮挡问题已修复",
+              "evidence_refs": ["test"],
+              "open_questions": [],
+              "next_action": "audit again"
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+
+    jobs = {job.role: job for job in service.get_task(task.id).role_jobs}
+    assert jobs["implementer"].status == "passed"
+    assert jobs["auditor"].status == "queued"
+
+
 def test_role_cannot_handoff_to_role_outside_routing_decision(tmp_path) -> None:
     service, _provider = _service(tmp_path)
     task = service.create_task(
@@ -686,7 +871,7 @@ def test_role_cannot_handoff_to_role_outside_routing_decision(tmp_path) -> None:
     assert detail.task.status == "blocked"
     assert jobs["implementer"].status == "blocked"
     assert jobs["implementer"].error_message == (
-        "handoff_to 审计工程师 is not in routing_decision.required_roles"
+        "handoff_to 审计工程师 before required role 测试工程师 completed"
     )
     assert jobs["auditor"].status == "idle"
 
@@ -752,10 +937,10 @@ def test_last_required_role_returns_to_director_instead_of_default_unrequired_ro
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
-    assert jobs["auditor"].status == "idle"
-    assert jobs["director"].status == "streaming"
+    assert jobs["auditor"].status == "streaming"
+    assert jobs["director"].status == "passed"
     assert provider.calls[-1][0] == "start_session"
-    assert "role: director" in provider.calls[-1][2]
+    assert "role: auditor" in provider.calls[-1][2]
 
 
 def test_dispatch_role_includes_role_targeted_handoff_even_when_not_latest(
@@ -1891,7 +2076,11 @@ def test_codex_native_turn_completed_recovers_core_relay_routing_decision(
     jobs = {job.role: job for job in detail.role_jobs}
     assert detail.routing_decision is not None
     assert detail.routing_decision["route"] == "core_relay"
-    assert detail.routing_decision["required_roles"] == ["director", "implementer"]
+    assert detail.routing_decision["required_roles"] == [
+        "director",
+        "implementer",
+        "auditor",
+    ]
     assert jobs["director"].status == "passed"
     assert jobs["implementer"].status == "streaming"
     assert any(
@@ -2145,7 +2334,7 @@ def test_routing_decision_queues_first_required_role_and_marks_idle_reasons(
     assert jobs["architect"].status == "queued"
     assert jobs["implementer"].status == "idle"
     assert jobs["implementer"].idle_reason == "等待上一角色交接"
-    assert jobs["auditor"].idle_reason == "未纳入本轮路线"
+    assert jobs["auditor"].idle_reason == "等待上一角色交接"
 
 
 def test_user_followup_steers_active_director_turn_when_supported(tmp_path) -> None:

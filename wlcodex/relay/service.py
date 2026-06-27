@@ -507,6 +507,59 @@ class RelayService:
             role=role,
             payload={"status": "passed" if envelope.status == "passed" else envelope.status},
         )
+        if (
+            role == "auditor"
+            and envelope.status in {"blocked", "failed"}
+            and envelope.handoff_to == "implementer"
+        ):
+            detail = self._store.get_task_detail(task_id)
+            next_role, handoff_error = self._resolve_handoff_target(
+                detail,
+                role,
+                envelope.handoff_to,
+                result.next_role,
+            )
+            if handoff_error:
+                self._block_role_with_error(
+                    task_id,
+                    role,
+                    handoff_error,
+                    output=output,
+                )
+                return result
+            if next_role == "implementer":
+                handoff = HandoffPacket(
+                    from_role=role,
+                    to_role=next_role,
+                    summary=envelope.summary,
+                    confirmed_facts=[],
+                    open_questions=envelope.open_questions,
+                    evidence_refs=envelope.evidence_refs,
+                    next_action=envelope.next_action,
+                )
+                self._store.save_handoff_packet(
+                    task_id,
+                    from_role=role,
+                    to_role=next_role,
+                    packet=handoff,
+                )
+                self._store.update_task_status(task_id, "running")
+                self._store.update_role_status(task_id, next_role, "queued")
+                self._events.emit(
+                    task_id,
+                    "handoff.created",
+                    role=role,
+                    payload=handoff.to_json_dict(),
+                )
+                self._events.emit(
+                    task_id,
+                    "role.queued",
+                    role=next_role,
+                    payload={"role": next_role, "reason": "auditor_rework"},
+                )
+                if dispatch_next:
+                    await self.dispatch_role(task_id, next_role)
+                return result
         if envelope.status == "blocked":
             self._store.update_task_status(task_id, "blocked")
             return result
@@ -747,10 +800,14 @@ class RelayService:
         risk = str(payload.get("risk") or "").strip().lower()
         if risk not in _ROUTING_DECISION_RISKS:
             return {}, f"invalid routing risk: {risk}"
-        required_roles = _clean_required_roles(payload.get("required_roles"))
-        if not required_roles:
+        raw_required_roles = _clean_required_roles(payload.get("required_roles"))
+        required_roles = _normalize_required_roles_for_route(
+            route,
+            payload.get("required_roles"),
+        )
+        if not raw_required_roles:
             return {}, "routing_decision requires at least one role"
-        if route == "director_only" and required_roles != ["director"]:
+        if route == "director_only" and raw_required_roles != ["director"]:
             return {}, "director_only route may only require director"
         if route == "director_only" and _user_requested_full_relay(prompt):
             return {}, "user requested full relay; director_only is not allowed"
@@ -827,7 +884,9 @@ class RelayService:
                 )
             return "director", ""
         if proposed not in required_roles:
-            if not explicit and not next_required:
+            if not explicit:
+                if next_required:
+                    return next_required, ""
                 return "director", ""
             return (
                 None,
@@ -1751,6 +1810,20 @@ def _clean_required_roles(values: Any) -> list[str]:
     return roles
 
 
+def _normalize_required_roles_for_route(route: str, values: Any) -> list[str]:
+    required_roles = _clean_required_roles(values)
+    if "director" not in required_roles:
+        required_roles.insert(0, "director")
+    if route == "director_only":
+        return ["director"]
+    if route == "core_relay":
+        if not any(role for role in required_roles if role != "director"):
+            required_roles.append("implementer")
+        if "implementer" in required_roles and "auditor" not in required_roles:
+            required_roles.append("auditor")
+    return required_roles
+
+
 def _first_required_role_after_director(
     required_roles: list[str],
     *,
@@ -1895,14 +1968,14 @@ def _recover_routing_decision_from_invalid_output(
             "role": "director",
             "artifact_type": "routing_decision",
             "handoff_to": "",
-            "summary": "按核心接力处理：先由总工程师确认方向，再交给开发角色实现。",
+            "summary": "按核心接力处理：先由总工程师确认方向，再交给开发角色实现，随后由审核角色复核。",
             "evidence_refs": ["recovered malformed director routing output"],
             "open_questions": [],
-            "next_action": "调度开发角色继续接力",
+            "next_action": "调度开发角色继续接力，完成后进入审核",
             "complexity": "medium",
             "risk": "medium",
             "route": "core_relay",
-            "required_roles": ["director", "implementer"],
+            "required_roles": ["director", "implementer", "auditor"],
             "acceptance_criteria": ["完成用户请求并给出中文结果"],
             "stop_conditions": ["发现需要用户确认范围或高风险操作时暂停"],
             "requires_user_approval": False,
@@ -1943,15 +2016,10 @@ def _recover_routing_decision_from_payload(
             return None
     if route == "director_only" and _prompt_looks_high_risk(prompt):
         return None
-    required_roles = _clean_required_roles(payload.get("required_roles"))
-    if "director" not in required_roles:
-        required_roles.insert(0, "director")
-    if route == "director_only":
-        required_roles = ["director"]
-    elif route == "core_relay" and not any(
-        role for role in required_roles if role != "director"
-    ):
-        required_roles.append("implementer")
+    required_roles = _normalize_required_roles_for_route(
+        route,
+        payload.get("required_roles"),
+    )
     complexity = str(payload.get("complexity") or "medium").strip() or "medium"
     risk = str(payload.get("risk") or "medium").strip().lower() or "medium"
     if risk not in _ROUTING_DECISION_RISKS:
