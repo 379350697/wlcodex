@@ -142,7 +142,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260627-fixed-topbar"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-marvis-scale"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4666,7 +4666,7 @@ def _format_marvis_relay_token_count(value: int) -> str:
 def _marvis_relay_followup_composer(
     *,
     task_id: int,
-    placeholder: str = "请输入任务",
+    placeholder: str = "请在此输入任务",
     workspace: str = "",
     access_token: str = "",
     task_status: str = "",
