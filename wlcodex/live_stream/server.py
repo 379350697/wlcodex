@@ -6626,12 +6626,7 @@ def _relay_task_detail_page(
       return value ? `${{role || ""}}:${{value}}` : "";
     }}
     function relayPreviewDisplayText(role, text) {{
-      const value = String(text || "");
-      const markers = ["artifact_type", "expected_output_envelope", "routing_decisioncomplexity", "required_roles", "handoff_to", "acceptance_criteria"];
-      if (value.includes("{{") && markers.some((marker) => value.includes(marker))) {{
-        return `${{labelForRole(role)}} 正在接收结构化输出，完成后展示 canonical 摘要和 JSON。（已接收 ${{value.length}} 字）`;
-      }}
-      return relaySanitizeProtocolLeakText(role, value);
+      return `${{labelForRole(role)}}正在处理任务，完成后展示结果。`;
     }}
     function appendRolePreview(role, text, eventId = "") {{
       if (!role || !text) return;
@@ -6640,12 +6635,9 @@ def _relay_task_detail_page(
       if (eventKey && seenPreviewEventKeys.has(eventKey)) return;
       if (eventKey) seenPreviewEventKeys.add(eventKey);
       const preview = rolePreviews[role];
-      let rawPreview = text;
       if (preview) {{
-        rawPreview = (preview.dataset.rawPreview || "") + text;
-        preview.dataset.rawPreview = rawPreview;
         preview.classList.remove("is-idle");
-        preview.textContent = relayPreviewDisplayText(role, rawPreview);
+        preview.textContent = relayPreviewDisplayText(role, text);
         preview.scrollTop = preview.scrollHeight;
       }}
       if (!conversationTimeline) return;
@@ -6656,14 +6648,12 @@ def _relay_task_detail_page(
         if (!node) return;
         node.dataset.conversationRolePreview = role;
       }}
-      node.dataset.rawPreview = (node.dataset.rawPreview || "") + text;
-      setNativeBodyText(node, relayPreviewDisplayText(role, node.dataset.rawPreview));
+      setNativeBodyText(node, relayPreviewDisplayText(role, text));
     }}
     function clearRolePreview(role) {{
       const preview = rolePreviews[role];
       if (preview) {{
         preview.textContent = "";
-        delete preview.dataset.rawPreview;
         preview.classList.add("is-idle");
       }}
       conversationTimeline?.querySelector(`[data-conversation-role-preview="${{role}}"]`)?.remove();
@@ -7211,12 +7201,7 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
         if kind == "text_delta"
         else ""
     )
-    raw_preview = str(row.get("raw_preview") or "")
-    raw_preview_attr = (
-        f' data-raw-preview="{escape(raw_preview)}"'
-        if kind == "text_delta" and raw_preview
-        else ""
-    )
+    raw_preview_attr = ""
     preview_event_ids = str(row.get("preview_event_ids") or "")
     preview_event_ids_attr = (
         f' data-preview-event-ids="{escape(preview_event_ids)}"'
@@ -7456,21 +7441,7 @@ def _relay_role_job_is_live_preview(job: Any | None) -> bool:
 
 
 def _relay_preview_display_text(role: str, text: str) -> str:
-    value = str(text or "")
-    markers = (
-        "artifact_type",
-        "expected_output_envelope",
-        "routing_decisioncomplexity",
-        "required_roles",
-        "handoff_to",
-        "acceptance_criteria",
-    )
-    if "{" in value and any(marker in value for marker in markers):
-        return (
-            f"{_relay_role_label(role)} 正在接收结构化输出，"
-            f"完成后展示 canonical 摘要和 JSON。（已接收 {len(value)} 字）"
-        )
-    return _relay_sanitize_protocol_leak_text(role, value)
+    return f"{_relay_role_label(role)}正在处理任务，完成后展示结果。"
 
 
 def _relay_conversation_row_is_task_status_noise(row: dict[str, str]) -> bool:

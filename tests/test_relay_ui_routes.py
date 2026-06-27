@@ -2131,11 +2131,11 @@ async def test_relay_task_detail_projects_running_delta_as_initial_preview(
     conversation_html = _relay_view_panel_html(response, "conversation")
     assert 'data-conversation-role-preview="director"' in conversation_html
     assert 'data-conversation-role-final="director"' not in conversation_html
-    assert 'data-raw-preview="总工程师正在拆解任务，先确认影响面。"' in conversation_html
+    assert "data-raw-preview" not in conversation_html
     assert 'data-preview-event-ids="1"' in conversation_html
-    assert "总工程师正在拆解任务，先确认影响面。" in _relay_message_bodies_html(
-        conversation_html
-    )
+    bodies_html = _relay_message_bodies_html(conversation_html)
+    assert "总工程师正在处理任务，完成后展示结果。" in bodies_html
+    assert "总工程师正在拆解任务，先确认影响面。" not in bodies_html
 
 
 @pytest.mark.asyncio
@@ -2186,8 +2186,9 @@ async def test_relay_task_detail_projects_structured_running_delta_as_counted_pr
     conversation_html = _relay_view_panel_html(response, "conversation")
     bodies_html = _relay_message_bodies_html(conversation_html)
     assert 'data-conversation-role-preview="director"' in conversation_html
-    assert "正在接收结构化输出" in bodies_html
-    assert f"已接收 {len(delta)} 字" in bodies_html
+    assert "总工程师正在处理任务，完成后展示结果。" in bodies_html
+    assert "正在接收结构化输出" not in bodies_html
+    assert f"已接收 {len(delta)} 字" not in bodies_html
 
 
 @pytest.mark.asyncio
@@ -2216,10 +2217,68 @@ async def test_relay_task_detail_streaming_delta_is_preview_not_final_output(
     assert 'data-role-preview="' not in response
     assert 'data-native-kind="waiting"' in response
     assert "..." in response
+
+
+@pytest.mark.asyncio
+async def test_marvis_relay_conversation_hides_native_task_delta_preview(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Native task chatter",
+        prompt="给聊天框上方增加工作区选择",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "implementer",
+        provider="claude",
+        model="sdk-deepseek",
+        native_session_id="native-implementer-chatter",
+        agent_run_id=917,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "implementer", "streaming")
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=917,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": (
+                "Task #1 created successfully: Explore project structure and chat UI"
+                "<tool_use_error>Directory does not exist: /repo/src.</tool_use_error>"
+                "total 144"
+            ),
+            "native_turn_id": "turn-chatter",
+            "itemId": "assistant-chatter",
+        },
+        occurred_at="2026-06-14T12:35:01+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
+    assert "Task #1 created successfully" not in conversation_html
+    assert "tool_use_error" not in conversation_html
+    assert "total 144" not in conversation_html
+    assert "开发工程师正在处理任务，完成后展示结果。" in conversation_html
+    assert "Task #1 created successfully" in work_log_html
     assert "function appendRolePreview" in response
     assert "function relayPreviewDisplayText" in response
     assert "function renderRoleEnvelope" in response
-    assert "已接收 ${value.length} 字" in response
+    assert "已接收 ${value.length} 字" not in response
+    assert "正在处理任务，完成后展示结果" in response
     assert "function clearAllRolePreviews" in response
     assert "const seenPreviewEventKeys = new Set" in response
     assert "function previewEventKey" in response

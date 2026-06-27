@@ -30,6 +30,13 @@ _DEFAULT_HANDOFFS = {
     "auditor": "director",
 }
 _VALID_ENVELOPE_STATUSES = {"passed", "failed", "blocked", "waiting"}
+_ARTIFACT_TYPE_ALIASES = {
+    "backend_patch": "implementation_report",
+    "code_patch": "implementation_report",
+    "frontend_patch": "implementation_report",
+    "implementation": "implementation_report",
+    "implementation_patch": "implementation_report",
+}
 
 
 def default_handoff_target(role: str) -> str | None:
@@ -64,6 +71,7 @@ def _parse_role_envelope_payload(payload: Any) -> EnvelopeParseResult:
         return EnvelopeParseResult(ok=False, error="role envelope must be a JSON object")
     if isinstance(payload.get("role_envelope"), dict):
         payload = payload["role_envelope"]
+    payload = _normalize_role_envelope_payload(payload)
 
     missing = [field for field in _REQUIRED_FIELDS if field not in payload]
     if missing:
@@ -102,6 +110,15 @@ def _parse_role_envelope_payload(payload: Any) -> EnvelopeParseResult:
         next_role=next_role,
         payload=dict(payload),
     )
+
+
+def _normalize_role_envelope_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    artifact_type = str(normalized.get("artifact_type") or "").strip()
+    alias = _ARTIFACT_TYPE_ALIASES.get(artifact_type)
+    if alias:
+        normalized["artifact_type"] = alias
+    return normalized
 
 
 def _extract_json_payloads(text: str) -> list[Any]:

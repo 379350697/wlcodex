@@ -1649,6 +1649,92 @@ def test_runtime_agent_run_failed_blocks_streaming_role(tmp_path) -> None:
     )
 
 
+def test_implementer_frontend_patch_envelope_normalizes_to_implementation_report(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="给聊天框上方增加工作区显示和选择入口",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "core relay required",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "implementer",
+              "summary": "需要开发工程师实现前端调整。",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "implementer implement",
+              "complexity": "medium",
+              "risk": "medium",
+              "route": "core_relay",
+              "required_roles": ["director", "implementer", "tester"],
+              "acceptance_criteria": ["聊天输入框上方显示工作区"],
+              "stop_conditions": [],
+              "requires_user_approval": false
+            }
+            """,
+        )
+    )
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    implementer_agent_run_id = int(jobs["implementer"].agent_run_id or 0)
+    runtime_event = RuntimeEvent(
+        id=88,
+        schema_version=1,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        aggregate_type=AggregateType.AGENT_RUN,
+        aggregate_id=str(implementer_agent_run_id),
+        correlation_id="corr-101",
+        source=EventSource.CLAUDE,
+        actor="claude",
+        visibility=Visibility.USER,
+        payload={
+            "text": """
+            ```json
+            {
+              "status": "passed",
+              "reason": "implemented",
+              "role": "implementer",
+              "artifact_type": "frontend_patch",
+              "handoff_to": "tester",
+              "summary": "已添加工作区显示和选择入口。",
+              "evidence_refs": ["wlcodex/live_stream/server.py"],
+              "open_questions": [],
+              "next_action": "tester verify"
+            }
+            ```
+            """
+        },
+        occurred_at=now_iso(),
+        agent_run_id=implementer_agent_run_id,
+    )
+
+    asyncio.run(service.handle_runtime_event(runtime_event))
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    implementation = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "implementation_report"
+    ]
+    assert jobs["implementer"].status == "passed"
+    assert jobs["tester"].status == "streaming"
+    assert implementation
+    assert implementation[-1]["summary"] == "已添加工作区显示和选择入口。"
+    assert [call[0] for call in provider.calls] == ["start_session", "start_session"]
+
+
 def test_codex_native_turn_completed_folds_text_deltas_into_routing_decision(
     tmp_path,
 ) -> None:
