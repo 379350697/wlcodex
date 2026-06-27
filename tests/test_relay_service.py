@@ -272,6 +272,7 @@ def test_resume_role_redispatches_blocked_role(tmp_path) -> None:
     assert jobs["implementer"].status == "streaming"
     assert jobs["implementer"].provider == "claude"
     assert jobs["implementer"].native_session_id == "native-1"
+    assert jobs["implementer"].error_message == ""
     assert provider.calls[0][0] == "start_session"
     assert [event.event_type for event in service.events_for_task(task.id)][-3:] == [
         "role.queued",
