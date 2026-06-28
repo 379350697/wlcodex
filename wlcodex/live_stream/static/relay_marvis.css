@@ -1,18 +1,18 @@
 html {
-  background: #f3f3f3 !important;
+  background: #FAF8F5 !important;
   color-scheme: light only;
 }
 
 body[data-marvis-relay-view] {
   margin: 0;
   min-height: 100dvh;
-  background: #f3f3f3 !important;
+  background: #FAF8F5 !important;
   color: #111;
   color-scheme: light only;
   forced-color-adjust: none;
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
   --marvis-s25-phone-width: 430px;
-  --marvis-s25-page-bg: #f3f3f3;
+  --marvis-s25-page-bg: #FAF8F5;
   --marvis-s25-topbar-pad-top: 28px;
   --marvis-s25-topbar-pad-x: 24px;
   --marvis-s25-topbar-pad-bottom: 12px;
@@ -95,8 +95,8 @@ body[data-marvis-relay-view] .marvis-relay-phone::after {
   pointer-events: none;
   background: linear-gradient(
     to bottom,
-    rgba(243, 243, 243, 0),
-    rgba(243, 243, 243, .96) 26%,
+    rgba(250, 248, 245, 0),
+    rgba(250, 248, 245, .96) 26%,
     var(--marvis-s25-page-bg) 52%
   );
 }
@@ -257,7 +257,7 @@ body[data-marvis-relay-view] .marvis-relay-icon-devices::after {
   height: var(--marvis-s25-devices-phone-height);
   border: var(--marvis-s25-top-icon-stroke) solid #111;
   border-radius: 5px;
-  background: #f3f3f3;
+  background: #FAF8F5;
 }
 
 body[data-marvis-relay-view] .marvis-relay-icon-list {
@@ -732,11 +732,11 @@ body[data-marvis-relay-view] .marvis-relay-composer {
   min-height: var(--marvis-s25-composer-height);
   transform: translateX(-50%);
   box-sizing: border-box;
-  border: 1px solid #dfdfdf;
+  border: 1px solid #E0DCD6;
   border-radius: var(--marvis-s25-composer-radius);
-  background: rgba(255, 255, 255, .94);
+  background: var(--marvis-s25-page-bg);
   padding: 8px 9px;
-  box-shadow: 0 -2px 18px rgba(0, 0, 0, .03);
+  box-shadow: 0 -2px 18px rgba(0, 0, 0, .04);
 }
 
 body[data-marvis-relay-view] .marvis-relay-composer-attachments {
@@ -1124,8 +1124,8 @@ body[data-marvis-relay-view] .marvis-relay-bottom-nav {
   min-height: var(--marvis-s25-bottom-nav-height);
   padding: 0 0 env(safe-area-inset-bottom);
   transform: translateX(-50%);
-  background: #fff;
-  border-top: 1px solid #edebe8;
+  background: var(--marvis-s25-page-bg);
+  border-top: 1px solid #E8E4DF;
   box-shadow: 0 -2px 10px rgba(0,0,0,.03);
 }
 
@@ -1157,7 +1157,7 @@ body[data-marvis-relay-view="chat"] .marvis-relay-chat-home {
   justify-items: start;
   gap: 34px;
   min-height: calc(100dvh - 230px);
-  padding: calc(140px + env(safe-area-inset-top, 0px)) 26px 230px;
+  padding: calc(180px + env(safe-area-inset-top, 0px)) 26px 230px;
   box-sizing: border-box;
 }
 
@@ -1612,12 +1612,12 @@ body[data-marvis-relay-view] .marvis-work-log-artifacts h3 {
 }
 
 body[data-marvis-relay-view] .relay-create-modal {
-  background: #f3f3f3;
+  background: #FAF8F5;
   color: #111;
 }
 
 body[data-marvis-relay-view] .relay-modal-head {
-  background: #f3f3f3;
+  background: #FAF8F5;
   border: 0;
 }
 

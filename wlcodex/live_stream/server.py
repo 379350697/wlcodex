@@ -7734,6 +7734,12 @@ def _relay_projected_conversation_rows(
     canonical_payload_sequence = canonical_payload_sequence or list(canonical_payloads.values())
     events = _relay_worker_events_for_roles(role_jobs, hub=hub)
     job_by_role = {str(getattr(job, "role", "") or ""): job for job in role_jobs}
+    user_followup_texts = {
+        _relay_user_message_dedupe_text(str(artifact.get("text") or ""))
+        for artifact in (artifacts or [])
+        if str(artifact.get("artifact_type") or "") == "user_followup"
+        and _relay_user_message_dedupe_text(str(artifact.get("text") or ""))
+    }
     completed_keys = {
         _relay_native_message_key(role, worker_event, bucket="assistant")
         for _occurred_at, _event_id, role, _display_name, worker_event in events
@@ -7795,9 +7801,12 @@ def _relay_projected_conversation_rows(
             continue
         if str(projected.get("kind") or "") == "user_message":
             body = str(projected.get("body") or "").strip()
-            if not body or body in seen_user_bodies:
+            dedupe_body = _relay_user_message_dedupe_text(body)
+            if not dedupe_body or dedupe_body in user_followup_texts:
                 continue
-            seen_user_bodies.add(body)
+            if dedupe_body in seen_user_bodies:
+                continue
+            seen_user_bodies.add(dedupe_body)
         key = str(projected.get("key") or "")
         if key and key in seen_keys:
             continue
@@ -7806,12 +7815,6 @@ def _relay_projected_conversation_rows(
         projected_rows.append(projected)
 
     if artifacts is not None:
-        user_followup_texts = {
-            str(artifact.get("text") or "").strip()
-            for artifact in artifacts
-            if str(artifact.get("artifact_type") or "") == "user_followup"
-            and str(artifact.get("text") or "").strip()
-        }
         for index, artifact in enumerate(artifacts):
             artifact_row = _relay_conversation_row_from_artifact(
                 artifact,
@@ -7823,9 +7826,10 @@ def _relay_projected_conversation_rows(
                 continue
             if str(artifact_row.get("kind") or "") == "user_message":
                 body = str(artifact_row.get("body") or "").strip()
-                if not body or body in seen_user_bodies:
+                dedupe_body = _relay_user_message_dedupe_text(body)
+                if not dedupe_body or dedupe_body in seen_user_bodies:
                     continue
-                seen_user_bodies.add(body)
+                seen_user_bodies.add(dedupe_body)
             key = str(artifact_row.get("key") or "")
             if key and key in seen_keys:
                 continue
@@ -7876,6 +7880,14 @@ def _relay_projected_conversation_rows(
     return projected_rows
 
 
+def _relay_user_message_dedupe_text(text: str) -> str:
+    body = str(text or "").strip()
+    for marker in ("\n\n用户附带图片：", "\n\n用户附带文件："):
+        if marker in body:
+            body = body.split(marker, 1)[0].strip()
+    return " ".join(body.split())
+
+
 def _relay_conversation_row_from_artifact(
     artifact: dict[str, Any],
     *,
@@ -7907,7 +7919,8 @@ def _relay_conversation_row_from_artifact(
             summary == "User follow-up routed to director"
             or next_step == "director review latest user input"
         )
-        if not is_followup_board or not text or text in user_followup_texts:
+        dedupe_text = _relay_user_message_dedupe_text(text)
+        if not is_followup_board or not text or dedupe_text in user_followup_texts:
             return None
         return {
             "role": "user",

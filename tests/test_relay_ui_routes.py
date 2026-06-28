@@ -369,12 +369,54 @@ async def test_relay_task_detail_projects_followup_turns_into_marvis_chat(
 async def test_relay_task_detail_projects_followup_attachments_into_user_bubble(
     tmp_path: Path,
 ) -> None:
-    server, service, _runtime_store = _server(tmp_path)
+    server, service, runtime_store = _server(tmp_path)
     task = service.create_task(
         title="Follow-up with attachments",
         prompt="Prompt",
         workspace="/repo",
         provider="claude",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="claude",
+        provider_engine="sdk-test",
+        native_session_id="native-director-followup",
+        agent_run_id=201,
+        turn_id="turn-followup",
+        active_turn_id="turn-followup",
+        turn_running=False,
+        dispatch_verified=True,
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"text": "看这个截图和日志", "native_turn_id": "turn-followup"},
+            occurred_at="2026-06-14T12:00:00+00:00",
+            agent_run_id=201,
+        )
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "relay_board",
+        {
+            "latest_user_input": (
+                "看这个截图和日志\n\n用户附带图片：\n"
+                "- screen.png (image/png)\n\n用户附带文件：\n"
+                "- trace.log (text/plain, 13 bytes)"
+            ),
+            "current_dispatch": "director",
+            "next_step": "director review latest user input",
+        },
+        summary="User follow-up routed to director",
     )
     service._store.save_artifact(
         task.id,
@@ -414,7 +456,10 @@ async def test_relay_task_detail_projects_followup_attachments_into_user_bubble(
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
-    assert "看这个截图和日志" in conversation_html
+    assert conversation_html.count("看这个截图和日志") == 1
+    assert 'data-native-kind="user_message"' in conversation_html
+    assert 'data-native-key="user_followup:' in conversation_html
+    assert 'relay_board_followup:' not in conversation_html
     assert 'class="marvis-relay-message-images"' in conversation_html
     assert 'class="marvis-relay-message-image"' in conversation_html
     assert 'src="data:image/png;base64,aGVsbG8="' in conversation_html

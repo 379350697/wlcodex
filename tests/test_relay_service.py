@@ -1137,6 +1137,34 @@ def test_user_followup_moves_waiting_task_back_to_running(tmp_path) -> None:
     assert {job.role: job.status for job in detail.role_jobs}["director"] == "streaming"
 
 
+def test_user_followup_starts_clean_visible_turn_after_blocked_role(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "blocked")
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_role_status(task.id, "implementer", "blocked")
+    service._store.update_role_status(task.id, "auditor", "passed")
+
+    asyncio.run(service.add_user_message(task.id, "按新一轮继续处理"))
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.task.status == "running"
+    assert jobs["director"].status == "streaming"
+    assert jobs["implementer"].status == "idle"
+    assert jobs["auditor"].status == "idle"
+    assert [call[0] for call in provider.calls] == [
+        "start_session",
+        "continue_session",
+    ]
+
+
 def test_user_followup_on_completed_task_records_visible_turn_and_resumes(
     tmp_path,
 ) -> None:

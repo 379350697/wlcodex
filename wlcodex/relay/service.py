@@ -1362,6 +1362,12 @@ class RelayService:
             images=clean_images,
             files=clean_files,
         )
+        starts_new_visible_turn = detail.task.status in {
+            "waiting_user",
+            "completed",
+            "blocked",
+            "failed",
+        }
         board = detail.board
         self._store.save_artifact(
             task_id,
@@ -1375,8 +1381,19 @@ class RelayService:
             },
             summary="User follow-up routed to director",
         )
-        if detail.task.status in {"waiting_user", "completed", "blocked", "failed"}:
+        if starts_new_visible_turn:
             self._store.update_task_status(task_id, "running")
+            for job in detail.role_jobs:
+                if job.role == "director":
+                    continue
+                if job.status != "idle":
+                    self._store.update_role_status(task_id, job.role, "idle")
+                    self._events.emit(
+                        task_id,
+                        "role.status",
+                        role=job.role,
+                        payload={"status": "idle", "reason": "new_followup_turn"},
+                    )
         self._store.update_role_status(task_id, "director", "queued")
         refreshed = self._store.get_task_detail(task_id)
         packet = build_role_context_packet(
