@@ -273,6 +273,9 @@ async def test_marvis_relay_composer_has_real_attachment_sheet(
     assert "本地文件" in response
     assert "我的技能" in response
     assert "添加技能" in response
+    assert "/static/marvis/attachment-icon-album-marvis.png" in response
+    assert "/static/marvis/attachment-icon-local-file-marvis.png" in response
+    assert "/static/marvis/attachment-icon-skills-marvis.png" in response
     assert "readRelayImageAttachment" in response
     assert "readRelayTextAttachment" in response
     css_response, _service = await _request(
@@ -285,11 +288,24 @@ async def test_marvis_relay_composer_has_real_attachment_sheet(
     assert "--marvis-s25-attachment-tile-height: 121px" in css_response
     assert "--marvis-s25-attachment-skill-icon: 82px" in css_response
     assert "background: rgba(0, 0, 0, .45)" in css_response
-    assert ".marvis-relay-sheet-icon-album" in css_response
-    assert ".marvis-relay-sheet-icon-local-file" in css_response
-    assert ".marvis-relay-sheet-icon-skills" in css_response
+    assert ".marvis-relay-sheet-icon-native" in css_response
+    assert ".marvis-relay-sheet-icon-album::before" not in css_response
+    assert ".marvis-relay-sheet-icon-local-file::before" not in css_response
+    assert ".marvis-relay-sheet-icon-skills::before" not in css_response
     assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css_response
     assert "gap: 20px" in css_response
+    for icon_path in (
+        "/static/marvis/attachment-icon-album-marvis.png",
+        "/static/marvis/attachment-icon-local-file-marvis.png",
+        "/static/marvis/attachment-icon-skills-marvis.png",
+    ):
+        icon_response, _service = await _request(
+            tmp_path,
+            f"GET {icon_path} HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+        assert "HTTP/1.1 200 OK" in icon_response
+        assert "Content-Type: image/png" in icon_response
 
 
 @pytest.mark.asyncio
@@ -573,7 +589,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet-v2">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-native-icons">' in response
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
@@ -749,7 +765,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet-v2">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-native-icons">' in response
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png?v=20260627-red-director" in response
@@ -1132,7 +1148,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-attachment-sheet-v2">' in response
+    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-native-icons">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert 'class="marvis-relay-menu is-back" href="/native/workflows/relay?token=secret&amp;workspace=/repo" aria-label="返回上一级"' in response
     assert 'class="marvis-relay-bottom-nav"' in response
