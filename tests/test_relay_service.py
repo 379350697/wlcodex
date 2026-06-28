@@ -3792,6 +3792,108 @@ def test_stale_scan_folds_current_turn_delta_consumed_before_completion(
     assert audit_reports[-1]["summary"] == "审核通过，可以交付。"
 
 
+def test_late_valid_protocol_delta_recovers_same_round_role_error(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="量化 Marvis 接力 token 消耗。",
+        workspace="/repo",
+        provider="claude",
+    )
+    conversation = service._store._ledger.create_conversation(
+        chat_id=1,
+        user_id=1,
+        title="Relay task",
+        mode="relay",
+        workspace_alias="/repo",
+    )
+    agent_run = service._store._ledger.create_agent_run(
+        conversation.id,
+        agent="claude",
+        role="director",
+        external_session_id="native-director",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="claude",
+        provider_engine="sdk-test",
+        native_session_id="native-director",
+        agent_run_id=agent_run.id,
+        turn_id="turn-director",
+        active_turn_id="turn-director",
+        turn_running=False,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "blocked")
+    service._store.update_task_status(task.id, "blocked")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "relay_role": "director",
+            "error": "invalid json: Expecting ',' delimiter",
+            "output": '{"artifact_type":"routing_decisioncomplexitymedium"}',
+            "retry_kind": "format",
+            "round_id": 1,
+        },
+        summary="角色输出格式错误，已要求重新输出合法 JSON：invalid json",
+    )
+    late_delta = RuntimeEvent(
+        id=77,
+        schema_version=1,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        aggregate_type=AggregateType.AGENT_RUN,
+        aggregate_id=str(agent_run.id),
+        correlation_id=f"corr-{agent_run.id}",
+        source=EventSource.CLAUDE,
+        actor="claude",
+        visibility=Visibility.USER,
+        payload={
+            "delta": """
+            {
+              "status": "passed",
+              "reason": "需要审计本地 token 统计来源后再量化。",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "auditor",
+              "summary": "先审计证据，再计算接力模式相对单角色模式的 token 增量。",
+              "evidence_refs": ["runtime_events"],
+              "open_questions": [],
+              "next_action": "派审核工程师读取本地 token 使用记录。",
+              "complexity": "medium",
+              "risk": "low",
+              "route": "audit_first",
+              "required_roles": ["director", "auditor"],
+              "acceptance_criteria": ["报告 token 绝对增量", "报告百分比开销"],
+              "stop_conditions": ["找不到 token 日志时说明不可直接量化"],
+              "requires_user_approval": false
+            }
+            """,
+            "native_turn_id": "turn-director",
+            "source_kind": "claude",
+        },
+        occurred_at=now_iso(),
+        agent_run_id=agent_run.id,
+    )
+
+    asyncio.run(service.handle_runtime_event(late_delta))
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    routing = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "routing_decision"
+    ]
+    assert detail.task.status == "running"
+    assert jobs["director"].status == "passed"
+    assert jobs["auditor"].status == "streaming"
+    assert routing[-1]["summary"] == "先审计证据，再计算接力模式相对单角色模式的 token 增量。"
+    assert [call[0] for call in provider.calls] == ["start_session"]
+
+
 def test_active_scan_completes_auditor_after_delta_cursor_passed_completion(
     tmp_path,
 ) -> None:

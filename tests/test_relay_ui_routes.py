@@ -4586,6 +4586,78 @@ async def test_relay_conversation_hides_blocked_error_details_and_dedupes_user_p
 
 
 @pytest.mark.asyncio
+async def test_relay_conversation_hides_same_round_role_error_after_success(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Recovered director envelope",
+        prompt="量化 Marvis 接力 token 消耗。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_role_status(task.id, "auditor", "streaming")
+    service._store.update_task_status(task.id, "running")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "relay_role": "director",
+            "role": "director",
+            "round_id": 1,
+            "artifact_type": "role_error",
+            "error": "invalid json: Expecting ',' delimiter",
+            "retry_kind": "format",
+        },
+        summary="结构化结果不是合法 JSON，系统无法直接收口。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "relay_role": "director",
+            "round_id": 1,
+            "status": "passed",
+            "reason": "需要先审计本地 token 来源。",
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "handoff_to": "auditor",
+            "summary": "先审计证据，再计算接力模式相对单角色模式的 token 增量。",
+            "route": "audit_first",
+            "risk": "low",
+            "required_roles": ["director", "auditor"],
+            "evidence_refs": ["runtime_events"],
+            "next_action": "派审核工程师读取本地 token 使用记录。",
+            "open_questions": [],
+            "acceptance_criteria": ["报告 token 绝对增量", "报告百分比开销"],
+            "stop_conditions": ["找不到 token 日志时说明不可直接量化"],
+            "requires_user_approval": False,
+        },
+        summary="先审计证据，再计算接力模式相对单角色模式的 token 增量。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "结论：先审计证据，再计算接力模式相对单角色模式的 token 增量。" in conversation_html
+    assert "接力暂停在总工程师" not in conversation_html
+    assert "结构化结果不是合法 JSON" not in conversation_html
+    assert "invalid json" not in conversation_html
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_projects_running_delta_as_initial_preview(
     tmp_path: Path,
 ) -> None:

@@ -1379,7 +1379,6 @@ class RelayService:
             "passed",
             "waiting",
             "failed",
-            "blocked",
             "interrupted",
         }:
             return None
@@ -1747,6 +1746,15 @@ class RelayService:
         ):
             return None
         if self._project_runtime_delta(runtime_event, task_id=task_id, role=role):
+            if _runtime_delta_is_complete_role_envelope(runtime_event):
+                text = _runtime_event_text(runtime_event).strip()
+                await self._apply_native_completion_output(
+                    task_id,
+                    role,
+                    runtime_event_id=event_id,
+                    output=text,
+                    agent_run_id=int(agent_run_id),
+                )
             return None
         if _is_runtime_failure(runtime_event):
             self._mark_native_agent_run_failed(
@@ -2763,6 +2771,15 @@ def _completed_role_envelope_text(events: list[Any]) -> str | None:
     if event is None:
         return None
     return _runtime_event_text(event)
+
+
+def _runtime_delta_is_complete_role_envelope(runtime_event: Any) -> bool:
+    if not _is_runtime_model_text_delta(runtime_event):
+        return False
+    text = _runtime_event_text(runtime_event).strip()
+    if not text.startswith("{") or not text.endswith("}"):
+        return False
+    return parse_role_envelope(text).ok
 
 
 def _complete_protocol_delta_event(events: list[Any]) -> Any | None:
