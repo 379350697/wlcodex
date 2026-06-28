@@ -1372,6 +1372,15 @@ async def test_marvis_relay_skills_and_profile_show_construction_pages(
         assert 'href="/native/workflows/relay/skills?token=secret&amp;workspace=/repo"' in response
         assert 'href="/native/workflows/relay/profile?token=secret&amp;workspace=/repo"' in response
 
+    asset_response, _ = await _request(
+        tmp_path,
+        "GET /static/marvis/relay-under-construction.svg HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+    assert "HTTP/1.1 200 OK" in asset_response
+    assert "Content-Type: image/svg+xml" in asset_response
+    assert "<svg" in asset_response
+
 
 @pytest.mark.asyncio
 async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal(

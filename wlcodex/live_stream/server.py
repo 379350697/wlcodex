@@ -149,6 +149,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
+    ".svg": "image/svg+xml; charset=utf-8",
 }
 _RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-task-list-construction"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
