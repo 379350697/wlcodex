@@ -3639,8 +3639,8 @@ def _relay_task_list_page(
     .relay-status-badge.is-completed {{ background: #f3eded; border-color: #efe3e3; color: #755f5f; }}
     .relay-pagination {{ display: flex; align-items: center; justify-content: center; gap: 10px; padding: 2px 0 0; }}
     .relay-page-link, .relay-page-disabled {{ min-height: 34px; display: inline-grid; place-items: center; border: 1px solid var(--border-subtle); border-radius: 999px; padding: 0 12px; font-size: 13px; text-decoration: none; }}
-    .relay-page-link {{ color: var(--text-primary); background: rgba(255,255,255,.04); }}
-    .relay-page-disabled {{ color: var(--text-muted); opacity: .55; }}
+    .relay-page-link {{ color: #315e8d; background: #e8f1fb; border-color: #d8e8f7; font-weight: var(--weight-bold); }}
+    .relay-page-disabled {{ color: #6f7782; background: #f0f2f5; border-color: #e0e4ea; opacity: 1; }}
     .relay-page-indicator {{ color: var(--text-muted); font-size: 13px; }}
     .relay-empty-state {{ display: grid; justify-items: start; gap: 10px; border: 1px dashed var(--border-subtle); border-radius: 8px; padding: 18px; color: var(--text-muted); }}
     .relay-empty-state h2 {{ color: var(--text-primary); font-size: 18px; }}
@@ -4645,6 +4645,34 @@ def _marvis_relay_office_persona(
     }
 
 
+def _marvis_office_token_details_html(stats: dict[str, Any]) -> str:
+    agents = stats.get("agents")
+    rows = agents if isinstance(agents, list) else []
+    if not rows:
+        return '<p class="marvis-token-details-empty">还没有记录到 Token 消耗。</p>'
+    parts: list[str] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        agent = str(item.get("agent") or "unknown")
+        label = _native_provider_display_name(agent)
+        today_tokens = _marvis_token_int(item.get("today_tokens"))
+        total_tokens = _marvis_token_int(item.get("total_tokens"))
+        input_tokens = _marvis_token_int(item.get("input_tokens"))
+        output_tokens = _marvis_token_int(item.get("output_tokens"))
+        parts.append(
+            f"""
+            <article class="marvis-token-details-row" data-token-agent="{escape(agent)}">
+              <strong>{escape(label)}</strong>
+              <span>今日 {escape(_format_marvis_token_count(today_tokens))}</span>
+              <span>总计 {escape(_format_marvis_token_count(total_tokens))}</span>
+              <small>输入 {escape(_format_marvis_token_count(input_tokens))} · 输出 {escape(_format_marvis_token_count(output_tokens))}</small>
+            </article>
+            """
+        )
+    return "\n".join(parts) or '<p class="marvis-token-details-empty">还没有记录到 Token 消耗。</p>'
+
+
 def _marvis_relay_office_page(
     *,
     access_token: str = "",
@@ -4658,6 +4686,7 @@ def _marvis_relay_office_page(
     total_consumed_tokens = _marvis_token_int(stats.get("total_consumed_tokens"))
     consumed_label = _format_marvis_token_count(consumed_tokens)
     total_consumed_label = _format_marvis_token_count(total_consumed_tokens)
+    token_details_html = _marvis_office_token_details_html(stats)
     assignment_map = config.get("assignments")
     assignments = assignment_map if isinstance(assignment_map, dict) else {}
     assignment_payload = {role: str(assignments.get(role) or "") for role in RELAY_ROLE_IDS}
@@ -4766,17 +4795,26 @@ def _marvis_relay_office_page(
         </div>
       </section>
       <section class="marvis-office-token-row" aria-label="Token统计" data-marvis-token-stats data-token-endpoint="/api/relay/token-stats{token_suffix}">
-        <div class="marvis-office-token-card">
+        <button type="button" class="marvis-office-token-card" data-marvis-token-details-open="today">
           <span>今日消耗Token</span>
           <strong data-token-consumed="{consumed_tokens}"><b data-token-consumed-label>{escape(consumed_label)}</b> <span class="marvis-token-beans" aria-hidden="true"><span></span><span></span></span></strong>
-        </div>
-        <div class="marvis-office-token-card">
+        </button>
+        <button type="button" class="marvis-office-token-card" data-marvis-token-details-open="total">
           <span>总消耗Token</span>
           <strong data-token-total="{total_consumed_tokens}"><b data-token-total-label>{escape(total_consumed_label)}</b> <span class="marvis-token-beans" aria-hidden="true"><span></span><span></span></span></strong>
-        </div>
+        </button>
       </section>
     </main>
     <div class="marvis-office-backdrop" data-marvis-persona-backdrop hidden></div>
+    <div class="marvis-office-backdrop marvis-token-details-backdrop" data-marvis-token-details-backdrop hidden></div>
+    <section class="marvis-token-details-sheet" data-marvis-token-details-modal hidden aria-modal="true" role="dialog" aria-label="Token明细">
+      <button class="marvis-token-details-close" type="button" data-marvis-token-details-close aria-label="关闭">×</button>
+      <h2>Token明细</h2>
+      <p class="marvis-token-details-summary">按今天和累计消耗汇总，每条记录来自任务工作日志中的 usage 事件。</p>
+      <div class="marvis-token-details-list" data-marvis-token-details-list>
+        {token_details_html}
+      </div>
+    </section>
     <section class="marvis-persona-modal" data-marvis-persona-modal hidden aria-modal="true" role="dialog" aria-label="Marvis（马维斯）人设">
       <button class="marvis-persona-close" type="button" data-marvis-persona-close aria-label="关闭"></button>
       <header class="marvis-persona-head">
@@ -4914,6 +4952,11 @@ def _marvis_relay_office_page(
       const consumedLabel = document.querySelector("[data-token-consumed-label]");
       const total = document.querySelector("[data-token-total]");
       const totalLabel = document.querySelector("[data-token-total-label]");
+      const tokenDetails = document.querySelector("[data-marvis-token-details-modal]");
+      const tokenDetailsBackdrop = document.querySelector("[data-marvis-token-details-backdrop]");
+      const tokenDetailsList = document.querySelector("[data-marvis-token-details-list]");
+      const tokenDetailsOpen = document.querySelectorAll("[data-marvis-token-details-open]");
+      const tokenDetailsClose = document.querySelectorAll("[data-marvis-token-details-close]");
       const formatToken = (value) => {{
         const number = Number(value || 0);
         if (!Number.isFinite(number) || number <= 0) return "0";
@@ -4932,7 +4975,32 @@ def _marvis_relay_office_page(
         }}
         if (consumedLabel) consumedLabel.textContent = formatToken(used);
         if (totalLabel) totalLabel.textContent = formatToken(totalUsed);
+        if (tokenDetailsList && stats && Array.isArray(stats.agents)) {{
+          tokenDetailsList.innerHTML = stats.agents.length ? stats.agents.map((item) => {{
+            const agent = String(item.agent || "unknown");
+            const label = providerLabel(agent);
+            const today = Number(item.today_tokens || 0);
+            const totalTokens = Number(item.total_tokens || 0);
+            const input = Number(item.input_tokens || 0);
+            const output = Number(item.output_tokens || 0);
+            return `<article class="marvis-token-details-row" data-token-agent="${{agent.replace(/"/g, "&quot;")}}">
+              <strong>${{label}}</strong>
+              <span>今日 ${{formatToken(today)}}</span>
+              <span>总计 ${{formatToken(totalTokens)}}</span>
+              <small>输入 ${{formatToken(input)}} · 输出 ${{formatToken(output)}}</small>
+            </article>`;
+          }}).join("") : '<p class="marvis-token-details-empty">还没有记录到 Token 消耗。</p>';
+        }}
       }};
+      const setTokenDetailsOpen = (isOpen) => {{
+        if (!tokenDetails || !tokenDetailsBackdrop) return;
+        tokenDetails.hidden = !isOpen;
+        tokenDetailsBackdrop.hidden = !isOpen;
+        document.body.classList.toggle("marvis-token-details-open", isOpen);
+      }};
+      tokenDetailsOpen.forEach((button) => button.addEventListener("click", () => setTokenDetailsOpen(true)));
+      tokenDetailsBackdrop?.addEventListener("click", () => setTokenDetailsOpen(false));
+      tokenDetailsClose.forEach((button) => button.addEventListener("click", () => setTokenDetailsOpen(false)));
       const refreshTokenStats = async () => {{
         if (!tokenStats) return;
         const endpoint = tokenStats.getAttribute("data-token-endpoint");

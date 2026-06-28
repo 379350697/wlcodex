@@ -1800,6 +1800,20 @@ body[data-marvis-relay-view="office"] .marvis-office-token-card {
   gap: 14px;
   border-bottom: 3px solid rgba(17, 17, 17, .045);
   padding-bottom: 18px;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  background: transparent;
+  text-align: left;
+  color: inherit;
+  appearance: none;
+  cursor: pointer;
+}
+
+body[data-marvis-relay-view="office"] .marvis-office-token-card:focus-visible {
+  outline: 2px solid rgba(49, 94, 141, .45);
+  outline-offset: 6px;
+  border-radius: 10px;
 }
 
 body[data-marvis-relay-view="office"] .marvis-office-token-card > span {
@@ -1823,6 +1837,97 @@ body[data-marvis-relay-view="office"] .marvis-office-token-card strong {
 body[data-marvis-relay-view="office"] .marvis-office-token-card strong b {
   font: inherit;
   font-weight: inherit;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-backdrop {
+  z-index: 42;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-sheet {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  z-index: 43;
+  transform: translateX(-50%);
+  width: min(100%, var(--marvis-relay-phone-width));
+  min-height: 42vh;
+  max-height: 76vh;
+  box-sizing: border-box;
+  padding: 26px 26px max(32px, env(safe-area-inset-bottom));
+  border-radius: 24px 24px 0 0;
+  background: #fff;
+  box-shadow: 0 -14px 38px rgba(0, 0, 0, .14);
+  overflow: auto;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-close {
+  position: absolute;
+  right: 22px;
+  top: 20px;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  background: transparent;
+  color: #111;
+  font-size: 32px;
+  line-height: 1;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-sheet h2 {
+  margin: 0;
+  color: #111;
+  font-size: 24px;
+  font-weight: 700;
+  text-align: center;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-summary {
+  margin: 10px 0 20px;
+  color: #999;
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-list {
+  display: grid;
+  gap: 12px;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-row {
+  display: grid;
+  grid-template-columns: minmax(82px, 1fr) auto auto;
+  gap: 8px 12px;
+  align-items: center;
+  padding: 14px;
+  border-radius: 16px;
+  background: #f6f6f6;
+  color: #111;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-row strong {
+  min-width: 0;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-row span {
+  color: #111;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-row small {
+  grid-column: 1 / -1;
+  color: #999;
+  font-size: 13px;
+}
+
+body[data-marvis-relay-view="office"] .marvis-token-details-empty {
+  margin: 0;
+  padding: 24px 0;
+  color: #999;
+  text-align: center;
 }
 
 body[data-marvis-relay-view="office"] .marvis-token-beans {

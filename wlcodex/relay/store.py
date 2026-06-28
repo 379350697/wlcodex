@@ -115,7 +115,7 @@ class RelayStore:
             raise RuntimeError("relay runtime settings are unavailable")
         self._ledger.set_runtime_setting(key, value)
 
-    def today_token_stats(self) -> dict[str, int]:
+    def today_token_stats(self) -> dict[str, Any]:
         today_row = self._ledger._conn.execute(
             """
             SELECT
@@ -137,9 +137,46 @@ class RelayStore:
             )
             """
         ).fetchone()
+        agent_rows = self._ledger._conn.execute(
+            """
+            SELECT
+                CASE WHEN TRIM(agent) = '' THEN 'unknown' ELSE TRIM(agent) END AS agent,
+                COALESCE(SUM(CASE
+                    WHEN date(created_at, 'localtime') = date('now', 'localtime')
+                    THEN total_tokens ELSE 0 END), 0) AS today_tokens,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                COALESCE(SUM(CASE
+                    WHEN date(created_at, 'localtime') = date('now', 'localtime')
+                    THEN input_tokens ELSE 0 END), 0) AS today_input_tokens,
+                COALESCE(SUM(CASE
+                    WHEN date(created_at, 'localtime') = date('now', 'localtime')
+                    THEN output_tokens ELSE 0 END), 0) AS today_output_tokens,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens
+            FROM usage_events
+            WHERE task_id IN (
+                SELECT id FROM team_runs WHERE route = 'relay'
+            )
+            GROUP BY CASE WHEN TRIM(agent) = '' THEN 'unknown' ELSE TRIM(agent) END
+            HAVING total_tokens > 0 OR today_tokens > 0
+            ORDER BY today_tokens DESC, total_tokens DESC, agent ASC
+            """
+        ).fetchall()
         return {
             "consumed_tokens": (int(today_row["total_tokens"] or 0) if today_row else 0),
             "total_consumed_tokens": (int(total_row["total_tokens"] or 0) if total_row else 0),
+            "agents": [
+                {
+                    "agent": str(row["agent"] or "unknown"),
+                    "today_tokens": int(row["today_tokens"] or 0),
+                    "total_tokens": int(row["total_tokens"] or 0),
+                    "today_input_tokens": int(row["today_input_tokens"] or 0),
+                    "today_output_tokens": int(row["today_output_tokens"] or 0),
+                    "input_tokens": int(row["input_tokens"] or 0),
+                    "output_tokens": int(row["output_tokens"] or 0),
+                }
+                for row in agent_rows
+            ],
         }
 
     def get_task_detail(self, task_id: int) -> RelayTaskDetail:

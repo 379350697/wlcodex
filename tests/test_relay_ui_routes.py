@@ -1290,6 +1290,8 @@ async def test_relay_task_list_paginates_ten_tasks_per_page(tmp_path: Path) -> N
         'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex&amp;page=2"'
         in page_one
     )
+    assert ".relay-page-link { color: #315e8d; background: #e8f1fb;" in page_one
+    assert ".relay-page-disabled { color: #6f7782; background: #f0f2f5;" in page_one
 
     assert page_two.count('class="relay-task-card marvis-relay-task-card"') == 2
     assert "Paged relay task 01" in page_two
@@ -1531,6 +1533,16 @@ async def test_marvis_relay_office_page_displays_today_token_usage(
 
     assert 'data-token-consumed="2200"' in response
     assert 'data-token-total="3000"' in response
+    assert 'type="button" class="marvis-office-token-card"' in response
+    assert 'data-marvis-token-details-open="today"' in response
+    assert 'data-marvis-token-details-open="total"' in response
+    assert "data-marvis-token-details-modal" in response
+    assert "Token明细" in response
+    assert "Codex" in response
+    assert "Claude" in response
+    assert "今日 1,500" in response
+    assert "总计 2,300" in response
+    assert "今日 700" in response
     assert "2,200" in response
     assert "3,000" in response
     assert "data-token-local" not in response
@@ -1538,6 +1550,11 @@ async def test_marvis_relay_office_page_displays_today_token_usage(
     assert "今日节省Token" not in response
     assert '"consumed_tokens": 2200' in stats_response
     assert '"total_consumed_tokens": 3000' in stats_response
+    assert '"agent": "codex"' in stats_response
+    assert '"today_tokens": 1500' in stats_response
+    assert '"total_tokens": 2300' in stats_response
+    assert '"agent": "claude"' in stats_response
+    assert '"today_tokens": 700' in stats_response
     assert "local_tokens" not in stats_response
     assert "saved_tokens" not in stats_response
 
