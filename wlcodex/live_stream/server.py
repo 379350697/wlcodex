@@ -7179,11 +7179,9 @@ def _relay_task_detail_page(
     function appendMarvisConversationHandoff(toRole, key = "", fromRole = "", roundId = "") {{
       if (!conversationTimeline || !toRole) return null;
       if (!fromRole || fromRole === toRole) return null;
-      if (!roundId && key && key.startsWith("handoff:")) {{
-        roundId = key.split(":")[1] || "1";
-      }}
+      roundId = roundId || activeRelayRoundId || CURRENT_ROUND_ID || "1";
       const existingPair = conversationTimeline.querySelector(
-        `[data-marvis-handoff][data-native-from-role='${{CSS.escape(fromRole)}}'][data-native-to-role='${{CSS.escape(toRole)}}'][data-native-round-id='${{CSS.escape(roundId || "1")}}']`
+        `[data-marvis-handoff][data-native-from-role='${{CSS.escape(fromRole)}}'][data-native-to-role='${{CSS.escape(toRole)}}'][data-native-round-id='${{CSS.escape(roundId)}}']`
       );
       if (existingPair) return existingPair;
       const handoffKey = key || `handoff:${{toRole}}`;
@@ -7198,7 +7196,7 @@ def _relay_task_detail_page(
       node.dataset.nativeRole = toRole;
       node.dataset.nativeFromRole = fromRole;
       node.dataset.nativeToRole = toRole;
-      node.dataset.nativeRoundId = roundId || "1";
+      node.dataset.nativeRoundId = roundId;
       node.dataset.nativeKey = handoffKey;
       node.textContent = marvisHandoffText(fromRole, toRole);
       conversationTimeline.appendChild(node);
@@ -7323,6 +7321,12 @@ def _relay_task_detail_page(
       if (!role || !envelope) return;
       clearRolePreview(role);
       const summaryText = relayHumanizeEnvelope(envelope);
+      const roundId = String(envelope.round_id || activeRelayRoundId || CURRENT_ROUND_ID || "1");
+      const isDispatchHandoff =
+        role === "director" &&
+        String(envelope.artifact_type || "") === "final_summary" &&
+        String(envelope.status || "") === "waiting" &&
+        Boolean(envelope.handoff_to);
       const output = roleOutputs[role];
       if (output) {{
         output.classList.remove("is-idle");
@@ -7333,11 +7337,18 @@ def _relay_task_detail_page(
         const key = `canonical:${{role}}:${{envelope.artifact_type || "role_envelope"}}`;
         let node = conversationTimeline.querySelector(`[data-conversation-role-final="${{role}}"]`);
         if (!node) {{
-          node = createNativeMessage(role, "role_envelope", labelForRole(role), labelForStatus(envelope.status || "passed"), key);
+          node = createNativeMessage(
+            role,
+            "role_envelope",
+            labelForRole(role),
+            isDispatchHandoff ? "" : labelForStatus(envelope.status || "passed"),
+            key
+          );
           if (!node) return;
           node.dataset.conversationRoleFinal = role;
         }}
         node.dataset.nativeKind = "role_envelope";
+        node.dataset.nativeRoundId = roundId;
         setNativeBodyText(node, summaryText);
         ensureCanonicalDetails(node, role, envelope);
       }}
@@ -7557,7 +7568,7 @@ def _relay_task_detail_page(
       if (!isCurrentRoundEvent(payload)) return;
       if (toRole) setRoleStatus(toRole, "queued");
       const handoffKey = `handoff:${{roundId}}:${{fromRole}}:${{toRole || ""}}:${{payload.artifact_id || payload.summary || event.lastEventId || ""}}`;
-      appendMarvisConversationHandoff(toRole, handoffKey, fromRole);
+      appendMarvisConversationHandoff(toRole, handoffKey, fromRole, roundId);
       appendActivity(`${{labelForRole(payload.from_role)}} 已交接给 ${{labelForRole(toRole)}}：${{payload.summary || "等待下一角色处理"}}`);
     }});
     source.addEventListener("role.status", (event) => {{
@@ -7876,9 +7887,7 @@ def _relay_projected_conversation_rows(
                     "role": role,
                     "kind": "role_envelope",
                     "speaker": _relay_role_label(role),
-                    "meta": _marvis_relay_role_status_label(
-                        str(getattr(job_by_role.get(role), "status", "") or "passed")
-                    ),
+                    "meta": _relay_conversation_artifact_meta(payload),
                     "body": _relay_humanize_role_envelope(payload),
                     "key": key,
                     "artifact_type": str(payload.get("artifact_type") or ""),
@@ -7958,6 +7967,37 @@ def _relay_user_message_dedupe_text(text: str) -> str:
         if marker in body:
             body = body.split(marker, 1)[0].strip()
     return " ".join(body.split())
+
+
+def _relay_round_id_sort_value(value: Any) -> int:
+    try:
+        return int(str(value or "").strip() or "0")
+    except (TypeError, ValueError):
+        return 0
+
+
+def _relay_current_round_id_from_artifacts(
+    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+) -> str:
+    current = 0
+    for artifact in artifacts or ():
+        current = max(current, _relay_round_id_sort_value(artifact.get("round_id")))
+    return str(current or 1)
+
+
+def _relay_conversation_artifact_meta(payload: dict[str, Any]) -> str:
+    status = str(payload.get("status") or "").strip()
+    role = str(payload.get("role") or payload.get("relay_role") or "").strip()
+    artifact_type = str(payload.get("artifact_type") or "").strip()
+    handoff_to = str(payload.get("handoff_to") or "").strip()
+    if (
+        role == "director"
+        and artifact_type == "final_summary"
+        and status == "waiting"
+        and handoff_to
+    ):
+        return ""
+    return status or "passed"
 
 
 def _relay_conversation_row_from_artifact(
@@ -8047,9 +8087,7 @@ def _relay_conversation_row_from_artifact(
         "role": role,
         "kind": "role_envelope",
         "speaker": _relay_role_label(role),
-        "meta": _marvis_relay_role_status_label(
-            str(getattr(job_by_role.get(role), "status", "") or "passed")
-        ),
+        "meta": _relay_conversation_artifact_meta(payload),
         "body": _relay_humanize_role_envelope(payload),
         "key": f"canonical:{role}:{payload.get('artifact_type') or 'role_envelope'}:{artifact_key}",
         "artifact_type": str(payload.get("artifact_type") or ""),
@@ -8201,19 +8239,30 @@ def _marvis_relay_conversation_html(
         ):
             return _marvis_relay_waiting_message_html()
         return _marvis_relay_empty_conversation_html()
+    current_round_id = _relay_current_round_id_from_artifacts(artifacts)
+
+    def is_current_round_row(row: dict[str, str]) -> bool:
+        round_id = str(row.get("round_id") or "").strip()
+        return not round_id or round_id == current_round_id
+
     html_rows: list[str] = []
     previous_role = ""
+    previous_round_id = ""
     handoffs_by_role: dict[str, list[dict[str, str]]] = {}
     for row in rows:
         if str(row.get("kind") or "") != "handoff":
+            continue
+        if not is_current_round_row(row):
             continue
         to_role = str(row.get("to_role") or row.get("role") or "")
         if to_role:
             handoffs_by_role.setdefault(to_role, []).append(row)
     rendered_handoffs: set[str] = set()
-    rendered_handoff_identities: set[tuple[str, str, str]] = set()
+    rendered_handoff_identities: set[tuple[str, str, str, str]] = set()
 
     def append_handoff_once(handoff: dict[str, str]) -> bool:
+        if not is_current_round_row(handoff):
+            return False
         key = str(handoff.get("key") or "")
         pair = _marvis_relay_handoff_pair(handoff)
         if pair is None:
@@ -8235,9 +8284,17 @@ def _marvis_relay_conversation_html(
     for row in rows:
         role = str(row.get("role") or "")
         kind = str(row.get("kind") or "")
+        row_round_id = str(row.get("round_id") or current_round_id)
+        if row_round_id != previous_round_id:
+            previous_role = ""
+            previous_round_id = row_round_id
         if kind == "handoff":
-            if str(row.get("from_role") or "") != "director":
+            if is_current_round_row(row) and str(row.get("from_role") or "") != "director":
                 append_handoff_once(row)
+            continue
+        if kind == "user_message":
+            html_rows.append(_marvis_relay_message_html(row))
+            previous_role = ""
             continue
         if kind == "role_envelope" and previous_role and role and role != previous_role:
             for handoff in handoffs_by_role.get(role, []):
@@ -8245,6 +8302,7 @@ def _marvis_relay_conversation_html(
                     append_handoff_once(handoff)
         if (
             kind == "role_envelope"
+            and is_current_round_row(row)
             and previous_role == "director"
             and role
             and role != "director"
@@ -8296,12 +8354,24 @@ def _marvis_relay_handoff_pair(row: dict[str, str]) -> tuple[str, str] | None:
     return from_role, to_role
 
 
-def _marvis_relay_handoff_identity(row: dict[str, str]) -> tuple[str, str, str]:
+def _marvis_relay_handoff_identity(row: dict[str, str]) -> tuple[str, str, str, str]:
     pair = _marvis_relay_handoff_pair(row)
     if pair is None:
-        return ("", "", "")
+        return ("", "", "", "")
     round_id = str(row.get("round_id") or "1")
-    return (round_id, pair[0], pair[1])
+    return (round_id, pair[0], pair[1], _marvis_relay_handoff_semantic_action(pair[0], pair[1]))
+
+
+def _marvis_relay_handoff_semantic_action(from_role: str, to_role: str) -> str:
+    if from_role == "director":
+        return "director_dispatch"
+    if from_role == "auditor" and to_role == "director":
+        return "audit_to_director"
+    if from_role == "auditor":
+        return "audit_return"
+    if to_role == "auditor":
+        return "submit_for_audit"
+    return "role_handoff"
 
 
 def _marvis_relay_empty_conversation_html() -> str:
@@ -8541,9 +8611,7 @@ def _relay_native_conversation_html(
                 "role": role,
                 "kind": "role_envelope",
                 "speaker": _relay_role_label(role),
-                "meta": _relay_role_status_label(
-                    str(getattr(job_by_role.get(role), "status", "") or "passed")
-                ),
+                "meta": _relay_conversation_artifact_meta(payload),
                 "body": _relay_humanize_role_envelope(payload),
                 "key": key,
                 "canonical_json": _relay_canonical_envelope_json(payload),

@@ -2259,6 +2259,199 @@ async def test_relay_task_detail_does_not_show_stale_round_final_summary_as_assi
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_limits_handoff_prompts_to_current_round(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Task30 projection task",
+        prompt="第一轮修复。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_status(task.id, "director", "interrupted")
+    service._store.update_role_status(task.id, "implementer", "passed")
+    service._store.update_role_status(task.id, "auditor", "passed")
+    service._store.update_task_status(task.id, "interrupted")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {
+            "round_id": 2,
+            "text": "历史轮：先修 A。",
+            "target_role": "director",
+            "context_packet_id": 1,
+        },
+        summary="历史轮：先修 A。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "round_id": 2,
+            "status": "waiting",
+            "reason": "交给开发工程师处理。",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": "历史轮交给开发工程师。",
+            "handoff_to": "implementer",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给开发工程师。",
+        },
+        summary="历史轮交给开发工程师。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "handoff_packet",
+        {
+            "round_id": 2,
+            "from_role": "director",
+            "to_role": "implementer",
+            "handoff_to": "implementer",
+            "summary": "历史轮交给开发工程师。",
+            "next_action": "开发处理。",
+        },
+        summary="历史轮交给开发工程师。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "relay_role": "implementer",
+            "round_id": 2,
+            "status": "passed",
+            "reason": "历史轮已修复 A。",
+            "role": "implementer",
+            "artifact_type": "implementation_report",
+            "summary": "历史轮已修复 A。",
+            "handoff_to": "auditor",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给审核工程师复核。",
+        },
+        summary="历史轮已修复 A。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "handoff_packet",
+        {
+            "round_id": 2,
+            "from_role": "implementer",
+            "to_role": "auditor",
+            "handoff_to": "auditor",
+            "summary": "历史轮交给审核工程师复核。",
+            "next_action": "审核。",
+        },
+        summary="历史轮交给审核工程师复核。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {
+            "round_id": 3,
+            "text": "当前轮：继续修 B。",
+            "target_role": "director",
+            "context_packet_id": 2,
+        },
+        summary="当前轮：继续修 B。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "round_id": 3,
+            "status": "waiting",
+            "reason": "当前轮交给开发工程师处理。",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": "当前轮交给开发工程师。",
+            "handoff_to": "implementer",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给开发工程师。",
+        },
+        summary="当前轮交给开发工程师。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "handoff_packet",
+        {
+            "round_id": 3,
+            "from_role": "director",
+            "to_role": "implementer",
+            "handoff_to": "implementer",
+            "summary": "当前轮交给开发工程师。",
+            "next_action": "开发处理。",
+        },
+        summary="当前轮交给开发工程师。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "relay_role": "implementer",
+            "round_id": 3,
+            "status": "passed",
+            "reason": "当前轮已修复 B。",
+            "role": "implementer",
+            "artifact_type": "implementation_report",
+            "summary": "当前轮已修复 B。",
+            "handoff_to": "auditor",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给审核工程师复核。",
+        },
+        summary="当前轮已修复 B。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "handoff_packet",
+        {
+            "round_id": 3,
+            "from_role": "implementer",
+            "to_role": "auditor",
+            "handoff_to": "auditor",
+            "summary": "当前轮交给审核工程师复核。",
+            "next_action": "审核。",
+        },
+        summary="当前轮交给审核工程师复核。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "历史轮：先修 A。" in conversation_html
+    assert "历史轮已修复 A。" in conversation_html
+    assert "当前轮：继续修 B。" in conversation_html
+    assert "当前轮已修复 B。" in conversation_html
+    assert "| 已中断" not in conversation_html
+    assert conversation_html.count("Marvis拍了拍 开发工程师，说开干吧") == 1
+    assert conversation_html.count("开发工程师交给审核工程师复核") == 1
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_replaces_generic_final_summary_with_role_closure(
     tmp_path: Path,
 ) -> None:
@@ -3419,7 +3612,9 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     assert "renderRoleEnvelope" in envelope_handler
     handoff_handler = response.split('source.addEventListener("handoff.created"', 1)[1]
     handoff_handler = handoff_handler.split('source.addEventListener("role.status"', 1)[0]
-    assert "appendMarvisConversationHandoff(toRole, handoffKey, fromRole);" in handoff_handler
+    assert (
+        "appendMarvisConversationHandoff(toRole, handoffKey, fromRole, roundId);" in handoff_handler
+    )
     assert "data-native-from-role" in response
     assert "data-native-to-role" in response
     assert "clearRolePreview(role);" in response
