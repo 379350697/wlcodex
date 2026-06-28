@@ -1555,23 +1555,10 @@ body[data-marvis-relay-view] .marvis-work-log-output pre {
   overflow-wrap: anywhere;
 }
 
-body[data-marvis-relay-view] .marvis-work-log-empty,
-body[data-marvis-relay-view] .marvis-work-log-artifacts p {
+body[data-marvis-relay-view] .marvis-work-log-empty {
   margin: 0;
   color: #999;
   font-size: 16px;
-}
-
-body[data-marvis-relay-view] .marvis-work-log-artifacts {
-  display: grid;
-  gap: 8px;
-  padding-top: 6px;
-}
-
-body[data-marvis-relay-view] .marvis-work-log-artifacts h3 {
-  color: #111;
-  font-size: 18px;
-  font-weight: 800;
 }
 
 @media (min-width: 980px) {

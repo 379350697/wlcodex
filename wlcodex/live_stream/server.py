@@ -6,6 +6,7 @@ import hmac
 import json
 import re
 import secrets
+import shlex
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -46,6 +47,10 @@ from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.jsonrpc import JsonRpcError, JsonRpcTimeout
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
+from wlcodex.relay.work_log_projection import (
+    RawWorkLogEntry,
+    compress_work_log_entries,
+)
 
 
 _REQUEST_TIMEOUT_SECONDS = 30.0
@@ -145,7 +150,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-image-remove-vector"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-worklog-no-artifacts"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4953,7 +4958,6 @@ def _marvis_relay_work_log_html(
       <button class="marvis-work-log-close" type="button" data-marvis-close-log aria-label="关闭">×</button>
       <div class="marvis-work-log-tabs">
         <button class="marvis-work-log-tab active" type="button">工作日志</button>
-        <button class="marvis-work-log-tab" type="button">产出物</button>
       </div>
       <div class="marvis-work-log-hero">
         <div class="marvis-work-log-desks" aria-hidden="true">
@@ -5070,14 +5074,6 @@ def _marvis_relay_work_log_body_html(
         rows.append(_marvis_relay_work_log_segment_html(segment, index=index))
     if not rows:
         return '<p class="marvis-work-log-empty">暂无工作日志</p>'
-    rows.append(
-        """
-      <section class="marvis-work-log-artifacts" data-marvis-work-log-artifacts>
-        <h3>产出物</h3>
-        <p>暂无产出物</p>
-      </section>
-        """
-    )
     return "\n".join(rows)
 
 
@@ -5138,13 +5134,40 @@ def _marvis_relay_work_log_segments(
         if entry is not None:
             append_entry(role, entry)
 
+    artifact_keys_added: set[str] = set()
+    for segment in segments:
+        payload = canonical_payloads.get(segment.role) or artifact_payloads.get(segment.role)
+        fallback_payload = artifact_payloads.get(segment.role)
+        if (
+            payload is not None
+            and fallback_payload is not None
+            and _marvis_relay_work_log_text_is_protocol_noise(
+                str(payload.get("summary") or payload.get("output") or "")
+            )
+        ):
+            payload = fallback_payload
+        if payload is None:
+            continue
+        key = f"artifact:{segment.role}"
+        if key in artifact_keys_added:
+            continue
+        segment.entries.append(
+            WorkLogEntry(
+                kind="artifact",
+                key=key,
+                text=_relay_humanize_role_envelope(payload),
+                chip=f"{_marvis_relay_action_label(segment.role, payload)} {_marvis_relay_role_status_label(str(payload.get('status') or 'passed'))}",
+            )
+        )
+        artifact_keys_added.add(key)
+
     _marvis_relay_finalize_work_log_segments(segments)
     existing_roles = {segment.role for segment in segments}
     for job in detail.role_jobs:
         role = str(getattr(job, "role", "") or "")
         if role not in RELAY_ROLE_IDS:
             continue
-        if role in existing_roles:
+        if role in existing_roles or f"artifact:{role}" in artifact_keys_added:
             payload = None
         else:
             payload = canonical_payloads.get(role) or artifact_payloads.get(role)
@@ -5276,7 +5299,7 @@ def _marvis_relay_finalize_work_log_segments(segments: list[WorkLogSegment]) -> 
     for segment in segments:
         entries: list[WorkLogEntry] = []
         for entry in segment.entries:
-            if entry.kind == "message":
+            if entry.kind == "message" and entry.text:
                 cleaned = _marvis_relay_clean_artifact_summary(entry.text)
                 if cleaned:
                     entry.text = cleaned
@@ -5284,7 +5307,34 @@ def _marvis_relay_finalize_work_log_segments(segments: list[WorkLogSegment]) -> 
                     continue
             if entry.text or entry.chip or entry.output:
                 entries.append(entry)
-        segment.entries = entries
+        projected = compress_work_log_entries(
+            [
+                RawWorkLogEntry(
+                    kind=entry.kind,
+                    key=entry.key,
+                    text=entry.text,
+                    chip=entry.chip,
+                    output=entry.output,
+                    failed=entry.failed,
+                    replace_text=entry.replace_text,
+                )
+                for entry in entries
+            ],
+            role=segment.role,
+            profile="marvis",
+        )
+        segment.entries = [
+            WorkLogEntry(
+                kind=entry.kind,
+                key=entry.key,
+                text=entry.text,
+                chip=entry.chip,
+                output=entry.output,
+                failed=entry.failed,
+                replace_text=entry.replace_text,
+            )
+            for entry in projected
+        ]
         if segment.entries:
             kept_segments.append(segment)
     segments[:] = kept_segments
@@ -5361,22 +5411,24 @@ def _marvis_relay_work_log_entry_from_event(
         text = _relay_native_event_text(worker_event)
         if not text or _marvis_relay_work_log_text_is_protocol_noise(text):
             return None
-        compact_text, output = _marvis_relay_compact_work_log_text(text)
+        compact_text, output, chip = _marvis_relay_compact_work_log_text(text)
         return WorkLogEntry(
             kind="message",
             key=_relay_native_message_key(role, worker_event, bucket="assistant"),
             text=_relay_sanitize_protocol_leak_text(role, compact_text),
+            chip=chip,
             output=output,
         )
     if kind == "message_completed":
         text = _relay_native_event_text(worker_event).strip()
         if not text or _marvis_relay_work_log_text_is_protocol_noise(text):
             return None
-        compact_text, output = _marvis_relay_compact_work_log_text(text)
+        compact_text, output, chip = _marvis_relay_compact_work_log_text(text)
         return WorkLogEntry(
             kind="message",
             key=_relay_native_message_key(role, worker_event, bucket="assistant"),
             text=_relay_sanitize_protocol_leak_text(role, compact_text),
+            chip=chip,
             output=output,
             replace_text=True,
         )
@@ -5434,17 +5486,19 @@ def _marvis_relay_work_log_entry_from_event(
     return None
 
 
-def _marvis_relay_compact_work_log_text(text: str) -> tuple[str, str]:
+def _marvis_relay_compact_work_log_text(text: str) -> tuple[str, str, str]:
     value = str(text or "").strip()
     if not value:
-        return "", ""
+        return "", "", ""
     if not _marvis_relay_should_fold_work_log_text(value):
-        return value, ""
-    return "输出较长，已折叠。", value
+        return value, "", ""
+    return "", value, "过程输出 已折叠"
 
 
 def _marvis_relay_should_fold_work_log_text(text: str) -> bool:
     value = str(text or "")
+    if _marvis_relay_text_looks_like_machine_output(value):
+        return True
     if len(value) > 600:
         return True
     if "```" in value:
@@ -5455,6 +5509,39 @@ def _marvis_relay_should_fold_work_log_text(text: str) -> bool:
     if re.search(r"(?is)<(?:!doctype|html|body|script|style|pre|div|section)\\b", value):
         return True
     return any(len(line) > 220 for line in value.splitlines())
+
+
+def _marvis_relay_text_looks_like_machine_output(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    normalized = value.replace("\\r\\n", "\n").replace("\\n", "\n")
+    if re.search(r"(?im)^(?:Task not found|Found \d+ files?|No files found)\b", normalized):
+        return True
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    if not lines:
+        return False
+    if len(lines) == 1:
+        line = lines[0]
+        return bool(
+            re.match(r"^\d{2,}[:\t ]+\S", line)
+            or re.match(r"^(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+$", line)
+        )
+    path_like = 0
+    line_hit_like = 0
+    code_like = 0
+    for line in lines:
+        if re.match(r"^(?:/[^:\s]+|(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)$", line):
+            path_like += 1
+        if re.match(r"^(?:\d{2,}|[^:\s]+:\d{1,5})[:\t ]+\S", line):
+            line_hit_like += 1
+        if re.search(r"\b(?:def|class|const|let|var|return|import|from)\b|[{}();=]", line):
+            code_like += 1
+    if path_like >= 2 or line_hit_like >= 2:
+        return True
+    if len(lines) >= 4 and (path_like + line_hit_like + code_like) / len(lines) >= 0.5:
+        return True
+    return False
 
 
 def _marvis_relay_work_log_text_is_protocol_noise(text: str) -> bool:
@@ -5568,9 +5655,45 @@ def _marvis_relay_tool_label(payload: dict[str, Any]) -> str:
 def _marvis_relay_command_label(payload: dict[str, Any]) -> str:
     command = payload.get("command")
     if isinstance(command, (list, tuple)):
-        return " ".join(str(part) for part in command[:3])
+        parts = [str(part) for part in command if str(part).strip()]
+        if len(parts) >= 2 and parts[1] == "executor":
+            return f"{parts[0]} executor"
+        if (
+            len(parts) >= 3
+            and Path(parts[0]).name in {"bash", "sh", "zsh"}
+            and parts[1]
+            in {
+                "-c",
+                "-lc",
+            }
+        ):
+            return _marvis_relay_command_label_from_text(parts[2])
+        return Path(parts[0]).name if parts else ""
     value = str(command or payload.get("cmd") or payload.get("name") or "").strip()
-    return value
+    return _marvis_relay_command_label_from_text(value)
+
+
+def _marvis_relay_command_label_from_text(value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    if value.endswith(" executor"):
+        return value
+    try:
+        parts = shlex.split(value)
+    except ValueError:
+        parts = value.split()
+    if (
+        len(parts) >= 3
+        and Path(parts[0]).name in {"bash", "sh", "zsh"}
+        and parts[1]
+        in {
+            "-c",
+            "-lc",
+        }
+    ):
+        return _marvis_relay_command_label_from_text(parts[2])
+    return Path(parts[0]).name if parts else value
 
 
 def _marvis_relay_static_work_log_body_html(body_html: str) -> str:
@@ -6710,8 +6833,30 @@ def _relay_task_detail_page(
     }}
     function marvisWorkLogCommandLabel(payload) {{
       const command = payload.command;
-      if (Array.isArray(command)) return command.slice(0, 3).map(String).join(" ");
-      return String(command || payload.cmd || payload.name || "").trim();
+      if (Array.isArray(command)) {{
+        const parts = command.map(String).filter((part) => part.trim());
+        if (parts.length >= 2 && parts[1] === "executor") return `${{parts[0]}} executor`;
+        if (parts.length >= 3 && ["bash", "sh", "zsh"].includes(parts[0].split(/[\\/]/).pop()) && ["-c", "-lc"].includes(parts[1])) {{
+          return marvisWorkLogCommandLabelFromText(parts[2]);
+        }}
+        return parts.length ? parts[0].split(/[\\/]/).pop() : "";
+      }}
+      const value = String(command || payload.cmd || payload.name || "").trim();
+      return marvisWorkLogCommandLabelFromText(value);
+    }}
+    function marvisWorkLogCommandLabelFromText(value) {{
+      value = String(value || "").trim();
+      if (!value) return "";
+      if (value.endsWith(" executor")) return value;
+      const parts = value.match(/(?:[^\\s"']+|"[^"]*"|'[^']*')+/g) || [];
+      if (parts.length >= 3) {{
+        const shell = parts[0].replace(/^["']|["']$/g, "").split(/[\\/]/).pop();
+        const flag = parts[1].replace(/^["']|["']$/g, "");
+        if (["bash", "sh", "zsh"].includes(shell) && ["-c", "-lc"].includes(flag)) {{
+          return marvisWorkLogCommandLabelFromText(parts[2].replace(/^["']|["']$/g, ""));
+        }}
+      }}
+      return parts.length ? parts[0].replace(/^["']|["']$/g, "").split(/[\\/]/).pop() : value;
     }}
     function marvisWorkLogOutputText(payload) {{
       for (const key of ["output", "stderr", "stdout", "result", "message", "error", "delta", "chunk"]) {{
@@ -6758,6 +6903,7 @@ def _relay_task_detail_page(
     }}
     function marvisWorkLogShouldFoldText(text) {{
       const value = String(text || "");
+      if (marvisWorkLogLooksLikeAgentDump(value)) return true;
       if (value.length > 600) return true;
       if (value.includes("```")) return true;
       const stripped = value.trimStart();
@@ -6765,11 +6911,42 @@ def _relay_task_detail_page(
       if (/<(?:!doctype|html|body|script|style|pre|div|section)\\b/i.test(value)) return true;
       return value.split(/\\r?\\n/).some((line) => line.length > 220);
     }}
+    function marvisWorkLogTextLooksLikeMachineOutput(text) {{
+      const value = String(text || "").trim();
+      if (!value) return false;
+      const normalized = value.replace(/\\\\r\\\\n/g, "\\n").replace(/\\\\n/g, "\\n");
+      if (/^(?:Task not found|Found \\d+ files?|No files found)\\b/im.test(normalized)) return true;
+      const lines = normalized.split(/\\r?\\n/).map((line) => line.trim()).filter(Boolean);
+      if (!lines.length) return false;
+      if (lines.length === 1) {{
+        const line = lines[0];
+        return /^\\d{{2,}}[:\\t ]+\\S/.test(line) || /^(?:[A-Za-z0-9_.-]+\\/)+[A-Za-z0-9_.-]+$/.test(line);
+      }}
+      let pathLike = 0;
+      let lineHitLike = 0;
+      let codeLike = 0;
+      for (const line of lines) {{
+        if (/^(?:\\/[^:\\s]+|(?:[A-Za-z0-9_.-]+\\/)+[A-Za-z0-9_.-]+)$/.test(line)) pathLike += 1;
+        if (/^(?:\\d{{2,}}|[^:\\s]+:\\d{{1,5}})[:\\t ]+\\S/.test(line)) lineHitLike += 1;
+        if (/\\b(?:def|class|const|let|var|return|import|from)\\b|[{{}}();=]/.test(line)) codeLike += 1;
+      }}
+      if (pathLike >= 2 || lineHitLike >= 2) return true;
+      return lines.length >= 4 && (pathLike + lineHitLike + codeLike) / lines.length >= 0.5;
+    }}
+    function marvisWorkLogLooksLikeAgentDump(text) {{
+      const value = String(text || "").trim();
+      if (!value) return false;
+      if (marvisWorkLogTextLooksLikeMachineOutput(value)) return true;
+      return /\\b(?:Let me|Now let me|Now I|I need to|I(?:'ll| will))\\b/i.test(value)
+        || /\\bThe file\\b.+\\bhas been updated successfully\\b/i.test(value)
+        || /\\b(?:All changes are in place|No matches found|Found \\d+ files?|Task not found)\\b/i.test(value)
+        || /位于分支|尚未暂存|修改尚未加入提交|未跟踪的文件/.test(value);
+    }}
     function marvisWorkLogCompactText(text) {{
       const value = String(text || "").trim();
-      if (!value) return {{ text: "", output: "" }};
-      if (!marvisWorkLogShouldFoldText(value)) return {{ text: value, output: "" }};
-      return {{ text: "输出较长，已折叠。", output: value }};
+      if (!value) return {{ text: "", output: "", chip: "" }};
+      if (!marvisWorkLogShouldFoldText(value)) return {{ text: value, output: "", chip: "" }};
+      return {{ text: "", output: value, chip: "过程输出 已折叠" }};
     }}
     function marvisWorkLogEntryFromNativeEvent(role, nativeEvent) {{
       const kind = marvisWorkLogNativeKind(nativeEvent);
@@ -6789,6 +6966,7 @@ def _relay_task_detail_page(
           kind: "message",
           key,
           text: relaySanitizeProtocolLeakText(role, compact.text),
+          chip: compact.chip,
           output: compact.output,
           replaceText: kind === "message_completed",
         }};
@@ -6856,7 +7034,6 @@ def _relay_task_detail_page(
       const empty = marvisWorkLogBody.querySelector(".marvis-work-log-empty");
       if (empty) empty.remove();
       const segments = Array.from(marvisWorkLogBody.querySelectorAll("[data-marvis-work-log-segment]"));
-      const artifact = marvisWorkLogBody.querySelector("[data-marvis-work-log-artifacts]");
       const lastSegment = segments[segments.length - 1];
       if (lastSegment && lastSegment.dataset.marvisWorkLogSegment === role) return lastSegment;
       const section = document.createElement("section");
@@ -6872,8 +7049,7 @@ def _relay_task_detail_page(
       line.className = "marvis-work-log-line";
       main.append(title, line);
       section.append(createMarvisWorkLogAvatar(role), main);
-      if (artifact) marvisWorkLogBody.insertBefore(section, artifact);
-      else marvisWorkLogBody.appendChild(section);
+      marvisWorkLogBody.appendChild(section);
       return section;
     }}
     function renderMarvisWorkLogEntry(segment, entry) {{
@@ -6936,7 +7112,96 @@ def _relay_task_detail_page(
           pre.textContent = pre.textContent ? `${{pre.textContent}}\\n${{entryOutput}}` : entryOutput;
         }}
       }}
+      compactMarvisWorkLogSegment(segment);
       marvisWorkLogBody?.scrollTo({{ top: marvisWorkLogBody.scrollHeight, behavior: "smooth" }});
+    }}
+    function marvisWorkLogToolCategory(chipText, kind) {{
+      const command = String(chipText || "").trim().split(/\\s+/, 1)[0].toLowerCase();
+      if (["rg", "grep", "find", "fd", "ag"].includes(command)) return "检索";
+      if (["sed", "nl", "cat", "head", "tail", "less"].includes(command)) return "读取";
+      if (command === "git") return "检查变更";
+      if (["pytest", "unittest", "coverage"].includes(command)) return "测试";
+      if (["node", "npm", "npx", "pnpm", "yarn"].includes(command)) return "前端工具";
+      if (["sqlite3", "psql", "mysql"].includes(command)) return "查询状态";
+      if (kind === "file") return "文件变更";
+      return "工具";
+    }}
+    function marvisWorkLogReadToolCounts(value) {{
+      try {{
+        const parsed = JSON.parse(String(value || "{{}}"));
+        return new Map(Object.entries(parsed).map(([label, count]) => [label, Number(count) || 0]));
+      }} catch (_error) {{
+        return new Map();
+      }}
+    }}
+    function marvisWorkLogWriteToolCounts(counts) {{
+      return JSON.stringify(Object.fromEntries(Array.from(counts.entries())));
+    }}
+    function compactMarvisWorkLogSegment(segment) {{
+      if (!segment) return;
+      const line = segment.querySelector(".marvis-work-log-line");
+      if (!line) return;
+      const toolNodes = Array.from(line.querySelectorAll('[data-marvis-work-log-entry="command"], [data-marvis-work-log-entry="tool"], [data-marvis-work-log-entry="file"]'));
+      const role = segment.dataset.marvisWorkLogSegment || "";
+      let batch = line.querySelector(`[data-marvis-work-log-entry-key="${{CSS.escape(`tool-batch:${{role}}`)}}"]`);
+      if (!batch && toolNodes.length < 4) return;
+      if (batch && !toolNodes.length) return;
+      const counts = new Map();
+      const outputParts = [];
+      let failed = false;
+      for (const node of toolNodes) {{
+        const chipText = node.querySelector(".marvis-work-log-tool-chip")?.textContent || node.dataset.marvisWorkLogEntry || "";
+        const kind = node.dataset.marvisWorkLogEntry || "";
+        const category = marvisWorkLogToolCategory(chipText, kind);
+        counts.set(category, (counts.get(category) || 0) + 1);
+        const body = node.querySelector("[data-marvis-work-log-output] pre")?.textContent || node.querySelector("p")?.textContent || "";
+        outputParts.push(body ? `${{chipText}}\\n${{body}}` : chipText);
+        failed = failed || node.classList.contains("is-failed");
+      }}
+      if (!batch) {{
+        batch = document.createElement("div");
+        batch.className = "marvis-work-log-entry";
+        batch.dataset.marvisWorkLogEntry = "tool_batch";
+        batch.dataset.marvisWorkLogEntryKey = `tool-batch:${{role}}`;
+        batch.appendChild(document.createElement("p"));
+        line.insertBefore(batch, toolNodes[0]);
+      }}
+      const totalCounts = marvisWorkLogReadToolCounts(batch.dataset.marvisWorkLogToolCounts);
+      for (const [label, count] of counts.entries()) {{
+        totalCounts.set(label, (totalCounts.get(label) || 0) + count);
+      }}
+      const previousCount = Number(batch.dataset.marvisWorkLogToolCount || "0") || 0;
+      const totalCount = previousCount + toolNodes.length;
+      batch.dataset.marvisWorkLogToolCount = String(totalCount);
+      batch.dataset.marvisWorkLogToolCounts = marvisWorkLogWriteToolCounts(totalCounts);
+      batch.classList.toggle("is-failed", batch.classList.contains("is-failed") || failed);
+      let chip = batch.querySelector(".marvis-work-log-tool-chip");
+      if (!chip) {{
+        chip = document.createElement("span");
+        chip.className = "marvis-work-log-tool-chip";
+        batch.insertBefore(chip, batch.firstChild);
+      }}
+      chip.textContent = `工具调用 ${{totalCount}} 次`;
+      const paragraph = batch.querySelector("p") || batch.appendChild(document.createElement("p"));
+      paragraph.textContent = `${{Array.from(totalCounts.entries()).map(([label, count]) => `${{label}} ${{count}} 次`).join("、")}}。原始输出已折叠。`;
+      let details = batch.querySelector("[data-marvis-work-log-output]");
+      if (!details) {{
+        details = document.createElement("details");
+        details.className = "marvis-work-log-output";
+        details.dataset.marvisWorkLogOutput = "";
+        const summary = document.createElement("summary");
+        summary.textContent = "查看输出";
+        const pre = document.createElement("pre");
+        details.append(summary, pre);
+        batch.appendChild(details);
+      }}
+      const pre = details.querySelector("pre");
+      if (pre) {{
+        const existingOutput = pre.textContent || "";
+        const newOutput = outputParts.join("\\n\\n");
+        pre.textContent = existingOutput && newOutput ? `${{existingOutput}}\\n\\n${{newOutput}}` : (existingOutput || newOutput);
+      }}
+      toolNodes.forEach((node) => node.remove());
     }}
     function renderMarvisWorkLogNativeEvent(role, nativeEvent, runtimeEventId = "") {{
       if (!marvisWorkLogBody || !nativeEvent) return;
@@ -11947,7 +12212,6 @@ def _marvis_extra_html() -> str:
     <button class="marvis-work-log-close" id="marvisWorkLogClose" type="button" aria-label="关闭">×</button>
     <div class="marvis-work-log-tabs">
       <button class="marvis-work-log-tab active" type="button">工作日志</button>
-      <button class="marvis-work-log-tab" type="button">产出物</button>
     </div>
     <div class="marvis-work-log-body">
       <div class="marvis-work-log-avatar">

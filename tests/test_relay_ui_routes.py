@@ -14,6 +14,7 @@ from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.server import (
     WorkerLiveStreamServer,
     _marvis_relay_clean_artifact_summary,
+    _marvis_relay_merge_work_log_entry,
     _marvis_relay_work_log_entry_from_event,
     _marvis_relay_work_log_entry_html,
     _relay_activity_label,
@@ -24,6 +25,11 @@ from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.relay.models import HandoffPacket
 from wlcodex.relay.service import RelayService
 from wlcodex.relay.store import RelayStore
+from wlcodex.relay.work_log_projection import (
+    RawWorkLogEntry,
+    WORK_LOG_PROJECTION_PROFILES,
+    compress_work_log_entries,
+)
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import (
     AggregateType,
@@ -111,14 +117,421 @@ def test_marvis_work_log_collapses_long_message_output() -> None:
 
     entry = _marvis_relay_work_log_entry_from_event("director", event)
     assert entry is not None
-    assert entry.text == "输出较长，已折叠。"
+    assert entry.text == ""
+    assert entry.chip == "过程输出 已折叠"
     assert entry.output == long_text
     html = _marvis_relay_work_log_entry_html(entry)
     paragraph_html = html.split("<details", 1)[0]
-    assert "输出较长，已折叠。" in paragraph_html
+    assert "过程输出 已折叠" in paragraph_html
+    assert "输出较长，已折叠。" not in paragraph_html
     assert "<!doctype html>" not in paragraph_html
     assert "查看输出" in html
     assert "&lt;!doctype html&gt;" in html
+
+
+def test_marvis_work_log_collapses_machine_transcript_output() -> None:
+    machine_output = (
+        "Task not found\n"
+        "Found 9 files\n"
+        "tests/test_relay_service.py\n"
+        "tests/test_relay_ui_routes.py\n"
+        "wlcodex/live_stream/server.py\n"
+        "No files found\n"
+        "4059:_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS: dict[str, tuple[tuple[str, str], ...]] = {\n"
+        "4098:    labels = _MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS.get(str(role or '').strip(), ())"
+    )
+    event = WorkerStreamEvent(
+        id=2,
+        type=EventType.MODEL_MESSAGE_COMPLETED,
+        kind="message_completed",
+        agent_run_id=102,
+        conversation_id=None,
+        occurred_at="2026-06-14T12:11:00+00:00",
+        source="codex",
+        actor="codex_native",
+        visibility="user",
+        payload={
+            "text": machine_output,
+            "native_turn_id": "turn-machine-output",
+            "itemId": "assistant-machine-output",
+        },
+    )
+
+    entry = _marvis_relay_work_log_entry_from_event("implementer", event)
+    assert entry is not None
+    assert entry.text == ""
+    assert entry.chip == "过程输出 已折叠"
+    assert entry.output == machine_output
+    html = _marvis_relay_work_log_entry_html(entry)
+    visible_html = html.split("<details", 1)[0]
+    assert "Found 9 files" not in visible_html
+    assert "No files found" not in visible_html
+    assert "4059:_MARVIS" not in visible_html
+    assert "Task not found" not in visible_html
+    assert "查看输出" in html
+    assert "Found 9 files" in html
+
+
+def test_marvis_work_log_keeps_natural_language_message_visible() -> None:
+    text = "我先定位 Marvis 会话组件，再核对输入区和工作日志的投影规则。"
+    event = WorkerStreamEvent(
+        id=3,
+        type=EventType.MODEL_MESSAGE_COMPLETED,
+        kind="message_completed",
+        agent_run_id=103,
+        conversation_id=None,
+        occurred_at="2026-06-14T12:12:00+00:00",
+        source="codex",
+        actor="codex_native",
+        visibility="user",
+        payload={
+            "text": text,
+            "native_turn_id": "turn-natural-language",
+            "itemId": "assistant-natural-language",
+        },
+    )
+
+    entry = _marvis_relay_work_log_entry_from_event("director", event)
+    assert entry is not None
+    assert entry.text == text
+    assert entry.chip == ""
+    assert entry.output == ""
+
+
+def test_marvis_work_log_merges_command_output_chunks_under_single_chip() -> None:
+    first = WorkerStreamEvent(
+        id=4,
+        type=EventType.COMMAND_OUTPUT_DELTA,
+        kind="command_output",
+        agent_run_id=104,
+        conversation_id=None,
+        occurred_at="2026-06-14T12:13:00+00:00",
+        source="codex",
+        actor="codex_native",
+        visibility="user",
+        payload={
+            "command": "/bin/zsh -lc 'rg Marvis'",
+            "output": "Found 9 files\nwlcodex/live_stream/server.py",
+            "native_turn_id": "turn-rg-output",
+            "itemId": "cmd-rg",
+        },
+    )
+    second = WorkerStreamEvent(
+        id=5,
+        type=EventType.COMMAND_OUTPUT_DELTA,
+        kind="command_output",
+        agent_run_id=104,
+        conversation_id=None,
+        occurred_at="2026-06-14T12:13:01+00:00",
+        source="codex",
+        actor="codex_native",
+        visibility="user",
+        payload={
+            "command": "/bin/zsh -lc 'rg Marvis'",
+            "output": "4059:_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS = {",
+            "native_turn_id": "turn-rg-output",
+            "itemId": "cmd-rg",
+        },
+    )
+
+    entry = _marvis_relay_work_log_entry_from_event("implementer", first)
+    update = _marvis_relay_work_log_entry_from_event("implementer", second)
+    assert entry is not None
+    assert update is not None
+    _marvis_relay_merge_work_log_entry(entry, update)
+
+    assert entry.text == ""
+    assert entry.chip == "rg 进行中"
+    assert "Found 9 files" in entry.output
+    assert "4059:_MARVIS" in entry.output
+    html = _marvis_relay_work_log_entry_html(entry)
+    visible_html = html.split("<details", 1)[0]
+    assert "Found 9 files" not in visible_html
+    assert "4059:_MARVIS" not in visible_html
+    assert html.count("data-marvis-work-log-output") == 1
+
+
+def test_marvis_work_log_projection_summarizes_tool_storm_and_hides_agent_dump() -> None:
+    entries = [
+        RawWorkLogEntry(
+            kind="message",
+            key="message:implementer:1",
+            text=(
+                "Let me inspect the relay UI files. Now let me apply all the changes. "
+                "The file wlcodex/live_stream/static/relay_marvis.css has been updated successfully."
+            ),
+        ),
+        RawWorkLogEntry(kind="command", key="cmd:rg", chip="rg 已完成", output="No matches found"),
+        RawWorkLogEntry(kind="command", key="cmd:sed", chip="sed 已完成", output="Found 9 files"),
+        RawWorkLogEntry(
+            kind="command", key="cmd:git", chip="git 已完成", output="位于分支 codex/relay"
+        ),
+        RawWorkLogEntry(kind="command", key="cmd:pytest", chip="pytest 已完成", output="2 passed"),
+        RawWorkLogEntry(
+            kind="artifact",
+            key="artifact:implementer",
+            chip="开发结果 已完成",
+            text="已调整页面安全区、头像位置和附件区域背景融合。",
+        ),
+        RawWorkLogEntry(
+            kind="error",
+            key="error:director",
+            chip="调用失败",
+            text=(
+                "总工程师执行问题：invalid json: Expecting ',' delimiter: line 1 column 42 "
+                "(char 41)"
+            ),
+            failed=True,
+        ),
+    ]
+
+    projected = compress_work_log_entries(entries, role="implementer", profile="marvis")
+
+    assert WORK_LOG_PROJECTION_PROFILES["marvis"].tool_batch_threshold == 4
+    visible = "\n".join(part for entry in projected for part in (entry.chip, entry.text) if part)
+    output = "\n".join(entry.output for entry in projected if entry.output)
+    assert "已调整页面安全区、头像位置和附件区域背景融合" in visible
+    assert "工具调用 4 次" in visible
+    assert "检索 1 次" in visible
+    assert "测试 1 次" in visible
+    assert "结构化结果不是合法 JSON" in visible
+    assert "Let me inspect" not in visible
+    assert "updated successfully" not in visible
+    assert "No matches found" not in visible
+    assert "Found 9 files" not in visible
+    assert "位于分支" not in visible
+    assert "Let me inspect" in output
+    assert "No matches found" in output
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_work_log_collapses_machine_output_in_default_view(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Work log raw output task",
+        prompt="修复 Marvis 工作日志默认视图。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "implementer",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-implementer-work-log",
+        agent_run_id=501,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "implementer", "passed")
+    machine_output = (
+        "Task not found\n"
+        "Found 9 files\n"
+        "tests/test_relay_service.py\n"
+        "tests/test_relay_ui_routes.py\n"
+        "wlcodex/live_stream/server.py\n"
+        "No files found\n"
+        "4059:_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS: dict[str, tuple[tuple[str, str], ...]] = {"
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=501,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": machine_output,
+            "native_turn_id": "turn-machine-transcript",
+            "itemId": "assistant-machine-transcript",
+        },
+        occurred_at="2026-06-14T12:20:00+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=501,
+        event_type=EventType.COMMAND_OUTPUT_DELTA,
+        payload={
+            "command": "/bin/zsh -lc 'rg Marvis'",
+            "output": "Found 9 files\nwlcodex/live_stream/server.py",
+            "native_turn_id": "turn-rg",
+            "itemId": "cmd-rg",
+        },
+        occurred_at="2026-06-14T12:20:01+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=501,
+        event_type=EventType.COMMAND_OUTPUT_DELTA,
+        payload={
+            "command": "/bin/zsh -lc 'rg Marvis'",
+            "output": "4059:_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS = {",
+            "native_turn_id": "turn-rg",
+            "itemId": "cmd-rg",
+        },
+        occurred_at="2026-06-14T12:20:02+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=501,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "我已定位到工作日志投影，把原始输出收进可展开详情。",
+            "native_turn_id": "turn-natural",
+            "itemId": "assistant-natural",
+        },
+        occurred_at="2026-06-14T12:20:03+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    work_log_html = _relay_work_log_html(response)
+    default_html = re.sub(
+        r'<details class="marvis-work-log-output"[^>]*>.*?</details>',
+        "",
+        work_log_html,
+        flags=re.DOTALL,
+    )
+    assert "过程输出 已折叠" in default_html
+    assert "rg 进行中" in default_html
+    assert "我已定位到工作日志投影" in default_html
+    assert "Found 9 files" not in default_html
+    assert "No files found" not in default_html
+    assert "4059:_MARVIS" not in default_html
+    assert "Task not found" not in default_html
+    assert "查看输出" in work_log_html
+    assert "Found 9 files" in work_log_html
+    assert "4059:_MARVIS" in work_log_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_work_log_projects_marvis_summary_not_tool_dump(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Marvis work log summary task",
+        prompt="修复 Marvis 头像遮挡和附件背景融合。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "implementer",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-implementer-summary",
+        agent_run_id=601,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "implementer", "passed")
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "status": "passed",
+            "reason": "completed",
+            "role": "implementer",
+            "relay_role": "implementer",
+            "artifact_type": "implementation_report",
+            "handoff_to": "auditor",
+            "summary": "已调整页面安全区、头像位置和附件区域背景融合。",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给审核工程师复核。",
+            "acceptance_criteria": [],
+        },
+        summary="已调整页面安全区、头像位置和附件区域背景融合。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "role": "director",
+            "relay_role": "director",
+            "artifact_type": "role_error",
+            "error": "invalid json: Expecting ',' delimiter: line 1 column 42 (char 41)",
+        },
+        summary="invalid json",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=601,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": (
+                "Let me inspect the relay UI files. Now let me apply all the changes. "
+                "The file wlcodex/live_stream/static/relay_marvis.css has been updated successfully."
+            ),
+            "native_turn_id": "turn-agent-dump",
+            "itemId": "assistant-agent-dump",
+        },
+        occurred_at="2026-06-14T12:21:00+00:00",
+    )
+    for index, (command, output) in enumerate(
+        [
+            ("/bin/zsh -lc 'rg Marvis'", "No matches found"),
+            ("/bin/zsh -lc 'sed -n 1,80p wlcodex/live_stream/server.py'", "Found 9 files"),
+            ("/bin/zsh -lc 'git status --short'", "位于分支 codex/relay\n尚未暂存"),
+            ("/bin/zsh -lc '.venv/bin/pytest tests/test_relay_ui_routes.py -q'", "2 passed"),
+        ],
+        start=1,
+    ):
+        _append_runtime_event(
+            runtime_store,
+            agent_run_id=601,
+            event_type=EventType.COMMAND_COMPLETED,
+            payload={
+                "command": command,
+                "output": output,
+                "native_turn_id": "turn-tool-storm",
+                "itemId": f"cmd-tool-{index}",
+            },
+            occurred_at=f"2026-06-14T12:21:0{index}+00:00",
+        )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    work_log_html = _relay_work_log_html(response)
+    default_html = re.sub(
+        r'<details class="marvis-work-log-output"[^>]*>.*?</details>',
+        "",
+        work_log_html,
+        flags=re.DOTALL,
+    )
+    assert "已调整页面安全区、头像位置和附件区域背景融合" in default_html
+    assert "工具调用 4 次" in default_html
+    assert "检索 1 次" in default_html
+    assert "测试 1 次" in default_html
+    assert "结构化结果不是合法 JSON" in default_html
+    assert "Let me inspect" not in default_html
+    assert "updated successfully" not in default_html
+    assert "rg 已完成" not in default_html
+    assert "sed 已完成" not in default_html
+    assert "git 已完成" not in default_html
+    assert "No matches found" not in default_html
+    assert "Found 9 files" not in default_html
+    assert "位于分支" not in default_html
+    assert "Let me inspect" in work_log_html
+    assert "No matches found" in work_log_html
 
 
 async def _read_response(host: str, port: int, request: str) -> str:
@@ -681,7 +1094,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-image-remove-vector">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-worklog-no-artifacts">'
         in response
     )
     assert 'class="marvis-relay-bottom-nav"' in response
@@ -866,7 +1279,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-image-remove-vector">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-worklog-no-artifacts">'
         in response
     )
     assert "Marvis办公室" in response
@@ -1280,7 +1693,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-image-remove-vector">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-worklog-no-artifacts">'
         in response
     )
     assert 'class="marvis-relay-topbar"' in response
@@ -1293,7 +1706,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'data-marvis-open-log aria-label="工作日志"' in response
     assert 'class="marvis-work-log"' in response
     assert "工作日志" in response
-    assert "产出物" in response
+    assert "产出物" not in response
     assert 'class="marvis-relay-composer"' in response
     assert "has-image-attachments" in response
     assert "marvis-relay-composer-image-preview" in response
@@ -1352,7 +1765,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "打开原生会话" not in response.split("<script", 1)[0]
     assert "native_thread_id=native-director-1" not in response
     assert "/sessions/native-director-1" not in response
-    assert "执行问题：invalid json: Expecting value" in work_log_html
+    assert "结构化结果不是合法 JSON，系统无法直接收口。" in work_log_html
     assert "等待总工程师接收并形成决策摘要" not in response
     assert f"/api/relay/tasks/{task.id}/message" in response
     assert "data-marvis-followup-composer" in response
@@ -1806,7 +2219,7 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
     ]:
         assert forbidden not in visible_html
     assert "工作日志" in work_log_html
-    assert "产出物" in work_log_html
+    assert "产出物" not in work_log_html
     assert "/static/marvis/office-desk-worker-" in work_log_html
     assert "/static/marvis/office-desk-empty-slot.png" in work_log_html
     assert 'data-marvis-work-log-role="director"' in work_log_html
@@ -2882,6 +3295,11 @@ async def test_relay_work_log_projects_native_events_in_call_order(
     assert work_log_html.count('data-marvis-work-log-segment="director"') >= 3
     assert "function renderMarvisWorkLogNativeEvent" in response
     assert "function ensureMarvisWorkLogSegment" in response
+    assert "function compactMarvisWorkLogSegment" in response
+    assert "dataset.marvisWorkLogToolCount" in response
+    assert "dataset.marvisWorkLogToolCounts" in response
+    assert "previousCount + toolNodes.length" in response
+    assert "existingOutput && newOutput" in response
     assert "updateMarvisWorkLogTokenTotal" in response
     assert (
         "renderMarvisWorkLogNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);"
@@ -3019,7 +3437,7 @@ async def test_relay_task_detail_humanizes_malformed_role_envelope(
     assert "routing_decisioncomplexitylow" not in conversation_html
     assert '{"acceptance_criteria"' not in conversation_html
     assert "总工程师执行问题" in board_html
-    assert "invalid json: Expecting" in board_html
+    assert "结构化结果不是合法 JSON，系统无法直接收口。" in board_html
 
 
 @pytest.mark.asyncio
@@ -3871,8 +4289,8 @@ async def test_relay_task_detail_uses_role_error_as_director_summary(
     finally:
         await server.stop()
 
-    assert "执行问题：invalid json: Expecting value" in response
+    assert "结构化结果不是合法 JSON，系统无法直接收口。" in response
     assert "等待总工程师接收并形成决策摘要" not in response
     assert "调度决策未生成" not in response
-    assert "总工程师执行问题：invalid json: Expecting value" in response
+    assert "总工程师执行问题：结构化结果不是合法 JSON，系统无法直接收口。" in response
     assert "等待总工程师接收任务并形成调度决策" not in response
