@@ -2468,6 +2468,7 @@ async def test_relay_task_detail_limits_handoff_prompts_to_current_round(
     assert "| 已中断" not in conversation_html
     assert conversation_html.count("| 等待") == 1
     assert conversation_html.count("任务分配 已完成") == 2
+    assert "接力暂停在总工程师" not in conversation_html
     assert conversation_html.count("Marvis拍了拍 开发工程师，说开干吧") == 1
     assert conversation_html.count("开发工程师交给审核工程师复核") == 1
 

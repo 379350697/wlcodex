@@ -7910,7 +7910,22 @@ def _relay_projected_conversation_rows(
         for row in projected_rows
     )
     blocked_role = _relay_first_blocked_role(role_jobs)
-    if blocked_role and not has_pending_followup_waiting:
+    current_round_id = _relay_current_round_id_from_artifacts(artifacts)
+    has_current_round_blocked_role_result = any(
+        str(row.get("role") or "") == blocked_role
+        and str(row.get("kind") or "") in {"role_envelope", "followup_response"}
+        and (
+            str(row.get("kind") or "") == "followup_response"
+            or str(row.get("artifact_type") or "") == "final_summary"
+        )
+        and str(row.get("round_id") or current_round_id) == current_round_id
+        for row in projected_rows
+    )
+    if (
+        blocked_role
+        and not has_pending_followup_waiting
+        and not has_current_round_blocked_role_result
+    ):
         projected_rows.append(
             {
                 "role": blocked_role,
