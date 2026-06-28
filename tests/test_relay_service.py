@@ -3557,6 +3557,326 @@ def test_stale_scan_folds_current_turn_delta_consumed_before_completion(
     assert audit_reports[-1]["summary"] == "审核通过，可以交付。"
 
 
+def test_active_scan_completes_auditor_after_delta_cursor_passed_completion(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="修复会话页附件背景融合问题",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "needs implementation",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "implementer",
+              "summary": "交给开发修复，再交给审核。",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "implementer implement",
+              "complexity": "medium",
+              "risk": "medium",
+              "route": "core_relay",
+              "required_roles": ["director", "implementer", "auditor"],
+              "acceptance_criteria": ["附件面板背景融合"],
+              "stop_conditions": [],
+              "requires_user_approval": false
+            }
+            """,
+        )
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "implementer",
+            """
+            {
+              "status": "passed",
+              "reason": "implemented",
+              "role": "implementer",
+              "artifact_type": "implementation_report",
+              "handoff_to": "auditor",
+              "summary": "已修复附件面板背景融合。",
+              "evidence_refs": ["wlcodex/live_stream/static/relay_marvis.css:23"],
+              "open_questions": [],
+              "next_action": "audit"
+            }
+            """,
+        )
+    )
+    conversation = service._store._ledger.create_conversation(
+        chat_id=1,
+        user_id=1,
+        title="Relay task",
+        mode="relay",
+        workspace_alias="/repo",
+    )
+    agent_run = service._store._ledger.create_agent_run(
+        conversation.id,
+        agent="codex",
+        role="auditor",
+        external_session_id="native-auditor",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "auditor",
+        provider="codex",
+        provider_engine="app-server",
+        native_session_id="native-auditor",
+        agent_run_id=agent_run.id,
+        turn_id="turn-audit",
+        active_turn_id="turn-audit",
+        turn_running=True,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "auditor", "streaming")
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    for delta in (
+        '{"artifact_type":"audit_report","evidence_refs":["css:23"],',
+        '"handoff_to":"","next_action":"complete task",',
+        '"open_questions":[],"reason":"审核通过",',
+        '"role":"auditor","status":"passed",',
+        '"summary":"审核通过，附件面板背景已和对话页融合。"}',
+    ):
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.MODEL_TEXT_DELTA,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id=str(agent_run.id),
+                correlation_id=f"corr-{agent_run.id}",
+                source=EventSource.CODEX,
+                actor="codex_native",
+                visibility=Visibility.USER,
+                payload={
+                    "delta": delta,
+                    "native_turn_id": "turn-audit",
+                    "source_kind": "codex_native",
+                    "provider": "codex",
+                    "provider_engine": "app-server",
+                },
+                occurred_at=now_iso(),
+                agent_run_id=agent_run.id,
+            )
+        )
+
+    projected_before_completion = asyncio.run(
+        service.scan_active_native_runtime_events(runtime_store)
+    )
+
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id=str(agent_run.id),
+            correlation_id=f"corr-{agent_run.id}",
+            source=EventSource.CODEX,
+            actor="codex_native",
+            visibility=Visibility.USER,
+            payload={
+                "action": "turn_completed",
+                "status": "completed",
+                "native_turn_id": "turn-audit",
+                "turnId": "turn-audit",
+                "source_kind": "codex_native",
+                "provider": "codex",
+                "provider_engine": "app-server",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=agent_run.id,
+        )
+    )
+
+    projected_after_completion = asyncio.run(
+        service.scan_active_native_runtime_events(runtime_store)
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    audit_reports = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "audit_report"
+    ]
+    updated_run = service._store._ledger.get_agent_run(agent_run.id)
+    assert projected_before_completion >= 2
+    assert projected_after_completion >= 1
+    assert int(completed.id) > 0
+    assert jobs["auditor"].status == "passed"
+    assert updated_run.status == "done"
+    assert audit_reports[-1]["summary"] == "审核通过，附件面板背景已和对话页融合。"
+
+
+def test_active_scan_reconciles_terminal_role_agent_run_without_duplicate_artifact(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="修复会话页附件背景融合问题",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "needs implementation",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "implementer",
+              "summary": "交给开发修复，再交给审核。",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "implementer implement",
+              "complexity": "medium",
+              "risk": "medium",
+              "route": "core_relay",
+              "required_roles": ["director", "implementer", "auditor"],
+              "acceptance_criteria": ["附件面板背景融合"],
+              "stop_conditions": [],
+              "requires_user_approval": false
+            }
+            """,
+        )
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "implementer",
+            """
+            {
+              "status": "passed",
+              "reason": "implemented",
+              "role": "implementer",
+              "artifact_type": "implementation_report",
+              "handoff_to": "auditor",
+              "summary": "已修复附件面板背景融合。",
+              "evidence_refs": ["wlcodex/live_stream/static/relay_marvis.css:23"],
+              "open_questions": [],
+              "next_action": "audit"
+            }
+            """,
+        )
+    )
+    conversation = service._store._ledger.create_conversation(
+        chat_id=1,
+        user_id=1,
+        title="Relay task",
+        mode="relay",
+        workspace_alias="/repo",
+    )
+    agent_run = service._store._ledger.create_agent_run(
+        conversation.id,
+        agent="codex",
+        role="auditor",
+        external_session_id="native-auditor",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "auditor",
+        provider="codex",
+        provider_engine="app-server",
+        native_session_id="native-auditor",
+        agent_run_id=agent_run.id,
+        turn_id="turn-audit",
+        active_turn_id="turn-audit",
+        turn_running=False,
+        dispatch_verified=True,
+    )
+    audit_report = """
+    {
+      "status": "passed",
+      "reason": "审核通过",
+      "role": "auditor",
+      "artifact_type": "audit_report",
+      "handoff_to": "",
+      "summary": "审核通过，附件面板背景已和对话页融合。",
+      "evidence_refs": ["css:23"],
+      "open_questions": [],
+      "next_action": "complete task"
+    }
+    """
+    asyncio.run(service.handle_role_output(task.id, "auditor", audit_report))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_MESSAGE_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id=str(agent_run.id),
+            correlation_id=f"corr-{agent_run.id}",
+            source=EventSource.CODEX,
+            actor="codex_native",
+            visibility=Visibility.USER,
+            payload={
+                "message": audit_report,
+                "native_turn_id": "turn-audit",
+                "source_kind": "codex_native",
+                "provider": "codex",
+                "provider_engine": "app-server",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=agent_run.id,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id=str(agent_run.id),
+            correlation_id=f"corr-{agent_run.id}",
+            source=EventSource.CODEX,
+            actor="codex_native",
+            visibility=Visibility.USER,
+            payload={
+                "action": "turn_completed",
+                "status": "completed",
+                "native_turn_id": "turn-audit",
+                "turnId": "turn-audit",
+                "source_kind": "codex_native",
+                "provider": "codex",
+                "provider_engine": "app-server",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=agent_run.id,
+        )
+    )
+    detail_before = service.get_task(task.id)
+    audit_count_before = sum(
+        1
+        for artifact in detail_before.artifacts
+        if artifact.get("artifact_type") == "audit_report"
+    )
+
+    changed = asyncio.run(service.scan_active_native_runtime_events(runtime_store))
+
+    detail_after = service.get_task(task.id)
+    audit_count_after = sum(
+        1
+        for artifact in detail_after.artifacts
+        if artifact.get("artifact_type") == "audit_report"
+    )
+    updated_run = service._store._ledger.get_agent_run(agent_run.id)
+    assert changed >= 1
+    assert audit_count_before == 1
+    assert audit_count_after == audit_count_before
+    assert updated_run.status == "done"
+
+
 def test_director_final_summary_requires_prior_routing_decision(tmp_path) -> None:
     service, _provider = _service(tmp_path)
     task = service.create_task(

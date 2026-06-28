@@ -508,11 +508,11 @@ async def _run_relay_watchdog_loop(
     watchdog_interval_seconds: int,
 ) -> None:
     while True:
-        await asyncio.sleep(watchdog_interval_seconds)
         try:
             await relay_watchdog.scan_once()
         except Exception as exc:
             logger.warning("Relay native watchdog scan failed: %s", exc)
+        await asyncio.sleep(watchdog_interval_seconds)
 
 
 async def _run_relay_runtime_projector_loop(
@@ -521,11 +521,11 @@ async def _run_relay_runtime_projector_loop(
     poll_interval_seconds: float,
 ) -> None:
     while True:
-        await asyncio.sleep(poll_interval_seconds)
         try:
             await relay_runtime_projector.scan_once()
         except Exception as exc:
             logger.warning("Relay runtime projector scan failed: %s", exc)
+        await asyncio.sleep(poll_interval_seconds)
 
 
 async def _run_web_entry_only(
@@ -1001,6 +1001,15 @@ def main() -> None:
 
     async def _run() -> None:
         pump_task = asyncio.create_task(event_bridge.run(), name="event-pump")
+        relay_runtime_projector_task: asyncio.Task[None] | None = None
+        if relay_runtime_projector is not None:
+            relay_runtime_projector_task = asyncio.create_task(
+                _run_relay_runtime_projector_loop(
+                    relay_runtime_projector,
+                    poll_interval_seconds=1.0,
+                ),
+                name="relay-runtime-projector",
+            )
         # Outbox delivery task — processes queued Telegram sends/edits with retry.
         async def _process_outbox() -> None:
             while True:
@@ -1079,6 +1088,12 @@ def main() -> None:
                 await pump_task
             except asyncio.CancelledError:
                 pass
+            if relay_runtime_projector_task is not None:
+                relay_runtime_projector_task.cancel()
+                try:
+                    await relay_runtime_projector_task
+                except asyncio.CancelledError:
+                    pass
             # 2b. Stop outbox processor
             outbox_task.cancel()
             try:

@@ -1346,6 +1346,125 @@ class RelayService:
             self._handled_runtime_completion_ids.add(runtime_event_id)
         return await self.handle_role_output(task_id, role, output)
 
+    async def _apply_native_completion_output(
+        self,
+        task_id: int,
+        role: str,
+        *,
+        runtime_event_id: int,
+        output: str,
+        agent_run_id: int | None = None,
+        completed_event: Any | None = None,
+    ) -> bool:
+        text = output.strip()
+        if not text:
+            if completed_event is not None and _is_agent_run_completed_event(completed_event):
+                self._mark_native_agent_run_failed(
+                    agent_run_id,
+                    "native provider completed without assistant output",
+                )
+                self._block_role_with_error(
+                    task_id,
+                    role,
+                    "native provider completed without assistant output",
+                )
+                return True
+            return False
+        parse_result = parse_role_envelope(text)
+        if (
+            not parse_result.ok
+            and self._should_accept_plain_followup_response(task_id, role)
+            and not _looks_like_relay_protocol_attempt(text)
+        ):
+            self._mark_native_agent_run_done(agent_run_id, text)
+            await self._handle_plain_followup_response(
+                task_id,
+                role,
+                runtime_event_id=runtime_event_id,
+                text=text,
+            )
+            return True
+        if (
+            not parse_result.ok
+            and await self._recover_director_routing_decision(
+                task_id,
+                role,
+                error=parse_result.error or "invalid role envelope",
+                output=text,
+            )
+        ):
+            self._mark_native_agent_run_done(agent_run_id, text)
+            return True
+        if not parse_result.ok and _looks_like_relay_protocol_attempt(text):
+            self._mark_native_agent_run_done(agent_run_id, text)
+            self._block_role_with_error(
+                task_id,
+                role,
+                parse_result.error or "invalid role envelope",
+                output=text,
+            )
+            return True
+        if not parse_result.ok:
+            return False
+        self._mark_native_agent_run_done(agent_run_id, text)
+        try:
+            await self.handle_role_completion_event(
+                task_id,
+                role,
+                runtime_event_id=runtime_event_id,
+                output=text,
+            )
+            return True
+        except Exception as exc:
+            reason = str(exc) or "runtime completion projector failed"
+            self._store.update_role_status(task_id, role, "blocked")
+            self._store.update_task_status(task_id, "blocked")
+            self._events.emit(
+                task_id,
+                "role.status",
+                role=role,
+                payload={"status": "blocked", "error": reason},
+            )
+            return True
+
+    def _mark_native_agent_run_done(
+        self,
+        agent_run_id: int | None,
+        completion_summary: str,
+    ) -> None:
+        if not agent_run_id:
+            return
+        try:
+            current = self._store._ledger.get_agent_run(int(agent_run_id))
+        except KeyError:
+            return
+        self._store._ledger.update_agent_run_status(
+            int(agent_run_id),
+            "done",
+            token_input=current.token_input,
+            token_output=current.token_output,
+            completion_summary=completion_summary[:2000],
+        )
+
+    def _mark_native_agent_run_failed(
+        self,
+        agent_run_id: int | None,
+        reason: str,
+    ) -> None:
+        if not agent_run_id:
+            return
+        try:
+            current = self._store._ledger.get_agent_run(int(agent_run_id))
+        except KeyError:
+            return
+        self._store._ledger.update_agent_run_status(
+            int(agent_run_id),
+            "failed",
+            token_input=current.token_input,
+            token_output=current.token_output,
+            completion_summary=reason[:2000],
+        )
+
     async def add_user_message(
         self,
         task_id: int,
@@ -1581,6 +1700,10 @@ class RelayService:
         if self._project_runtime_delta(runtime_event, task_id=task_id, role=role):
             return None
         if _is_runtime_failure(runtime_event):
+            self._mark_native_agent_run_failed(
+                agent_run_id,
+                _runtime_failure_reason(runtime_event),
+            )
             self._block_role_with_error(
                 task_id,
                 role,
@@ -1596,52 +1719,15 @@ class RelayService:
         )
         if not text:
             text = self._runtime_completion_text(runtime_event)
-        if not text.strip():
-            if _is_agent_run_completed_event(runtime_event):
-                self._block_role_with_error(
-                    task_id,
-                    role,
-                    "native provider completed without assistant output",
-                )
-            return None
-        parse_result = parse_role_envelope(text)
-        if (
-            not parse_result.ok
-            and self._should_accept_plain_followup_response(task_id, role)
-            and not _looks_like_relay_protocol_attempt(text)
-        ):
-            return await self._handle_plain_followup_response(
-                task_id,
-                role,
-                runtime_event_id=event_id,
-                text=text,
-            )
-        if not _is_agent_run_completed_event(runtime_event) and not parse_result.ok:
-            await self._recover_director_routing_decision(
-                task_id,
-                role,
-                error=parse_result.error or "invalid role envelope",
-                output=text,
-            )
-            return None
-        try:
-            return await self.handle_role_completion_event(
-                task_id,
-                role,
-                runtime_event_id=event_id,
-                output=text,
-            )
-        except Exception as exc:
-            reason = str(exc) or "runtime completion projector failed"
-            self._store.update_role_status(task_id, role, "blocked")
-            self._store.update_task_status(task_id, "blocked")
-            self._events.emit(
-                task_id,
-                "role.status",
-                role=role,
-                payload={"status": "blocked", "error": reason},
-            )
-            return None
+        await self._apply_native_completion_output(
+            task_id,
+            role,
+            runtime_event_id=event_id,
+            output=text,
+            agent_run_id=int(agent_run_id),
+            completed_event=runtime_event,
+        )
+        return None
 
     def _should_accept_plain_followup_response(self, task_id: int, role: str) -> bool:
         if role != "director":
@@ -1781,7 +1867,73 @@ class RelayService:
                     if self._is_runtime_completion(event) or _is_runtime_failure(event):
                         await self.handle_runtime_event(event)
                     projected += 1
+        projected += self._reconcile_finished_native_agent_runs(runtime_store)
         return projected
+
+    def _reconcile_finished_native_agent_runs(
+        self,
+        runtime_store: RuntimeEventStore,
+    ) -> int:
+        changed = 0
+        for summary in self._store.list_tasks():
+            try:
+                task_detail = self._store.get_task_detail(summary.task_id)
+            except KeyError:
+                continue
+            for job in task_detail.role_jobs:
+                if job.status in {"running", "streaming"} or not job.agent_run_id:
+                    continue
+                agent_run_id = int(job.agent_run_id)
+                try:
+                    agent_run = self._store._ledger.get_agent_run(agent_run_id)
+                except KeyError:
+                    continue
+                if str(agent_run.status) in {
+                    "done",
+                    "failed",
+                    "cancelled",
+                    "canceled",
+                    "interrupted",
+                }:
+                    continue
+                events = runtime_store.list_by_agent_run_tail(agent_run_id, limit=500)
+                current_turn_id = job.active_turn_id or job.turn_id
+                if current_turn_id:
+                    events = [
+                        event
+                        for event in events
+                        if _runtime_event_matches_turn(event, current_turn_id)
+                    ]
+                if not events:
+                    continue
+                failure = next(
+                    (event for event in reversed(events) if _is_runtime_failure(event)),
+                    None,
+                )
+                if failure is not None:
+                    self._mark_native_agent_run_failed(
+                        agent_run_id,
+                        _runtime_failure_reason(failure),
+                    )
+                    changed += 1
+                    continue
+                if not any(self._is_runtime_completion(event) for event in events):
+                    continue
+                protocol_delta = _complete_protocol_delta_event(events)
+                summary_text = (
+                    _completed_role_envelope_text(events)
+                    or (_runtime_event_text(protocol_delta) if protocol_delta else "")
+                    or "".join(
+                        _runtime_event_text(event)
+                        for event in events
+                        if _is_runtime_model_text_delta(event)
+                    )
+                    or _runtime_event_text(events[-1])
+                    or "native provider completed"
+                )
+                self._mark_native_agent_run_done(agent_run_id, summary_text)
+                changed += 1
+        return changed
 
     async def scan_stale_native_roles(
         self,
@@ -2162,15 +2314,6 @@ class RelayService:
             ]
             if any(_is_runtime_completion_event(event) for event in current_turn_events):
                 events = current_turn_events
-        completed = _completed_role_envelope_event(events)
-        if completed is not None:
-            await self.handle_role_completion_event(
-                task_id,
-                role,
-                runtime_event_id=int(getattr(completed, "id", 0) or 0),
-                output=_runtime_event_text(completed),
-            )
-            return True
         if allow_read_session:
             read_session_output = await self._read_native_session_completion_text(
                 provider_name=provider_name,
@@ -2178,13 +2321,23 @@ class RelayService:
                 expected_turn_id=current_turn_id,
             )
             if read_session_output:
-                await self.handle_role_completion_event(
+                return await self._apply_native_completion_output(
                     task_id,
                     role,
                     runtime_event_id=0,
                     output=read_session_output,
+                    agent_run_id=agent_run_id,
                 )
-                return True
+        completed = _completed_role_envelope_event(events)
+        if completed is not None:
+            return await self._apply_native_completion_output(
+                task_id,
+                role,
+                runtime_event_id=int(getattr(completed, "id", 0) or 0),
+                output=_runtime_event_text(completed),
+                agent_run_id=agent_run_id,
+                completed_event=completed,
+            )
         delta_events = [event for event in events if _is_runtime_model_text_delta(event)]
         if not delta_events:
             return False
@@ -2195,43 +2348,13 @@ class RelayService:
         else:
             output = "".join(_runtime_event_text(event) for event in delta_events)
             runtime_event_id = int(getattr(delta_events[-1], "id", 0) or 0)
-        parse_result = parse_role_envelope(output)
-        if not parse_result.ok:
-            if self._should_accept_plain_followup_response(
-                task_id,
-                role,
-            ) and not _looks_like_relay_protocol_attempt(output):
-                runtime_event_id = int(getattr(delta_events[-1], "id", 0) or 0)
-                await self._handle_plain_followup_response(
-                    task_id,
-                    role,
-                    runtime_event_id=runtime_event_id,
-                    text=output,
-                )
-                return True
-            if await self._recover_director_routing_decision(
-                task_id,
-                role,
-                error=parse_result.error or "invalid role envelope",
-                output=output,
-            ):
-                return True
-            if _looks_like_relay_protocol_attempt(output):
-                self._block_role_with_error(
-                    task_id,
-                    role,
-                    parse_result.error or "invalid role envelope",
-                    output=output,
-                )
-                return True
-            return False
-        await self.handle_role_completion_event(
+        return await self._apply_native_completion_output(
             task_id,
             role,
             runtime_event_id=runtime_event_id,
             output=output,
+            agent_run_id=agent_run_id,
         )
-        return True
 
     def _stale_native_completion_error(
         self,
