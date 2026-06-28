@@ -1748,11 +1748,7 @@ class RelayService:
         if limit <= 0:
             return 0
         projected = 0
-        for detail in self._store.list_tasks(status="running"):
-            try:
-                task_detail = self._store.get_task_detail(detail.task_id)
-            except KeyError:
-                continue
+        for task_detail in self._active_native_task_details():
             for job in task_detail.role_jobs:
                 if job.status not in {"running", "streaming"} or not job.agent_run_id:
                     continue
@@ -1798,11 +1794,7 @@ class RelayService:
         current = now or datetime.now(timezone.utc)
         runtime_store = RuntimeEventStore(self._store._ledger._conn)
         changed = 0
-        for detail in self._store.list_tasks(status="running"):
-            try:
-                task_detail = self._store.get_task_detail(detail.task_id)
-            except KeyError:
-                continue
+        for task_detail in self._active_native_task_details():
             for job in task_detail.role_jobs:
                 if job.status not in {"running", "streaming"} or not job.agent_run_id:
                     continue
@@ -1881,6 +1873,33 @@ class RelayService:
                 )
                 changed += 1
         return changed
+
+    def _active_native_task_details(self) -> list[Any]:
+        details: list[Any] = []
+        seen: set[int] = set()
+        for summary in self._store.list_tasks(status="running"):
+            try:
+                detail = self._store.get_task_detail(summary.task_id)
+            except KeyError:
+                continue
+            seen.add(int(detail.task.id))
+            details.append(detail)
+        for summary in self._store.list_tasks(status="interrupted"):
+            if int(summary.task_id) in seen:
+                continue
+            try:
+                detail = self._store.get_task_detail(summary.task_id)
+            except KeyError:
+                continue
+            has_active_native_role = any(
+                job.status in {"running", "streaming"} and job.agent_run_id
+                for job in detail.role_jobs
+            )
+            if not has_active_native_role:
+                continue
+            self._store.update_task_status(detail.task.id, "running")
+            details.append(self._store.get_task_detail(detail.task.id))
+        return details
 
     def _runtime_task_done(self, task: asyncio.Task[Any]) -> None:
         self._runtime_tasks.discard(task)
