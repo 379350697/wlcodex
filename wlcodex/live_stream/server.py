@@ -150,7 +150,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-token-details-coffee"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-task-list-construction"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -487,6 +487,8 @@ class WorkerLiveStreamServer:
                 "/native/workflows/relay/chat",
                 "/native/workflows/relay/config",
                 "/native/workflows/relay/office",
+                "/native/workflows/relay/skills",
+                "/native/workflows/relay/profile",
             ) or parsed.path.startswith("/native/workflows/relay/tasks/"):
                 await self._handle_relay_ui_route(
                     writer,
@@ -1217,6 +1219,8 @@ class WorkerLiveStreamServer:
             "/native/workflows/relay",
             "/native/workflows/relay/chat",
             "/native/workflows/relay/config",
+            "/native/workflows/relay/skills",
+            "/native/workflows/relay/profile",
         ):
             project_rows = _relay_project_rows()
             selected_workspace = _relay_selected_workspace(
@@ -1228,6 +1232,17 @@ class WorkerLiveStreamServer:
                 writer,
                 200,
                 _relay_chat_home_page(
+                    selected_workspace=selected_workspace,
+                    access_token=token,
+                ),
+            )
+            return
+        if path in ("/native/workflows/relay/skills", "/native/workflows/relay/profile"):
+            await self._send_html(
+                writer,
+                200,
+                _relay_construction_page(
+                    active="skills" if path.endswith("/skills") else "profile",
                     selected_workspace=selected_workspace,
                     access_token=token,
                 ),
@@ -3777,6 +3792,58 @@ def _relay_chat_home_page(
 </html>""")
 
 
+def _relay_construction_page(
+    *,
+    active: str,
+    selected_workspace: str = "",
+    access_token: str = "",
+) -> str:
+    token_suffix = _token_suffix(access_token)
+    selected_workspace = str(selected_workspace or "")
+    workspace_label = Path(selected_workspace).name or selected_workspace or "wlcodex"
+    topbar_html = _marvis_relay_topbar(
+        title="Marvis",
+        subtitle=workspace_label,
+        back_href=f"/native{token_suffix}",
+        right_html=f"""
+          <a class="marvis-relay-icon-button" href="/native/workflows/relay/office{token_suffix}" aria-label="Marvis办公室">
+            <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
+          </a>
+          <a class="marvis-relay-icon-button" href="/native/workflows/relay{token_suffix}" aria-label="任务">
+            <span class="marvis-relay-icon-list" aria-hidden="true"></span>
+          </a>
+        """,
+    )
+    bottom_nav_html = _marvis_relay_bottom_nav(
+        active,
+        access_token=access_token,
+        selected_workspace=selected_workspace,
+    )
+    return _replace_html_icons(f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light only">
+  <title>正在建设中</title>
+  <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
+</head>
+<body data-marvis-relay-view="construction">
+  <div class="marvis-relay-phone">
+    {topbar_html}
+    <main class="marvis-relay-construction" aria-label="正在建设中">
+      <img src="/static/marvis/relay-under-construction.svg" alt="" aria-hidden="true">
+      <h2>正在建设中</h2>
+    </main>
+    <nav class="marvis-relay-bottom-nav" aria-label="Marvis relay navigation">
+      {bottom_nav_html}
+    </nav>
+  </div>
+</body>
+</html>""")
+
+
 def _relay_config_page(
     *,
     providers: list[dict[str, str]],
@@ -4221,6 +4288,8 @@ def _marvis_relay_bottom_nav(
     hrefs = {
         "chat": f"/native/workflows/relay/chat{token_suffix}{workspace_query}",
         "tasks": f"/native/workflows/relay{token_suffix}{workspace_query}",
+        "skills": f"/native/workflows/relay/skills{token_suffix}{workspace_query}",
+        "profile": f"/native/workflows/relay/profile{token_suffix}{workspace_query}",
     }
     items = [
         ("chat", "对话", "chat"),
@@ -4233,24 +4302,14 @@ def _marvis_relay_bottom_nav(
         class_name = f"marvis-relay-nav-item{' active' if key == active else ''}"
         current = ' aria-current="page"' if key == active else ""
         icon_html = _marvis_relay_nav_icon_html(icon)
-        if key in hrefs:
-            rows.append(
-                f"""
+        rows.append(
+            f"""
         <a class="{class_name}" href="{escape(hrefs[key])}" data-marvis-nav="{escape(key)}"{current}>
           {icon_html}
           <span>{escape(label)}</span>
         </a>
         """
-            )
-        else:
-            rows.append(
-                f"""
-        <button class="{class_name}" type="button" data-marvis-nav="{escape(key)}"{current}>
-          {icon_html}
-          <span>{escape(label)}</span>
-        </button>
-        """
-            )
+        )
     return "\n".join(rows)
 
 
@@ -5975,15 +6034,13 @@ def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
             {_marvis_relay_avatar_html("marvis", label="Marvis")}
           </div>
           <div class="relay-card-side">
+            <span class="{escape(status_class)}">{escape(status_label)}</span>
             <span class="relay-card-project-pill">{escape(project_name)}</span>
             <span class="relay-card-activity">{escape(activity)}</span>
           </div>
         </div>
         <div class="relay-title">{escape(summary.title)}</div>
         <div class="marvis-relay-task-card-footer">
-          <div class="relay-card-meta">
-            <span class="{escape(status_class)}">{escape(status_label)}</span>
-          </div>
           <a class="relay-open relay-card-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">打开任务</a>
         </div>
       </article>

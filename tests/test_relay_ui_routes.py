@@ -1095,7 +1095,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-token-details-coffee">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-task-list-construction">'
         in response
     )
     assert 'class="marvis-relay-bottom-nav"' in response
@@ -1233,9 +1233,18 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         'class="relay-card-project-pill"'
     )
     assert polished.index('class="relay-card-identity"') < polished.index('class="relay-title"')
+    assert polished.index("relay-status-badge") < polished.index('class="relay-title"')
     assert "当前阶段：" not in polished
     assert "/repo ·" not in polished
     assert "is-completed" in polished
+    css_response, _ = await _request(
+        tmp_path,
+        "GET /static/relay_marvis.css HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
+        relay_service=service,
+    )
+    footer_start = css_response.index(".marvis-relay-task-card-footer")
+    footer_block = css_response[footer_start : footer_start + 260]
+    assert "padding-left" not in footer_block
     assert "最近活动 06-16 15:51" in polished
     assert "2026-06-16T07:51:57.510982123+00:00" not in polished
     assert "最近接棒：" not in polished
@@ -1340,6 +1349,31 @@ async def test_marvis_relay_chat_home_is_the_only_new_task_entry(
 
 
 @pytest.mark.asyncio
+async def test_marvis_relay_skills_and_profile_show_construction_pages(
+    tmp_path: Path,
+) -> None:
+    skills_response, _ = await _request(
+        tmp_path,
+        "GET /native/workflows/relay/skills?token=secret&workspace=%2Frepo HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+    profile_response, _ = await _request(
+        tmp_path,
+        "GET /native/workflows/relay/profile?token=secret&workspace=%2Frepo HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    for response, active_nav in ((skills_response, "skills"), (profile_response, "profile")):
+        assert "HTTP/1.1 200 OK" in response
+        assert 'data-marvis-relay-view="construction"' in response
+        assert "正在建设中" in response
+        assert "/static/marvis/relay-under-construction.svg" in response
+        assert f'data-marvis-nav="{active_nav}" aria-current="page"' in response
+        assert 'href="/native/workflows/relay/skills?token=secret&amp;workspace=/repo"' in response
+        assert 'href="/native/workflows/relay/profile?token=secret&amp;workspace=/repo"' in response
+
+
+@pytest.mark.asyncio
 async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal(
     tmp_path: Path,
 ) -> None:
@@ -1353,7 +1387,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-token-details-coffee">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-task-list-construction">'
         in response
     )
     assert "Marvis办公室" in response
@@ -1909,7 +1943,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-token-details-coffee">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-task-list-construction">'
         in response
     )
     assert 'class="marvis-relay-topbar"' in response

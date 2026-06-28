@@ -512,11 +512,15 @@ body[data-marvis-relay-view] .relay-card-head > div:not(.relay-card-meta) {
 
 body[data-marvis-relay-view] .marvis-relay-task-card-footer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px 12px;
+  grid-template-columns: 1fr;
+  gap: 10px;
   align-items: center;
-  padding-left: 58px;
   min-width: 0;
+}
+
+body[data-marvis-relay-view] .relay-card-side .relay-status-badge {
+  min-height: 26px;
+  padding: 0 11px;
 }
 
 body[data-marvis-relay-view] .relay-card-meta {
@@ -551,8 +555,7 @@ body[data-marvis-relay-view] .relay-summary {
 
 @media (max-width: 420px) {
   body[data-marvis-relay-view] .marvis-relay-task-card-footer {
-    grid-template-columns: minmax(0, 1fr) auto;
-    padding-left: 58px;
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1171,6 +1174,32 @@ body[data-marvis-relay-view="chat"] .marvis-relay-chat-home h2 {
   margin: 18px 0 0;
   color: #111;
   font-size: 30px;
+  line-height: 1.25;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+body[data-marvis-relay-view="construction"] .marvis-relay-construction {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 18px;
+  min-height: calc(100dvh - var(--marvis-s25-bottom-nav-height) - 112px);
+  padding: calc(64px + env(safe-area-inset-top, 0px)) 28px 150px;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+body[data-marvis-relay-view="construction"] .marvis-relay-construction img {
+  width: min(210px, 62vw);
+  height: auto;
+  display: block;
+}
+
+body[data-marvis-relay-view="construction"] .marvis-relay-construction h2 {
+  margin: 0;
+  color: #111;
+  font-size: 24px;
   line-height: 1.25;
   font-weight: 800;
   letter-spacing: 0;
