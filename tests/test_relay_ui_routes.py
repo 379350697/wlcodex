@@ -3108,6 +3108,91 @@ async def test_relay_work_log_hides_superseded_role_errors_after_round_success(
 
 
 @pytest.mark.asyncio
+async def test_relay_work_log_hides_same_round_stale_job_error_after_success(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Same round stale job error",
+        prompt="修复同一回合失败后成功的状态收口。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_status(task.id, "implementer", "interrupted")
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "role_error",
+        {
+            "relay_role": "implementer",
+            "role": "implementer",
+            "round_id": 1,
+            "artifact_type": "role_error",
+            "error": "结构化结果缺少必填字段：status, reason, role。",
+        },
+        summary="结构化结果缺少必填字段：status, reason, role。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "relay_role": "implementer",
+            "round_id": 1,
+            "status": "passed",
+            "reason": "已重新输出合法实现报告并完成修复。",
+            "role": "implementer",
+            "artifact_type": "implementation_report",
+            "summary": "已重新输出合法实现报告并完成修复。",
+            "handoff_to": "auditor",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给审核工程师复核。",
+        },
+        summary="已重新输出合法实现报告并完成修复。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "auditor",
+        "audit_report",
+        {
+            "relay_role": "auditor",
+            "round_id": 1,
+            "status": "passed",
+            "reason": "审核通过，确认同一回合旧错误不再污染当前生命周期。",
+            "role": "auditor",
+            "artifact_type": "audit_report",
+            "summary": "审核通过，确认同一回合旧错误不再污染当前生命周期。",
+            "handoff_to": "director",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交回Marvis收尾。",
+        },
+        summary="审核通过，确认同一回合旧错误不再污染当前生命周期。",
+    )
+
+    detail = service._store.get_task_detail(task.id)
+    implementer_job = next(job for job in detail.role_jobs if job.role == "implementer")
+    assert implementer_job.error_message == ""
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    work_log_html = _relay_work_log_html(response)
+    assert "已重新输出合法实现报告并完成修复。" in work_log_html
+    assert "结构化结果缺少必填字段：status, reason, role。" not in work_log_html
+    assert 'data-marvis-work-log-entry="error"' not in work_log_html
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_replaces_generic_final_summary_with_role_closure(
     tmp_path: Path,
 ) -> None:

@@ -646,9 +646,32 @@ def _latest_error_by_role(artifacts: list[dict[str, Any]]) -> dict[str, dict[str
     errors: dict[str, dict[str, Any]] = {}
     for artifact in artifacts:
         role = str(artifact.get("relay_role") or "")
-        if role and artifact.get("artifact_type") == "role_error":
+        if not role:
+            continue
+        if artifact.get("artifact_type") == "role_error":
             errors[role] = artifact
+            continue
+        if _artifact_resolves_role_error(artifact):
+            errors.pop(role, None)
     return errors
+
+
+def _artifact_resolves_role_error(artifact: dict[str, Any]) -> bool:
+    artifact_type = str(artifact.get("artifact_type") or "")
+    if artifact_type not in {
+        "architecture_plan",
+        "implementation_report",
+        "test_report",
+        "audit_report",
+        "final_summary",
+        "followup_response",
+        "routing_decision",
+    }:
+        return False
+    status = str(artifact.get("status") or "").strip()
+    if status:
+        return status in {"passed", "completed", "success", "succeeded", "done"}
+    return artifact_type in {"followup_response", "final_summary"}
 
 
 def _latest_handoff_by_role(
