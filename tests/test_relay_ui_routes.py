@@ -2429,6 +2429,25 @@ async def test_relay_task_detail_limits_handoff_prompts_to_current_round(
         },
         summary="当前轮交给审核工程师复核。",
     )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "round_id": 3,
+            "status": "waiting",
+            "reason": "当前轮等待最终收口。",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": "当前轮等待最终收口。",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "",
+        },
+        summary="当前轮等待最终收口。",
+    )
 
     await server.start()
     try:
@@ -2447,6 +2466,8 @@ async def test_relay_task_detail_limits_handoff_prompts_to_current_round(
     assert "当前轮：继续修 B。" in conversation_html
     assert "当前轮已修复 B。" in conversation_html
     assert "| 已中断" not in conversation_html
+    assert conversation_html.count("| 等待") == 1
+    assert conversation_html.count("任务分配 已完成") == 2
     assert conversation_html.count("Marvis拍了拍 开发工程师，说开干吧") == 1
     assert conversation_html.count("开发工程师交给审核工程师复核") == 1
 

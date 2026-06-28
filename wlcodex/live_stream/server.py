@@ -4064,7 +4064,13 @@ def _marvis_relay_action_label(role: str, payload: dict[str, Any] | None = None)
     artifact_type = str((payload or {}).get("artifact_type") or "").strip()
     if role == "director":
         kind = str((payload or {}).get("kind") or "").strip()
-        if artifact_type == "routing_decision" or kind in {"text_delta", "waiting"}:
+        status = str((payload or {}).get("status") or "").strip()
+        handoff_to = str((payload or {}).get("handoff_to") or "").strip()
+        if (
+            artifact_type == "routing_decision"
+            or kind in {"text_delta", "waiting"}
+            or (artifact_type == "final_summary" and status == "waiting" and handoff_to)
+        ):
             return "任务分配"
         return ""
     if artifact_type:
@@ -7341,7 +7347,7 @@ def _relay_task_detail_page(
             role,
             "role_envelope",
             labelForRole(role),
-            isDispatchHandoff ? "" : labelForStatus(envelope.status || "passed"),
+            isDispatchHandoff ? labelForStatus("passed") : labelForStatus(envelope.status || "passed"),
             key
           );
           if (!node) return;
@@ -7996,7 +8002,7 @@ def _relay_conversation_artifact_meta(payload: dict[str, Any]) -> str:
         and status == "waiting"
         and handoff_to
     ):
-        return ""
+        return "passed"
     return status or "passed"
 
 
