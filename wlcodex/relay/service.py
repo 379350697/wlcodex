@@ -350,9 +350,14 @@ class RelayService:
     def list_tasks(self, **kwargs: Any):
         return self._store.list_tasks(**kwargs)
 
-    def today_token_stats(self) -> dict[str, int]:
+    def today_token_stats(self) -> dict[str, Any]:
         if hasattr(self._store, "today_token_stats"):
             return self._store.today_token_stats()
+        return {"consumed_tokens": 0, "total_consumed_tokens": 0}
+
+    def task_token_stats(self, task_id: int) -> dict[str, Any]:
+        if hasattr(self._store, "task_token_stats"):
+            return self._store.task_token_stats(task_id)
         return {"consumed_tokens": 0, "total_consumed_tokens": 0}
 
     def config(self) -> dict[str, Any]:

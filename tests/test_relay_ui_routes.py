@@ -1560,6 +1560,121 @@ async def test_marvis_relay_office_page_displays_today_token_usage(
 
 
 @pytest.mark.asyncio
+async def test_marvis_relay_office_token_usage_includes_runtime_usage_by_agent_run(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Runtime usage relay",
+        prompt="count runtime tokens",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        provider_engine="app-server",
+        model="gpt-5",
+        native_session_id="native-director",
+        agent_run_id=801,
+        dispatch_verified=True,
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "implementer",
+        provider="claude",
+        provider_engine="sdk-deepseek",
+        model="claude",
+        native_session_id="native-implementer",
+        agent_run_id=802,
+        dispatch_verified=True,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.MODEL_USAGE_UPDATED,
+        payload={
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "total_tokens": 110,
+            "provider": "codex",
+            "native_turn_id": "turn-director",
+        },
+        occurred_at=now,
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=801,
+        event_type=EventType.MODEL_USAGE_UPDATED,
+        payload={
+            "input_tokens": 200,
+            "output_tokens": 20,
+            "total_tokens": 220,
+            "provider": "codex",
+            "native_turn_id": "turn-director",
+        },
+        occurred_at=now,
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=802,
+        event_type=EventType.MODEL_USAGE_UPDATED,
+        payload={
+            "usage": {
+                "input_tokens": 50,
+                "cache_read_input_tokens": 400,
+                "output_tokens": 30,
+            },
+            "provider": "claude",
+            "native_turn_id": "turn-implementer",
+        },
+        occurred_at=now,
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/workflows/relay/office?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+        stats_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/relay/token-stats?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+        task_response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert 'data-token-consumed="700"' in response
+    assert 'data-token-total="700"' in response
+    assert "Codex" in response
+    assert "Claude" in response
+    assert "今日 220" in response
+    assert "今日 480" in response
+    assert "缓存 400" in response
+    assert '"consumed_tokens": 700' in stats_response
+    assert '"total_consumed_tokens": 700' in stats_response
+    assert '"agent": "codex"' in stats_response
+    assert '"today_tokens": 220' in stats_response
+    assert '"agent": "claude"' in stats_response
+    assert '"today_tokens": 480' in stats_response
+    assert '"cached_input_tokens": 400' in stats_response
+    assert 'data-token-total="700"' in task_response
+    assert ">700 ☕<" in task_response
+
+
+@pytest.mark.asyncio
 async def test_marvis_relay_office_occupancy_follows_configured_roles(
     tmp_path: Path,
 ) -> None:

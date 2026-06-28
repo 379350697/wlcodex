@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from wlcodex.models import TeamAgentJob, TeamArtifact, TeamRun
@@ -116,68 +117,10 @@ class RelayStore:
         self._ledger.set_runtime_setting(key, value)
 
     def today_token_stats(self) -> dict[str, Any]:
-        today_row = self._ledger._conn.execute(
-            """
-            SELECT
-                COALESCE(SUM(total_tokens), 0) AS total_tokens
-            FROM usage_events
-            WHERE date(created_at, 'localtime') = date('now', 'localtime')
-              AND task_id IN (
-                  SELECT id FROM team_runs WHERE route = 'relay'
-              )
-            """
-        ).fetchone()
-        total_row = self._ledger._conn.execute(
-            """
-            SELECT
-                COALESCE(SUM(total_tokens), 0) AS total_tokens
-            FROM usage_events
-            WHERE task_id IN (
-                SELECT id FROM team_runs WHERE route = 'relay'
-            )
-            """
-        ).fetchone()
-        agent_rows = self._ledger._conn.execute(
-            """
-            SELECT
-                CASE WHEN TRIM(agent) = '' THEN 'unknown' ELSE TRIM(agent) END AS agent,
-                COALESCE(SUM(CASE
-                    WHEN date(created_at, 'localtime') = date('now', 'localtime')
-                    THEN total_tokens ELSE 0 END), 0) AS today_tokens,
-                COALESCE(SUM(total_tokens), 0) AS total_tokens,
-                COALESCE(SUM(CASE
-                    WHEN date(created_at, 'localtime') = date('now', 'localtime')
-                    THEN input_tokens ELSE 0 END), 0) AS today_input_tokens,
-                COALESCE(SUM(CASE
-                    WHEN date(created_at, 'localtime') = date('now', 'localtime')
-                    THEN output_tokens ELSE 0 END), 0) AS today_output_tokens,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens
-            FROM usage_events
-            WHERE task_id IN (
-                SELECT id FROM team_runs WHERE route = 'relay'
-            )
-            GROUP BY CASE WHEN TRIM(agent) = '' THEN 'unknown' ELSE TRIM(agent) END
-            HAVING total_tokens > 0 OR today_tokens > 0
-            ORDER BY today_tokens DESC, total_tokens DESC, agent ASC
-            """
-        ).fetchall()
-        return {
-            "consumed_tokens": (int(today_row["total_tokens"] or 0) if today_row else 0),
-            "total_consumed_tokens": (int(total_row["total_tokens"] or 0) if total_row else 0),
-            "agents": [
-                {
-                    "agent": str(row["agent"] or "unknown"),
-                    "today_tokens": int(row["today_tokens"] or 0),
-                    "total_tokens": int(row["total_tokens"] or 0),
-                    "today_input_tokens": int(row["today_input_tokens"] or 0),
-                    "today_output_tokens": int(row["today_output_tokens"] or 0),
-                    "input_tokens": int(row["input_tokens"] or 0),
-                    "output_tokens": int(row["output_tokens"] or 0),
-                }
-                for row in agent_rows
-            ],
-        }
+        return self._relay_token_stats()
+
+    def task_token_stats(self, task_id: int) -> dict[str, Any]:
+        return self._relay_token_stats(task_id=task_id)
 
     def get_task_detail(self, task_id: int) -> RelayTaskDetail:
         team_run = self._ledger.get_team_run(task_id)
@@ -443,6 +386,209 @@ class RelayStore:
         ]
         return _annotate_artifact_rounds(artifacts)
 
+    def _relay_token_stats(self, *, task_id: int | None = None) -> dict[str, Any]:
+        buckets: dict[str, dict[str, int | str]] = {}
+        consumed_tokens = 0
+        total_consumed_tokens = 0
+        usage_turn_keys: set[tuple[int, int, str, str]] = set()
+
+        def add_row(
+            *,
+            agent: str,
+            role: str,
+            total_tokens: int,
+            input_tokens: int = 0,
+            cached_input_tokens: int = 0,
+            output_tokens: int = 0,
+            reasoning_output_tokens: int = 0,
+            is_today: bool,
+        ) -> None:
+            nonlocal consumed_tokens, total_consumed_tokens
+            total_tokens = max(0, int(total_tokens or 0))
+            if total_tokens <= 0:
+                return
+            agent_key = _relay_usage_agent_key(agent, role)
+            bucket = buckets.setdefault(
+                agent_key,
+                {
+                    "agent": agent_key,
+                    "today_tokens": 0,
+                    "total_tokens": 0,
+                    "today_input_tokens": 0,
+                    "today_output_tokens": 0,
+                    "input_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                },
+            )
+            bucket["total_tokens"] = int(bucket["total_tokens"]) + total_tokens
+            bucket["input_tokens"] = int(bucket["input_tokens"]) + max(0, int(input_tokens or 0))
+            bucket["cached_input_tokens"] = int(bucket["cached_input_tokens"]) + max(
+                0, int(cached_input_tokens or 0)
+            )
+            bucket["output_tokens"] = int(bucket["output_tokens"]) + max(0, int(output_tokens or 0))
+            bucket["reasoning_output_tokens"] = int(bucket["reasoning_output_tokens"]) + max(
+                0, int(reasoning_output_tokens or 0)
+            )
+            total_consumed_tokens += total_tokens
+            if is_today:
+                bucket["today_tokens"] = int(bucket["today_tokens"]) + total_tokens
+                bucket["today_input_tokens"] = int(bucket["today_input_tokens"]) + max(
+                    0, int(input_tokens or 0)
+                )
+                bucket["today_output_tokens"] = int(bucket["today_output_tokens"]) + max(
+                    0, int(output_tokens or 0)
+                )
+                consumed_tokens += total_tokens
+
+        usage_sql = """
+            SELECT
+                u.*,
+                COALESCE(task_run.id, job_run.id) AS relay_task_id,
+                COALESCE(job.role, u.role, '') AS relay_role,
+                COALESCE(job.model_profile, '') AS relay_model_profile,
+                date(u.created_at, 'localtime') = date('now', 'localtime') AS is_today
+            FROM usage_events u
+            LEFT JOIN team_runs task_run
+              ON task_run.id = u.task_id AND task_run.route = 'relay'
+            LEFT JOIN team_agent_jobs job
+              ON job.agent_run_id = u.agent_run_id
+            LEFT JOIN team_runs job_run
+              ON job_run.id = job.team_run_id AND job_run.route = 'relay'
+            WHERE (task_run.id IS NOT NULL OR job_run.id IS NOT NULL)
+        """
+        usage_params: list[Any] = []
+        if task_id is not None:
+            usage_sql += " AND COALESCE(task_run.id, job_run.id) = ?"
+            usage_params.append(int(task_id))
+        usage_sql += " ORDER BY u.id ASC"
+        for row in self._ledger._conn.execute(usage_sql, usage_params).fetchall():
+            relay_task_id = int(row["relay_task_id"])
+            agent_run_id = int(row["agent_run_id"] or 0)
+            role = str(row["relay_role"] or row["role"] or "")
+            agent = _relay_usage_agent_key(
+                str(row["agent"] or row["relay_model_profile"] or ""), role
+            )
+            turn_id = str(row["external_turn_id"] or "")
+            if agent_run_id and turn_id:
+                usage_turn_keys.add((relay_task_id, agent_run_id, agent, turn_id))
+            add_row(
+                agent=agent,
+                role=role,
+                total_tokens=int(row["total_tokens"] or 0),
+                input_tokens=int(row["input_tokens"] or 0),
+                cached_input_tokens=int(row["cached_input_tokens"] or 0),
+                output_tokens=int(row["output_tokens"] or 0),
+                reasoning_output_tokens=int(row["reasoning_output_tokens"] or 0),
+                is_today=bool(row["is_today"]),
+            )
+
+        runtime_sql = """
+            SELECT
+                r.id,
+                r.occurred_at,
+                r.agent_run_id,
+                r.actor,
+                r.payload_json,
+                COALESCE(task_run.id, job_run.id) AS relay_task_id,
+                COALESCE(job.role, '') AS relay_role,
+                COALESCE(job.model_profile, '') AS relay_model_profile,
+                date(r.occurred_at, 'localtime') = date('now', 'localtime') AS is_today
+            FROM runtime_events r
+            LEFT JOIN team_runs task_run
+              ON task_run.id = r.task_id AND task_run.route = 'relay'
+            LEFT JOIN team_agent_jobs job
+              ON job.agent_run_id = r.agent_run_id
+            LEFT JOIN team_runs job_run
+              ON job_run.id = job.team_run_id AND job_run.route = 'relay'
+            WHERE (
+                r.event_type = 'model.usage.updated'
+                OR (
+                    json_valid(r.payload_json)
+                    AND (
+                        json_type(r.payload_json, '$.usage') IS NOT NULL
+                        OR json_type(r.payload_json, '$.total_tokens') IS NOT NULL
+                        OR json_type(r.payload_json, '$.totalTokens') IS NOT NULL
+                    )
+                )
+            )
+              AND (task_run.id IS NOT NULL OR job_run.id IS NOT NULL)
+        """
+        runtime_params: list[Any] = []
+        if task_id is not None:
+            runtime_sql += " AND COALESCE(task_run.id, job_run.id) = ?"
+            runtime_params.append(int(task_id))
+        runtime_sql += " ORDER BY r.id ASC"
+
+        latest_runtime_by_turn: dict[
+            tuple[int, int, str, str],
+            tuple[int, dict[str, Any], str, str, bool],
+        ] = {}
+        for row in self._ledger._conn.execute(runtime_sql, runtime_params).fetchall():
+            payload = _relay_json_payload(row["payload_json"])
+            if not payload:
+                continue
+            relay_task_id = int(row["relay_task_id"])
+            agent_run_id = int(row["agent_run_id"] or 0)
+            agent = _relay_usage_agent_key(
+                str(
+                    payload.get("provider")
+                    or payload.get("agent")
+                    or payload.get("source_kind")
+                    or row["relay_model_profile"]
+                    or row["actor"]
+                    or ""
+                ),
+                str(row["relay_role"] or ""),
+            )
+            turn_id = str(
+                payload.get("native_turn_id")
+                or payload.get("external_turn_id")
+                or payload.get("turn_id")
+                or ""
+            )
+            if not turn_id:
+                turn_id = f"event:{int(row['id'])}"
+            key = (relay_task_id, agent_run_id, agent, turn_id)
+            latest_runtime_by_turn[key] = (
+                int(row["id"]),
+                payload,
+                str(row["relay_role"] or ""),
+                agent,
+                bool(row["is_today"]),
+            )
+
+        for key, (_event_id, payload, role, agent, is_today) in latest_runtime_by_turn.items():
+            relay_task_id, agent_run_id, _agent, turn_id = key
+            if (relay_task_id, agent_run_id, agent, turn_id) in usage_turn_keys:
+                continue
+            usage = _relay_usage_tokens_from_payload(payload)
+            add_row(
+                agent=agent,
+                role=role,
+                total_tokens=usage["total_tokens"],
+                input_tokens=usage["input_tokens"],
+                cached_input_tokens=usage["cached_input_tokens"],
+                output_tokens=usage["output_tokens"],
+                reasoning_output_tokens=usage["reasoning_output_tokens"],
+                is_today=is_today,
+            )
+
+        agents = sorted(
+            buckets.values(),
+            key=lambda item: (
+                -int(item["today_tokens"]),
+                -int(item["total_tokens"]),
+                str(item["agent"]),
+            ),
+        )
+        return {
+            "consumed_tokens": consumed_tokens,
+            "total_consumed_tokens": total_consumed_tokens,
+            "agents": agents,
+        }
+
     def _latest_board(
         self,
         task: RelayTask,
@@ -622,6 +768,107 @@ def _latest_summary(artifacts: list[dict[str, Any]], artifact_type: str) -> str:
         if artifact.get("artifact_type") == artifact_type:
             return str(artifact.get("summary") or "")
     return ""
+
+
+def _relay_json_payload(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _relay_usage_agent_key(agent: str, role: str = "") -> str:
+    value = str(agent or "").strip().lower()
+    role_value = str(role or "").strip().lower()
+    if value in {"codex", "codex_native", "app-server", "gpt-5"}:
+        return "codex"
+    if value.startswith("claude") or value in {"sdk-deepseek", "deepseek"}:
+        return "claude"
+    if value.startswith("antigravity"):
+        return "antigravity"
+    if role_value:
+        return role_value
+    return value or "unknown"
+
+
+def _relay_usage_tokens_from_payload(payload: dict[str, Any]) -> dict[str, int]:
+    candidate = _relay_usage_payload_candidate(payload)
+    input_tokens = _relay_payload_int(candidate, "input_tokens", "inputTokens")
+    output_tokens = _relay_payload_int(candidate, "output_tokens", "outputTokens")
+    cached_input_tokens = _relay_payload_int(
+        candidate,
+        "cached_input_tokens",
+        "cachedInputTokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "cacheCreationInputTokens",
+        "cacheReadInputTokens",
+    )
+    reasoning_output_tokens = _relay_payload_int(
+        candidate,
+        "reasoning_output_tokens",
+        "reasoningOutputTokens",
+    )
+    total_tokens = _relay_payload_int(
+        candidate,
+        "total_tokens",
+        "totalTokens",
+        "tokens",
+        "consumed_tokens",
+    )
+    if total_tokens <= 0:
+        total_tokens = input_tokens + cached_input_tokens + output_tokens + reasoning_output_tokens
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _relay_usage_payload_candidate(payload: dict[str, Any]) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = [payload]
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        candidates.append(usage)
+        usage_total = usage.get("total")
+        if isinstance(usage_total, dict):
+            candidates.append(usage_total)
+    payload_total = payload.get("total")
+    if isinstance(payload_total, dict):
+        candidates.append(payload_total)
+    for candidate in candidates:
+        if _relay_payload_int(
+            candidate,
+            "total_tokens",
+            "totalTokens",
+            "tokens",
+            "consumed_tokens",
+        ):
+            return candidate
+    return candidates[1] if len(candidates) > 1 else payload
+
+
+def _relay_payload_int(payload: dict[str, Any], *keys: str) -> int:
+    total = 0
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int | float):
+            total += int(value)
+        elif isinstance(value, str):
+            try:
+                total += int(float(value.strip()))
+            except ValueError:
+                continue
+    return max(0, total)
 
 
 def _latest_role_metadata(artifacts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

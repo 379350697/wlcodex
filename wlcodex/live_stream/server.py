@@ -1303,6 +1303,7 @@ class WorkerLiveStreamServer:
                 view=detail_view,
                 events=events,
                 hub=self._hub,
+                token_stats=self._relay_service.task_token_stats(task_id),
             ),
         )
 
@@ -4659,14 +4660,26 @@ def _marvis_office_token_details_html(stats: dict[str, Any]) -> str:
         today_tokens = _marvis_token_int(item.get("today_tokens"))
         total_tokens = _marvis_token_int(item.get("total_tokens"))
         input_tokens = _marvis_token_int(item.get("input_tokens"))
+        cached_input_tokens = _marvis_token_int(item.get("cached_input_tokens"))
         output_tokens = _marvis_token_int(item.get("output_tokens"))
+        reasoning_output_tokens = _marvis_token_int(item.get("reasoning_output_tokens"))
+        detail_parts = [
+            f"输入 {escape(_format_marvis_token_count(input_tokens))}",
+        ]
+        if cached_input_tokens:
+            detail_parts.append(f"缓存 {escape(_format_marvis_token_count(cached_input_tokens))}")
+        detail_parts.append(f"输出 {escape(_format_marvis_token_count(output_tokens))}")
+        if reasoning_output_tokens:
+            detail_parts.append(
+                f"推理 {escape(_format_marvis_token_count(reasoning_output_tokens))}"
+            )
         parts.append(
             f"""
             <article class="marvis-token-details-row" data-token-agent="{escape(agent)}">
               <strong>{escape(label)}</strong>
               <span>今日 {escape(_format_marvis_token_count(today_tokens))}</span>
               <span>总计 {escape(_format_marvis_token_count(total_tokens))}</span>
-              <small>输入 {escape(_format_marvis_token_count(input_tokens))} · 输出 {escape(_format_marvis_token_count(output_tokens))}</small>
+              <small>{" · ".join(detail_parts)}</small>
             </article>
             """
         )
@@ -4982,12 +4995,18 @@ def _marvis_relay_office_page(
             const today = Number(item.today_tokens || 0);
             const totalTokens = Number(item.total_tokens || 0);
             const input = Number(item.input_tokens || 0);
+            const cached = Number(item.cached_input_tokens || 0);
             const output = Number(item.output_tokens || 0);
+            const reasoning = Number(item.reasoning_output_tokens || 0);
+            const detailParts = [`输入 ${{formatToken(input)}}`];
+            if (cached > 0) detailParts.push(`缓存 ${{formatToken(cached)}}`);
+            detailParts.push(`输出 ${{formatToken(output)}}`);
+            if (reasoning > 0) detailParts.push(`推理 ${{formatToken(reasoning)}}`);
             return `<article class="marvis-token-details-row" data-token-agent="${{agent.replace(/"/g, "&quot;")}}">
               <strong>${{label}}</strong>
               <span>今日 ${{formatToken(today)}}</span>
               <span>总计 ${{formatToken(totalTokens)}}</span>
-              <small>输入 ${{formatToken(input)}} · 输出 ${{formatToken(output)}}</small>
+              <small>${{detailParts.join(" · ")}}</small>
             </article>`;
           }}).join("") : '<p class="marvis-token-details-empty">还没有记录到 Token 消耗。</p>';
         }}
@@ -6519,6 +6538,7 @@ def _relay_task_detail_page(
     view: str = "conversation",
     events: list[Any] | tuple[Any, ...] | None = None,
     hub: WorkerLiveStreamHub | None = None,
+    token_stats: dict[str, Any] | None = None,
 ) -> str:
     view = _relay_task_detail_view(view)
     token_suffix = _token_suffix(access_token)
@@ -6558,7 +6578,7 @@ def _relay_task_detail_page(
         access_token=access_token,
         selected_workspace=str(task.workspace or ""),
     )
-    token_total = _marvis_relay_token_total_from_events(detail.role_jobs, hub=hub)
+    token_total = _marvis_token_int((token_stats or {}).get("total_consumed_tokens"))
     token_text = _format_marvis_relay_token_count(token_total)
     work_log_html = _marvis_relay_work_log_html(
         body_html=_marvis_relay_work_log_body_html(
