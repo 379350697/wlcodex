@@ -145,7 +145,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-image-preview"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-image-remove-vector"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4411,7 +4411,6 @@ def _marvis_relay_attachment_script() -> str:
           const remove = document.createElement("span");
           remove.className = "marvis-relay-composer-image-remove";
           remove.setAttribute("aria-hidden", "true");
-          remove.textContent = "\\u00d7";
           preview.append(img, remove);
           preview.addEventListener("click", () => {
             state.images.splice(index, 1);

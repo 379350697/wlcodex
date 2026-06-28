@@ -840,6 +840,27 @@ body[data-marvis-relay-view] .marvis-relay-composer-image-remove {
   line-height: 1;
 }
 
+body[data-marvis-relay-view] .marvis-relay-composer-image-remove::before,
+body[data-marvis-relay-view] .marvis-relay-composer-image-remove::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 13px;
+  height: 2px;
+  border-radius: 999px;
+  background: #fff;
+  transform-origin: center;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-image-remove::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-image-remove::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
 body[data-marvis-relay-view] .marvis-relay-composer-attachment,
 body[data-marvis-relay-view] .marvis-relay-attachment-chip {
   display: inline-flex;
