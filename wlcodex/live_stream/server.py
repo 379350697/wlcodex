@@ -3625,8 +3625,9 @@ def _relay_task_list_page(
     .relay-filter-chip.active {{ border-color: var(--color-link); color: var(--text-primary); background: rgba(88, 166, 255, .1); }}
     .relay-task-list {{ display: grid; gap: 10px; min-width: 0; }}
     .relay-task-card {{ display: grid; gap: 12px; border: 1px solid var(--border-card); border-radius: 8px; padding: 14px; background: var(--bg-surface); min-width: 0; overflow-wrap: anywhere; }}
-    .relay-card-topline {{ display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--text-muted); font-size: 13px; line-height: 1.3; }}
-    .relay-card-project {{ color: var(--text-primary); font-weight: var(--weight-bold); white-space: nowrap; }}
+    .relay-card-identity {{ display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: center; min-width: 0; }}
+    .relay-card-side {{ display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; color: var(--text-muted); font-size: 13px; line-height: 1.3; }}
+    .relay-card-project-pill {{ display: inline-grid; place-items: center; min-height: 24px; border-radius: 999px; padding: 0 9px; color: #315e8d; background: #e8f1fb; border: 1px solid #d8e8f7; font-weight: var(--weight-bold); white-space: nowrap; }}
     .relay-card-activity {{ color: var(--text-muted); min-width: 0; }}
     .relay-card-avatar-row {{ display: flex; align-items: center; min-height: 42px; }}
     .relay-card-meta {{ display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }}
@@ -5882,12 +5883,14 @@ def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
         status_class += f" is-{_relay_status_class_name(status)}"
     return f"""
       <article class="relay-task-card marvis-relay-task-card" data-status="{escape(status)}">
-        <div class="relay-card-topline">
-          <span class="relay-card-project">{escape(project_name)}</span>
-          <span class="relay-card-activity">{escape(activity)}</span>
-        </div>
-        <div class="relay-card-avatar-row">
-          {_marvis_relay_avatar_html("marvis", label="Marvis")}
+        <div class="relay-card-identity">
+          <div class="relay-card-avatar-row">
+            {_marvis_relay_avatar_html("marvis", label="Marvis")}
+          </div>
+          <div class="relay-card-side">
+            <span class="relay-card-project-pill">{escape(project_name)}</span>
+            <span class="relay-card-activity">{escape(activity)}</span>
+          </div>
         </div>
         <div class="relay-title">{escape(summary.title)}</div>
         <div class="marvis-relay-task-card-footer">

@@ -1225,10 +1225,14 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert polished.index("relay-status-badge") < polished.index(
         'class="relay-open relay-card-open"'
     )
-    assert 'class="relay-card-topline"' in polished
-    assert 'class="relay-card-project">repo</span>' in polished
+    assert 'class="relay-card-topline"' not in polished
+    assert 'class="relay-card-identity"' in polished
+    assert 'class="relay-card-project-pill">repo</span>' in polished
     assert 'class="relay-card-activity">最近活动 06-16 15:51</span>' in polished
-    assert polished.index('class="relay-card-avatar-row"') < polished.index('class="relay-title"')
+    assert polished.index('class="relay-card-avatar-row"') < polished.index(
+        'class="relay-card-project-pill"'
+    )
+    assert polished.index('class="relay-card-identity"') < polished.index('class="relay-title"')
     assert "当前阶段：" not in polished
     assert "/repo ·" not in polished
     assert "is-completed" in polished
