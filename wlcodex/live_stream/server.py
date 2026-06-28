@@ -5235,7 +5235,7 @@ def _marvis_relay_work_log_segments(
 def _marvis_relay_role_error_payloads_by_role(
     artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
 ) -> dict[str, dict[str, Any]]:
-    errors_by_round_role: dict[tuple[str, str], dict[str, Any]] = {}
+    errors: dict[str, dict[str, Any]] = {}
     success_roles_by_round: dict[str, set[str]] = {}
     for artifact in artifacts:
         payload = dict(artifact or {})
@@ -5246,15 +5246,12 @@ def _marvis_relay_role_error_payloads_by_role(
         success_roles = success_roles_by_round.setdefault(round_id, set())
         artifact_type = str(payload.get("artifact_type") or "")
         if artifact_type == "role_error":
-            errors_by_round_role[(round_id, role)] = payload
+            errors[role] = payload
             continue
         normalized_status = _relay_lifecycle_status_for_payload(payload, success_roles)
         if _relay_payload_status_is_success(normalized_status):
             success_roles.add(role)
-            errors_by_round_role.pop((round_id, role), None)
-    errors: dict[str, dict[str, Any]] = {}
-    for (_round_id, role), payload in errors_by_round_role.items():
-        errors[role] = payload
+            errors.pop(role, None)
     return errors
 
 

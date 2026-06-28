@@ -15,6 +15,7 @@ from wlcodex.live_stream.server import (
     WorkerLiveStreamServer,
     _marvis_relay_clean_artifact_summary,
     _marvis_relay_merge_work_log_entry,
+    _marvis_relay_role_error_payloads_by_role,
     _marvis_relay_work_log_entry_from_event,
     _marvis_relay_work_log_entry_html,
     _relay_activity_label,
@@ -3190,6 +3191,139 @@ async def test_relay_work_log_hides_same_round_stale_job_error_after_success(
     assert "已重新输出合法实现报告并完成修复。" in work_log_html
     assert "结构化结果缺少必填字段：status, reason, role。" not in work_log_html
     assert 'data-marvis-work-log-entry="error"' not in work_log_html
+
+
+@pytest.mark.asyncio
+async def test_relay_work_log_hides_previous_round_error_after_later_role_success(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Cross round stale error",
+        prompt="修复上一轮失败但下一轮成功后的日志收口。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {
+            "relay_role": "director",
+            "artifact_type": "user_followup",
+            "summary": "第一轮接续触发开发。",
+        },
+        summary="第一轮接续触发开发。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "role_error",
+        {
+            "relay_role": "implementer",
+            "role": "implementer",
+            "artifact_type": "role_error",
+            "error": "结构化结果缺少必填字段：status, reason, role。",
+        },
+        summary="结构化结果缺少必填字段：status, reason, role。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {
+            "relay_role": "director",
+            "artifact_type": "user_followup",
+            "summary": "第二轮继续完成同一个开发问题。",
+        },
+        summary="第二轮继续完成同一个开发问题。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "relay_role": "implementer",
+            "status": "passed",
+            "reason": "第二轮已经完成同一个开发问题。",
+            "role": "implementer",
+            "artifact_type": "implementation_report",
+            "summary": "第二轮已经完成同一个开发问题。",
+            "handoff_to": "auditor",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给审核工程师复核。",
+        },
+        summary="第二轮已经完成同一个开发问题。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "auditor",
+        "audit_report",
+        {
+            "relay_role": "auditor",
+            "status": "passed",
+            "reason": "审核通过，确认跨回合旧错误不再污染默认工作日志。",
+            "role": "auditor",
+            "artifact_type": "audit_report",
+            "summary": "审核通过，确认跨回合旧错误不再污染默认工作日志。",
+            "handoff_to": "director",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交回Marvis收尾。",
+        },
+        summary="审核通过，确认跨回合旧错误不再污染默认工作日志。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    work_log_html = _relay_work_log_html(response)
+    assert "第二轮已经完成同一个开发问题。" in work_log_html
+    assert "结构化结果缺少必填字段：status, reason, role。" not in work_log_html
+    assert 'data-marvis-work-log-entry="error"' not in work_log_html
+
+
+def test_relay_role_error_projection_is_resolved_by_later_round_success() -> None:
+    errors = _marvis_relay_role_error_payloads_by_role(
+        [
+            {
+                "relay_role": "implementer",
+                "role": "implementer",
+                "round_id": 5,
+                "artifact_type": "role_error",
+                "error": "结构化结果缺少必填字段：status, reason, role。",
+            },
+            {
+                "relay_role": "director",
+                "role": "director",
+                "round_id": 6,
+                "artifact_type": "final_summary",
+                "status": "waiting",
+                "summary": "重新派发开发工程师处理同一问题。",
+                "handoff_to": "implementer",
+            },
+            {
+                "relay_role": "implementer",
+                "role": "implementer",
+                "round_id": 6,
+                "artifact_type": "implementation_report",
+                "status": "passed",
+                "summary": "开发工程师已经在下一轮修复同一问题。",
+                "handoff_to": "auditor",
+            },
+        ]
+    )
+
+    assert "implementer" not in errors
 
 
 @pytest.mark.asyncio
