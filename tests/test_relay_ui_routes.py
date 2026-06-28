@@ -2887,6 +2887,227 @@ async def test_relay_task_detail_limits_handoff_prompts_to_current_round(
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_treats_terminal_waiting_summary_as_completed(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Task30 lifecycle closure task",
+        prompt="修复接力生命周期状态。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_status(task.id, "director", "interrupted")
+    service._store.update_role_status(task.id, "implementer", "passed")
+    service._store.update_role_status(task.id, "auditor", "passed")
+    service._store.update_task_status(task.id, "interrupted")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {
+            "round_id": 2,
+            "text": "当前轮：修复接力收口。",
+            "target_role": "director",
+            "context_packet_id": 1,
+        },
+        summary="当前轮：修复接力收口。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "relay_role": "implementer",
+            "round_id": 2,
+            "status": "passed",
+            "reason": "修复了接力状态错误显示。",
+            "role": "implementer",
+            "artifact_type": "implementation_report",
+            "summary": "修复了接力状态错误显示。",
+            "handoff_to": "auditor",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给审核工程师复核。",
+        },
+        summary="修复了接力状态错误显示。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "auditor",
+        "audit_report",
+        {
+            "relay_role": "auditor",
+            "round_id": 2,
+            "status": "passed",
+            "reason": "审核通过，接力状态已经正确收口。",
+            "role": "auditor",
+            "artifact_type": "audit_report",
+            "summary": "审核通过，接力状态已经正确收口。",
+            "handoff_to": "director",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交回Marvis收尾。",
+        },
+        summary="审核通过，接力状态已经正确收口。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "round_id": 2,
+            "status": "waiting",
+            "reason": "已完成接力生命周期统一收口。",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": "已完成接力生命周期统一收口。",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "",
+        },
+        summary="已完成接力生命周期统一收口。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "已完成接力生命周期统一收口。" in conversation_html
+    assert "| 等待" not in conversation_html
+    assert "| 已完成" in conversation_html
+    assert "接力暂停在总工程师" not in conversation_html
+
+
+@pytest.mark.asyncio
+async def test_relay_work_log_hides_superseded_role_errors_after_round_success(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Task30 work log lifecycle task",
+        prompt="修复工作日志错误收口。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_status(task.id, "director", "interrupted")
+    service._store.update_role_status(task.id, "implementer", "passed")
+    service._store.update_role_status(task.id, "auditor", "passed")
+    service._store.update_task_status(task.id, "interrupted")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "relay_role": "director",
+            "role": "director",
+            "round_id": 2,
+            "artifact_type": "role_error",
+            "error": "结构化结果不是合法 JSON，系统无法直接收口。",
+        },
+        summary="结构化结果不是合法 JSON，系统无法直接收口。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "role_error",
+        {
+            "relay_role": "implementer",
+            "role": "implementer",
+            "round_id": 2,
+            "artifact_type": "role_error",
+            "error": "结构化结果缺少必填字段：status, reason, role。",
+        },
+        summary="结构化结果缺少必填字段：status, reason, role。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "relay_role": "implementer",
+            "round_id": 2,
+            "status": "passed",
+            "reason": "已修复工作日志默认展示失败的问题。",
+            "role": "implementer",
+            "artifact_type": "implementation_report",
+            "summary": "已修复工作日志默认展示失败的问题。",
+            "handoff_to": "auditor",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给审核工程师复核。",
+        },
+        summary="已修复工作日志默认展示失败的问题。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "auditor",
+        "audit_report",
+        {
+            "relay_role": "auditor",
+            "round_id": 2,
+            "status": "passed",
+            "reason": "审核通过，确认错误收口不再污染默认工作日志。",
+            "role": "auditor",
+            "artifact_type": "audit_report",
+            "summary": "审核通过，确认错误收口不再污染默认工作日志。",
+            "handoff_to": "director",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交回Marvis收尾。",
+        },
+        summary="审核通过，确认错误收口不再污染默认工作日志。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "round_id": 2,
+            "status": "waiting",
+            "reason": "已完成工作日志生命周期收口。",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": "已完成工作日志生命周期收口。",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "",
+        },
+        summary="已完成工作日志生命周期收口。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    work_log_html = _relay_work_log_html(response)
+    assert "已完成工作日志生命周期收口。" in work_log_html
+    assert "已修复工作日志默认展示失败的问题。" in work_log_html
+    assert "结构化结果不是合法 JSON，系统无法直接收口。" not in work_log_html
+    assert "结构化结果缺少必填字段：status, reason, role。" not in work_log_html
+    assert 'data-marvis-work-log-entry="error"' not in work_log_html
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_replaces_generic_final_summary_with_role_closure(
     tmp_path: Path,
 ) -> None:

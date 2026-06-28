@@ -5167,10 +5167,14 @@ def _marvis_relay_work_log_segments(
         role = str(getattr(job, "role", "") or "")
         if role not in RELAY_ROLE_IDS:
             continue
+        role_success_payload = canonical_payloads.get(role) or artifact_payloads.get(role)
+        has_lifecycle_success = _relay_payload_status_is_success(
+            str((role_success_payload or {}).get("status") or "")
+        )
         if role in existing_roles or f"artifact:{role}" in artifact_keys_added:
             payload = None
         else:
-            payload = canonical_payloads.get(role) or artifact_payloads.get(role)
+            payload = role_success_payload
             fallback_payload = artifact_payloads.get(role)
             if (
                 payload is not None
@@ -5200,7 +5204,7 @@ def _marvis_relay_work_log_segments(
                 ),
             )
             existing_roles.add(role)
-        if error_message:
+        if error_message and (role_error or not has_lifecycle_success):
             append_entry(
                 role,
                 WorkLogEntry(
@@ -5231,14 +5235,26 @@ def _marvis_relay_work_log_segments(
 def _marvis_relay_role_error_payloads_by_role(
     artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
 ) -> dict[str, dict[str, Any]]:
-    errors: dict[str, dict[str, Any]] = {}
+    errors_by_round_role: dict[tuple[str, str], dict[str, Any]] = {}
+    success_roles_by_round: dict[str, set[str]] = {}
     for artifact in artifacts:
         payload = dict(artifact or {})
-        if str(payload.get("artifact_type") or "") != "role_error":
-            continue
         role = str(payload.get("role") or payload.get("relay_role") or "")
-        if role:
-            errors[role] = payload
+        if not role:
+            continue
+        round_id = str(payload.get("round_id") or "")
+        success_roles = success_roles_by_round.setdefault(round_id, set())
+        artifact_type = str(payload.get("artifact_type") or "")
+        if artifact_type == "role_error":
+            errors_by_round_role[(round_id, role)] = payload
+            continue
+        normalized_status = _relay_lifecycle_status_for_payload(payload, success_roles)
+        if _relay_payload_status_is_success(normalized_status):
+            success_roles.add(role)
+            errors_by_round_role.pop((round_id, role), None)
+    errors: dict[str, dict[str, Any]] = {}
+    for (_round_id, role), payload in errors_by_round_role.items():
+        errors[role] = payload
     return errors
 
 
@@ -5246,6 +5262,7 @@ def _marvis_relay_summary_payloads_by_role(
     artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
 ) -> dict[str, dict[str, Any]]:
     payloads: dict[str, dict[str, Any]] = {}
+    success_roles_by_round: dict[str, set[str]] = {}
     for artifact in artifacts:
         payload = dict(artifact or {})
         artifact_type = str(payload.get("artifact_type") or "").strip()
@@ -5264,17 +5281,23 @@ def _marvis_relay_summary_payloads_by_role(
         ).strip()
         summary = _marvis_relay_clean_artifact_summary(summary)
         if role and summary:
+            round_id = str(payload.get("round_id") or "")
+            success_roles = success_roles_by_round.setdefault(round_id, set())
+            normalized_status = _relay_lifecycle_status_for_payload(payload, success_roles)
             payloads[role] = {
                 "role": role,
                 "artifact_type": artifact_type,
-                "status": str(payload.get("status") or "passed"),
+                "status": normalized_status,
                 "summary": summary,
                 "next_action": str(payload.get("next_action") or ""),
                 "open_questions": payload.get("open_questions") or [],
                 "acceptance_criteria": payload.get("acceptance_criteria") or [],
                 "route": str(payload.get("route") or ""),
                 "risk": str(payload.get("risk") or ""),
+                "round_id": round_id,
             }
+            if _relay_payload_status_is_success(normalized_status):
+                success_roles.add(role)
     return payloads
 
 
@@ -8169,6 +8192,7 @@ def _relay_projected_conversation_rows(
                 }
             )
     _relay_enrich_generic_final_summary_rows(projected_rows)
+    _relay_normalize_conversation_lifecycle_rows(projected_rows)
     has_pending_followup_waiting = any(
         str(row.get("kind") or "") == "waiting"
         and str(row.get("key") or "").startswith("followup-waiting:")
@@ -8271,8 +8295,37 @@ def _relay_current_round_id_from_artifacts(
     return str(current or 1)
 
 
-def _relay_conversation_artifact_meta(payload: dict[str, Any]) -> str:
+def _relay_payload_status_is_success(status: str) -> bool:
+    return str(status or "").strip() in {"passed", "completed", "success", "succeeded", "done"}
+
+
+def _relay_payload_status_is_terminal_failure(status: str) -> bool:
+    return str(status or "").strip() in {"failed", "blocked", "error", "interrupted"}
+
+
+def _relay_lifecycle_status_for_payload(
+    payload: dict[str, Any],
+    success_roles_in_round: set[str] | None = None,
+) -> str:
     status = str(payload.get("status") or "").strip()
+    role = str(payload.get("role") or payload.get("relay_role") or "").strip()
+    artifact_type = str(payload.get("artifact_type") or "").strip()
+    handoff_to = str(payload.get("handoff_to") or "").strip()
+    if (
+        role == "director"
+        and artifact_type == "final_summary"
+        and status == "waiting"
+        and not handoff_to
+        and "auditor" in (success_roles_in_round or set())
+    ):
+        return "passed"
+    if not status and artifact_type in {"followup_response", "final_summary"} and not handoff_to:
+        return "passed"
+    return status or "passed"
+
+
+def _relay_conversation_artifact_meta(payload: dict[str, Any]) -> str:
+    status = _relay_lifecycle_status_for_payload(payload)
     role = str(payload.get("role") or payload.get("relay_role") or "").strip()
     artifact_type = str(payload.get("artifact_type") or "").strip()
     handoff_to = str(payload.get("handoff_to") or "").strip()
@@ -8283,7 +8336,36 @@ def _relay_conversation_artifact_meta(payload: dict[str, Any]) -> str:
         and handoff_to
     ):
         return "passed"
-    return status or "passed"
+    return status
+
+
+def _relay_normalize_conversation_lifecycle_rows(rows: list[dict[str, str]]) -> None:
+    success_roles_by_round: dict[str, set[str]] = {}
+    for row in rows:
+        if str(row.get("kind") or "") not in {"role_envelope", "followup_response"}:
+            continue
+        role = str(row.get("role") or "")
+        if not role:
+            continue
+        round_id = str(row.get("round_id") or "")
+        success_roles = success_roles_by_round.setdefault(round_id, set())
+        status = str(row.get("status") or row.get("meta") or "").strip()
+        artifact_type = str(row.get("artifact_type") or "").strip()
+        handoff_to = str(row.get("handoff_to") or "").strip()
+        if (
+            role == "director"
+            and artifact_type == "final_summary"
+            and status == "waiting"
+            and not handoff_to
+            and "auditor" in success_roles
+        ):
+            row["status"] = "passed"
+            row["meta"] = "passed"
+            status = "passed"
+        if _relay_payload_status_is_success(status):
+            success_roles.add(role)
+        elif _relay_payload_status_is_terminal_failure(status):
+            success_roles.discard(role)
 
 
 def _relay_conversation_row_from_artifact(
@@ -9439,13 +9521,20 @@ def _relay_role_canonical_payloads_by_role(
     artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
 ) -> dict[str, dict[str, Any]]:
     payloads: dict[str, dict[str, Any]] = {}
+    success_roles_by_round: dict[str, set[str]] = {}
     for artifact in artifacts:
         payload = _relay_canonical_payload_from_artifact(artifact)
         if payload is None:
             continue
         role = str(payload.get("role") or payload.get("relay_role") or "")
         if role:
+            round_id = str(payload.get("round_id") or "")
+            success_roles = success_roles_by_round.setdefault(round_id, set())
+            normalized_status = _relay_lifecycle_status_for_payload(payload, success_roles)
+            payload = {**payload, "status": normalized_status}
             payloads[role] = payload
+            if _relay_payload_status_is_success(normalized_status):
+                success_roles.add(role)
     return payloads
 
 
@@ -9453,6 +9542,7 @@ def _relay_role_canonical_payload_sequence(
     artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
+    success_roles_by_round: dict[str, set[str]] = {}
     for index, artifact in enumerate(artifacts):
         payload = _relay_canonical_payload_from_artifact(artifact)
         if payload is None:
@@ -9460,20 +9550,28 @@ def _relay_role_canonical_payload_sequence(
         role = str(payload.get("role") or payload.get("relay_role") or "")
         if not role:
             continue
+        round_id = str(payload.get("round_id") or "")
+        success_roles = success_roles_by_round.setdefault(round_id, set())
+        normalized_status = _relay_lifecycle_status_for_payload(payload, success_roles)
         payloads.append(
             {
                 **payload,
+                "status": normalized_status,
                 "_relay_artifact_key": str(
                     artifact.get("id") or artifact.get("created_at") or index
                 ),
             }
         )
+        if _relay_payload_status_is_success(normalized_status):
+            success_roles.add(role)
     return payloads
 
 
 def _relay_canonical_payload_from_artifact(
     artifact: dict[str, Any],
 ) -> dict[str, Any] | None:
+    if str((artifact or {}).get("artifact_type") or "") == "role_error":
+        return None
     payload = {
         key: value
         for key, value in dict(artifact or {}).items()
