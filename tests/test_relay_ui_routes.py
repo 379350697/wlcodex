@@ -366,6 +366,53 @@ async def test_relay_task_detail_projects_followup_turns_into_marvis_chat(
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_projects_running_followup_as_marvis_waiting(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Running follow-up relay task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_task_status(task.id, "running")
+    service._store.update_role_status(task.id, "director", "streaming")
+    service._store.update_role_status(task.id, "implementer", "idle")
+    service._store.update_role_status(task.id, "auditor", "idle")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {
+            "text": "接力暂停在开发工程师，可以接着继续下去吗",
+            "target_role": "director",
+            "context_packet_id": 42,
+        },
+        summary="接力暂停在开发工程师，可以接着继续下去吗",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "接力暂停在开发工程师，可以接着继续下去吗" in conversation_html
+    assert 'class="marvis-relay-user-message"' in conversation_html
+    assert 'data-native-kind="waiting"' in conversation_html
+    assert 'data-marvis-followup-waiting="true"' in conversation_html
+    assert "..." in conversation_html
+    assert "接力暂停在开发工程师，详情见工作日志。" not in conversation_html
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_projects_followup_attachments_into_user_bubble(
     tmp_path: Path,
 ) -> None:
@@ -1280,6 +1327,10 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "function renderRelayNativeEvent" in response
     assert "const TERMINAL_ROLE_STATUSES = new Set" in response
     assert "TERMINAL_ROLE_STATUSES.has(currentStatus)" in response
+    assert "function clearMarvisConversationPausedRows()" in response
+    assert "setRoleStatus(role, status, options = {})" in response
+    assert "options.force" in response
+    assert 'reason === "new_followup_turn"' in response
     assert "function relayTaskIsRunning()" in response
     assert '!relayTaskIsRunning()) return;' in response
     assert 'source.addEventListener("role.native_event"' in response

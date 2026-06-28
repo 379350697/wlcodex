@@ -1165,6 +1165,36 @@ def test_user_followup_starts_clean_visible_turn_after_blocked_role(tmp_path) ->
     ]
 
 
+def test_user_followup_starts_clean_visible_turn_after_interrupted_task(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "interrupted")
+    service._store.update_role_status(task.id, "director", "interrupted")
+    service._store.update_role_status(task.id, "implementer", "blocked")
+    service._store.update_role_status(task.id, "auditor", "passed")
+
+    asyncio.run(service.add_user_message(task.id, "接力暂停了，可以继续吗"))
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.task.status == "running"
+    assert jobs["director"].status == "streaming"
+    assert jobs["implementer"].status == "idle"
+    assert jobs["auditor"].status == "idle"
+    assert [call[0] for call in provider.calls] == [
+        "start_session",
+        "continue_session",
+    ]
+
+
 def test_user_followup_on_completed_task_records_visible_turn_and_resumes(
     tmp_path,
 ) -> None:
@@ -1223,7 +1253,7 @@ def test_director_followup_plain_text_completion_is_visible_and_completes_turn(
     service._store.update_task_status(task.id, "completed")
     asyncio.run(service.add_user_message(task.id, "继续解释为什么没有显示"))
     runtime_store = RuntimeEventStore(service._store._ledger._conn)
-    runtime_store.append(
+    completed = runtime_store.append(
         RuntimeEvent(
             schema_version=1,
             event_type=EventType.MODEL_TEXT_DELTA,
@@ -2096,6 +2126,122 @@ def test_scan_stale_native_role_completes_synced_role_envelope_delta(
         "sync_session",
         "start_session",
     ]
+
+
+def test_scan_stale_native_role_prefers_late_complete_delta_over_bad_stream(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    now = datetime(2026, 6, 16, 8, 0, 0, tzinfo=timezone.utc)
+    for delta in (
+        '{"artifact_type":"routing_decision"',
+        '"role":"director","status":"passed"',
+    ):
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.MODEL_TEXT_DELTA,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id="101",
+                correlation_id="corr-101",
+                source=EventSource.CLAUDE,
+                actor="claude",
+                visibility=Visibility.USER,
+                payload={"delta": delta, "native_turn_id": "turn-late"},
+                occurred_at=(now - timedelta(seconds=302)).isoformat(),
+                agent_run_id=101,
+            )
+        )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={
+                "action": "turn_completed",
+                "status": "completed",
+                "native_turn_id": "turn-late",
+            },
+            occurred_at=(now - timedelta(seconds=301)).isoformat(),
+            agent_run_id=101,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={
+                "delta": """
+                {
+                  "status": "passed",
+                  "reason": "implementation and audit required",
+                  "role": "director",
+                  "artifact_type": "routing_decision",
+                  "handoff_to": "",
+                  "summary": "继续执行最新接续需求。",
+                  "evidence_refs": [],
+                  "open_questions": [],
+                  "next_action": "交给开发工程师处理。",
+                  "complexity": "medium",
+                  "risk": "medium",
+                  "route": "core_relay",
+                  "required_roles": ["director", "implementer", "auditor"],
+                  "acceptance_criteria": ["开发完成", "审核通过"],
+                  "stop_conditions": [],
+                  "requires_user_approval": false
+                }
+                """,
+                "native_turn_id": "turn-late",
+            },
+            occurred_at=now.isoformat(),
+            agent_run_id=101,
+        )
+    )
+
+    changed = asyncio.run(
+        service._complete_stale_native_delta_if_ready(
+            runtime_store,
+            task_id=task.id,
+            role="director",
+            agent_run_id=101,
+            after_id=0,
+            provider_name="claude",
+            native_session_id="native-1",
+            allow_read_session=False,
+            current_turn_id="turn-late",
+        )
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    routing = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "routing_decision"
+    ]
+    assert changed is True
+    assert routing[-1]["summary"] == "继续执行最新接续需求。"
+    assert jobs["director"].status == "passed"
+    assert jobs["implementer"].status == "streaming"
 
 
 def test_scan_stale_native_role_prefers_synced_completed_message_over_bad_delta(

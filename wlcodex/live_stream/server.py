@@ -7118,8 +7118,12 @@ def _relay_task_detail_page(
       node.dataset.pendingFollowup = "failed";
       node.title = "发送失败";
     }}
+    function clearMarvisConversationPausedRows() {{
+      conversationTimeline?.querySelectorAll("[data-native-key^='relay-paused:']").forEach((node) => node.remove());
+    }}
     function appendMarvisConversationWaiting() {{
       if (!conversationTimeline) return null;
+      clearMarvisConversationPausedRows();
       let node = conversationTimeline.querySelector("[data-marvis-followup-waiting]");
       if (node) return node;
       const empty = conversationTimeline.querySelector("[data-native-empty]");
@@ -7371,14 +7375,15 @@ def _relay_task_detail_page(
       const statusNode = lane?.querySelector(".role-status");
       return statusNode?.dataset.status || "";
     }}
-    function canApplyRoleStatus(role, status) {{
+    function canApplyRoleStatus(role, status, options = {{}}) {{
       if (!status) return false;
+      if (options.force) return true;
       const currentStatus = currentRoleStatus(role);
       if (TERMINAL_ROLE_STATUSES.has(currentStatus) && !TERMINAL_ROLE_STATUSES.has(status)) return false;
       return true;
     }}
-    function setRoleStatus(role, status) {{
-      if (!canApplyRoleStatus(role, status)) return;
+    function setRoleStatus(role, status, options = {{}}) {{
+      if (!canApplyRoleStatus(role, status, options)) return;
       const lane = document.querySelector(`[data-role="${{role}}"]`);
       const statusNode = lane?.querySelector(".role-status");
       if (statusNode && status) {{
@@ -7441,7 +7446,9 @@ def _relay_task_detail_page(
     const source = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{EVENTS_SUFFIX}}`);
     source.addEventListener("role.queued", (event) => {{
       const payload = parseRelayEvent(event);
-      setRoleStatus(payload.role, "queued");
+      const force = payload.reason === "new_followup_turn";
+      if (force) clearMarvisConversationPausedRows();
+      setRoleStatus(payload.role, "queued", {{ force }});
       appendActivity(`${{labelForRole(payload.role)}} 已进入队列，等待启动。`);
     }});
     source.addEventListener("role.streaming", (event) => {{
@@ -7463,13 +7470,14 @@ def _relay_task_detail_page(
     source.addEventListener("user.followup", (event) => {{
       const payload = parseRelayEvent(event);
       const key = payload.artifact_id ? `user_followup:${{payload.artifact_id}}` : `user_followup:${{payload.context_packet_id || Date.now()}}`;
+      clearMarvisConversationPausedRows();
       appendMarvisConversationUser(payload.text || payload.latest_user_input || "", key, false, {{
         images: payload.images || [],
         files: payload.files || []
       }});
       appendMarvisConversationWaiting();
       updateTaskStatus("running");
-      setRoleStatus("director", "queued");
+      setRoleStatus("director", "queued", {{ force: true }});
     }});
     source.addEventListener("role.native_event", (event) => {{
       const payload = parseRelayEvent(event);
@@ -7554,7 +7562,10 @@ def _relay_task_detail_page(
     }});
     source.addEventListener("role.status", (event) => {{
       const payload = parseRelayEvent(event);
-      setRoleStatus(payload.role, payload.status);
+      const reason = payload.reason || payload.payload?.reason || "";
+      const force = reason === "new_followup_turn";
+      if (force) clearMarvisConversationPausedRows();
+      setRoleStatus(payload.role, payload.status, {{ force }});
       if (TERMINAL_ROLE_STATUSES.has(payload.status)) clearRolePreview(payload.role);
       appendActivity(`${{labelForRole(payload.role)}} 状态更新为 ${{labelForStatus(payload.status)}}。`);
     }});
@@ -7598,10 +7609,11 @@ def _relay_task_detail_page(
       if ((attachments.images || []).length) data.images = attachments.images;
       if ((attachments.files || []).length) data.files = attachments.files;
       const localKey = `local-followup:${{Date.now()}}`;
+      clearMarvisConversationPausedRows();
       appendMarvisConversationUser(data.text || "已添加附件", localKey, true, attachments);
       appendMarvisConversationWaiting();
       updateTaskStatus("running");
-      setRoleStatus("director", "queued");
+      setRoleStatus("director", "queued", {{ force: true }});
       appendActivity("你已补充需求，已发送给总工程师。");
       const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/message${{TOKEN_SUFFIX}}`, {{
         method: "POST",
@@ -7836,6 +7848,13 @@ def _relay_projected_conversation_rows(
             if key:
                 seen_keys.add(key)
             projected_rows.append(artifact_row)
+        pending_row = _relay_pending_followup_waiting_row(artifacts, job_by_role)
+        if pending_row is not None:
+            key = str(pending_row.get("key") or "")
+            if not key or key not in seen_keys:
+                if key:
+                    seen_keys.add(key)
+                projected_rows.append(pending_row)
     else:
         for index, payload in enumerate(canonical_payload_sequence):
             role = str(payload.get("role") or payload.get("relay_role") or "")
@@ -7865,8 +7884,13 @@ def _relay_projected_conversation_rows(
                 }
             )
     _relay_enrich_generic_final_summary_rows(projected_rows)
+    has_pending_followup_waiting = any(
+        str(row.get("kind") or "") == "waiting"
+        and str(row.get("key") or "").startswith("followup-waiting:")
+        for row in projected_rows
+    )
     blocked_role = _relay_first_blocked_role(role_jobs)
-    if blocked_role:
+    if blocked_role and not has_pending_followup_waiting:
         projected_rows.append(
             {
                 "role": blocked_role,
@@ -7878,6 +7902,50 @@ def _relay_projected_conversation_rows(
             }
         )
     return projected_rows
+
+
+def _relay_pending_followup_waiting_row(
+    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    job_by_role: dict[str, Any],
+) -> dict[str, str] | None:
+    latest_followup_index = -1
+    latest_followup_key = ""
+    for index, artifact in enumerate(artifacts):
+        if str(artifact.get("artifact_type") or "") != "user_followup":
+            continue
+        latest_followup_index = index
+        latest_followup_key = str(
+            artifact.get("id") or artifact.get("created_at") or index
+        )
+    if latest_followup_index < 0:
+        return None
+    for artifact in artifacts[latest_followup_index + 1 :]:
+        artifact_type = str(artifact.get("artifact_type") or "")
+        if artifact_type in {
+            "followup_response",
+            "routing_decision",
+            "role_envelope",
+            "final_summary",
+            "implementation_report",
+            "audit_report",
+            "role_error",
+        }:
+            return None
+        if _relay_canonical_payload_from_artifact(artifact) is not None:
+            return None
+    director = job_by_role.get("director")
+    director_status = str(getattr(director, "status", "") or "")
+    if director_status not in {"queued", "running", "streaming"}:
+        return None
+    return {
+        "role": "director",
+        "kind": "waiting",
+        "speaker": "Marvis",
+        "meta": "进行中",
+        "body": "...",
+        "key": f"followup-waiting:{latest_followup_key}",
+        "status": "streaming",
+    }
 
 
 def _relay_user_message_dedupe_text(text: str) -> str:
@@ -8257,6 +8325,17 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
         {attachment_html}
       </article>
         """
+    if kind == "waiting":
+        persona, display_name = _marvis_relay_public_role("director")
+        return f"""
+      <article class="marvis-relay-agent-step marvis-relay-waiting" data-native-role="director" data-native-kind="waiting" data-native-key="{escape(key)}" data-marvis-followup-waiting="true">
+        {_marvis_relay_avatar_html(persona, label=display_name)}
+        <div class="marvis-relay-agent-content">
+          <div class="marvis-relay-agent-head"><strong>{escape(display_name)}</strong></div>
+          <div class="marvis-relay-agent-bubble" data-native-message-body>{escape(body or "...")}</div>
+        </div>
+      </article>
+    """
     persona, display_name = _marvis_relay_public_role(role)
     meta = str(row.get("meta") or row.get("status") or "")
     status_label = _marvis_relay_role_status_label(meta)

@@ -1367,6 +1367,7 @@ class RelayService:
             "completed",
             "blocked",
             "failed",
+            "interrupted",
         }
         board = detail.board
         self._store.save_artifact(
@@ -1437,7 +1438,10 @@ class RelayService:
             task_id,
             "role.queued",
             role="director",
-            payload={"latest_user_input": prompt_text},
+            payload={
+                "latest_user_input": prompt_text,
+                "reason": "new_followup_turn",
+            },
         )
         director = next(
             (job for job in detail.role_jobs if job.role == "director"),
