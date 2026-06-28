@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from wlcodex.relay.artifact_types import ALL_RELAY_ARTIFACT_TYPES
+
 
 @dataclass(frozen=True)
 class RelayRoleDefinition:
@@ -39,17 +41,7 @@ RELAY_ROLE_JOB_STATUSES = (
     "blocked",
     "interrupted",
 )
-RELAY_ARTIFACT_TYPES = (
-    "relay_board",
-    "routing_decision",
-    "role_dispatch_metadata",
-    "architecture_plan",
-    "implementation_report",
-    "test_report",
-    "audit_report",
-    "handoff_packet",
-    "final_summary",
-)
+RELAY_ARTIFACT_TYPES = ALL_RELAY_ARTIFACT_TYPES
 
 
 def _clean_list(values: list[Any] | tuple[Any, ...] | None) -> list[str]:

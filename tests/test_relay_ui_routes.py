@@ -257,10 +257,12 @@ def test_marvis_work_log_projection_summarizes_tool_storm_and_hides_agent_dump()
         RawWorkLogEntry(
             kind="message",
             key="message:implementer:1",
-            text=(
-                "Let me inspect the relay UI files. Now let me apply all the changes. "
-                "The file wlcodex/live_stream/static/relay_marvis.css has been updated successfully."
-            ),
+            text="The file wlcodex/live_stream/static/relay_marvis.css has been updated successfully.",
+        ),
+        RawWorkLogEntry(
+            kind="message",
+            key="message:implementer:2",
+            text="Let me summarize the visible relay UI state before handing off.",
         ),
         RawWorkLogEntry(kind="command", key="cmd:rg", chip="rg 已完成", output="No matches found"),
         RawWorkLogEntry(kind="command", key="cmd:sed", chip="sed 已完成", output="Found 9 files"),
@@ -296,12 +298,11 @@ def test_marvis_work_log_projection_summarizes_tool_storm_and_hides_agent_dump()
     assert "检索 1 次" in visible
     assert "测试 1 次" in visible
     assert "结构化结果不是合法 JSON" in visible
-    assert "Let me inspect" not in visible
+    assert "Let me summarize the visible relay UI state" in visible
     assert "updated successfully" not in visible
     assert "No matches found" not in visible
     assert "Found 9 files" not in visible
     assert "位于分支" not in visible
-    assert "Let me inspect" in output
     assert "No matches found" in output
 
 
@@ -470,13 +471,23 @@ async def test_relay_task_detail_work_log_projects_marvis_summary_not_tool_dump(
         event_type=EventType.MODEL_MESSAGE_COMPLETED,
         payload={
             "text": (
-                "Let me inspect the relay UI files. Now let me apply all the changes. "
                 "The file wlcodex/live_stream/static/relay_marvis.css has been updated successfully."
             ),
             "native_turn_id": "turn-agent-dump",
             "itemId": "assistant-agent-dump",
         },
         occurred_at="2026-06-14T12:21:00+00:00",
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=601,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": "Let me summarize the visible relay UI state before handing off.",
+            "native_turn_id": "turn-natural-english",
+            "itemId": "assistant-natural-english",
+        },
+        occurred_at="2026-06-14T12:21:01+00:00",
     )
     for index, (command, output) in enumerate(
         [
@@ -523,7 +534,7 @@ async def test_relay_task_detail_work_log_projects_marvis_summary_not_tool_dump(
     assert "检索 1 次" in default_html
     assert "测试 1 次" in default_html
     assert "结构化结果不是合法 JSON" in default_html
-    assert "Let me inspect" not in default_html
+    assert "Let me summarize the visible relay UI state" in default_html
     assert "updated successfully" not in default_html
     assert "rg 已完成" not in default_html
     assert "sed 已完成" not in default_html
@@ -531,7 +542,6 @@ async def test_relay_task_detail_work_log_projects_marvis_summary_not_tool_dump(
     assert "No matches found" not in default_html
     assert "Found 9 files" not in default_html
     assert "位于分支" not in default_html
-    assert "Let me inspect" in work_log_html
     assert "No matches found" in work_log_html
 
 
@@ -929,7 +939,7 @@ async def test_relay_task_detail_projects_followup_attachments_into_user_bubble(
 
 
 @pytest.mark.asyncio
-async def test_relay_task_detail_humanizes_pseudo_envelope_followup_response(
+async def test_relay_task_detail_hides_pseudo_envelope_followup_response(
     tmp_path: Path,
 ) -> None:
     server, service, _runtime_store = _server(tmp_path)
@@ -976,12 +986,12 @@ async def test_relay_task_detail_humanizes_pseudo_envelope_followup_response(
 
     conversation_html = _relay_view_panel_html(response, "conversation")
     assert "接续验证：请用一句话说明 task28 现在可以继续对话。" in conversation_html
-    assert "task28 现在可以继续对话" in conversation_html
-    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" not in conversation_html
+    assert "summary task28 现在可以继续对话" not in conversation_html
+    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" in conversation_html
 
 
 @pytest.mark.asyncio
-async def test_relay_task_detail_humanizes_fused_json_followup_response(
+async def test_relay_task_detail_hides_fused_json_followup_response(
     tmp_path: Path,
 ) -> None:
     server, service, _runtime_store = _server(tmp_path)
@@ -1026,7 +1036,8 @@ async def test_relay_task_detail_humanizes_fused_json_followup_response(
 
     conversation_html = _relay_view_panel_html(response, "conversation")
     assert "部署后接续验证" in conversation_html
-    assert "已修复" in conversation_html
+    assert "summary已修复" not in conversation_html
+    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" in conversation_html
     assert "next_actionopen_questionsreason" not in conversation_html
 
 
@@ -4167,9 +4178,12 @@ async def test_relay_task_detail_humanizes_valid_role_envelope(
             "text": json.dumps(
                 {
                     "status": "waiting_user",
+                    "reason": "需要用户先确认目标文件，避免误删。",
                     "role": "director",
                     "artifact_type": "routing_decision",
+                    "handoff_to": "",
                     "summary": "需要先确认具体文件路径。",
+                    "evidence_refs": ["用户请求未提供精确路径"],
                     "next_action": "请用户确认要删除的 md 文件。",
                     "open_questions": ["是否删除 /repo/测试接力.md？"],
                     "route": "waiting_user",
@@ -4748,6 +4762,8 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     envelope_handler = response.split('source.addEventListener("role.envelope"', 1)[1]
     envelope_handler = envelope_handler.split('source.addEventListener("handoff.created"', 1)[0]
     assert "renderRoleEnvelope" in envelope_handler
+    assert "payload.display_text" in envelope_handler
+    assert "envelope.display_text" in response
     handoff_handler = response.split('source.addEventListener("handoff.created"', 1)[1]
     handoff_handler = handoff_handler.split('source.addEventListener("role.status"', 1)[0]
     assert (

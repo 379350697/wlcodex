@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from wlcodex.models import TeamAgentJob, TeamArtifact, TeamRun
+from wlcodex.relay.artifact_types import is_relay_artifact_type
 from wlcodex.relay.context import build_relay_board
 from wlcodex.relay.models import (
     RELAY_ROLE_IDS,
@@ -178,6 +179,8 @@ class RelayStore:
         *,
         summary: str = "",
     ) -> TeamArtifact:
+        if not is_relay_artifact_type(artifact_type):
+            raise ValueError(f"unknown relay artifact_type: {artifact_type}")
         job = self._team_job_for_role(task_id, role) if role else None
         next_payload = dict(payload)
         if role:

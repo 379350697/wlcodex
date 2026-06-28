@@ -25,6 +25,39 @@ from wlcodex.runtime_events import (
 )
 
 
+def _strict_json_envelope(
+    *,
+    role: str = "director",
+    artifact_type: str = "routing_decision",
+    handoff_to: str = "",
+    summary: str = "route accepted",
+) -> str:
+    payload: dict[str, Any] = {
+        "status": "passed",
+        "reason": "valid strict json",
+        "role": role,
+        "artifact_type": artifact_type,
+        "handoff_to": handoff_to,
+        "summary": summary,
+        "evidence_refs": ["tests/test_relay_service.py"],
+        "open_questions": [],
+        "next_action": "continue",
+    }
+    if artifact_type == "routing_decision":
+        payload.update(
+            {
+                "complexity": "medium",
+                "risk": "medium",
+                "route": "core_relay",
+                "required_roles": ["director", "implementer", "auditor"],
+                "acceptance_criteria": ["strict JSON is accepted"],
+                "stop_conditions": ["stop on protocol error"],
+                "requires_user_approval": False,
+            }
+        )
+    return json.dumps(payload, ensure_ascii=False)
+
+
 class FakeProvider:
     provider = "claude"
     provider_engine = "sdk-test"
@@ -526,7 +559,7 @@ def test_invalid_streamed_envelope_retries_format_once(tmp_path) -> None:
     )
 
 
-def test_malformed_director_routing_recovers_explicit_full_relay(tmp_path) -> None:
+def test_malformed_director_routing_blocks_explicit_full_relay_after_retry(tmp_path) -> None:
     service, provider = _service(tmp_path)
     task = service.create_task(
         title="Relay",
@@ -559,20 +592,19 @@ def test_malformed_director_routing_recovers_explicit_full_relay(tmp_path) -> No
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
-    assert result.ok is False
-    assert detail.task.status == "running"
-    assert detail.routing_decision is not None
-    assert detail.routing_decision["route"] == "full_relay"
-    assert detail.routing_decision["required_roles"] == [
-        "director",
-        "architect",
-        "implementer",
-        "tester",
-        "auditor",
+    role_errors = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "director"
     ]
-    assert jobs["architect"].status == "streaming"
-    assert provider.calls[-1][0] == "start_session"
-    assert "role: architect" in provider.calls[-1][2]
+    assert result.ok is False
+    assert detail.task.status == "blocked"
+    assert detail.routing_decision is None
+    assert jobs["director"].status == "blocked"
+    assert jobs["architect"].status == "idle"
+    assert [call[0] for call in provider.calls] == ["start_session"]
+    assert all("recovered_as" not in artifact for artifact in role_errors)
 
 
 def test_successful_role_envelopes_dispatch_next_roles(tmp_path) -> None:
@@ -1295,7 +1327,7 @@ def test_director_followup_plain_text_completion_is_visible_and_completes_turn(
     assert followup_responses[-1]["text"] == "问题在主会话投影层，"
 
 
-def test_followup_malformed_routing_envelope_recovers_instead_of_plain_response(
+def test_followup_malformed_routing_envelope_retries_strict_json_instead_of_recovering(
     tmp_path,
 ) -> None:
     service, provider = _service(tmp_path)
@@ -1354,24 +1386,135 @@ def test_followup_malformed_routing_envelope_recovers_instead_of_plain_response(
         for artifact in detail.artifacts
         if artifact.get("artifact_type") == "followup_response"
     ]
+    role_errors = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "director"
+    ]
     assert followup_responses == []
     assert detail.task.status == "running"
-    assert detail.routing_decision is not None
-    assert detail.routing_decision["route"] == "core_relay"
-    assert detail.routing_decision["required_roles"] == [
-        "director",
-        "implementer",
-        "auditor",
-    ]
-    assert jobs["director"].status == "passed"
-    assert jobs["implementer"].status == "streaming"
-    assert any(call[0] == "start_session" for call in provider.calls)
-    assert any(
-        artifact.get("artifact_type") == "role_error"
-        and artifact.get("relay_role") == "director"
-        and artifact.get("recovered_as") == "routing_decision"
-        for artifact in detail.artifacts
+    assert detail.routing_decision is None
+    assert jobs["director"].status == "streaming"
+    assert jobs["implementer"].status == "idle"
+    assert any(call[0] == "continue_session" for call in provider.calls)
+    assert role_errors[-1]["retry_kind"] == "format"
+    assert all("recovered_as" not in artifact for artifact in role_errors)
+
+
+def test_malformed_routing_envelope_blocks_after_format_retry_is_spent(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="给聊天框上方增加工作区显示和选择入口",
+        workspace="/repo",
+        provider="claude",
     )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {"retry_kind": "format", "error": "invalid json", "round_id": 1},
+        summary="previous format retry already used",
+    )
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            '{"artifact_type":"routing_decisioncomplexitymedium'
+            "routecore_relayrequired_rolesdirectorimplementerauditor"
+            'statuspassedsummary core：先清理，再残行为一致结果"}',
+        )
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    role_errors = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "director"
+    ]
+    assert detail.task.status == "blocked"
+    assert jobs["director"].status == "blocked"
+    assert detail.routing_decision is None
+    assert all("recovered_as" not in artifact for artifact in role_errors)
+    assert "missing required fields" in role_errors[-1]["error"]
+
+
+def test_format_retry_budget_resets_for_new_followup_round(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="给聊天框上方增加工作区显示和选择入口",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {"retry_kind": "format", "error": "invalid json", "round_id": 1},
+        summary="previous round format retry already used",
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_task_status(task.id, "completed")
+
+    asyncio.run(service.add_user_message(task.id, "继续处理刚才的问题"))
+    provider.calls.clear()
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            '{"artifact_type":"routing_decisioncomplexitymedium'
+            "routecore_relayrequired_rolesdirectorimplementerauditor"
+            'statuspassedsummary core：先清理，再残行为一致结果"}',
+        )
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    current_round_errors = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "director"
+        and artifact.get("round_id") == 2
+    ]
+    assert detail.current_round_id == 2
+    assert detail.task.status == "running"
+    assert jobs["director"].status == "streaming"
+    assert any(call[0] == "continue_session" for call in provider.calls)
+    assert current_round_errors[-1]["retry_kind"] == "format"
+
+
+def test_relay_store_rejects_unknown_artifact_type(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="audit artifact type boundaries",
+        workspace="/repo",
+        provider="claude",
+    )
+
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {"error": "format failed"},
+        summary="format failed",
+    )
+
+    with pytest.raises(ValueError, match="unknown relay artifact_type: weather_answer"):
+        service._store.save_artifact(
+            task.id,
+            "director",
+            "weather_answer",
+            {"summary": "not a relay artifact"},
+            summary="not a relay artifact",
+        )
 
 
 def test_followup_director_waiting_handoff_dispatches_implementer(
@@ -1913,7 +2056,7 @@ def test_followup_plain_text_can_complete_from_provider_read_session(
     assert followup_responses[-1]["native_turn_id"] == "turn-followup"
 
 
-def test_followup_malformed_read_session_protocol_recovers_not_plain_response(
+def test_followup_malformed_read_session_protocol_retries_not_plain_response(
     tmp_path,
 ) -> None:
     service, provider = _service(tmp_path)
@@ -1974,28 +2117,25 @@ def test_followup_malformed_read_session_protocol_recovers_not_plain_response(
     ]
     assert followup_responses == []
     assert detail.task.status == "running"
-    assert detail.routing_decision is not None
-    assert detail.routing_decision["route"] == "core_relay"
-    assert detail.routing_decision["required_roles"] == [
-        "director",
-        "implementer",
-        "auditor",
-    ]
-    assert jobs["director"].status == "passed"
-    assert jobs["implementer"].status == "streaming"
+    assert detail.routing_decision is None
+    assert jobs["director"].status == "streaming"
+    assert jobs["implementer"].status == "idle"
 
 
-def test_plain_followup_visible_text_extracts_fused_protocol_summary() -> None:
+def test_plain_followup_visible_text_hides_fused_protocol_summary() -> None:
     text = (
         '{"artifact_type":"final_summary","evidence_refs":[],"handoff_to":"",'
         '"next_actionopen_questionsreason接续验证。'
         'roledirectorstatuspassedsummary已修复"}'
     )
 
-    assert _plain_followup_visible_text(text) == "已修复"
+    assert (
+        _plain_followup_visible_text(text)
+        == "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。"
+    )
 
 
-def test_plain_followup_visible_text_prefers_readable_text_over_fragmented_summary() -> None:
+def test_plain_followup_visible_text_hides_fragmented_protocol_after_readable_prefix() -> None:
     text = (
         "我会先修输入框对齐，再替换底部导航图标。"
         "CSS 已经收口，旧伪元素已删除，编译确认通过。"
@@ -2004,10 +2144,13 @@ def test_plain_followup_visible_text_prefers_readable_text_over_fragmented_summa
         'roledirectorstatuspassedsummary区“请输入”椭圆麦克风 风格为空可更新 缓存版本"}'
     )
 
-    assert _plain_followup_visible_text(text) == "CSS 已经收口，旧伪元素已删除，编译确认通过。"
+    assert (
+        _plain_followup_visible_text(text)
+        == "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。"
+    )
 
 
-def test_plain_followup_visible_text_uses_result_tail_before_protocol_payload() -> None:
+def test_plain_followup_visible_text_does_not_guess_result_tail_before_protocol_payload() -> None:
     text = (
         "我会先修输入框对齐。"
         "中间过程文字很多，没有完整断句"
@@ -2016,7 +2159,10 @@ def test_plain_followup_visible_text_uses_result_tail_before_protocol_payload() 
         '"reason完成交互本地roledirectorstatuspassedsummary区“请输入”椭圆麦克风"}'
     )
 
-    assert _plain_followup_visible_text(text).startswith("CSS 已经收口")
+    assert (
+        _plain_followup_visible_text(text)
+        == "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。"
+    )
 
 
 def test_scan_stale_native_role_does_not_close_pending_followup_from_old_session_read(
@@ -3165,7 +3311,7 @@ def test_runtime_agent_run_failed_blocks_streaming_role(tmp_path) -> None:
     )
 
 
-def test_implementer_frontend_patch_envelope_normalizes_to_implementation_report(
+def test_implementer_markdown_fenced_frontend_patch_envelope_retries_format(
     tmp_path,
 ) -> None:
     service, provider = _service(tmp_path)
@@ -3244,11 +3390,20 @@ def test_implementer_frontend_patch_envelope_normalizes_to_implementation_report
         for artifact in detail.artifacts
         if artifact.get("artifact_type") == "implementation_report"
     ]
-    assert jobs["implementer"].status == "passed"
-    assert jobs["tester"].status == "streaming"
-    assert implementation
-    assert implementation[-1]["summary"] == "已添加工作区显示和选择入口。"
-    assert [call[0] for call in provider.calls] == ["start_session", "start_session"]
+    role_errors = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "implementer"
+    ]
+    assert jobs["implementer"].status == "streaming"
+    assert jobs["tester"].status == "idle"
+    assert implementation == []
+    assert role_errors[-1]["retry_kind"] == "format"
+    assert [call[0] for call in provider.calls] == [
+        "start_session",
+        "continue_session",
+    ]
 
 
 def test_implementer_placeholder_artifact_type_normalizes_and_dispatches_auditor(
@@ -3400,7 +3555,7 @@ def test_codex_native_turn_completed_folds_text_deltas_into_routing_decision(
     assert event_types[-2:] == ["role.streaming", "dispatch.verified"]
 
 
-def test_codex_native_turn_completed_recovers_core_relay_routing_decision(
+def test_codex_native_turn_completed_retries_invalid_core_relay_routing_decision(
     tmp_path,
 ) -> None:
     service, _provider = _service(tmp_path)
@@ -3478,20 +3633,18 @@ def test_codex_native_turn_completed_recovers_core_relay_routing_decision(
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
-    assert detail.routing_decision is not None
-    assert detail.routing_decision["route"] == "core_relay"
-    assert detail.routing_decision["required_roles"] == [
-        "director",
-        "implementer",
-        "auditor",
-    ]
-    assert jobs["director"].status == "passed"
-    assert jobs["implementer"].status == "streaming"
-    assert any(
-        artifact.get("artifact_type") == "role_error"
-        and "已按明确语义恢复路由" in str(artifact.get("summary") or "")
+    role_errors = [
+        artifact
         for artifact in detail.artifacts
-    )
+        if artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "director"
+    ]
+    assert detail.routing_decision is None
+    assert detail.task.status == "running"
+    assert jobs["director"].status == "streaming"
+    assert jobs["implementer"].status == "idle"
+    assert role_errors[-1]["retry_kind"] == "format"
+    assert all("recovered_as" not in artifact for artifact in role_errors)
 
 
 def test_stale_scan_folds_current_turn_delta_consumed_before_completion(
@@ -4439,6 +4592,12 @@ def test_native_runtime_completion_advances_without_sse_request(tmp_path) -> Non
     assert jobs["tester"].status == "streaming"
     event_types = [event.event_type for event in service.events_for_task(task.id)]
     assert "role.envelope" in event_types
+    envelope_event = next(
+        event
+        for event in service.events_for_task(task.id)
+        if event.event_type == "role.envelope" and event.role == "implementer"
+    )
+    assert envelope_event.payload["display_text"].startswith("结论：该角色已返回结构化结果")
     assert "handoff.created" in event_types
     assert "role.queued" in event_types
     assert "dispatch.verified" in event_types
@@ -4802,7 +4961,7 @@ def test_auditor_passed_returns_to_director_then_final_summary_completes_task(
     assert service.events_for_task(task.id)[-1].event_type == "task.completed"
 
 
-def test_single_role_interrupt_stops_native_session_without_interrupting_whole_task(
+def test_single_role_interrupt_stops_native_session_and_interrupts_task_when_no_roles_active(
     tmp_path,
 ) -> None:
     service, provider = _service(tmp_path)
@@ -4818,7 +4977,7 @@ def test_single_role_interrupt_stops_native_session_without_interrupting_whole_t
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
-    assert detail.task.status == "running"
+    assert detail.task.status == "interrupted"
     assert jobs["director"].status == "interrupted"
     assert jobs["architect"].status == "idle"
     assert ("interrupt_session", "native-1", "") in provider.calls

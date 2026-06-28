@@ -45,6 +45,22 @@ from wlcodex.live_stream.collapse import (
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.jsonrpc import JsonRpcError, JsonRpcTimeout
+from wlcodex.relay.display import (
+    dict_looks_like_role_envelope as relay_dict_looks_like_role_envelope,
+)
+from wlcodex.relay.display import (
+    followup_response_display_text,
+    humanize_display_text,
+    humanize_role_envelope,
+    join_text_list,
+    protocol_output_hidden_text,
+    replace_legacy_role_identifiers,
+    role_output_error_text,
+    routing_risk_label,
+    routing_route_label,
+    sanitize_protocol_leak_text,
+    text_needs_chinese_fallback,
+)
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
 from wlcodex.relay.work_log_projection import (
@@ -4187,14 +4203,7 @@ def _relay_replace_legacy_role_display_names(text: str) -> str:
 
 
 def _relay_replace_legacy_role_identifiers(text: str) -> str:
-    value = _relay_replace_legacy_role_display_names(text)
-    for role in RELAY_ROLE_IDS:
-        current_slug = _marvis_relay_public_role(role)[0]
-        for slug_parts in _MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS.get(role, ()):
-            legacy_slug = "-".join(slug_parts)
-            if legacy_slug and legacy_slug != current_slug:
-                value = value.replace(legacy_slug, current_slug)
-    return value
+    return replace_legacy_role_identifiers(text)
 
 
 def _marvis_relay_role_status_label(status: str) -> str:
@@ -4203,7 +4212,7 @@ def _marvis_relay_role_status_label(status: str) -> str:
         return "已完成"
     if value in {"failed", "blocked", "error"}:
         return "调用失败"
-    if value in {"queued", "streaming", "running", "started", "progress"}:
+    if value in {"queued", "streaming", "started", "progress"}:
         return "进行中"
     if value == "waiting_user":
         return "等待中"
@@ -6083,76 +6092,19 @@ def _relay_role_status_label(status: str) -> str:
 
 
 def _relay_routing_route_label(route: str) -> str:
-    return {
-        "director_only": "总工程师直接完成",
-        "core_relay": "核心接力",
-        "full_relay": "完整五角色接力",
-        "audit_first": "审计优先",
-        "waiting_user": "等待用户确认",
-        "blocked": "已阻塞",
-    }.get(route, route or "等待总工程师判断")
+    return routing_route_label(route)
 
 
 def _relay_humanize_display_text(text: str, *, english_fallback: str = "") -> str:
-    value = str(text or "")
-    value = re.sub(
-        r"(?:Marvis/)?(?:App|File|Search|Computer|Browser)(?:/(?:App|File|Search|Computer|Browser))+ Agent",
-        "英文角色名",
-        value,
-    )
-    value = _relay_replace_legacy_role_identifiers(value)
-    replacements = (
-        ("路由为director_only", "由总工程师直接处理"),
-        ("director_only", "总工程师直接处理"),
-        ("core_relay", "核心角色接力"),
-        ("full_relay", "五角色完整接力"),
-        ("audit_first", "先审计再推进"),
-        ("waiting_user", "等待你补充"),
-        (
-            "complete directly after routing by checking current market sources and returning the latest available gold price",
-            "由总工程师核验最新行情来源并给出结果",
-        ),
-        ("complete directly after routing", "由总工程师直接处理"),
-        ("complete directly", "直接处理"),
-        ("dispatch next role", "交给下一位角色处理"),
-        ("dispatch task", "任务分配"),
-        ("safe-area-inset-top", "顶部安全区"),
-        ("safe-area", "安全区"),
-    )
-    for source, target in replacements:
-        value = value.replace(source, target)
-    if english_fallback and _relay_text_needs_chinese_fallback(value):
-        return english_fallback
-    return value
+    return humanize_display_text(text, english_fallback=english_fallback)
 
 
 def _relay_text_needs_chinese_fallback(text: str) -> bool:
-    value = _relay_replace_legacy_role_identifiers(text).strip()
-    if not value:
-        return False
-    normalized = value
-    for public_name in (
-        "开发工程师",
-        "架构工程师",
-        "测试工程师",
-        "审核工程师",
-        "Marvis",
-    ):
-        normalized = normalized.replace(public_name, "")
-    if not re.search(r"[A-Za-z]{3,}", normalized):
-        return False
-    if not re.search(r"[\u4e00-\u9fff]", normalized):
-        return True
-    return bool(re.search(r"[A-Za-z]{3,}(?:[ -]+[A-Za-z]{2,}){1,}", normalized))
+    return text_needs_chinese_fallback(text)
 
 
 def _relay_routing_risk_label(risk: str) -> str:
-    return {
-        "low": "低",
-        "medium": "中",
-        "high": "高",
-        "critical": "关键",
-    }.get(risk, risk or "待判断")
+    return routing_risk_label(risk)
 
 
 def _relay_phase_label(phase: str) -> str:
@@ -7191,8 +7143,7 @@ def _relay_task_detail_page(
       const value = String(text || "").trim();
       if (!value) return false;
       if (marvisWorkLogTextLooksLikeMachineOutput(value)) return true;
-      return /\\b(?:Let me|Now let me|Now I|I need to|I(?:'ll| will))\\b/i.test(value)
-        || /\\bThe file\\b.+\\bhas been updated successfully\\b/i.test(value)
+      return /\\bThe file\\b.+\\bhas been updated successfully\\b/i.test(value)
         || /\\b(?:All changes are in place|No matches found|Found \\d+ files?|Task not found)\\b/i.test(value)
         || /位于分支|尚未暂存|修改尚未加入提交|未跟踪的文件/.test(value);
     }}
@@ -7845,7 +7796,7 @@ def _relay_task_detail_page(
     function renderRoleEnvelope(role, envelope) {{
       if (!role || !envelope) return;
       clearRolePreview(role);
-      const summaryText = relayHumanizeEnvelope(envelope);
+      const summaryText = envelope.display_text || relayHumanizeEnvelope(envelope);
       const roundId = String(envelope.round_id || activeRelayRoundId || CURRENT_ROUND_ID || "1");
       const isDispatchHandoff =
         role === "director" &&
@@ -8024,7 +7975,7 @@ def _relay_task_detail_page(
       const roundId = relayEventRoundId(payload);
       appendMarvisConversationAssistant(
         payload.role || "director",
-        payload.text || payload.summary || "",
+        payload.display_text || payload.text || payload.summary || "",
         "followup_response",
         payload.artifact_id ? `followup_response:${{payload.artifact_id}}` : "",
         payload.status || "passed",
@@ -8067,7 +8018,8 @@ def _relay_task_detail_page(
     source.addEventListener("role.envelope", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
-      const envelope = payload.envelope || payload;
+      const envelope = {{ ...(payload.envelope || payload) }};
+      if (payload.display_text && !envelope.display_text) envelope.display_text = payload.display_text;
       const role = payload.role || envelope.role;
       renderRoleEnvelope(role, envelope);
       if (envelope.summary) {{
@@ -8488,7 +8440,7 @@ def _relay_pending_followup_waiting_row(
             return None
     director = job_by_role.get("director")
     director_status = str(getattr(director, "status", "") or "")
-    if director_status not in {"queued", "running", "streaming"}:
+    if director_status not in {"queued", "streaming"}:
         return None
     return {
         "role": "director",
@@ -9467,169 +9419,31 @@ def _relay_extract_context_field(text: str, field: str) -> str:
 
 
 def _relay_sanitize_protocol_leak_text(role: str, text: str) -> str:
-    value = _relay_humanize_display_text(text)
-    sentinel = "原始结构化输出不在主会话展示。"
-    if sentinel in value:
-        return value.split(sentinel, 1)[0] + sentinel
-    markers = (
-        "artifact_type",
-        "expected_output_envelope",
-        "routing_decisioncomplexity",
-        "required_roles",
-        "handoff_to",
-    )
-    if "{" in value and any(marker in value for marker in markers):
-        return _relay_protocol_output_hidden_text(role)
-    return value
+    return sanitize_protocol_leak_text(role, text)
 
 
 def _relay_followup_response_display_text(role: str, text: str) -> str:
-    value = text.strip()
-    if not value:
-        return ""
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        parsed = None
-    if isinstance(parsed, dict) and _relay_dict_looks_like_role_envelope(parsed):
-        display_text = _relay_humanize_role_envelope(parsed)
-        extracted = _relay_extract_pseudo_envelope_human_text(value)
-        if display_text == "角色已返回结构化结果。" and extracted:
-            return extracted
-        return display_text
-
-    humanized = _relay_humanize_display_text(value)
-    extracted = _relay_extract_pseudo_envelope_human_text(humanized)
-    if extracted:
-        return extracted
-    return _relay_sanitize_protocol_leak_text(role, value)
-
-
-def _relay_extract_pseudo_envelope_human_text(text: str) -> str:
-    if not text or "{" not in text:
-        return ""
-    if not any(marker in text for marker in ("artifact_type", "summary", "reason")):
-        return ""
-
-    normalized = re.sub(r"\s+", " ", text).strip()
-    candidates: list[str] = []
-    for field in ("summary", "reason"):
-        match = re.search(
-            rf"(?:^|[{{,\\s\"]){field}(?:[\"\\s:=：]*)(.+)",
-            normalized,
-        )
-        if match:
-            candidates.append(match.group(1))
-            continue
-        marker_index = normalized.rfind(field)
-        if marker_index >= 0:
-            candidates.append(normalized[marker_index + len(field) :])
-
-    for candidate in candidates:
-        cut_at = len(candidate)
-        for marker in (
-            "role",
-            "status",
-            "handoff_to",
-            "next_action",
-            "open_questions",
-            "evidence_refs",
-            "artifact_type",
-        ):
-            marker_index = candidate.find(marker)
-            if marker_index > 0:
-                cut_at = min(cut_at, marker_index)
-        cleaned = candidate[:cut_at]
-        cleaned = cleaned.strip(' ,，。"{}')
-        if not cleaned:
-            continue
-        cleaned = _relay_humanize_display_text(cleaned)
-        if _relay_text_needs_chinese_fallback(cleaned):
-            continue
-        if len(cleaned) >= 2:
-            return cleaned
-    return ""
+    return followup_response_display_text(role, text)
 
 
 def _relay_dict_looks_like_role_envelope(payload: dict[str, Any]) -> bool:
-    return any(
-        key in payload
-        for key in (
-            "artifact_type",
-            "relay_role",
-            "summary",
-            "next_action",
-            "open_questions",
-            "required_roles",
-            "acceptance_criteria",
-        )
-    )
+    return relay_dict_looks_like_role_envelope(payload)
 
 
 def _relay_humanize_role_envelope(payload: dict[str, Any]) -> str:
-    lines: list[str] = []
-    summary = str(
-        payload.get("summary") or payload.get("output") or payload.get("reason") or ""
-    ).strip()
-    if summary:
-        summary = _relay_humanize_display_text(
-            summary,
-            english_fallback="该角色已返回结构化结果，详情见结构化数据。",
-        )
-        lines.append(f"结论：{summary}")
-    next_action = str(payload.get("next_action") or "").strip()
-    if next_action:
-        next_action = _relay_humanize_display_text(
-            next_action,
-            english_fallback="下一步见结构化数据。",
-        )
-        lines.append(f"下一步：{next_action}")
-    questions = _relay_join_text_list(payload.get("open_questions"))
-    if questions:
-        questions = _relay_humanize_display_text(
-            questions,
-            english_fallback="待确认内容见结构化数据。",
-        )
-        lines.append(f"待确认：{questions}")
-    route = str(payload.get("route") or "").strip()
-    risk = str(payload.get("risk") or "").strip()
-    if route or risk:
-        parts: list[str] = []
-        if route:
-            parts.append(f"路径：{_relay_routing_route_label(route)}")
-        if risk:
-            parts.append(f"风险：{_relay_routing_risk_label(risk)}")
-        lines.append(" · ".join(parts))
-    acceptance = _relay_join_text_list(payload.get("acceptance_criteria"))
-    if acceptance:
-        acceptance = _relay_humanize_display_text(
-            acceptance,
-            english_fallback="验收依据见结构化数据。",
-        )
-        lines.append(f"验收依据：{acceptance}")
-    if not lines:
-        lines.append("角色已返回结构化结果。")
-    return "\n".join(lines)
+    return humanize_role_envelope(payload)
 
 
 def _relay_join_text_list(value: Any) -> str:
-    if isinstance(value, (list, tuple)):
-        return "；".join(str(item).strip() for item in value if str(item).strip())
-    return str(value or "").strip()
+    return join_text_list(value)
 
 
 def _relay_role_output_error_text(role: str, error: str) -> str:
-    role_label = _relay_role_label(role)
-    lines = [f"{role_label}输出格式异常，任务已阻塞。"]
-    if error:
-        lines.append(f"错误：{_relay_humanize_display_text(error)}")
-    lines.append("请补充确认后重新调度，原始结构化输出不在主会话展示。")
-    return "\n".join(lines)
+    return role_output_error_text(role, error)
 
 
 def _relay_protocol_output_hidden_text(role: str) -> str:
-    role_label = _relay_role_label(role)
-    return f"{role_label}的结构化输出已由系统处理，原始协议内容不在主会话展示。"
+    return protocol_output_hidden_text(role)
 
 
 def _relay_native_message_html(row: dict[str, str]) -> str:

@@ -845,7 +845,7 @@ async def test_relay_message_routes_to_director_and_interrupt_role(tmp_path: Pat
         relay_service=service,
     )
     payload = _json_body(interrupt_response)
-    assert payload["task"]["status"] == "running"
+    assert payload["task"]["status"] == "interrupted"
     assert {job["role"]: job["status"] for job in payload["role_jobs"]}[
         "director"
     ] == "interrupted"

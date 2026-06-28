@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import json
-import re
 from typing import Any
 
 from wlcodex.live_stream.models import stream_event_from_runtime
 from wlcodex.relay.context import build_role_context_packet
+from wlcodex.relay.display import (
+    followup_response_display_text,
+    humanize_role_envelope,
+)
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.events import RelayEvent, RelayEventBus
 from wlcodex.relay.models import HandoffPacket, RelayTask, RelayTaskDetail
@@ -436,7 +439,7 @@ class RelayService:
         job = next((candidate for candidate in detail.role_jobs if candidate.role == role), None)
         if job is None:
             raise ValueError(f"unknown relay role: {role}")
-        if job.status in {"running", "streaming", "queued"} and not force:
+        if job.status in {"streaming", "queued"} and not force:
             return
         self._store.update_task_status(task_id, "running")
         self._store.update_role_status(task_id, role, "queued")
@@ -653,13 +656,6 @@ class RelayService:
     ):
         result = parse_role_envelope(output)
         if not result.ok or result.envelope is None:
-            if dispatch_next and await self._recover_director_routing_decision(
-                task_id,
-                role,
-                error=result.error or "invalid role envelope",
-                output=output,
-            ):
-                return result
             if dispatch_next and await self._retry_role_envelope_format(
                 task_id,
                 role,
@@ -705,11 +701,12 @@ class RelayService:
             **envelope.to_json_dict(),
             "round_id": round_id,
         }
+        display_text = humanize_role_envelope(envelope_payload)
         self._events.emit(
             task_id,
             "role.envelope",
             role=role,
-            payload=envelope_payload,
+            payload={**envelope_payload, "display_text": display_text},
         )
         self._store.save_artifact(
             task_id,
@@ -1277,7 +1274,8 @@ class RelayService:
         output: str,
     ) -> bool:
         detail = self._store.get_task_detail(task_id)
-        if _has_format_retry(detail.artifacts, role):
+        round_id = self._store.current_round_id(task_id)
+        if _has_format_retry(detail.artifacts, role, round_id=round_id):
             return False
         job = next((job for job in detail.role_jobs if job.role == role), None)
         if job is None or not job.provider:
@@ -1306,6 +1304,7 @@ class RelayService:
                 "error": error,
                 "output": output,
                 "retry_kind": "format",
+                "round_id": round_id,
             },
             summary=f"角色输出格式错误，已要求重新输出合法 JSON：{error}",
         )
@@ -1363,46 +1362,6 @@ class RelayService:
                 "provider": job.provider,
                 "native_session_id": native_session_id,
             },
-        )
-        return True
-
-    async def _recover_director_routing_decision(
-        self,
-        task_id: int,
-        role: str,
-        *,
-        error: str,
-        output: str,
-    ) -> bool:
-        if role != "director":
-            return False
-        detail = self._store.get_task_detail(task_id)
-        if detail.routing_decision:
-            return False
-        recovered = _recover_routing_decision_from_invalid_output(
-            detail.task.prompt,
-            output,
-        )
-        if not recovered:
-            return False
-        self._store.save_artifact(
-            task_id,
-            role,
-            "role_error",
-            {
-                "error": error,
-                "output": output,
-                "recovered_as": "routing_decision",
-            },
-            summary=f"总工程师路由输出格式错误，已按明确语义恢复路由：{recovered['route']}",
-        )
-        recovered_output = json.dumps(recovered, ensure_ascii=False, sort_keys=True)
-        await self._handle_routing_decision(
-            task_id,
-            role,
-            recovered_output,
-            recovered,
-            dispatch_next=True,
         )
         return True
 
@@ -1468,15 +1427,14 @@ class RelayService:
                 text=text,
             )
             return True
-        if not parse_result.ok and await self._recover_director_routing_decision(
-            task_id,
-            role,
-            error=parse_result.error or "invalid role envelope",
-            output=text,
-        ):
-            self._mark_native_agent_run_done(agent_run_id, text)
-            return True
         if not parse_result.ok and _looks_like_relay_protocol_attempt(text):
+            if await self._retry_role_envelope_format(
+                task_id,
+                role,
+                error=parse_result.error or "invalid role envelope",
+                output=text,
+            ):
+                return True
             self._mark_native_agent_run_done(agent_run_id, text)
             self._block_role_with_error(
                 task_id,
@@ -1900,6 +1858,7 @@ class RelayService:
             payload={
                 "role": role,
                 "text": clean_text,
+                "display_text": clean_text,
                 "status": "passed",
                 "artifact_id": int(getattr(response_artifact, "id", 0) or 0),
                 "round_id": round_id,
@@ -1930,7 +1889,7 @@ class RelayService:
         projected = 0
         for task_detail in self._active_native_task_details():
             for job in task_detail.role_jobs:
-                if job.status not in {"running", "streaming"} or not job.agent_run_id:
+                if job.status != "streaming" or not job.agent_run_id:
                     continue
                 agent_run_id = int(job.agent_run_id)
                 after_id = self._runtime_projection_cursors.get(agent_run_id, 0)
@@ -1975,7 +1934,7 @@ class RelayService:
             except KeyError:
                 continue
             for job in task_detail.role_jobs:
-                if job.status in {"running", "streaming"} or not job.agent_run_id:
+                if job.status == "streaming" or not job.agent_run_id:
                     continue
                 agent_run_id = int(job.agent_run_id)
                 try:
@@ -2042,7 +2001,7 @@ class RelayService:
         changed = 0
         for task_detail in self._active_native_task_details():
             for job in task_detail.role_jobs:
-                if job.status not in {"running", "streaming"} or not job.agent_run_id:
+                if job.status != "streaming" or not job.agent_run_id:
                     continue
                 last_activity = self._last_native_role_activity_at(
                     runtime_store,
@@ -2063,10 +2022,7 @@ class RelayService:
                     (candidate for candidate in refreshed.role_jobs if candidate.role == job.role),
                     None,
                 )
-                if refreshed_job is None or refreshed_job.status not in {
-                    "running",
-                    "streaming",
-                }:
+                if refreshed_job is None or refreshed_job.status != "streaming":
                     continue
                 pending_followup_response = self._should_accept_plain_followup_response(
                     task_detail.task.id,
@@ -2134,7 +2090,7 @@ class RelayService:
             except KeyError:
                 continue
             has_active_native_role = any(
-                job.status in {"running", "streaming"} and job.agent_run_id
+                job.status == "streaming" and job.agent_run_id
                 for job in detail.role_jobs
             )
             if not has_active_native_role:
@@ -2165,12 +2121,25 @@ class RelayService:
             if job is not None:
                 await self._interrupt_native_job(job)
             self._store.update_role_status(task_id, role, "interrupted")
+            refreshed = self._store.get_task_detail(task_id)
+            has_active_role = any(
+                candidate.status in {"queued", "streaming", "waiting"}
+                for candidate in refreshed.role_jobs
+            )
+            if not has_active_role and refreshed.task.status in {
+                "queued",
+                "running",
+                "waiting_user",
+            }:
+                self._store.update_task_status(task_id, "interrupted")
             self._events.emit(
                 task_id,
                 "role.status",
                 role=role,
                 payload={"status": "interrupted"},
             )
+            if not has_active_role:
+                self._events.emit(task_id, "task.interrupted", payload={})
             return
         detail = self._store.get_task_detail(task_id)
         if detail.task.status not in {"queued", "running", "streaming", "waiting_user"}:
@@ -2690,15 +2659,32 @@ def _next_uncompleted_required_role(
     return None
 
 
-def _has_format_retry(artifacts: list[dict[str, Any]], role: str) -> bool:
+def _has_format_retry(
+    artifacts: list[dict[str, Any]],
+    role: str,
+    *,
+    round_id: int | None = None,
+) -> bool:
     for artifact in artifacts:
         if str(artifact.get("artifact_type") or "") != "role_error":
             continue
         if str(artifact.get("relay_role") or artifact.get("role") or "") != role:
             continue
+        if round_id is not None:
+            artifact_round = _coerce_round_id(artifact.get("round_id")) or 1
+            if artifact_round != round_id:
+                continue
         if str(artifact.get("retry_kind") or "") == "format":
             return True
     return False
+
+
+def _coerce_round_id(value: Any) -> int:
+    try:
+        round_id = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return round_id if round_id > 0 else 0
 
 
 def _role_envelope_retry_prompt(
@@ -2728,157 +2714,6 @@ def _role_envelope_retry_prompt(
         "上一版无效输出如下，请保留语义、修正结构：\n"
         f"{output}"
     )
-
-
-def _recover_routing_decision_from_invalid_output(
-    prompt: str,
-    output: str,
-) -> dict[str, Any] | None:
-    text = f"{prompt}\n{output}".lower()
-    if "routing_decision" not in text and "route" not in text:
-        return None
-    payload = _latest_json_object(output)
-    if payload is not None:
-        recovered = _recover_routing_decision_from_payload(prompt, payload)
-        if recovered is not None:
-            return recovered
-    if _user_requested_full_relay(prompt):
-        return {
-            "status": "passed",
-            "reason": "用户明确要求完整接力流程，格式恢复后继续调度五个角色。",
-            "role": "director",
-            "artifact_type": "routing_decision",
-            "handoff_to": "",
-            "summary": "按完整五角色接力处理：先由架构工程师审查，再交给开发、测试、审计，最后由总工程师收口。",
-            "evidence_refs": ["recovered malformed director routing output"],
-            "open_questions": [],
-            "next_action": "调度架构工程师继续接力",
-            "complexity": "high",
-            "risk": "medium",
-            "route": "full_relay",
-            "required_roles": [
-                "director",
-                "architect",
-                "implementer",
-                "tester",
-                "auditor",
-            ],
-            "acceptance_criteria": [
-                "五个角色均参与并产出协议化结果",
-                "不修改文件、不提交、不部署",
-                "最终由总工程师给出中文收口总结",
-            ],
-            "stop_conditions": [
-                "发现需要修改文件、提交或部署时停止并说明",
-                "发现高风险或目标不清时停止并要求用户确认",
-            ],
-            "requires_user_approval": False,
-        }
-    if _prompt_looks_high_risk(prompt):
-        return None
-    if "core_relay" in text or "core relay" in text:
-        return {
-            "status": "passed",
-            "reason": "总工程师输出的路由语义明确为核心接力，格式恢复后继续调度开发角色。",
-            "role": "director",
-            "artifact_type": "routing_decision",
-            "handoff_to": "",
-            "summary": "按核心接力处理：先由总工程师确认方向，再交给开发角色实现，随后由审核角色复核。",
-            "evidence_refs": ["recovered malformed director routing output"],
-            "open_questions": [],
-            "next_action": "调度开发角色继续接力，完成后进入审核",
-            "complexity": "medium",
-            "risk": "medium",
-            "route": "core_relay",
-            "required_roles": ["director", "implementer", "auditor"],
-            "acceptance_criteria": ["完成用户请求并给出中文结果"],
-            "stop_conditions": ["发现需要用户确认范围或高风险操作时暂停"],
-            "requires_user_approval": False,
-        }
-    if "director_only" in text or "route_only" in text or "routedirector" in text:
-        return {
-            "status": "passed",
-            "reason": "任务为低风险直接回答，格式恢复后由总工程师直接收口。",
-            "role": "director",
-            "artifact_type": "routing_decision",
-            "handoff_to": "",
-            "summary": "由总工程师直接处理并给出最终回答。",
-            "evidence_refs": ["recovered malformed director routing output"],
-            "open_questions": [],
-            "next_action": "由总工程师继续给出最终总结",
-            "complexity": "low",
-            "risk": "low",
-            "route": "director_only",
-            "required_roles": ["director"],
-            "acceptance_criteria": ["直接回答用户问题"],
-            "stop_conditions": ["需要改动文件或执行高风险操作时停止"],
-            "requires_user_approval": False,
-        }
-    return None
-
-
-def _recover_routing_decision_from_payload(
-    prompt: str,
-    payload: dict[str, Any],
-) -> dict[str, Any] | None:
-    if str(payload.get("artifact_type") or "") != "routing_decision":
-        return None
-    route = str(payload.get("route") or "").strip()
-    if route not in _ROUTING_DECISION_ROUTES:
-        if "core_relay" in route or "core" in route:
-            route = "core_relay"
-        else:
-            return None
-    if route == "director_only" and _prompt_looks_high_risk(prompt):
-        return None
-    required_roles = _normalize_required_roles_for_route(
-        route,
-        payload.get("required_roles"),
-    )
-    complexity = str(payload.get("complexity") or "medium").strip() or "medium"
-    risk = str(payload.get("risk") or "medium").strip().lower() or "medium"
-    if risk not in _ROUTING_DECISION_RISKS:
-        risk = "medium"
-    return {
-        "status": "passed",
-        "reason": str(
-            payload.get("reason") or "总工程师路由语义明确，已恢复为合法 routing_decision。"
-        ),
-        "role": "director",
-        "artifact_type": "routing_decision",
-        "handoff_to": "",
-        "summary": str(payload.get("summary") or "总工程师已完成路由判断。"),
-        "evidence_refs": _clean_string_list(payload.get("evidence_refs"))
-        or ["recovered malformed director routing output"],
-        "open_questions": _clean_string_list(payload.get("open_questions")),
-        "next_action": str(payload.get("next_action") or "继续接力"),
-        "complexity": complexity,
-        "risk": risk,
-        "route": route,
-        "required_roles": required_roles,
-        "acceptance_criteria": _clean_string_list(payload.get("acceptance_criteria"))
-        or ["完成用户请求并给出中文结果"],
-        "stop_conditions": _clean_string_list(payload.get("stop_conditions"))
-        or ["发现需要用户确认范围或高风险操作时暂停"],
-        "requires_user_approval": bool(payload.get("requires_user_approval")),
-    }
-
-
-def _latest_json_object(text: str) -> dict[str, Any] | None:
-    decoder = json.JSONDecoder()
-    candidates: list[dict[str, Any]] = []
-    for start, char in enumerate(text):
-        if char != "{":
-            continue
-        try:
-            value, _index = decoder.raw_decode(text[start:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            candidates.append(value)
-    if not candidates:
-        return None
-    return candidates[-1]
 
 
 def _user_requested_full_relay(prompt: str) -> bool:
@@ -2986,17 +2821,6 @@ def _runtime_failure_reason(runtime_event: Any) -> str:
     return reason or "native provider failed before producing relay output"
 
 
-def _is_codex_native_app_server_event(runtime_event: Any) -> bool:
-    payload = dict(getattr(runtime_event, "payload", {}) or {})
-    return (
-        str(getattr(runtime_event, "source", "") or "") == "codex"
-        and str(getattr(runtime_event, "actor", "") or "") == "codex_native"
-        and str(payload.get("source_kind") or "") == "codex_native"
-        and str(payload.get("provider") or "") == "codex"
-        and str(payload.get("provider_engine") or "") == "app-server"
-    )
-
-
 def _runtime_event_type(runtime_event: Any) -> str:
     return str(getattr(runtime_event, "event_type", "") or "")
 
@@ -3065,116 +2889,7 @@ def _looks_like_relay_protocol_attempt(text: str) -> bool:
 
 
 def _plain_followup_visible_text(text: str) -> str:
-    value = text.strip()
-    if not value:
-        return ""
-    parsed: Any = None
-    if value.startswith("{"):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            parsed = None
-    if isinstance(parsed, dict):
-        for field in ("summary", "reason", "message", "text", "output"):
-            field_value = str(parsed.get(field) or "").strip()
-            if field_value:
-                return _trim_protocol_field_value(field_value)
-        fused = " ".join(str(key) for key in parsed.keys())
-        extracted = _extract_protocol_field_value(fused, "summary")
-        if extracted:
-            return extracted
-        extracted = _extract_protocol_field_value(fused, "reason")
-        if extracted:
-            return extracted
-    prefix_text = _readable_text_before_protocol_payload(value)
-    if prefix_text:
-        return prefix_text
-    for field in ("summary", "reason"):
-        extracted = _extract_protocol_field_value(value, field)
-        if extracted:
-            return extracted
-    return value
-
-
-def _readable_text_before_protocol_payload(text: str) -> str:
-    protocol_index = text.find('{"artifact_type"')
-    if protocol_index <= 0:
-        protocol_index = text.find('{"role_envelope"')
-    if protocol_index <= 0:
-        return ""
-    prefix = text[:protocol_index].strip()
-    if len(prefix) < 12 or not re.search(r"[\u4e00-\u9fff]", prefix):
-        return ""
-    result_tail = _readable_result_tail(prefix)
-    if result_tail:
-        return result_tail
-    sentences = re.findall(r"[^。！？!?]+[。！？!?]", prefix)
-    if sentences:
-        return sentences[-1].strip()
-    return prefix
-
-
-def _readable_result_tail(text: str) -> str:
-    css_result_index = text.rfind("CSS 已经")
-    if css_result_index >= 0:
-        return text[css_result_index:].strip()
-    markers = (
-        "验证通过",
-        "编译确认",
-        "已修复",
-        "已完成",
-        "已更新",
-        "已收口",
-        "已经收口",
-        "完成",
-    )
-    positions = [text.rfind(marker) for marker in markers]
-    marker_index = max(positions)
-    if marker_index < 0:
-        return ""
-    start = max(
-        text.rfind("。", 0, marker_index),
-        text.rfind("！", 0, marker_index),
-        text.rfind("？", 0, marker_index),
-        text.rfind("\n", 0, marker_index),
-    )
-    if start >= 0:
-        start += 1
-    else:
-        start = marker_index
-        css_index = text.rfind("CSS ", 0, marker_index + 8)
-        if css_index >= 0:
-            start = css_index
-    return text[start:].strip()
-
-
-def _extract_protocol_field_value(text: str, field: str) -> str:
-    match = re.search(rf"(?:^|[{{,\s\"]){field}(?:[\"\s:=：]*)(.+)", text)
-    if match:
-        return _trim_protocol_field_value(match.group(1))
-    marker_index = text.rfind(field)
-    if marker_index < 0:
-        return ""
-    return _trim_protocol_field_value(text[marker_index + len(field) :])
-
-
-def _trim_protocol_field_value(text: str) -> str:
-    cut_at = len(text)
-    for marker in (
-        "role",
-        "status",
-        "handoff_to",
-        "next_action",
-        "open_questions",
-        "evidence_refs",
-        "artifact_type",
-        "summary",
-        "reason",
-    ):
-        marker_index = text.find(marker)
-        if marker_index > 0:
-            cut_at = min(cut_at, marker_index)
-    return text[:cut_at].strip(' ,，。"{}')
+    return followup_response_display_text("director", text)
 
 
 def _latest_artifact_id(

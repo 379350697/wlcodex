@@ -1,5 +1,6 @@
 import json
 
+from wlcodex.relay.artifact_types import ROLE_ENVELOPE_ARTIFACT_TYPES
 from wlcodex.relay.envelopes import default_handoff_target, parse_role_envelope
 
 
@@ -82,7 +83,7 @@ def test_parse_role_envelope_normalizes_role_aliases() -> None:
     assert result.payload["required_roles"] == ["director", "implementer", "auditor"]
 
 
-def test_parse_role_envelope_extracts_json_from_provider_chatter() -> None:
+def test_parse_role_envelope_rejects_provider_chatter() -> None:
     text = """
 Let me inspect the relay files first.
 
@@ -105,11 +106,16 @@ Let me inspect the relay files first.
 
     result = parse_role_envelope(text)
 
-    assert result.ok is True
-    assert result.envelope is not None
-    assert result.envelope.role == "implementer"
-    assert result.envelope.summary == "Implementation ready"
-    assert result.next_role == "tester"
+    assert result.ok is False
+    assert result.envelope is None
+    assert result.next_role is None
+    assert "invalid json" in result.error
+
+
+def test_role_envelope_artifact_types_exclude_internal_artifacts() -> None:
+    assert "implementation_report" in ROLE_ENVELOPE_ARTIFACT_TYPES
+    assert "role_error" not in ROLE_ENVELOPE_ARTIFACT_TYPES
+    assert "followup_response" not in ROLE_ENVELOPE_ARTIFACT_TYPES
 
 
 def test_invalid_role_envelope_returns_validation_error_without_advancement() -> None:

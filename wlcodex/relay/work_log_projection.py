@@ -49,11 +49,6 @@ _COMMAND_CATEGORY_LABELS: tuple[tuple[set[str], str], ...] = (
 )
 
 _AGENT_META_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bLet me\b", re.IGNORECASE),
-    re.compile(r"\bNow let me\b", re.IGNORECASE),
-    re.compile(r"\bNow I\b", re.IGNORECASE),
-    re.compile(r"\bI need to\b", re.IGNORECASE),
-    re.compile(r"\bI(?:'ll| will)\b", re.IGNORECASE),
     re.compile(r"\bThe file\b.+\bhas been updated successfully\b", re.IGNORECASE),
     re.compile(r"\bAll changes are in place\b", re.IGNORECASE),
     re.compile(r"\bNo matches found\b", re.IGNORECASE),

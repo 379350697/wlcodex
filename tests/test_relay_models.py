@@ -1,3 +1,8 @@
+from wlcodex.relay.artifact_types import (
+    ALL_RELAY_ARTIFACT_TYPES,
+    INTERNAL_RELAY_ARTIFACT_TYPES,
+    ROLE_ENVELOPE_ARTIFACT_TYPES,
+)
 from wlcodex.relay.models import (
     RELAY_ARTIFACT_TYPES,
     RELAY_ROLE_JOB_STATUSES,
@@ -48,7 +53,7 @@ def test_relay_statuses_and_artifact_types_match_design_spec() -> None:
         "blocked",
         "interrupted",
     )
-    assert RELAY_ARTIFACT_TYPES == (
+    assert ROLE_ENVELOPE_ARTIFACT_TYPES == (
         "relay_board",
         "routing_decision",
         "role_dispatch_metadata",
@@ -59,6 +64,14 @@ def test_relay_statuses_and_artifact_types_match_design_spec() -> None:
         "handoff_packet",
         "final_summary",
     )
+    assert INTERNAL_RELAY_ARTIFACT_TYPES == (
+        "role_error",
+        "role_resume",
+        "user_attachments",
+        "user_followup",
+        "followup_response",
+    )
+    assert RELAY_ARTIFACT_TYPES == ALL_RELAY_ARTIFACT_TYPES
 
 
 def test_relay_api_shapes_are_serializable() -> None:
