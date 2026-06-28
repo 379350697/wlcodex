@@ -64,9 +64,7 @@ def test_relay_activity_label_formats_iso_timestamp_for_mobile_cards() -> None:
     microsecond_label = _relay_activity_label("2026-06-16T07:51:57.510982+00:00")
     assert microsecond_label == "最近活动 06-16 15:51"
 
-    datetime_label = _relay_activity_label(
-        datetime(2026, 6, 16, 7, 58, 48, tzinfo=timezone.utc)
-    )
+    datetime_label = _relay_activity_label(datetime(2026, 6, 16, 7, 58, 48, tzinfo=timezone.utc))
     assert datetime_label == "最近活动 06-16 15:58"
 
     fallback_label = _relay_activity_label("2026-06-16T07:51:57.510982123+00:00")
@@ -91,9 +89,7 @@ def test_marvis_work_log_collapses_long_message_output() -> None:
         "现在生成页面代码：\n"
         "```html\n"
         "<!doctype html>\n"
-        "<html><body><pre>"
-        + "x" * 900
-        + "</pre></body></html>\n"
+        "<html><body><pre>" + "x" * 900 + "</pre></body></html>\n"
         "```"
     )
     event = WorkerStreamEvent(
@@ -158,15 +154,19 @@ def _server(tmp_path: Path, relay_service: RelayService | None = None):
         },
     )
     runtime_store = RuntimeEventStore(ledger._conn)
-    return WorkerLiveStreamServer(
-        host="127.0.0.1",
-        port=0,
-        hub=WorkerLiveStreamHub(runtime_store),
-        native_registry=NativeAgentRegistry(providers),
-        relay_service=service,
-        access_token="secret",
-        allow_unauthenticated_loopback=False,
-    ), service, runtime_store
+    return (
+        WorkerLiveStreamServer(
+            host="127.0.0.1",
+            port=0,
+            hub=WorkerLiveStreamHub(runtime_store),
+            native_registry=NativeAgentRegistry(providers),
+            relay_service=service,
+            access_token="secret",
+            allow_unauthenticated_loopback=False,
+        ),
+        service,
+        runtime_store,
+    )
 
 
 async def _request(tmp_path: Path, request: str, relay_service: RelayService | None = None):
@@ -264,10 +264,10 @@ async def test_marvis_relay_composer_has_real_attachment_sheet(
         "Host: test\r\nConnection: close\r\n\r\n",
     )
 
-    assert 'data-marvis-attachment-sheet' in response
-    assert 'data-marvis-attach-open' in response
-    assert 'data-marvis-image-input' in response
-    assert 'data-marvis-file-input' in response
+    assert "data-marvis-attachment-sheet" in response
+    assert "data-marvis-attach-open" in response
+    assert "data-marvis-image-input" in response
+    assert "data-marvis-file-input" in response
     assert "添加到对话" in response
     assert "相册" in response
     assert "本地文件" in response
@@ -280,8 +280,7 @@ async def test_marvis_relay_composer_has_real_attachment_sheet(
     assert "readRelayTextAttachment" in response
     css_response, _service = await _request(
         tmp_path,
-        "GET /static/relay_marvis.css HTTP/1.1\r\n"
-        "Host: test\r\nConnection: close\r\n\r\n",
+        "GET /static/relay_marvis.css HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
     )
     assert "--marvis-s25-bottom-nav-item-gap: 1px" in css_response
     assert "--marvis-s25-attachment-sheet-height: 487px" in css_response
@@ -301,8 +300,7 @@ async def test_marvis_relay_composer_has_real_attachment_sheet(
     ):
         icon_response, _service = await _request(
             tmp_path,
-            f"GET {icon_path} HTTP/1.1\r\n"
-            "Host: test\r\nConnection: close\r\n\r\n",
+            f"GET {icon_path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
         )
         assert "HTTP/1.1 200 OK" in icon_response
         assert "Content-Type: image/png" in icon_response
@@ -506,7 +504,7 @@ async def test_relay_task_detail_projects_followup_attachments_into_user_bubble(
     assert conversation_html.count("看这个截图和日志") == 1
     assert 'data-native-kind="user_message"' in conversation_html
     assert 'data-native-key="user_followup:' in conversation_html
-    assert 'relay_board_followup:' not in conversation_html
+    assert "relay_board_followup:" not in conversation_html
     assert 'class="marvis-relay-message-images"' in conversation_html
     assert 'class="marvis-relay-message-image"' in conversation_html
     assert 'src="data:image/png;base64,aGVsbG8="' in conversation_html
@@ -541,13 +539,13 @@ async def test_relay_task_detail_humanizes_pseudo_envelope_followup_response(
         {
             "text": (
                 '{"artifact_type":"final_summary","reason接续验证一句话回复。'
-                "roledirectorstatuspassedsummary task28 现在可以继续对话\"}"
+                'roledirectorstatuspassedsummary task28 现在可以继续对话"}'
             ),
             "target_role": "user",
         },
         summary=(
             '{"artifact_type":"final_summary","reason接续验证一句话回复。'
-            "roledirectorstatuspassedsummary task28 现在可以继续对话\"}"
+            'roledirectorstatuspassedsummary task28 现在可以继续对话"}'
         ),
     )
 
@@ -622,8 +620,7 @@ async def test_relay_task_detail_humanizes_fused_json_followup_response(
 async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path) -> None:
     response, _service = await _request(
         tmp_path,
-        "GET /native?token=secret HTTP/1.1\r\n"
-        "Host: test\r\nConnection: close\r\n\r\n",
+        "GET /native?token=secret HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
     )
 
     assert "HTTP/1.1 200 OK" in response
@@ -634,15 +631,14 @@ async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path)
     assert "Marvis 接力" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert 'data-native-entry="marvis-relay"' in response
-    assert '<span>工作流</span>' not in response
+    assert "<span>工作流</span>" not in response
 
 
 @pytest.mark.asyncio
 async def test_workflow_directory_links_to_relay_council_and_dev_flow(tmp_path: Path) -> None:
     response, _service = await _request(
         tmp_path,
-        "GET /native/workflows?token=secret HTTP/1.1\r\n"
-        "Host: test\r\nConnection: close\r\n\r\n",
+        "GET /native/workflows?token=secret HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
     )
 
     assert "HTTP/1.1 200 OK" in response
@@ -684,7 +680,10 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Marvis" in response
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-image-remove-vector">' in response
+    assert (
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-image-remove-vector">'
+        in response
+    )
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
@@ -692,7 +691,10 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         'href="/native/workflows/relay/chat?token=secret&amp;workspace=/Users/wl/projects/wlcodex"'
         in response
     )
-    assert 'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex"' in response
+    assert (
+        'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex"'
+        in response
+    )
     assert 'data-marvis-nav="tasks" aria-current="page"' in response
     assert 'class="marvis-relay-composer"' not in response
     assert "请输入任务" not in response
@@ -742,8 +744,8 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "等待总工程师接收" not in response
     assert "打开任务" in response
     assert "open task" not in response
-    assert f'/native/workflows/relay/tasks/{task.id}?token=secret' in response
-    assert f'/native/workflows/relay/tasks/{other.id}?token=secret' not in response
+    assert f"/native/workflows/relay/tasks/{task.id}?token=secret" in response
+    assert f"/native/workflows/relay/tasks/{other.id}?token=secret" not in response
 
     populated, _ = await _request(
         tmp_path,
@@ -781,8 +783,8 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "等待总工程师接收" not in populated
     assert "打开任务" in populated
     assert "open task" not in populated
-    assert f'/native/workflows/relay/tasks/{repo_task.id}?token=secret' in populated
-    assert f'/native/workflows/relay/tasks/{other.id}?token=secret' not in populated
+    assert f"/native/workflows/relay/tasks/{repo_task.id}?token=secret" in populated
+    assert f"/native/workflows/relay/tasks/{other.id}?token=secret" not in populated
 
     service._store.save_artifact(
         repo_task.id,
@@ -829,7 +831,10 @@ async def test_marvis_relay_chat_home_is_the_only_new_task_entry(
     assert 'data-marvis-relay-view="chat"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert 'class="marvis-relay-topbar"' in response
-    assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis marvis-relay-hero-avatar"' in response
+    assert (
+        'class="marvis-relay-avatar marvis-relay-avatar-marvis marvis-relay-hero-avatar"'
+        in response
+    )
     assert "你好，今天想做什么？" in response
     assert "GitHub热门项目收集" not in response
     assert "曼谷旅行路线书网页" not in response
@@ -860,7 +865,10 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-image-remove-vector">' in response
+    assert (
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-image-remove-vector">'
+        in response
+    )
     assert "Marvis办公室" in response
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "/static/marvis/office-scene-roles-5.png?v=20260627-red-director" in response
@@ -871,16 +879,37 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert response.count("data-marvis-persona-open=") == 5
     assert '"architect":{"role":"architect","display_name":"架构工程师"' in response
     assert '"implementer":{"role":"implementer","display_name":"开发工程师"' in response
-    assert '"director":{"role":"director","display_name":"总工程师","title":"总工程师","provider"' in response
-    assert '"architect":{"role":"architect","display_name":"架构工程师","title":"架构工程师","provider"' in response
-    assert '"implementer":{"role":"implementer","display_name":"开发工程师","title":"开发工程师","provider"' in response
-    assert '"tester":{"role":"tester","display_name":"测试工程师","title":"测试工程师","provider"' in response
-    assert '"auditor":{"role":"auditor","display_name":"审核工程师","title":"审核工程师","provider"' in response
+    assert (
+        '"director":{"role":"director","display_name":"总工程师","title":"总工程师","provider"'
+        in response
+    )
+    assert (
+        '"architect":{"role":"architect","display_name":"架构工程师","title":"架构工程师","provider"'
+        in response
+    )
+    assert (
+        '"implementer":{"role":"implementer","display_name":"开发工程师","title":"开发工程师","provider"'
+        in response
+    )
+    assert (
+        '"tester":{"role":"tester","display_name":"测试工程师","title":"测试工程师","provider"'
+        in response
+    )
+    assert (
+        '"auditor":{"role":"auditor","display_name":"审核工程师","title":"审核工程师","provider"'
+        in response
+    )
     assert re.search(r'"director":\{[^}]*"display_name":"总工程师"[^}]*"avatar":"marvis"', response)
-    assert re.search(r'"architect":\{[^}]*"display_name":"架构工程师"[^}]*"avatar":"architect"', response)
-    assert re.search(r'"implementer":\{[^}]*"display_name":"开发工程师"[^}]*"avatar":"implementer"', response)
+    assert re.search(
+        r'"architect":\{[^}]*"display_name":"架构工程师"[^}]*"avatar":"architect"', response
+    )
+    assert re.search(
+        r'"implementer":\{[^}]*"display_name":"开发工程师"[^}]*"avatar":"implementer"', response
+    )
     assert re.search(r'"tester":\{[^}]*"display_name":"测试工程师"[^}]*"avatar":"tester"', response)
-    assert re.search(r'"auditor":\{[^}]*"display_name":"审核工程师"[^}]*"avatar":"auditor"', response)
+    assert re.search(
+        r'"auditor":\{[^}]*"display_name":"审核工程师"[^}]*"avatar":"auditor"', response
+    )
     assert "data-persona-name" in response
     assert "Team Leader" not in response
     for legacy_role_name in [
@@ -935,7 +964,9 @@ def test_marvis_relay_task_topbar_is_fixed_above_scroll_content() -> None:
     assert "--marvis-s25-bottom-nav-height: 78px;" in css
     assert "body[data-marvis-relay-view] .marvis-relay-menu.is-back::after {" in css
     assert ":placeholder-shown) .marvis-relay-submit:not(.is-stop)" not in css
-    assert "body[data-marvis-relay-view] .marvis-relay-agent-bubble {\n  grid-column: 1 / -1;" in css
+    assert (
+        "body[data-marvis-relay-view] .marvis-relay-agent-bubble {\n  grid-column: 1 / -1;" in css
+    )
     assert "body[data-marvis-relay-view] .marvis-relay-composer-image-remove::before" in css
     assert "body[data-marvis-relay-view] .marvis-relay-composer-image-remove::after" in css
     assert "body[data-marvis-relay-view] .relay-message-body {\n  grid-column: 1 / -1;" in css
@@ -1099,7 +1130,10 @@ async def test_relay_config_has_dedicated_page(tmp_path: Path) -> None:
     assert "gitnexus-impact-analysis" in response
     assert "test-driven-development" in response
     assert "保存配置" in response
-    assert 'const RELAY_HISTORY_HREF = "/native/workflows/relay?token=secret&workspace=/repo";' in response
+    assert (
+        'const RELAY_HISTORY_HREF = "/native/workflows/relay?token=secret&workspace=/repo";'
+        in response
+    )
     assert "window.location.href = RELAY_HISTORY_HREF;" in response
     assert "任务历史" not in response
     assert "新接力任务" not in response
@@ -1245,9 +1279,15 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "HTTP/1.1 200 OK" in response
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
-    assert '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-image-remove-vector">' in response
+    assert (
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-s25-image-remove-vector">'
+        in response
+    )
     assert 'class="marvis-relay-topbar"' in response
-    assert 'class="marvis-relay-menu is-back" href="/native/workflows/relay?token=secret&amp;workspace=/repo" aria-label="返回上一级"' in response
+    assert (
+        'class="marvis-relay-menu is-back" href="/native/workflows/relay?token=secret&amp;workspace=/repo" aria-label="返回上一级"'
+        in response
+    )
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'href="/native/workflows/relay/office?token=secret"' in response
     assert 'data-marvis-open-log aria-label="工作日志"' in response
@@ -1272,9 +1312,9 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "你好，今天想做什么？" not in response
     assert "marvis-relay-hero-avatar" not in response
     assert "relay-conversation" in response
-    assert 'data-native-conversation-timeline' in response
+    assert "data-native-conversation-timeline" in response
     assert 'class="relay-native-stack"' not in response
-    assert 'data-native-session-stack' not in response
+    assert "data-native-session-stack" not in response
     assert 'class="relay-native-stream"' not in response
     assert 'class="relay-native-frame"' not in response
     assert "<iframe" not in response
@@ -1315,7 +1355,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "执行问题：invalid json: Expecting value" in work_log_html
     assert "等待总工程师接收并形成决策摘要" not in response
     assert f"/api/relay/tasks/{task.id}/message" in response
-    assert 'data-marvis-followup-composer' in response
+    assert "data-marvis-followup-composer" in response
     assert 'followupComposer?.addEventListener("submit"' in response
     assert 'document.querySelector(".relay-composer")?.addEventListener("submit"' not in response
     assert "relay-board-grid" not in response.split("<script", 1)[0]
@@ -1332,7 +1372,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "options.force" in response
     assert 'reason === "new_followup_turn"' in response
     assert "function relayTaskIsRunning()" in response
-    assert '!relayTaskIsRunning()) return;' in response
+    assert "!relayTaskIsRunning()) return;" in response
     assert 'source.addEventListener("role.native_event"' in response
     assert 'document.querySelectorAll("[data-native-key]")' in response
     assert "nativeTranscriptNodes.set(node.dataset.nativeKey" in response
@@ -1729,9 +1769,10 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
     assert 'data-marvis-open-log aria-label="工作日志"' in response
     assert "wanglin的Mac mini" in response
     assert 'data-marvis-nav="tasks"' in response
-    assert 'data-marvis-nav="tasks"' not in response.split(
-        'document.querySelectorAll("[data-marvis-open-log]"', 1
-    )[-1]
+    assert (
+        'data-marvis-nav="tasks"'
+        not in response.split('document.querySelectorAll("[data-marvis-open-log]"', 1)[-1]
+    )
     assert "手机办公室看不到其他小马" in conversation_html
     assert "Marvis" in conversation_html
     assert "任务分配 已完成" in conversation_html
@@ -1757,7 +1798,7 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
         "查看结构化数据",
         "打开原生会话",
         "data-role-output",
-        "data-view-panel=\"board\"",
+        'data-view-panel="board"',
         "任务进度",
         "调度决策",
         "你好，今天想做什么？",
@@ -1963,11 +2004,258 @@ async def test_relay_task_detail_projects_saved_handoff_when_native_rows_are_ear
     conversation_html = _relay_view_panel_html(response, "conversation")
     assert conversation_html.count("Marvis拍了拍 开发工程师，说开干吧") == 1
     assert "开发工程师交给审核工程师复核" in conversation_html
+    assert "审核工程师退回开发工程师继续处理" in conversation_html
     assert "Marvis拍了拍 审核工程师，说开干吧" not in conversation_html
     assert "Marvis拍了拍 Marvis，说开干吧" not in conversation_html
     assert conversation_html.index("Marvis拍了拍 开发工程师") < conversation_html.index(
         "修复完成，交给审核。"
     )
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_renders_auditor_return_to_director_handoff(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Auditor final handoff task",
+        prompt="修复接力提示。",
+        workspace="/repo",
+        provider="codex",
+    )
+    for role in ("director", "implementer", "auditor"):
+        service._store.update_role_metadata(
+            task.id,
+            role,
+            provider="codex",
+            model="gpt-5",
+            native_session_id=f"native-{role}-final-handoff",
+            agent_run_id=970 + len(role),
+            dispatch_verified=True,
+        )
+        service._store.update_role_status(task.id, role, "passed")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "relay_role": "director",
+            "status": "passed",
+            "reason": "需要开发和审核",
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "summary": "交给开发工程师处理。",
+            "route": "core_relay",
+            "required_roles": ["director", "implementer", "auditor"],
+            "handoff_to": "implementer",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "开发处理",
+        },
+        summary="交给开发工程师处理。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "relay_role": "implementer",
+            "status": "passed",
+            "reason": "已修复提示。",
+            "role": "implementer",
+            "artifact_type": "implementation_report",
+            "summary": "已修复提示。",
+            "handoff_to": "auditor",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给审核工程师复核。",
+        },
+        summary="已修复提示。",
+    )
+    service._store.save_handoff_packet(
+        task.id,
+        from_role="implementer",
+        to_role="auditor",
+        packet=HandoffPacket(
+            from_role="implementer",
+            to_role="auditor",
+            summary="开发完成后交给审核工程师复核。",
+            confirmed_facts=[],
+            open_questions=[],
+            evidence_refs=[],
+            next_action="audit",
+        ),
+    )
+    service._store.save_artifact(
+        task.id,
+        "auditor",
+        "audit_report",
+        {
+            "relay_role": "auditor",
+            "status": "passed",
+            "reason": "审核通过。",
+            "role": "auditor",
+            "artifact_type": "audit_report",
+            "summary": "审核通过。",
+            "handoff_to": "director",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交回总工程师收尾。",
+        },
+        summary="审核通过。",
+    )
+    service._store.save_handoff_packet(
+        task.id,
+        from_role="auditor",
+        to_role="director",
+        packet=HandoffPacket(
+            from_role="auditor",
+            to_role="director",
+            summary="审核通过，交回总工程师收尾。",
+            confirmed_facts=[],
+            open_questions=[],
+            evidence_refs=[],
+            next_action="summarize",
+        ),
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "status": "passed",
+            "reason": "completed",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": "已修复接力提示丢失问题。",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "",
+        },
+        summary="已修复接力提示丢失问题。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "开发工程师交给审核工程师复核" in conversation_html
+    assert "审核工程师交回Marvis收尾" in conversation_html
+    assert conversation_html.index("审核工程师交回Marvis收尾") < conversation_html.index(
+        "已修复接力提示丢失问题。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_does_not_show_stale_round_final_summary_as_assignment_waiting(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Stale waiting final summary task",
+        prompt="第一轮问题。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_status(task.id, "director", "interrupted")
+    service._store.update_task_status(task.id, "interrupted")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "round_id": 1,
+            "status": "waiting",
+            "reason": "旧轮等待用户验收",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": "旧轮等待用户验收。",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "等待用户确认",
+        },
+        summary="旧轮等待用户验收。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {
+            "round_id": 2,
+            "text": "第二轮继续修复。",
+            "target_role": "director",
+            "context_packet_id": 1,
+        },
+        summary="第二轮继续修复。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "followup_response",
+        {
+            "round_id": 2,
+            "text": "第二轮已经处理完成。",
+            "target_role": "user",
+            "status": "passed",
+        },
+        summary="第二轮已经处理完成。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "旧轮等待用户验收。" in conversation_html
+    assert "第二轮已经处理完成。" in conversation_html
+    assert "任务分配 等待" not in conversation_html
+    assert "任务分配 已中断" not in conversation_html
+    assert 'const CURRENT_ROUND_ID = "2";' in response
+    assert "let activeRelayRoundId = CURRENT_ROUND_ID;" in response
+    assert "function isCurrentRoundEvent(payload)" in response
+    assert "function activateRelayRound(payload)" in response
+    assert "if (!isCurrentRoundEvent(payload)) return;" in response
+    native_handler = response.split('source.addEventListener("role.native_event"', 1)[1]
+    native_handler = native_handler.split('source.addEventListener("role.output_delta"', 1)[0]
+    assert "renderMarvisWorkLogNativeEvent" in native_handler
+    assert "if (!isCurrentRoundEvent(payload)) return;" in native_handler
+    assert native_handler.index("renderMarvisWorkLogNativeEvent") < native_handler.index(
+        "if (!isCurrentRoundEvent(payload)) return;"
+    )
+    followup_handler = response.split(
+        'source.addEventListener("role.followup_response"',
+        1,
+    )[1]
+    followup_handler = followup_handler.split(
+        'source.addEventListener("routing.decision"',
+        1,
+    )[0]
+    assert "if (!isCurrentRoundEvent(payload)) return;" in followup_handler
+    status_handler = response.split('source.addEventListener("role.status"', 1)[1]
+    status_handler = status_handler.split('source.addEventListener("task.completed"', 1)[0]
+    assert "if (!isCurrentRoundEvent(payload)) return;" in status_handler
+    completed_handler = response.split('source.addEventListener("task.completed"', 1)[1]
+    completed_handler = completed_handler.split('source.addEventListener("task.interrupted"', 1)[0]
+    assert "if (!isCurrentRoundEvent(payload)) return;" in completed_handler
 
 
 @pytest.mark.asyncio
@@ -2380,7 +2668,10 @@ async def test_relay_work_log_projects_native_events_in_call_order(
     assert "function renderMarvisWorkLogNativeEvent" in response
     assert "function ensureMarvisWorkLogSegment" in response
     assert "updateMarvisWorkLogTokenTotal" in response
-    assert "renderMarvisWorkLogNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);" in response
+    assert (
+        "renderMarvisWorkLogNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);"
+        in response
+    )
     assert "marvis-work-log-shell" not in visible_html
 
 
@@ -3111,8 +3402,14 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     assert "function appendMarvisConversationHandoff" in response
     assert "const seenPreviewEventKeys = new Set" in response
     assert "function previewEventKey" in response
-    assert "renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);" in response
-    assert 'appendRolePreview(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);' in response
+    assert (
+        "renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);"
+        in response
+    )
+    assert (
+        'appendRolePreview(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);'
+        in response
+    )
     delta_handler = response.split('source.addEventListener("role.output_delta"', 1)[1]
     delta_handler = delta_handler.split('source.addEventListener("routing.decision"', 1)[0]
     assert "appendRolePreview" in delta_handler
@@ -3193,10 +3490,7 @@ async def test_relay_task_detail_humanizes_internal_route_terms(
     assert "下一步：由总工程师核验最新行情来源并给出结果" in visible_html
     assert "验收依据：不展示 总工程师直接处理 给用户" in visible_html
     assert "路由为director_only" not in visible_html
-    assert (
-        "complete directly after routing by checking current market sources"
-        not in visible_html
-    )
+    assert "complete directly after routing by checking current market sources" not in visible_html
 
 
 @pytest.mark.asyncio

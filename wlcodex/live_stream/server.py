@@ -200,9 +200,7 @@ _UNICODE_ICON_MAP = {
 
 # ICONS object injected into <script> blocks for dynamic JS icon use
 _ICONS_JS_LITERAL = (
-    "const ICONS={"
-    + ",".join(f"{key}:{json.dumps(svg)}" for key, svg in _ICON_SVG.items())
-    + "};"
+    "const ICONS={" + ",".join(f"{key}:{json.dumps(svg)}" for key, svg in _ICON_SVG.items()) + "};"
 )
 
 
@@ -297,11 +295,7 @@ class WorkerLiveStreamServer:
             for task in self._native_background_tasks.values()
             if task is not asyncio.current_task()
         )
-        tasks.extend(
-            task
-            for task in self._council_run_tasks
-            if task is not asyncio.current_task()
-        )
+        tasks.extend(task for task in self._council_run_tasks if task is not asyncio.current_task())
         for task in tasks:
             task.cancel()
         if tasks:
@@ -548,8 +542,7 @@ class WorkerLiveStreamServer:
                     headers,
                     query,
                     require_token=(
-                        self._native_registry is not None
-                        or self._native_controller is not None
+                        self._native_registry is not None or self._native_controller is not None
                     ),
                 ):
                     await self._send_html(writer, 401, _native_token_entry_page())
@@ -578,8 +571,7 @@ class WorkerLiveStreamServer:
                 return
 
             if (
-                parsed.path.startswith("/api/workers/")
-                or parsed.path.startswith("/workers/")
+                parsed.path.startswith("/api/workers/") or parsed.path.startswith("/workers/")
             ) and not self._is_authorized(writer, headers, query):
                 await self._send_json(writer, 401, {"error": "unauthorized"})
                 return
@@ -592,16 +584,16 @@ class WorkerLiveStreamServer:
             if agent_id is not None:
                 after = _safe_int(query.get("after", ["0"])[0], default=0)
                 limit = _safe_int(query.get("limit", ["500"])[0], default=500)
-                native_thread_id = _optional_nonempty_string(
-                    query.get("native_thread_id", [""])[0]
-                ) or ""
-                native_provider = _optional_nonempty_string(
-                    query.get("native_provider", [""])[0]
-                ) or "codex"
+                native_thread_id = (
+                    _optional_nonempty_string(query.get("native_thread_id", [""])[0]) or ""
+                )
+                native_provider = (
+                    _optional_nonempty_string(query.get("native_provider", [""])[0]) or "codex"
+                )
                 native_provider_key = native_provider.strip().lower() or "codex"
-                native_turn_id = _optional_nonempty_string(
-                    query.get("native_turn_id", [""])[0]
-                ) or ""
+                native_turn_id = (
+                    _optional_nonempty_string(query.get("native_turn_id", [""])[0]) or ""
+                )
                 native_sync_error = self._native_background_errors.get(
                     ("native_transcript", native_provider_key, native_thread_id),
                     "",
@@ -669,9 +661,7 @@ class WorkerLiveStreamServer:
                 suffix="/turn-summary",
             )
             if agent_id is not None:
-                native_turn_id = _optional_nonempty_string(
-                    query.get("native_turn_id", [""])[0]
-                )
+                native_turn_id = _optional_nonempty_string(query.get("native_turn_id", [""])[0])
                 if not native_turn_id:
                     await self._send_json(
                         writer,
@@ -685,9 +675,7 @@ class WorkerLiveStreamServer:
                 )
                 summary = await summarize_turn_with_sidecar(
                     events,
-                    current_turn_id=_optional_nonempty_string(
-                        query.get("current_turn_id", [""])[0]
-                    )
+                    current_turn_id=_optional_nonempty_string(query.get("current_turn_id", [""])[0])
                     or "",
                     config=self._turn_summary_config,
                     client=self._turn_summary_client,
@@ -713,9 +701,7 @@ class WorkerLiveStreamServer:
                 )
                 if self._native_provider(native_provider) is None:
                     native_provider = "codex"
-                theme = _optional_nonempty_string(
-                    query.get("theme", [""])[0]
-                ) or ""
+                theme = _optional_nonempty_string(query.get("theme", [""])[0]) or ""
                 await self._send_html(
                     writer,
                     200,
@@ -733,12 +719,12 @@ class WorkerLiveStreamServer:
                     query.get("after", [headers.get("last-event-id", "0")])[0],
                     default=0,
                 )
-                native_thread_id = _optional_nonempty_string(
-                    query.get("native_thread_id", [""])[0]
-                ) or ""
-                native_provider = _optional_nonempty_string(
-                    query.get("native_provider", [""])[0]
-                ) or "codex"
+                native_thread_id = (
+                    _optional_nonempty_string(query.get("native_thread_id", [""])[0]) or ""
+                )
+                native_provider = (
+                    _optional_nonempty_string(query.get("native_provider", [""])[0]) or "codex"
+                )
                 await self._send_sse(
                     writer,
                     agent_id,
@@ -925,9 +911,7 @@ class WorkerLiveStreamServer:
                 self._publish_native_sessions(provider_name, payload)
                 self._native_background_errors.pop(key, None)
             except Exception as exc:
-                self._native_background_errors[key] = (
-                    str(exc) or "native sessions sync failed"
-                )
+                self._native_background_errors[key] = str(exc) or "native sessions sync failed"
             finally:
                 if self._native_background_tasks.get(key) is task:
                     self._native_background_tasks.pop(key, None)
@@ -1039,9 +1023,7 @@ class WorkerLiveStreamServer:
                     signature = self._native_sessions_file_signature(provider_name)
                     if not signature:
                         continue
-                    if signature == self._native_session_file_signatures.get(
-                        provider_name
-                    ):
+                    if signature == self._native_session_file_signatures.get(provider_name):
                         continue
                     self._native_session_file_signatures[provider_name] = signature
                     payload = await self._native_sessions_payload(
@@ -1109,9 +1091,7 @@ class WorkerLiveStreamServer:
                     )
                     if not signature:
                         continue
-                    if signature == self._native_transcript_file_signatures.get(
-                        signature_key
-                    ):
+                    if signature == self._native_transcript_file_signatures.get(signature_key):
                         continue
                     self._native_transcript_file_signatures[signature_key] = signature
                     sync_error = await self._sync_native_transcript(
@@ -1177,9 +1157,7 @@ class WorkerLiveStreamServer:
                 else:
                     self._native_background_errors.pop(key, None)
             except Exception as exc:
-                self._native_background_errors[key] = (
-                    str(exc) or "native transcript sync failed"
-                )
+                self._native_background_errors[key] = str(exc) or "native transcript sync failed"
             finally:
                 if self._native_background_tasks.get(key) is task:
                     self._native_background_tasks.pop(key, None)
@@ -1216,13 +1194,9 @@ class WorkerLiveStreamServer:
             await self._send_html(writer, 200, _native_workflows_page(access_token=token))
             return
         if path == "/native/workflows/relay/office":
-            relay_config = (
-                self._relay_service.config() if self._relay_service is not None else {}
-            )
+            relay_config = self._relay_service.config() if self._relay_service is not None else {}
             token_stats = (
-                self._relay_service.today_token_stats()
-                if self._relay_service is not None
-                else {}
+                self._relay_service.today_token_stats() if self._relay_service is not None else {}
             )
             await self._send_html(
                 writer,
@@ -1256,9 +1230,7 @@ class WorkerLiveStreamServer:
             return
         if path == "/native/workflows/relay":
             summaries = (
-                self._relay_service.list_tasks(
-                    workspace=selected_workspace
-                )
+                self._relay_service.list_tasks(workspace=selected_workspace)
                 if self._relay_service is not None
                 else []
             )
@@ -1267,9 +1239,7 @@ class WorkerLiveStreamServer:
                 if self._native_registry is not None
                 else []
             )
-            relay_config = (
-                self._relay_service.config() if self._relay_service is not None else {}
-            )
+            relay_config = self._relay_service.config() if self._relay_service is not None else {}
             await self._send_html(
                 writer,
                 200,
@@ -1289,9 +1259,7 @@ class WorkerLiveStreamServer:
                 if self._native_registry is not None
                 else []
             )
-            relay_config = (
-                self._relay_service.config() if self._relay_service is not None else {}
-            )
+            relay_config = self._relay_service.config() if self._relay_service is not None else {}
             await self._send_html(
                 writer,
                 200,
@@ -1377,10 +1345,7 @@ class WorkerLiveStreamServer:
                         return
                     try:
                         config = self._relay_service.save_config(
-                            {
-                                str(role): str(provider)
-                                for role, provider in assignments.items()
-                            }
+                            {str(role): str(provider) for role, provider in assignments.items()}
                         )
                     except ValueError as exc:
                         await self._send_json(writer, 400, {"error": str(exc)})
@@ -1392,12 +1357,8 @@ class WorkerLiveStreamServer:
             if normalized_path == "/api/relay/tasks":
                 if method == "GET":
                     summaries = self._relay_service.list_tasks(
-                        workspace=_optional_nonempty_string(
-                            (query.get("workspace") or [""])[0]
-                        ),
-                        status=_optional_nonempty_string(
-                            (query.get("status") or [""])[0]
-                        ),
+                        workspace=_optional_nonempty_string((query.get("workspace") or [""])[0]),
+                        status=_optional_nonempty_string((query.get("status") or [""])[0]),
                     )
                     await self._send_json(
                         writer,
@@ -1461,9 +1422,7 @@ class WorkerLiveStreamServer:
                     return
                 after = _safe_int(query.get("after", ["0"])[0], default=0)
                 live = "text/event-stream" in headers.get("accept", "").lower()
-                relay_event_queue = (
-                    self._relay_service.subscribe_events(task_id) if live else None
-                )
+                relay_event_queue = self._relay_service.subscribe_events(task_id) if live else None
                 try:
                     events = self._relay_service.events_for_task(task_id, after=after)
                     detail = self._relay_service.get_task(task_id)
@@ -1724,11 +1683,7 @@ class WorkerLiveStreamServer:
 
         approval_prefix = "/approvals/"
         if route.startswith(approval_prefix):
-            parts = [
-                unquote(part)
-                for part in route[len(approval_prefix) :].split("/")
-                if part
-            ]
+            parts = [unquote(part) for part in route[len(approval_prefix) :].split("/") if part]
             if len(parts) == 2 and parts[1] == "resolve" and method == "POST":
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
@@ -1805,10 +1760,7 @@ class WorkerLiveStreamServer:
             )
             if provider_name.strip().lower() != "antigravity":
                 permission_kwargs.pop("sandbox", None)
-            force_new_turn = (
-                body.get("force_new_turn") is True
-                or body.get("forceNewTurn") is True
-            )
+            force_new_turn = body.get("force_new_turn") is True or body.get("forceNewTurn") is True
             continue_kwargs: dict[str, Any] = {}
             if force_new_turn:
                 continue_kwargs["force_new_turn"] = True
@@ -1843,9 +1795,7 @@ class WorkerLiveStreamServer:
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
                 return
-            expected_turn_id = str(
-                body.get("expected_turn_id") or body.get("turn_id") or ""
-            )
+            expected_turn_id = str(body.get("expected_turn_id") or body.get("turn_id") or "")
             permission_kwargs = _native_permission_kwargs_from_body(provider_name, body)
             if provider_name.strip().lower() != "antigravity":
                 permission_kwargs.pop("sandbox", None)
@@ -1912,8 +1862,7 @@ class WorkerLiveStreamServer:
             headers,
             query,
             require_token=(
-                self._native_registry is not None
-                or self._native_controller is not None
+                self._native_registry is not None or self._native_controller is not None
             ),
         ):
             await self._send_json(writer, 401, {"error": "unauthorized"})
@@ -1985,8 +1934,7 @@ class WorkerLiveStreamServer:
             headers,
             query,
             require_token=(
-                self._native_registry is not None
-                or self._native_controller is not None
+                self._native_registry is not None or self._native_controller is not None
             ),
         ):
             await self._send_json(writer, 401, {"error": "unauthorized"})
@@ -2168,9 +2116,7 @@ class WorkerLiveStreamServer:
         payload = config.to_json_dict()
         payload["providers"] = providers
         payload["models"] = models
-        payload["diversity"] = council_assignment_diversity(
-            config.assignments
-        ).to_json_dict()
+        payload["diversity"] = council_assignment_diversity(config.assignments).to_json_dict()
         return payload
 
     async def _council_config_from_body(self, body: dict[str, Any]) -> CouncilConfig:
@@ -2262,8 +2208,7 @@ class WorkerLiveStreamServer:
             headers,
             query,
             require_token=(
-                self._native_registry is not None
-                or self._native_controller is not None
+                self._native_registry is not None or self._native_controller is not None
             ),
         ):
             await self._send_html(writer, 401, _native_token_entry_page("/native"))
@@ -2319,10 +2264,7 @@ class WorkerLiveStreamServer:
             if content_type == "application/x-www-form-urlencoded":
                 raw = await self._read_request_body_bytes(reader, headers)
                 parsed = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
-                return {
-                    key: values[-1] if values else ""
-                    for key, values in parsed.items()
-                }
+                return {key: values[-1] if values else "" for key, values in parsed.items()}
             return await self._read_json_body(reader, headers)
         except RequestBodyTooLarge:
             await self._send_json(writer, 413, {"error": "request body too large"})
@@ -2438,9 +2380,7 @@ class WorkerLiveStreamServer:
             200,
             content_type,
             asset_path.read_bytes(),
-            extra_headers={
-                "Cache-Control": "public, max-age=300, stale-while-revalidate=60"
-            },
+            extra_headers={"Cache-Control": "public, max-age=300, stale-while-revalidate=60"},
         )
 
     async def _send_redirect(
@@ -2501,9 +2441,7 @@ class WorkerLiveStreamServer:
                 await _write_sse(writer, event)
         finally:
             self._hub.unsubscribe(agent_run_id=agent_run_id, queue=queue)
-            if native_thread_id and self._hub.subscriber_count(
-                agent_run_id=agent_run_id
-            ) == 0:
+            if native_thread_id and self._hub.subscriber_count(agent_run_id=agent_run_id) == 0:
                 provider_name = native_provider.strip().lower() or "codex"
                 key = (
                     "native_transcript_watch",
@@ -2699,11 +2637,7 @@ async def _send_relay_sse(
                     source_kind, job, source_queue = pending.pop(task)
                     if source_kind == "relay":
                         event = task.result()
-                        payload = (
-                            event.to_dict()
-                            if hasattr(event, "to_dict")
-                            else dict(event)
-                        )
+                        payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
                         sequence = int(payload.get("sequence") or 0)
                         if sequence not in seen_relay_sequences:
                             if sequence:
@@ -2718,11 +2652,7 @@ async def _send_relay_sse(
                             if runtime_event_id > 0:
                                 seen_worker_events.add(
                                     (
-                                        str(
-                                            payload.get("role")
-                                            or event_payload.get("role")
-                                            or ""
-                                        ),
+                                        str(payload.get("role") or event_payload.get("role") or ""),
                                         runtime_event_id,
                                         event_type,
                                     )
@@ -2767,7 +2697,9 @@ async def _send_relay_sse(
             relay_service.unsubscribe_events(task_id, queue)
     elif live and hub is not None and role_jobs:
         subscriptions: list[tuple[Any, asyncio.Queue[WorkerStreamEvent]]] = []
-        pending: dict[asyncio.Task[WorkerStreamEvent], tuple[Any, asyncio.Queue[WorkerStreamEvent]]] = {}
+        pending: dict[
+            asyncio.Task[WorkerStreamEvent], tuple[Any, asyncio.Queue[WorkerStreamEvent]]
+        ] = {}
         for job in role_jobs:
             queue = hub.subscribe(agent_run_id=int(job.agent_run_id))
             subscriptions.append((job, queue))
@@ -2821,11 +2753,7 @@ async def _write_relay_sse_payload(
 ) -> None:
     writer.write(f"id: {event_id}\n".encode("utf-8"))
     writer.write(f"event: {event_type}\n".encode("utf-8"))
-    writer.write(
-        ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode(
-            "utf-8"
-        )
-    )
+    writer.write(("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8"))
     await writer.drain()
 
 
@@ -2868,10 +2796,7 @@ def _relay_worker_payload(
 
 def _uses_chunked_transfer(headers: dict[str, str]) -> bool:
     transfer_encoding = headers.get("transfer-encoding", "")
-    return any(
-        part.strip().lower() == "chunked"
-        for part in transfer_encoding.split(",")
-    )
+    return any(part.strip().lower() == "chunked" for part in transfer_encoding.split(","))
 
 
 async def _read_chunked_body(reader: asyncio.StreamReader) -> bytes:
@@ -2923,9 +2848,7 @@ async def _discard_chunked_trailers(reader: asyncio.StreamReader) -> None:
 
 def format_sse_event(event: WorkerStreamEvent) -> bytes:
     payload = json.dumps(event.to_json_dict(), ensure_ascii=False)
-    return f"id: {event.id}\nevent: {event.kind}\ndata: {payload}\n\n".encode(
-        "utf-8"
-    )
+    return f"id: {event.id}\nevent: {event.kind}\ndata: {payload}\n\n".encode("utf-8")
 
 
 def _agent_id_from_path(path: str, *, prefix: str, suffix: str) -> int | None:
@@ -3009,7 +2932,11 @@ def _native_permission_presets(provider: str) -> list[dict[str, object]]:
         return list(_CLAUDE_PERMISSION_PRESETS)
     if normalized == "antigravity":
         return [
-            {key: value for key, value in preset.items() if key not in {"dangerously_skip_permissions", "sandbox"}}
+            {
+                key: value
+                for key, value in preset.items()
+                if key not in {"dangerously_skip_permissions", "sandbox"}
+            }
             for preset in _ANTIGRAVITY_PERMISSION_PRESETS
         ]
     return list(_CODEX_PERMISSION_PRESETS_UI)
@@ -3065,9 +2992,7 @@ def _codex_collaboration_kwargs_from_body(
     settings = raw.get("settings")
     clean_settings = dict(settings) if isinstance(settings, dict) else {}
     existing_model = clean_settings.get("model")
-    if mode == "plan" and not (
-        isinstance(existing_model, str) and existing_model.strip()
-    ):
+    if mode == "plan" and not (isinstance(existing_model, str) and existing_model.strip()):
         body_model = body.get("model")
         if isinstance(body_model, str) and body_model.strip():
             clean_settings["model"] = body_model.strip()
@@ -3338,9 +3263,7 @@ def _council_assignments_from_json(value: Any) -> tuple[CouncilSeatAssignment, .
                 model=str(raw.get("model") or ""),
                 profile=str(raw.get("profile") or ""),
                 enabled=bool(raw.get("enabled", True)),
-                metadata=raw.get("metadata")
-                if isinstance(raw.get("metadata"), dict)
-                else {},
+                metadata=raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {},
             )
         )
     return tuple(assignments)
@@ -3395,8 +3318,7 @@ def _native_session_path(provider: str, native_session_id: str) -> str:
     if not provider or not native_session_id:
         return ""
     return (
-        f"/native/{quote(provider, safe='')}"
-        f"?native_thread_id={quote(native_session_id, safe='')}"
+        f"/native/{quote(provider, safe='')}?native_thread_id={quote(native_session_id, safe='')}"
     )
 
 
@@ -3497,8 +3419,8 @@ def _native_provider_index_html(
             (
                 f'<a class="provider" href="/native/'
                 f'{quote(str(provider["provider"]), safe="")}{token_suffix}">'
-                f'<span>{escape(_native_provider_display_name(str(provider["provider"])))}</span>'
-                f'<small>{escape(str(provider.get("provider_engine", "")))}</small>'
+                f"<span>{escape(_native_provider_display_name(str(provider['provider'])))}</span>"
+                f"<small>{escape(str(provider.get('provider_engine', '')))}</small>"
                 "</a>"
             )
             for provider in providers
@@ -3594,13 +3516,12 @@ def _relay_task_list_page(
         '<button class="relay-filter-chip" type="button" '
         f'data-filter="{escape(status)}">'
         f"{escape(_relay_task_status_label(status))} "
-        f'<span>{counts.get(status, 0)}</span></button>'
+        f"<span>{counts.get(status, 0)}</span></button>"
         for status in filters
     )
     if sorted_summaries:
         task_list_html = "\n".join(
-            _relay_task_card_html(summary, token_suffix)
-            for summary in sorted_summaries
+            _relay_task_card_html(summary, token_suffix) for summary in sorted_summaries
         )
     else:
         task_list_html = """
@@ -3926,23 +3847,28 @@ def _relay_workspace_nav_html(
         if not cwd or cwd in seen:
             continue
         seen.add(cwd)
-        rows.append((
-            cwd,
-            str(project.get("name") or Path(cwd).name or cwd),
-            cwd,
-        ))
+        rows.append(
+            (
+                cwd,
+                str(project.get("name") or Path(cwd).name or cwd),
+                cwd,
+            )
+        )
     if selected_workspace and selected_workspace not in seen:
-        rows.insert(0, (
-            selected_workspace,
-            Path(selected_workspace).name or selected_workspace,
-            selected_workspace,
-        ))
+        rows.insert(
+            0,
+            (
+                selected_workspace,
+                Path(selected_workspace).name or selected_workspace,
+                selected_workspace,
+            ),
+        )
     links = "\n".join(
         '<a class="relay-workspace-link'
         f'{" active" if workspace == selected_workspace else ""}" '
         f'data-workspace-value="{escape(workspace)}" '
         f'href="{escape(_relay_workspace_href(workspace, access_token))}">'
-        f'{escape(label)}</a>'
+        f"{escape(label)}</a>"
         for workspace, label, _path in rows
     )
     current = selected_workspace
@@ -3999,11 +3925,7 @@ def _relay_config_href(workspace: str, access_token: str) -> str:
 
 def _relay_project_rows() -> list[dict[str, str]]:
     payload = _council_projects_payload()
-    return [
-        project
-        for project in payload.get("projects", [])
-        if str(project.get("cwd", "") or "")
-    ]
+    return [project for project in payload.get("projects", []) if str(project.get("cwd", "") or "")]
 
 
 def _relay_default_workspace(projects: list[Any]) -> str:
@@ -4034,7 +3956,7 @@ def _relay_role_summary_html(
     fallback = str(provider_rows[0].get("provider") or "codex")
     return "\n".join(
         f'<span class="relay-chip">{escape(_relay_role_label(role))} · '
-        f'{escape(_native_provider_display_name(str(assignment_map.get(role) or fallback)))}</span>'
+        f"{escape(_native_provider_display_name(str(assignment_map.get(role) or fallback)))}</span>"
         for role in RELAY_ROLE_IDS
     )
 
@@ -4089,6 +4011,8 @@ def _marvis_relay_handoff_text(from_role: str, to_role: str) -> str:
     from_name = _marvis_relay_handoff_role_label(from_role)
     if to_role == "auditor":
         return f"{from_name}交给{to_name}复核"
+    if from_role == "auditor" and to_role == "director":
+        return f"{from_name}交回Marvis收尾"
     if from_role == "auditor":
         return f"{from_name}退回{to_name}继续处理"
     return f"{from_name}交给{to_name}继续处理"
@@ -4139,9 +4063,16 @@ def _marvis_relay_role_status_label(status: str) -> str:
 def _marvis_relay_action_label(role: str, payload: dict[str, Any] | None = None) -> str:
     artifact_type = str((payload or {}).get("artifact_type") or "").strip()
     if role == "director":
-        return "任务分配"
+        kind = str((payload or {}).get("kind") or "").strip()
+        if artifact_type == "routing_decision" or kind in {"text_delta", "waiting"}:
+            return "任务分配"
+        return ""
     if artifact_type:
-        return _marvis_relay_role_status_label(artifact_type) if artifact_type in {"passed", "failed", "blocked", "completed"} else artifact_type.replace("_", " ")
+        return (
+            _marvis_relay_role_status_label(artifact_type)
+            if artifact_type in {"passed", "failed", "blocked", "completed"}
+            else artifact_type.replace("_", " ")
+        )
     return "任务"
 
 
@@ -4154,7 +4085,7 @@ def _marvis_relay_topbar(
 ) -> str:
     left = (
         f'<a class="marvis-relay-menu is-back" href="{escape(back_href)}" aria-label="返回上一级">'
-        '<span></span><span></span><span></span></a>'
+        "<span></span><span></span><span></span></a>"
         if back_href
         else '<button class="marvis-relay-menu" type="button" aria-label="菜单"><span></span><span></span><span></span></button>'
     )
@@ -4163,7 +4094,9 @@ def _marvis_relay_topbar(
         if subtitle
         else ""
     )
-    actions = right_html or """
+    actions = (
+        right_html
+        or """
       <button class="marvis-relay-icon-button" type="button" aria-label="设备">
         <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
       </button>
@@ -4171,6 +4104,7 @@ def _marvis_relay_topbar(
         <span class="marvis-relay-icon-list" aria-hidden="true"></span>
       </button>
     """
+    )
     return f"""
     <header class="marvis-relay-topbar">
       {left}
@@ -4557,9 +4491,7 @@ def _marvis_relay_office_roles(relay_config: dict[str, Any] | None) -> list[dict
         roles.append(
             {
                 "role": role,
-                "display_name": str(
-                    entry.get("display_name") or _relay_role_label(role)
-                ),
+                "display_name": str(entry.get("display_name") or _relay_role_label(role)),
             }
         )
     return roles[:6]
@@ -4639,10 +4571,7 @@ def _marvis_relay_office_page(
     total_consumed_label = _format_marvis_token_count(total_consumed_tokens)
     assignment_map = config.get("assignments")
     assignments = assignment_map if isinstance(assignment_map, dict) else {}
-    assignment_payload = {
-        role: str(assignments.get(role) or "")
-        for role in RELAY_ROLE_IDS
-    }
+    assignment_payload = {role: str(assignments.get(role) or "") for role in RELAY_ROLE_IDS}
     provider_rows = config.get("providers")
     provider_source = provider_rows if isinstance(provider_rows, list) else []
     provider_options: list[dict[str, str]] = []
@@ -4676,7 +4605,7 @@ def _marvis_relay_office_page(
     provider_options_html = "\n".join(
         '<button class="marvis-persona-model-option" type="button" '
         f'data-provider-option="{escape(option["provider"])}">'
-        f'{escape(option["label"])}</button>'
+        f"{escape(option['label'])}</button>"
         for option in provider_options
     )
     provider_options_json = json.dumps(
@@ -4711,8 +4640,8 @@ def _marvis_relay_office_page(
             role = active_roles[index]
             office_slots.append(
                 f"""
-        <button class="{slot_class}" type="button" data-marvis-office-role="{escape(role['role'])}" data-marvis-persona-open="{escape(role['role'])}" aria-label="打开{escape(role['display_name'])}人设">
-          <span>{escape(role['display_name'])}</span>
+        <button class="{slot_class}" type="button" data-marvis-office-role="{escape(role["role"])}" data-marvis-persona-open="{escape(role["role"])}" aria-label="打开{escape(role["display_name"])}人设">
+          <span>{escape(role["display_name"])}</span>
         </button>
         """
             )
@@ -5042,7 +4971,13 @@ def _marvis_relay_token_total_from_events(
     hub: WorkerLiveStreamHub | None,
 ) -> int:
     total = 0
-    for _occurred_at, _event_id, _role, _display_name, worker_event in _relay_worker_events_for_roles(
+    for (
+        _occurred_at,
+        _event_id,
+        _role,
+        _display_name,
+        worker_event,
+    ) in _relay_worker_events_for_roles(
         role_jobs,
         hub=hub,
     ):
@@ -5056,7 +4991,13 @@ def _marvis_relay_max_event_id_from_events(
     hub: WorkerLiveStreamHub | None,
 ) -> int:
     max_event_id = 0
-    for _occurred_at, event_id, _role, _display_name, _worker_event in _relay_worker_events_for_roles(
+    for (
+        _occurred_at,
+        event_id,
+        _role,
+        _display_name,
+        _worker_event,
+    ) in _relay_worker_events_for_roles(
         role_jobs,
         hub=hub,
     ):
@@ -5141,9 +5082,7 @@ def _marvis_relay_work_log_segments(
     canonical_payloads: dict[str, dict[str, Any]] | None = None,
 ) -> list[WorkLogSegment]:
     canonical_payloads = canonical_payloads or {}
-    role_errors = _marvis_relay_role_error_payloads_by_role(
-        getattr(detail, "artifacts", []) or []
-    )
+    role_errors = _marvis_relay_role_error_payloads_by_role(getattr(detail, "artifacts", []) or [])
     artifact_payloads = _marvis_relay_summary_payloads_by_role(
         getattr(detail, "artifacts", []) or []
     )
@@ -5152,9 +5091,7 @@ def _marvis_relay_work_log_segments(
         _relay_native_message_key(role, worker_event, bucket="assistant")
         for _occurred_at, _event_id, role, _display_name, worker_event in events
         if worker_event.kind == "message_completed"
-        and _marvis_relay_work_log_text_is_protocol_noise(
-            _relay_native_event_text(worker_event)
-        )
+        and _marvis_relay_work_log_text_is_protocol_noise(_relay_native_event_text(worker_event))
     }
     segments: list[WorkLogSegment] = []
     entry_maps: list[dict[str, WorkLogEntry]] = []
@@ -5246,11 +5183,7 @@ def _marvis_relay_work_log_segments(
                 ),
             )
             existing_roles.add(role)
-        if (
-            role not in existing_roles
-            and status
-            and status not in {"idle", "passed", "completed"}
-        ):
+        if role not in existing_roles and status and status not in {"idle", "passed", "completed"}:
             _persona, display_name = _marvis_relay_public_role(role)
             append_entry(
                 role,
@@ -5298,10 +5231,7 @@ def _marvis_relay_summary_payloads_by_role(
             continue
         role = str(payload.get("role") or payload.get("relay_role") or "")
         summary = str(
-            payload.get("summary")
-            or payload.get("output")
-            or payload.get("reason")
-            or ""
+            payload.get("summary") or payload.get("output") or payload.get("reason") or ""
         ).strip()
         summary = _marvis_relay_clean_artifact_summary(summary)
         if role and summary:
@@ -5381,9 +5311,7 @@ def _marvis_relay_work_log_entry_html(entry: WorkLogEntry) -> str:
     chip = _relay_replace_legacy_role_identifiers(entry.chip)
     text = _relay_replace_legacy_role_identifiers(entry.text)
     output = _relay_replace_legacy_role_identifiers(entry.output)
-    chip_html = (
-        f'<span class="marvis-work-log-tool-chip">{escape(chip)}</span>' if chip else ""
-    )
+    chip_html = f'<span class="marvis-work-log-tool-chip">{escape(chip)}</span>' if chip else ""
     output_html = ""
     if output:
         output_html = (
@@ -5393,7 +5321,7 @@ def _marvis_relay_work_log_entry_html(entry: WorkLogEntry) -> str:
             "</details>"
         )
     return f"""
-      <div class="{' '.join(classes)}" data-marvis-work-log-entry="{escape(entry.kind)}"{key_attr}>
+      <div class="{" ".join(classes)}" data-marvis-work-log-entry="{escape(entry.kind)}"{key_attr}>
         {chip_html}
         <p>{escape(text)}</p>
         {output_html}
@@ -5486,10 +5414,7 @@ def _marvis_relay_work_log_entry_from_event(
         text = _relay_native_event_text(worker_event).strip()
         if not text and kind == "failed":
             text = str(
-                payload.get("error")
-                or payload.get("reason")
-                or payload.get("status")
-                or "调用失败"
+                payload.get("error") or payload.get("reason") or payload.get("status") or "调用失败"
             ).strip()
         if not text:
             return None
@@ -5674,10 +5599,11 @@ def _relay_role_config_html(
     assignments = relay_config.get("assignments")
     assignment_map = assignments if isinstance(assignments, dict) else {}
     roles = relay_config.get("roles")
-    role_rows = roles if isinstance(roles, list) and roles else [
-        {"role": role, "display_name": _relay_role_label(role)}
-        for role in RELAY_ROLE_IDS
-    ]
+    role_rows = (
+        roles
+        if isinstance(roles, list) and roles
+        else [{"role": role, "display_name": _relay_role_label(role)} for role in RELAY_ROLE_IDS]
+    )
     provider_rows = providers or [{"provider": "codex", "provider_engine": ""}]
     rows = []
     for role_entry in role_rows:
@@ -5687,18 +5613,21 @@ def _relay_role_config_html(
         selected = str(assignment_map.get(role) or provider_rows[0].get("provider") or "codex")
         options = "\n".join(
             f'<option value="{escape(str(provider.get("provider", "")))}"'
-            f'{" selected" if str(provider.get("provider", "")) == selected else ""}>'
-            f'{escape(_native_provider_display_name(str(provider.get("provider", ""))))}</option>'
+            f"{' selected' if str(provider.get('provider', '')) == selected else ''}>"
+            f"{escape(_native_provider_display_name(str(provider.get('provider', ''))))}</option>"
             for provider in provider_rows
             if str(provider.get("provider", "")).strip()
         )
-        tool_chips = "".join(
-            f'<span class="relay-chip">{escape(str(item))}</span>'
-            for item in [
-                *list(role_entry.get("skills") or []),
-                *list(role_entry.get("capabilities") or []),
-            ]
-        ) or '<span class="relay-chip">默认能力</span>'
+        tool_chips = (
+            "".join(
+                f'<span class="relay-chip">{escape(str(item))}</span>'
+                for item in [
+                    *list(role_entry.get("skills") or []),
+                    *list(role_entry.get("capabilities") or []),
+                ]
+            )
+            or '<span class="relay-chip">默认能力</span>'
+        )
         rows.append(
             f"""
             <div class="relay-config-row">
@@ -5797,7 +5726,10 @@ def _relay_humanize_display_text(text: str, *, english_fallback: str = "") -> st
         ("full_relay", "五角色完整接力"),
         ("audit_first", "先审计再推进"),
         ("waiting_user", "等待你补充"),
-        ("complete directly after routing by checking current market sources and returning the latest available gold price", "由总工程师核验最新行情来源并给出结果"),
+        (
+            "complete directly after routing by checking current market sources and returning the latest available gold price",
+            "由总工程师核验最新行情来源并给出结果",
+        ),
         ("complete directly after routing", "由总工程师直接处理"),
         ("complete directly", "直接处理"),
         ("dispatch next role", "交给下一位角色处理"),
@@ -5960,24 +5892,20 @@ def _relay_routing_decision_html(detail: Any) -> str:
     if not decision:
         decision = _relay_missing_routing_decision(detail)
     required_roles = [
-        _relay_role_label(str(role))
-        for role in decision.get("required_roles", [])
-        if str(role)
+        _relay_role_label(str(role)) for role in decision.get("required_roles", []) if str(role)
     ]
     acceptance = [
-        str(item)
-        for item in decision.get("acceptance_criteria", [])
-        if str(item).strip()
+        str(item) for item in decision.get("acceptance_criteria", []) if str(item).strip()
     ]
     stop_conditions = [
-        str(item)
-        for item in decision.get("stop_conditions", [])
-        if str(item).strip()
+        str(item) for item in decision.get("stop_conditions", []) if str(item).strip()
     ]
     required_text = "、".join(required_roles) or "等待总工程师判断"
     acceptance_text = "、".join(acceptance) or "等待总工程师给出验收依据"
     stop_text = "、".join(stop_conditions) or "暂无额外停止条件"
-    approval_text = "需要用户确认" if bool(decision.get("requires_user_approval")) else "无需额外确认"
+    approval_text = (
+        "需要用户确认" if bool(decision.get("requires_user_approval")) else "无需额外确认"
+    )
     route = str(decision.get("route") or "")
     summary = _relay_humanize_display_text(
         str(decision.get("summary") or "等待总工程师接收任务并形成调度决策。")
@@ -6059,9 +5987,7 @@ def _relay_conversation_message_html(
     body: str,
     meta: str = "",
 ) -> str:
-    meta_html = (
-        f'<span class="relay-message-meta">{escape(meta)}</span>' if meta else ""
-    )
+    meta_html = f'<span class="relay-message-meta">{escape(meta)}</span>' if meta else ""
     return f"""
       <article class="relay-message" data-conversation-kind="{escape(kind)}" data-conversation-role="{escape(role)}">
         <div class="relay-message-head">
@@ -6379,34 +6305,67 @@ def _relay_task_detail_page(
   <script>
     {_marvis_relay_attachment_script()}
     const TASK_ID = {json.dumps(str(task.id))};
+    const CURRENT_ROUND_ID = {json.dumps(str(getattr(detail, "current_round_id", 1) or 1))};
+    let activeRelayRoundId = CURRENT_ROUND_ID;
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
     const EVENTS_SUFFIX = {json.dumps(events_suffix)};
-    const ROLE_LABELS = {json.dumps({role: _relay_role_label(role) for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
-    const MARVIS_WORK_LOG_ROLE_LABELS = {json.dumps({role: _marvis_relay_public_role(role)[1] for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
-    const MARVIS_WORK_LOG_ROLE_PERSONAS = {json.dumps({role: _marvis_relay_public_role(role)[0] for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
-    const MARVIS_HANDOFF_ROLE_LABELS = {json.dumps({role: _marvis_relay_handoff_role_label(role) for role in RELAY_ROLE_IDS}, ensure_ascii=False)};
-    const MARVIS_LEGACY_ROLE_LABEL_PARTS = {json.dumps(_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS, ensure_ascii=False)};
-    const MARVIS_LEGACY_ROLE_SLUG_PARTS = {json.dumps(_MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS, ensure_ascii=False)};
-    const STATUS_LABELS = {json.dumps({
-        "idle": "未调度",
-        "queued": "排队中",
-        "streaming": "执行中",
-        "waiting": "等待中",
-        "passed": "已完成",
-        "failed": "失败",
-        "blocked": "阻塞",
-        "interrupted": "已中断",
-        "completed": "已完成",
-    }, ensure_ascii=False)};
-    const TASK_STATUS_LABELS = {json.dumps({
-        "queued": "排队中",
-        "running": "进行中",
-        "waiting_user": "等待你",
-        "blocked": "已阻塞",
-        "failed": "失败",
-        "completed": "已完成",
-        "interrupted": "已中断",
-    }, ensure_ascii=False)};
+    const ROLE_LABELS = {
+        json.dumps({role: _relay_role_label(role) for role in RELAY_ROLE_IDS}, ensure_ascii=False)
+    };
+    const MARVIS_WORK_LOG_ROLE_LABELS = {
+        json.dumps(
+            {role: _marvis_relay_public_role(role)[1] for role in RELAY_ROLE_IDS},
+            ensure_ascii=False,
+        )
+    };
+    const MARVIS_WORK_LOG_ROLE_PERSONAS = {
+        json.dumps(
+            {role: _marvis_relay_public_role(role)[0] for role in RELAY_ROLE_IDS},
+            ensure_ascii=False,
+        )
+    };
+    const MARVIS_HANDOFF_ROLE_LABELS = {
+        json.dumps(
+            {role: _marvis_relay_handoff_role_label(role) for role in RELAY_ROLE_IDS},
+            ensure_ascii=False,
+        )
+    };
+    const MARVIS_LEGACY_ROLE_LABEL_PARTS = {
+        json.dumps(_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS, ensure_ascii=False)
+    };
+    const MARVIS_LEGACY_ROLE_SLUG_PARTS = {
+        json.dumps(_MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS, ensure_ascii=False)
+    };
+    const STATUS_LABELS = {
+        json.dumps(
+            {
+                "idle": "未调度",
+                "queued": "排队中",
+                "streaming": "执行中",
+                "waiting": "等待中",
+                "passed": "已完成",
+                "failed": "失败",
+                "blocked": "阻塞",
+                "interrupted": "已中断",
+                "completed": "已完成",
+            },
+            ensure_ascii=False,
+        )
+    };
+    const TASK_STATUS_LABELS = {
+        json.dumps(
+            {
+                "queued": "排队中",
+                "running": "进行中",
+                "waiting_user": "等待你",
+                "blocked": "已阻塞",
+                "failed": "失败",
+                "completed": "已完成",
+                "interrupted": "已中断",
+            },
+            ensure_ascii=False,
+        )
+    };
     const roleOutputs = {{}};
     const marvisWorkLog = document.querySelector("[data-marvis-work-log]");
     const marvisWorkLogBackdrop = document.querySelector("[data-marvis-work-log-backdrop]");
@@ -6460,6 +6419,7 @@ def _relay_task_detail_page(
       if (fromRole === "director") return `Marvis拍了拍 ${{toName}}，说开干吧`;
       const fromName = marvisHandoffRoleLabel(fromRole);
       if (toRole === "auditor") return `${{fromName}}交给${{toName}}复核`;
+      if (fromRole === "auditor" && toRole === "director") return `${{fromName}}交回Marvis收尾`;
       if (fromRole === "auditor") return `${{fromName}}退回${{toName}}继续处理`;
       return `${{fromName}}交给${{toName}}继续处理`;
     }}
@@ -7121,17 +7081,34 @@ def _relay_task_detail_page(
     function clearMarvisConversationPausedRows() {{
       conversationTimeline?.querySelectorAll("[data-native-key^='relay-paused:']").forEach((node) => node.remove());
     }}
-    function appendMarvisConversationWaiting() {{
+    function relayEventRoundId(payload) {{
+      const value = payload?.round_id || payload?.payload?.round_id || "";
+      return value ? String(value) : "";
+    }}
+    function isCurrentRoundEvent(payload) {{
+      const roundId = relayEventRoundId(payload);
+      return !roundId || roundId === activeRelayRoundId;
+    }}
+    function activateRelayRound(payload) {{
+      const roundId = relayEventRoundId(payload);
+      if (roundId) activeRelayRoundId = roundId;
+      return activeRelayRoundId;
+    }}
+    function appendMarvisConversationWaiting(roundId = "") {{
       if (!conversationTimeline) return null;
       clearMarvisConversationPausedRows();
       let node = conversationTimeline.querySelector("[data-marvis-followup-waiting]");
-      if (node) return node;
+      if (node) {{
+        if (roundId) node.dataset.nativeRoundId = roundId;
+        return node;
+      }}
       const empty = conversationTimeline.querySelector("[data-native-empty]");
       if (empty) empty.remove();
       node = document.createElement("article");
       node.className = "marvis-relay-agent-step marvis-relay-waiting";
       node.dataset.nativeRole = "director";
       node.dataset.nativeKind = "waiting";
+      node.dataset.nativeRoundId = roundId || activeRelayRoundId || "1";
       node.dataset.marvisFollowupWaiting = "true";
       const avatar = document.createElement("span");
       avatar.className = "marvis-relay-avatar marvis-relay-avatar-marvis";
@@ -7156,17 +7133,23 @@ def _relay_task_detail_page(
       scrollNativeConversationToEnd();
       return node;
     }}
-    function clearMarvisConversationWaiting() {{
-      conversationTimeline?.querySelectorAll("[data-marvis-followup-waiting]").forEach((node) => node.remove());
+    function clearMarvisConversationWaiting(roundId = "") {{
+      const activeRound = roundId || activeRelayRoundId || "";
+      conversationTimeline?.querySelectorAll("[data-marvis-followup-waiting]").forEach((node) => {{
+        if (!activeRound || !node.dataset.nativeRoundId || node.dataset.nativeRoundId === activeRound) {{
+          node.remove();
+        }}
+      }});
     }}
-    function appendMarvisConversationAssistant(role, text, kind = "followup_response", key = "", status = "passed") {{
+    function appendMarvisConversationAssistant(role, text, kind = "followup_response", key = "", status = "passed", roundId = "") {{
       if (!conversationTimeline || !text) return null;
-      clearMarvisConversationWaiting();
+      clearMarvisConversationWaiting(roundId);
       const existing = key ? nativeTranscriptNodes.get(key) || conversationTimeline.querySelector(`[data-native-key='${{CSS.escape(key)}}']`) : null;
       const node = existing || document.createElement("article");
       node.className = "marvis-relay-agent-step";
       node.dataset.nativeRole = role || "director";
       node.dataset.nativeKind = kind || "followup_response";
+      node.dataset.nativeRoundId = roundId || activeRelayRoundId || "1";
       if (key) node.dataset.nativeKey = key;
       if (!existing) {{
         const avatar = document.createElement("span");
@@ -7180,7 +7163,7 @@ def _relay_task_detail_page(
         title.textContent = labelForRole(role);
         const action = document.createElement("span");
         action.className = "marvis-relay-agent-action";
-        action.textContent = `| 任务分配 ${{labelForStatus(status) || "已完成"}}`;
+        action.textContent = `| ${{labelForStatus(status) || "已完成"}}`;
         head.append(title, document.createTextNode(" "), action);
         const bubble = document.createElement("div");
         bubble.className = "marvis-relay-agent-bubble";
@@ -7193,11 +7176,14 @@ def _relay_task_detail_page(
       if (key) nativeTranscriptNodes.set(key, node);
       return node;
     }}
-    function appendMarvisConversationHandoff(toRole, key = "", fromRole = "") {{
+    function appendMarvisConversationHandoff(toRole, key = "", fromRole = "", roundId = "") {{
       if (!conversationTimeline || !toRole) return null;
-      if (!fromRole || fromRole === toRole || toRole === "director") return null;
+      if (!fromRole || fromRole === toRole) return null;
+      if (!roundId && key && key.startsWith("handoff:")) {{
+        roundId = key.split(":")[1] || "1";
+      }}
       const existingPair = conversationTimeline.querySelector(
-        `[data-marvis-handoff][data-native-from-role='${{CSS.escape(fromRole)}}'][data-native-to-role='${{CSS.escape(toRole)}}']`
+        `[data-marvis-handoff][data-native-from-role='${{CSS.escape(fromRole)}}'][data-native-to-role='${{CSS.escape(toRole)}}'][data-native-round-id='${{CSS.escape(roundId || "1")}}']`
       );
       if (existingPair) return existingPair;
       const handoffKey = key || `handoff:${{toRole}}`;
@@ -7212,6 +7198,7 @@ def _relay_task_detail_page(
       node.dataset.nativeRole = toRole;
       node.dataset.nativeFromRole = fromRole;
       node.dataset.nativeToRole = toRole;
+      node.dataset.nativeRoundId = roundId || "1";
       node.dataset.nativeKey = handoffKey;
       node.textContent = marvisHandoffText(fromRole, toRole);
       conversationTimeline.appendChild(node);
@@ -7446,6 +7433,7 @@ def _relay_task_detail_page(
     const source = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{EVENTS_SUFFIX}}`);
     source.addEventListener("role.queued", (event) => {{
       const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
       const force = payload.reason === "new_followup_turn";
       if (force) clearMarvisConversationPausedRows();
       setRoleStatus(payload.role, "queued", {{ force }});
@@ -7453,12 +7441,14 @@ def _relay_task_detail_page(
     }});
     source.addEventListener("role.streaming", (event) => {{
       const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
       setRoleStatus(payload.role, "streaming");
       updateNativeLink(payload.role, payload.provider, payload.native_session_id);
       appendActivity(`${{labelForRole(payload.role)}} 开始执行。`);
     }});
     source.addEventListener("dispatch.verified", (event) => {{
       const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
       setRoleStatus(payload.role, "streaming");
       updateNativeLink(payload.role, payload.provider, payload.native_session_id);
       appendActivity(`${{labelForRole(payload.role)}} 的原生会话已启动。`);
@@ -7469,39 +7459,46 @@ def _relay_task_detail_page(
     }});
     source.addEventListener("user.followup", (event) => {{
       const payload = parseRelayEvent(event);
+      const roundId = activateRelayRound(payload);
       const key = payload.artifact_id ? `user_followup:${{payload.artifact_id}}` : `user_followup:${{payload.context_packet_id || Date.now()}}`;
       clearMarvisConversationPausedRows();
       appendMarvisConversationUser(payload.text || payload.latest_user_input || "", key, false, {{
         images: payload.images || [],
         files: payload.files || []
       }});
-      appendMarvisConversationWaiting();
+      appendMarvisConversationWaiting(roundId);
       updateTaskStatus("running");
       setRoleStatus("director", "queued", {{ force: true }});
     }});
     source.addEventListener("role.native_event", (event) => {{
       const payload = parseRelayEvent(event);
-      renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);
       renderMarvisWorkLogNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);
+      if (!isCurrentRoundEvent(payload)) return;
+      renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);
     }});
     source.addEventListener("role.output_delta", (event) => {{
       const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
       appendRolePreview(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);
       setRoleStatus(payload.role, "streaming");
     }});
     source.addEventListener("role.followup_response", (event) => {{
       const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
+      const roundId = relayEventRoundId(payload);
       appendMarvisConversationAssistant(
         payload.role || "director",
         payload.text || payload.summary || "",
         "followup_response",
         payload.artifact_id ? `followup_response:${{payload.artifact_id}}` : "",
-        payload.status || "passed"
+        payload.status || "passed",
+        roundId
       );
       setRoleStatus(payload.role || "director", payload.status || "passed");
     }});
     source.addEventListener("routing.decision", (event) => {{
       const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
       const routeLabels = {{
         director_only: "总工程师直接完成",
         core_relay: "核心接力",
@@ -7533,6 +7530,7 @@ def _relay_task_detail_page(
     }});
     source.addEventListener("role.envelope", (event) => {{
       const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
       const envelope = payload.envelope || payload;
       const role = payload.role || envelope.role;
       renderRoleEnvelope(role, envelope);
@@ -7555,13 +7553,16 @@ def _relay_task_detail_page(
       const payload = parseRelayEvent(event);
       const toRole = payload.to_role || payload.handoff_to;
       const fromRole = payload.from_role || "";
+      const roundId = String(payload.round_id || "1");
+      if (!isCurrentRoundEvent(payload)) return;
       if (toRole) setRoleStatus(toRole, "queued");
-      const handoffKey = `handoff:${{fromRole}}:${{toRole || ""}}:${{payload.artifact_id || payload.summary || event.lastEventId || ""}}`;
+      const handoffKey = `handoff:${{roundId}}:${{fromRole}}:${{toRole || ""}}:${{payload.artifact_id || payload.summary || event.lastEventId || ""}}`;
       appendMarvisConversationHandoff(toRole, handoffKey, fromRole);
       appendActivity(`${{labelForRole(payload.from_role)}} 已交接给 ${{labelForRole(toRole)}}：${{payload.summary || "等待下一角色处理"}}`);
     }});
     source.addEventListener("role.status", (event) => {{
       const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
       const reason = payload.reason || payload.payload?.reason || "";
       const force = reason === "new_followup_turn";
       if (force) clearMarvisConversationPausedRows();
@@ -7569,12 +7570,16 @@ def _relay_task_detail_page(
       if (TERMINAL_ROLE_STATUSES.has(payload.status)) clearRolePreview(payload.role);
       appendActivity(`${{labelForRole(payload.role)}} 状态更新为 ${{labelForStatus(payload.status)}}。`);
     }});
-    source.addEventListener("task.completed", () => {{
+    source.addEventListener("task.completed", (event) => {{
+      const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
       updateTaskStatus("completed");
       clearAllRolePreviews();
       appendActivity("任务已完成，可以继续补充给总工程师进行追问或追加验收。");
     }});
-    source.addEventListener("task.interrupted", () => {{
+    source.addEventListener("task.interrupted", (event) => {{
+      const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
       updateTaskStatus("interrupted");
       clearAllRolePreviews();
       appendActivity("任务已中断。");
@@ -7777,13 +7782,12 @@ def _relay_projected_conversation_rows(
                     "meta": str(worker_event.source or ""),
                     "body": "",
                     "key": key,
+                    "round_id": "",
                     "preview_event_ids": str(worker_event.id),
                 }
                 rows.append(row)
                 row_by_key[key] = row
-            event_ids = set(
-                filter(None, row_by_key[key].get("preview_event_ids", "").split(","))
-            )
+            event_ids = set(filter(None, row_by_key[key].get("preview_event_ids", "").split(",")))
             event_ids.add(str(worker_event.id))
             row_by_key[key]["preview_event_ids"] = ",".join(sorted(event_ids, key=int))
             row_by_key[key]["body"] += text
@@ -7881,6 +7885,7 @@ def _relay_projected_conversation_rows(
                     "status": str(payload.get("status") or ""),
                     "handoff_to": str(payload.get("handoff_to") or ""),
                     "display_summary": _relay_concrete_payload_summary(payload),
+                    "round_id": str(payload.get("round_id") or ""),
                 }
             )
     _relay_enrich_generic_final_summary_rows(projected_rows)
@@ -7914,9 +7919,7 @@ def _relay_pending_followup_waiting_row(
         if str(artifact.get("artifact_type") or "") != "user_followup":
             continue
         latest_followup_index = index
-        latest_followup_key = str(
-            artifact.get("id") or artifact.get("created_at") or index
-        )
+        latest_followup_key = str(artifact.get("id") or artifact.get("created_at") or index)
     if latest_followup_index < 0:
         return None
     for artifact in artifacts[latest_followup_index + 1 :]:
@@ -7945,6 +7948,7 @@ def _relay_pending_followup_waiting_row(
         "body": "...",
         "key": f"followup-waiting:{latest_followup_key}",
         "status": "streaming",
+        "round_id": str(artifacts[latest_followup_index].get("round_id") or ""),
     }
 
 
@@ -7978,6 +7982,7 @@ def _relay_conversation_row_from_artifact(
             "key": f"user_followup:{artifact_key}",
             "images": list(artifact.get("images") or []),
             "files": list(artifact.get("files") or []),
+            "round_id": str(artifact.get("round_id") or ""),
         }
     if artifact_type == "relay_board":
         text = str(artifact.get("latest_user_input") or "").strip()
@@ -7997,6 +8002,7 @@ def _relay_conversation_row_from_artifact(
             "meta": "",
             "body": _relay_humanize_user_message(text),
             "key": f"relay_board_followup:{artifact_key}",
+            "round_id": str(artifact.get("round_id") or ""),
         }
     if artifact_type == "handoff_packet":
         from_role = str(artifact.get("from_role") or artifact.get("relay_role") or "")
@@ -8012,6 +8018,7 @@ def _relay_conversation_row_from_artifact(
             "key": f"handoff:{from_role}:{to_role}:{artifact_key}",
             "from_role": from_role,
             "to_role": to_role,
+            "round_id": str(artifact.get("round_id") or ""),
         }
     if artifact_type in {"role_dispatch_metadata", "role_error"}:
         return None
@@ -8028,6 +8035,7 @@ def _relay_conversation_row_from_artifact(
             "body": _relay_followup_response_display_text(role, text),
             "key": f"followup_response:{artifact_key}",
             "status": "passed",
+            "round_id": str(artifact.get("round_id") or ""),
         }
     payload = _relay_canonical_payload_from_artifact(artifact)
     if payload is None:
@@ -8048,6 +8056,7 @@ def _relay_conversation_row_from_artifact(
         "status": str(payload.get("status") or ""),
         "handoff_to": str(payload.get("handoff_to") or ""),
         "display_summary": _relay_concrete_payload_summary(payload),
+        "round_id": str(payload.get("round_id") or ""),
     }
 
 
@@ -8187,7 +8196,9 @@ def _marvis_relay_conversation_html(
         artifacts=artifacts,
     )
     if not rows:
-        if any(str(getattr(job, "status", "") or "") in {"queued", "streaming"} for job in role_jobs):
+        if any(
+            str(getattr(job, "status", "") or "") in {"queued", "streaming"} for job in role_jobs
+        ):
             return _marvis_relay_waiting_message_html()
         return _marvis_relay_empty_conversation_html()
     html_rows: list[str] = []
@@ -8200,14 +8211,15 @@ def _marvis_relay_conversation_html(
         if to_role:
             handoffs_by_role.setdefault(to_role, []).append(row)
     rendered_handoffs: set[str] = set()
-    rendered_handoff_pairs: set[tuple[str, str]] = set()
+    rendered_handoff_identities: set[tuple[str, str, str]] = set()
 
     def append_handoff_once(handoff: dict[str, str]) -> bool:
         key = str(handoff.get("key") or "")
         pair = _marvis_relay_handoff_pair(handoff)
         if pair is None:
             return False
-        if pair in rendered_handoff_pairs:
+        identity = _marvis_relay_handoff_identity(handoff)
+        if identity in rendered_handoff_identities:
             return True
         if key and key in rendered_handoffs:
             return True
@@ -8215,7 +8227,7 @@ def _marvis_relay_conversation_html(
         if not html:
             return False
         html_rows.append(html)
-        rendered_handoff_pairs.add(pair)
+        rendered_handoff_identities.add(identity)
         if key:
             rendered_handoffs.add(key)
         return True
@@ -8224,13 +8236,10 @@ def _marvis_relay_conversation_html(
         role = str(row.get("role") or "")
         kind = str(row.get("kind") or "")
         if kind == "handoff":
+            if str(row.get("from_role") or "") != "director":
+                append_handoff_once(row)
             continue
-        if (
-            kind == "role_envelope"
-            and previous_role
-            and role
-            and role != previous_role
-        ):
+        if kind == "role_envelope" and previous_role and role and role != previous_role:
             for handoff in handoffs_by_role.get(role, []):
                 if _marvis_relay_handoff_pair(handoff) == (previous_role, role):
                     append_handoff_once(handoff)
@@ -8239,7 +8248,8 @@ def _marvis_relay_conversation_html(
             and previous_role == "director"
             and role
             and role != "director"
-            and (previous_role, role) not in rendered_handoff_pairs
+            and _marvis_relay_handoff_identity({**row, "from_role": previous_role, "to_role": role})
+            not in rendered_handoff_identities
         ):
             synthetic_key = f"synthetic-handoff:{previous_role}:{role}"
             append_handoff_once(
@@ -8247,6 +8257,7 @@ def _marvis_relay_conversation_html(
                     "from_role": previous_role,
                     "to_role": role,
                     "role": role,
+                    "round_id": str(row.get("round_id") or ""),
                     "key": synthetic_key,
                 }
             )
@@ -8262,11 +8273,13 @@ def _marvis_relay_handoff_html(row: dict[str, str]) -> str:
         return ""
     from_role, to_role = pair
     key = str(row.get("key") or "")
+    round_id = str(row.get("round_id") or "1")
     text = _marvis_relay_handoff_text(from_role, to_role)
     return (
         '<div class="marvis-relay-handoff" data-marvis-handoff '
         f'data-native-kind="handoff" data-native-from-role="{escape(from_role)}" '
         f'data-native-to-role="{escape(to_role)}" data-native-role="{escape(to_role)}" '
+        f'data-native-round-id="{escape(round_id)}" '
         f'data-native-key="{escape(key)}">'
         f"{escape(text)}"
         "</div>"
@@ -8278,9 +8291,17 @@ def _marvis_relay_handoff_pair(row: dict[str, str]) -> tuple[str, str] | None:
     to_role = str(row.get("to_role") or row.get("role") or "").strip()
     if not from_role or not to_role:
         return None
-    if from_role == to_role or to_role == "director":
+    if from_role == to_role:
         return None
     return from_role, to_role
+
+
+def _marvis_relay_handoff_identity(row: dict[str, str]) -> tuple[str, str, str]:
+    pair = _marvis_relay_handoff_pair(row)
+    if pair is None:
+        return ("", "", "")
+    round_id = str(row.get("round_id") or "1")
+    return (round_id, pair[0], pair[1])
 
 
 def _marvis_relay_empty_conversation_html() -> str:
@@ -8341,14 +8362,10 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
     status_label = _marvis_relay_role_status_label(meta)
     action = _marvis_relay_action_label(role, row)
     role_final_attr = (
-        f' data-conversation-role-final="{escape(role)}"'
-        if kind == "role_envelope"
-        else ""
+        f' data-conversation-role-final="{escape(role)}"' if kind == "role_envelope" else ""
     )
     role_preview_attr = (
-        f' data-conversation-role-preview="{escape(role)}"'
-        if kind == "text_delta"
-        else ""
+        f' data-conversation-role-preview="{escape(role)}"' if kind == "text_delta" else ""
     )
     raw_preview_attr = ""
     preview_event_ids = str(row.get("preview_event_ids") or "")
@@ -8357,11 +8374,16 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
         if kind == "text_delta" and preview_event_ids
         else ""
     )
-    action_html = (
-        f'<span class="marvis-relay-agent-action">| {escape(action)} {escape(status_label)}</span>'
-        if kind in {"role_envelope", "text_delta"} or role == "director"
-        else ""
-    )
+    show_action = kind in {"role_envelope", "text_delta"} or role == "director"
+    if show_action and action:
+        action_html = (
+            f'<span class="marvis-relay-agent-action">| {escape(action)} '
+            f"{escape(status_label)}</span>"
+        )
+    elif show_action and status_label:
+        action_html = f'<span class="marvis-relay-agent-action">| {escape(status_label)}</span>'
+    else:
+        action_html = ""
     return f"""
       <article class="marvis-relay-agent-step" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(key)}"{role_final_attr}{role_preview_attr}{raw_preview_attr}{preview_event_ids_attr}>
         {_marvis_relay_avatar_html(persona, label=display_name)}
@@ -8381,9 +8403,7 @@ def _marvis_relay_attachment_list_html(row: dict[str, Any]) -> str:
             continue
         src = str(raw.get("url") or raw.get("data_url") or "")
         if not (
-            src.startswith("data:image/")
-            or src.startswith("http://")
-            or src.startswith("https://")
+            src.startswith("data:image/") or src.startswith("http://") or src.startswith("https://")
         ):
             continue
         image_items.append(
@@ -8402,13 +8422,9 @@ def _marvis_relay_attachment_list_html(row: dict[str, Any]) -> str:
         )
     parts: list[str] = []
     if image_items:
-        parts.append(
-            '<div class="marvis-relay-message-images">' + "".join(image_items) + "</div>"
-        )
+        parts.append('<div class="marvis-relay-message-images">' + "".join(image_items) + "</div>")
     if file_items:
-        parts.append(
-            '<div class="marvis-relay-attachment-list">' + "".join(file_items) + "</div>"
-        )
+        parts.append('<div class="marvis-relay-attachment-list">' + "".join(file_items) + "</div>")
     if not parts:
         return ""
     return "".join(parts)
@@ -8429,9 +8445,7 @@ def _relay_native_conversation_html(
             if agent_run_id is None:
                 continue
             role = str(getattr(job, "role", "") or "")
-            display_name = str(
-                getattr(job, "display_name", "") or _relay_role_label(role)
-            )
+            display_name = str(getattr(job, "display_name", "") or _relay_role_label(role))
             for worker_event in hub.snapshot(
                 agent_run_id=int(agent_run_id),
                 after_id=0,
@@ -8859,7 +8873,7 @@ def _relay_extract_pseudo_envelope_human_text(text: str) -> str:
             if marker_index > 0:
                 cut_at = min(cut_at, marker_index)
         cleaned = candidate[:cut_at]
-        cleaned = cleaned.strip(" ,，。\"{}")
+        cleaned = cleaned.strip(' ,，。"{}')
         if not cleaned:
             continue
         cleaned = _relay_humanize_display_text(cleaned)
@@ -8953,26 +8967,18 @@ def _relay_protocol_output_hidden_text(role: str) -> str:
 
 def _relay_native_message_html(row: dict[str, str]) -> str:
     meta = str(row.get("meta") or "")
-    meta_html = (
-        f'<span class="relay-message-meta">{escape(meta)}</span>' if meta else ""
-    )
+    meta_html = f'<span class="relay-message-meta">{escape(meta)}</span>' if meta else ""
     role = str(row.get("role", "") or "system")
     kind = str(row.get("kind", "") or "event")
     role_final_attr = (
-        f' data-conversation-role-final="{escape(role)}"'
-        if kind == "role_envelope"
-        else ""
+        f' data-conversation-role-final="{escape(role)}"' if kind == "role_envelope" else ""
     )
     role_preview_attr = (
-        f' data-conversation-role-preview="{escape(role)}"'
-        if kind == "text_delta"
-        else ""
+        f' data-conversation-role-preview="{escape(role)}"' if kind == "text_delta" else ""
     )
     raw_preview = str(row.get("raw_preview") or "")
     raw_preview_attr = (
-        f' data-raw-preview="{escape(raw_preview)}"'
-        if kind == "text_delta" and raw_preview
-        else ""
+        f' data-raw-preview="{escape(raw_preview)}"' if kind == "text_delta" and raw_preview else ""
     )
     preview_event_ids = str(row.get("preview_event_ids") or "")
     preview_event_ids_attr = (
@@ -9030,7 +9036,9 @@ def _relay_role_display_from_job(
             "summary_text": _relay_humanize_role_envelope(payload),
             "canonical_json": _relay_canonical_envelope_json(payload),
             "is_preview": False,
-            "debug_raw": output if output and output != _relay_canonical_envelope_json(payload) else "",
+            "debug_raw": output
+            if output and output != _relay_canonical_envelope_json(payload)
+            else "",
         }
     if error_message and status in {"blocked", "failed"}:
         return {
@@ -9123,7 +9131,9 @@ def _relay_canonical_payload_from_artifact(
     return parsed
 
 
-def _relay_parse_role_envelope_payload(text_or_payload: str | dict[str, Any]) -> dict[str, Any] | None:
+def _relay_parse_role_envelope_payload(
+    text_or_payload: str | dict[str, Any],
+) -> dict[str, Any] | None:
     result = parse_role_envelope(text_or_payload)
     if result.ok and result.payload:
         return dict(result.payload)
@@ -11808,9 +11818,7 @@ __MARVIS_EXTRA_HTML__
         .replace(
             "__PLUGIN_MENU_ITEMS_JSON__",
             json.dumps(
-                _codex_plugin_menu_items()
-                if supports_plugin_menu
-                else [],
+                _codex_plugin_menu_items() if supports_plugin_menu else [],
                 ensure_ascii=False,
             ),
         )
@@ -16327,8 +16335,7 @@ __MARVIS_EXTRA_HTML__
 </body>
 </html>"""
     return _replace_html_icons(
-        template
-        .replace("__SAFE_TITLE__", safe_title)
+        template.replace("__SAFE_TITLE__", safe_title)
         .replace("__NATIVE_APP_HEAD__", _NATIVE_APP_HEAD)
         .replace("__MARVIS_CSS_LINK__", marvis_css_link)
         .replace("__MARVIS_BODY_ATTR__", marvis_body_attr)
@@ -16366,9 +16373,7 @@ __MARVIS_EXTRA_HTML__
         .replace(
             "__PLUGIN_MENU_ITEMS_JSON__",
             json.dumps(
-                _codex_plugin_menu_items()
-                if supports_plugin_menu
-                else [],
+                _codex_plugin_menu_items() if supports_plugin_menu else [],
                 ensure_ascii=False,
             ),
         )

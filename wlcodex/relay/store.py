@@ -89,17 +89,18 @@ class RelayStore:
                 continue
             if status and task.status != status:
                 continue
-            jobs = self._role_jobs(task.id)
             artifacts = self._relay_artifacts(task.id)
+            current_artifacts = _current_round_artifacts(artifacts)
+            jobs = self._role_jobs(task.id, artifacts=current_artifacts)
             summaries.append(
                 RelayTaskSummary.from_task(
                     task,
                     role_statuses={job.role: job.status for job in jobs},
                     role_providers={job.role: job.provider for job in jobs},
                     director_decision_summary=_latest_summary(
-                        artifacts, "routing_decision"
+                        current_artifacts, "routing_decision"
                     ),
-                    latest_handoff_summary=_latest_summary(artifacts, "handoff_packet"),
+                    latest_handoff_summary=_latest_summary(current_artifacts, "handoff_packet"),
                 )
             )
         return summaries
@@ -137,12 +138,8 @@ class RelayStore:
             """
         ).fetchone()
         return {
-            "consumed_tokens": (
-                int(today_row["total_tokens"] or 0) if today_row else 0
-            ),
-            "total_consumed_tokens": (
-                int(total_row["total_tokens"] or 0) if total_row else 0
-            ),
+            "consumed_tokens": (int(today_row["total_tokens"] or 0) if today_row else 0),
+            "total_consumed_tokens": (int(total_row["total_tokens"] or 0) if total_row else 0),
         }
 
     def get_task_detail(self, task_id: int) -> RelayTaskDetail:
@@ -151,10 +148,12 @@ class RelayStore:
             raise KeyError(f"unknown relay task id: {task_id}")
         task = self._task_from_run(team_run)
         artifacts = self._relay_artifacts(task_id)
-        board = self._latest_board(task, artifacts)
-        latest_handoff = self._latest_handoff(artifacts)
-        routing_decision = _latest_routing_decision(artifacts)
-        role_jobs = self._role_jobs(task_id, artifacts=artifacts)
+        current_round_id = _current_round_id(artifacts)
+        current_artifacts = _artifacts_for_round(artifacts, current_round_id)
+        board = self._latest_board(task, current_artifacts or artifacts)
+        latest_handoff = self._latest_handoff(current_artifacts)
+        routing_decision = _latest_routing_decision(current_artifacts)
+        role_jobs = self._role_jobs(task_id, artifacts=current_artifacts)
         return RelayTaskDetail(
             task=task,
             board=board,
@@ -172,6 +171,7 @@ class RelayStore:
                 if job.provider and job.native_session_id
             ],
             routing_decision=routing_decision,
+            current_round_id=current_round_id,
         )
 
     def save_context_packet(
@@ -202,6 +202,7 @@ class RelayStore:
         next_payload = dict(payload)
         if role:
             next_payload.setdefault("relay_role", role)
+        next_payload.setdefault("round_id", self.current_round_id(task_id))
         return self._ledger.record_team_artifact(
             team_run_id=task_id,
             agent_job_id=job.id if job else None,
@@ -229,13 +230,19 @@ class RelayStore:
         )
 
     def handoffs_for_role(self, task_id: int, role: str) -> list[HandoffPacket]:
+        artifacts = _current_round_artifacts(self._relay_artifacts(task_id))
         return [
             HandoffPacket.from_payload(artifact)
-            for artifact in self._relay_artifacts(task_id)
+            for artifact in artifacts
             if artifact.get("artifact_type") == "handoff_packet"
-            and str(artifact.get("handoff_to") or artifact.get("to_role") or "")
-            in (role, "")
+            and str(artifact.get("handoff_to") or artifact.get("to_role") or "") in (role, "")
         ]
+
+    def current_round_id(self, task_id: int) -> int:
+        return _current_round_id(self._relay_artifacts(task_id))
+
+    def next_round_id(self, task_id: int) -> int:
+        return self.current_round_id(task_id) + 1
 
     def update_role_status(self, task_id: int, role: str, status: str) -> RelayRoleJob:
         job = self._team_job_for_role(task_id, role)
@@ -372,9 +379,7 @@ class RelayStore:
                     latest_handoff_summary=str(handoff.get("summary") or ""),
                     open_questions=list(output_payload.get("open_questions") or []),
                     error_message=str(
-                        error_payload.get("error")
-                        or error_payload.get("summary")
-                        or ""
+                        error_payload.get("error") or error_payload.get("summary") or ""
                     ),
                     idle_reason=_role_idle_reason(job.role, routing_decision),
                     updated_at=job.updated_at.isoformat(),
@@ -389,7 +394,7 @@ class RelayStore:
         raise KeyError(f"unknown relay role {role!r} for task {task_id}")
 
     def _relay_artifacts(self, task_id: int) -> list[dict[str, Any]]:
-        return [
+        artifacts = [
             {
                 "id": artifact.id,
                 "artifact_type": artifact.artifact_type,
@@ -399,6 +404,7 @@ class RelayStore:
             }
             for artifact in self._ledger.list_team_artifacts(task_id)
         ]
+        return _annotate_artifact_rounds(artifacts)
 
     def _latest_board(
         self,
@@ -437,22 +443,19 @@ def _encode_goal(
     role_providers: dict[str, str] | None = None,
     phase: str = "director",
 ) -> str:
-    return (
-        "relay:"
-        + __import__("json").dumps(
-            {
-                "title": title,
-                "prompt": prompt,
-                "workspace": workspace,
-                "provider": provider,
-                "phase": phase,
-                "role_providers": _normalize_role_providers(
-                    role_providers,
-                    fallback=provider,
-                ),
-            },
-            ensure_ascii=False,
-        )
+    return "relay:" + __import__("json").dumps(
+        {
+            "title": title,
+            "prompt": prompt,
+            "workspace": workspace,
+            "provider": provider,
+            "phase": phase,
+            "role_providers": _normalize_role_providers(
+                role_providers,
+                fallback=provider,
+            ),
+        },
+        ensure_ascii=False,
     )
 
 
@@ -495,6 +498,53 @@ def _normalize_role_providers(
         role: str(source.get(role) or fallback_provider).strip() or fallback_provider
         for role in RELAY_ROLE_IDS
     }
+
+
+def _coerce_round_id(value: Any) -> int:
+    try:
+        round_id = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return round_id if round_id > 0 else 0
+
+
+def _annotate_artifact_rounds(
+    artifacts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    current_round = 1
+    annotated: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        next_artifact = dict(artifact)
+        explicit_round = _coerce_round_id(next_artifact.get("round_id"))
+        if explicit_round:
+            current_round = explicit_round
+        elif str(next_artifact.get("artifact_type") or "") == "user_followup":
+            current_round += 1
+        next_artifact["round_id"] = current_round
+        annotated.append(next_artifact)
+    return annotated
+
+
+def _current_round_id(artifacts: list[dict[str, Any]]) -> int:
+    return max([_coerce_round_id(artifact.get("round_id")) for artifact in artifacts] or [1]) or 1
+
+
+def _artifacts_for_round(
+    artifacts: list[dict[str, Any]],
+    round_id: int,
+) -> list[dict[str, Any]]:
+    target = _coerce_round_id(round_id) or 1
+    return [
+        artifact
+        for artifact in artifacts
+        if (_coerce_round_id(artifact.get("round_id")) or 1) == target
+    ]
+
+
+def _current_round_artifacts(
+    artifacts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return _artifacts_for_round(artifacts, _current_round_id(artifacts))
 
 
 def _row_to_team_run(row: Any) -> TeamRun:
@@ -569,11 +619,7 @@ def _role_idle_reason(role: str, decision: dict[str, Any] | None) -> str:
         return "等待用户补充后再调度"
     if route == "blocked":
         return "被风险门禁阻塞"
-    required_roles = {
-        str(item)
-        for item in decision.get("required_roles", [])
-        if str(item).strip()
-    }
+    required_roles = {str(item) for item in decision.get("required_roles", []) if str(item).strip()}
     if role in required_roles:
         if role == "director" and route == "director_only":
             return "总工程师直接完成"

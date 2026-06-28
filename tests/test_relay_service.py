@@ -119,9 +119,7 @@ class ActiveTurnProvider(FakeProvider):
         prompt: str,
         **kwargs: Any,
     ):
-        self.calls.append(
-            ("steer_session", native_session_id, expected_turn_id, prompt, kwargs)
-        )
+        self.calls.append(("steer_session", native_session_id, expected_turn_id, prompt, kwargs))
         return NativeAgentControlResult(
             provider=self.provider,
             provider_engine=self.provider_engine,
@@ -383,7 +381,9 @@ def test_create_task_snapshots_role_providers_and_dispatches_each_role_provider(
     assert antigravity.calls[0][0] == "start_session"
     assert not codex.calls
     assert not claude.calls
-    implementer = next(job for job in service.get_task(task.id).role_jobs if job.role == "implementer")
+    implementer = next(
+        job for job in service.get_task(task.id).role_jobs if job.role == "implementer"
+    )
     assert implementer.provider == "antigravity"
     assert implementer.native_session_id == "native-1"
 
@@ -475,9 +475,7 @@ def test_invalid_envelope_blocks_advancement(tmp_path) -> None:
         provider="claude",
     )
 
-    result = asyncio.run(
-        service.handle_role_output(task.id, "implementer", '{"status": "passed"}')
-    )
+    result = asyncio.run(service.handle_role_output(task.id, "implementer", '{"status": "passed"}'))
 
     detail = service.get_task(task.id)
     tester = next(job for job in detail.role_jobs if job.role == "tester")
@@ -1313,7 +1311,7 @@ def test_followup_malformed_routing_envelope_recovers_instead_of_plain_response(
     runtime_store = RuntimeEventStore(service._store._ledger._conn)
     bad_protocol_text = (
         '{"artifact_type":"routing_decisioncomplexitymedium'
-        'routecore_relayrequired_rolesdirectorimplementerauditor'
+        "routecore_relayrequired_rolesdirectorimplementerauditor"
         'statuspassedsummary core：先清理，再残行为一致结果"}'
     )
     runtime_store.append(
@@ -1461,6 +1459,116 @@ def test_followup_director_waiting_handoff_dispatches_implementer(
         for artifact in detail.artifacts
     )
     assert provider.calls[-1][0] == "start_session"
+
+
+def test_followup_starts_new_round_and_current_detail_ignores_old_waiting_summary(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay rounds",
+        prompt="先修复顶部图标。",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "status": "passed",
+            "reason": "需要开发和审核",
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "handoff_to": "implementer",
+            "summary": "第一轮交给开发。",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "开发处理",
+            "route": "core_relay",
+            "required_roles": ["director", "implementer", "auditor"],
+            "requires_user_approval": False,
+        },
+        summary="第一轮交给开发。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "status": "waiting",
+            "reason": "旧轮等待用户验收",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "handoff_to": "",
+            "summary": "旧轮等待用户验收。",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "等待用户确认",
+        },
+        summary="旧轮等待用户验收。",
+    )
+    service._store.update_task_status(task.id, "completed")
+    service._store.update_role_status(task.id, "director", "passed")
+
+    asyncio.run(service.add_user_message(task.id, "继续修复 handoff 提示"))
+
+    detail = service.get_task(task.id)
+    rounds = {
+        artifact.get("artifact_type"): artifact.get("round_id")
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") in {"user_followup", "relay_board"}
+    }
+    assert max(int(artifact.get("round_id") or 0) for artifact in detail.artifacts) == 2
+    assert rounds["user_followup"] == 2
+    assert detail.routing_decision is None
+    assert detail.task.status == "running"
+    assert {job.role: job.status for job in detail.role_jobs}["director"] == "streaming"
+
+
+def test_runtime_projection_tags_events_with_current_agent_run_round(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay rounds",
+        prompt="先修复顶部图标。",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_task_status(task.id, "completed")
+    asyncio.run(service.add_user_message(task.id, "第二轮继续修复"))
+
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    current_round_delta = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-current-round",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"delta": "当前轮输出"},
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+
+    service.project_runtime_event(current_round_delta)
+
+    native_events = [
+        event
+        for event in service.events_for_task(task.id)
+        if event.event_type == "role.native_event"
+    ]
+    delta_events = [
+        event
+        for event in service.events_for_task(task.id)
+        if event.event_type == "role.output_delta"
+    ]
+    assert native_events[-1].payload["round_id"] == 2
+    assert delta_events[-1].payload["round_id"] == 2
 
 
 def test_followup_completion_uses_current_native_turn_delta_not_old_completed_text(
@@ -1711,9 +1819,7 @@ def test_runtime_completion_uses_provider_read_session_before_bad_delta(
         provider.calls.append(("read_session", native_session_id))
         return {
             "thread": {"native_session_id": native_session_id},
-            "turns": [
-                {"role": "assistant", "text": completed_text, "native_turn_id": "turn-1"}
-            ],
+            "turns": [{"role": "assistant", "text": completed_text, "native_turn_id": "turn-1"}],
         }
 
     provider.read_session = read_session
@@ -1822,7 +1928,7 @@ def test_followup_malformed_read_session_protocol_recovers_not_plain_response(
     asyncio.run(service.add_user_message(task.id, "继续按开发审核流程处理"))
     bad_protocol_text = (
         '{"artifact_type":"routing_decisioncomplexitymedium'
-        'routecore_relayrequired_rolesdirectorimplementerauditor'
+        "routecore_relayrequired_rolesdirectorimplementerauditor"
         'statuspassedsummary core：先清理，再残行为一致结果"}'
     )
 
@@ -1970,9 +2076,7 @@ def test_scan_stale_native_role_does_not_close_pending_followup_from_old_session
 
     provider.read_session = read_session
 
-    changed = asyncio.run(
-        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
-    )
+    changed = asyncio.run(service.scan_stale_native_roles(max_idle_seconds=300, now=now))
 
     detail = service.get_task(task.id)
     followup_responses = [
@@ -2016,9 +2120,7 @@ def test_scan_stale_native_role_syncs_then_blocks_without_assistant_output(
         )
     )
 
-    changed = asyncio.run(
-        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
-    )
+    changed = asyncio.run(service.scan_stale_native_roles(max_idle_seconds=300, now=now))
 
     assert changed == 1
     assert ("sync_session", "native-1") in provider.calls
@@ -2109,9 +2211,7 @@ def test_scan_stale_native_role_completes_synced_role_envelope_delta(
 
     provider.sync_session = sync_session
 
-    changed = asyncio.run(
-        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
-    )
+    changed = asyncio.run(service.scan_stale_native_roles(max_idle_seconds=300, now=now))
 
     assert changed == 1
     assert ("sync_session", "native-1") in provider.calls
@@ -2206,9 +2306,7 @@ def test_scan_stale_native_role_recovers_interrupted_task_with_active_role(
 
     provider.sync_session = sync_session
 
-    changed = asyncio.run(
-        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
-    )
+    changed = asyncio.run(service.scan_stale_native_roles(max_idle_seconds=300, now=now))
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
@@ -2324,9 +2422,7 @@ def test_scan_stale_native_role_uses_complete_protocol_delta_before_fragments(
         )
     )
 
-    changed = asyncio.run(
-        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
-    )
+    changed = asyncio.run(service.scan_stale_native_roles(max_idle_seconds=300, now=now))
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
@@ -2551,9 +2647,7 @@ def test_scan_stale_native_role_prefers_synced_completed_message_over_bad_delta(
 
     provider.sync_session = sync_session
 
-    changed = asyncio.run(
-        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
-    )
+    changed = asyncio.run(service.scan_stale_native_roles(max_idle_seconds=300, now=now))
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
@@ -2636,16 +2730,12 @@ def test_scan_stale_native_role_uses_provider_read_session_before_bad_delta(
         provider.calls.append(("read_session", native_session_id))
         return {
             "thread": {"native_session_id": native_session_id},
-            "turns": [
-                {"role": "assistant", "text": completed_text, "native_turn_id": "turn-1"}
-            ],
+            "turns": [{"role": "assistant", "text": completed_text, "native_turn_id": "turn-1"}],
         }
 
     provider.read_session = read_session
 
-    changed = asyncio.run(
-        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
-    )
+    changed = asyncio.run(service.scan_stale_native_roles(max_idle_seconds=300, now=now))
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
@@ -2701,9 +2791,7 @@ def test_scan_stale_native_role_blocks_completed_invalid_output(
         )
     )
 
-    changed = asyncio.run(
-        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
-    )
+    changed = asyncio.run(service.scan_stale_native_roles(max_idle_seconds=300, now=now))
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
@@ -2987,9 +3075,7 @@ def test_scan_active_native_runtime_events_projects_existing_completion(
         )
     )
 
-    changed = asyncio.run(
-        service.scan_active_native_runtime_events(runtime_store, limit=20)
-    )
+    changed = asyncio.run(service.scan_active_native_runtime_events(runtime_store, limit=20))
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
@@ -3031,9 +3117,7 @@ def test_agent_run_completed_without_text_blocks_streaming_role(tmp_path) -> Non
     jobs = {job.role: job for job in detail.role_jobs}
     assert detail.task.status == "blocked"
     assert jobs["architect"].status == "blocked"
-    assert jobs["architect"].error_message == (
-        "native provider completed without assistant output"
-    )
+    assert jobs["architect"].error_message == ("native provider completed without assistant output")
     assert any(
         artifact.get("artifact_type") == "role_error"
         and artifact.get("summary") == "native provider completed without assistant output"
@@ -3548,9 +3632,7 @@ def test_stale_scan_folds_current_turn_delta_consumed_before_completion(
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
     audit_reports = [
-        artifact
-        for artifact in detail.artifacts
-        if artifact.get("artifact_type") == "audit_report"
+        artifact for artifact in detail.artifacts if artifact.get("artifact_type") == "audit_report"
     ]
     assert changed is True
     assert jobs["auditor"].status == "passed"
@@ -3703,9 +3785,7 @@ def test_active_scan_completes_auditor_after_delta_cursor_passed_completion(
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
     audit_reports = [
-        artifact
-        for artifact in detail.artifacts
-        if artifact.get("artifact_type") == "audit_report"
+        artifact for artifact in detail.artifacts if artifact.get("artifact_type") == "audit_report"
     ]
     updated_run = service._store._ledger.get_agent_run(agent_run.id)
     assert projected_before_completion >= 2
@@ -3857,18 +3937,14 @@ def test_active_scan_reconciles_terminal_role_agent_run_without_duplicate_artifa
     )
     detail_before = service.get_task(task.id)
     audit_count_before = sum(
-        1
-        for artifact in detail_before.artifacts
-        if artifact.get("artifact_type") == "audit_report"
+        1 for artifact in detail_before.artifacts if artifact.get("artifact_type") == "audit_report"
     )
 
     changed = asyncio.run(service.scan_active_native_runtime_events(runtime_store))
 
     detail_after = service.get_task(task.id)
     audit_count_after = sum(
-        1
-        for artifact in detail_after.artifacts
-        if artifact.get("artifact_type") == "audit_report"
+        1 for artifact in detail_after.artifacts if artifact.get("artifact_type") == "audit_report"
     )
     updated_run = service._store._ledger.get_agent_run(agent_run.id)
     assert changed >= 1
@@ -4185,7 +4261,9 @@ def test_director_dispatch_prompt_requires_initial_routing_decision(tmp_path) ->
     prompt = provider.calls[0][2]
     assert "Director first action must be a routing_decision" in prompt
     assert '"artifact_type": "routing_decision"' in prompt
-    assert '"route": "director_only|core_relay|full_relay|audit_first|waiting_user|blocked"' in prompt
+    assert (
+        '"route": "director_only|core_relay|full_relay|audit_first|waiting_user|blocked"' in prompt
+    )
     assert "Do not inspect, edit, delete, test, commit, or deploy" in prompt
 
 
@@ -4437,8 +4515,7 @@ def test_intermediate_message_completed_without_envelope_waits_for_final_output(
         if artifact.get("role") == "implementer"
     )
     assert not any(
-        event.event_type == "role.envelope" and event.role == "implementer"
-        for event in events
+        event.event_type == "role.envelope" and event.role == "implementer" for event in events
     )
     assert [call[0] for call in provider.calls] == ["start_session"]
 

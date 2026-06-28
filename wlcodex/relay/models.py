@@ -260,6 +260,7 @@ class RelayTaskDetail:
     latest_handoff: HandoffPacket | None
     session_links: list[RelaySessionLink]
     routing_decision: dict[str, Any] | None = None
+    current_round_id: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -267,11 +268,10 @@ class RelayTaskDetail:
             "board": self.board.to_json_dict(),
             "role_jobs": [job.to_dict() for job in self.role_jobs],
             "artifacts": self.artifacts,
-            "latest_handoff": (
-                self.latest_handoff.to_json_dict() if self.latest_handoff else None
-            ),
+            "latest_handoff": (self.latest_handoff.to_json_dict() if self.latest_handoff else None),
             "session_links": [link.to_dict() for link in self.session_links],
             "routing_decision": self.routing_decision,
+            "current_round_id": self.current_round_id,
         }
 
 

@@ -195,9 +195,7 @@ class RelayNativeRunWatchdog:
         self._max_idle_seconds = max_idle_seconds
 
     async def scan_once(self) -> int:
-        return await self._service.scan_stale_native_roles(
-            max_idle_seconds=self._max_idle_seconds
-        )
+        return await self._service.scan_stale_native_roles(max_idle_seconds=self._max_idle_seconds)
 
 
 class RelayRuntimeEventProjector:
@@ -308,14 +306,8 @@ class RelayService:
                 },
                 summary=", ".join(
                     [
-                        *[
-                            str(image.get("filename") or "image")
-                            for image in clean_images
-                        ],
-                        *[
-                            str(file.get("filename") or "file")
-                            for file in clean_files
-                        ],
+                        *[str(image.get("filename") or "image") for image in clean_images],
+                        *[str(file.get("filename") or "file") for file in clean_files],
                     ]
                 )
                 or "用户附件",
@@ -335,7 +327,9 @@ class RelayService:
                 },
                 summary="RelayBoard initialized with attachments",
             )
-        director_job = next(job for job in self._store.get_task_detail(task.id).role_jobs if job.role == "director")
+        director_job = next(
+            job for job in self._store.get_task_detail(task.id).role_jobs if job.role == "director"
+        )
         self._events.emit(task.id, "task.created", payload={"title": title})
         self._events.emit(
             task.id,
@@ -399,11 +393,7 @@ class RelayService:
         assignments = {}
         for role in RELAY_ROLE_IDS:
             stored = self._store.get_runtime_setting(f"{RELAY_ASSIGNMENT_PREFIX}{role}")
-            value = (
-                stored
-                or self._role_provider_defaults.get(role)
-                or self._default_provider
-            )
+            value = stored or self._role_provider_defaults.get(role) or self._default_provider
             if value not in available:
                 value = self._default_available_provider()
             assignments[role] = value
@@ -468,14 +458,13 @@ class RelayService:
         prefer_continue: bool = True,
     ) -> None:
         detail = self._store.get_task_detail(task_id)
+        round_id = int(getattr(detail, "current_round_id", 1) or 1)
         job = next(
             (candidate for candidate in detail.role_jobs if candidate.role == role),
             None,
         )
         provider_name = (
-            detail.task.role_providers.get(role)
-            or detail.task.provider
-            or self._default_provider
+            detail.task.role_providers.get(role) or detail.task.provider or self._default_provider
         )
         try:
             provider = self._registry.get(provider_name)
@@ -519,8 +508,7 @@ class RelayService:
                     "dispatch.fallback",
                     role=role,
                     payload={
-                        "fallback_reason": str(exc)
-                        or "provider failed to continue native session",
+                        "fallback_reason": str(exc) or "provider failed to continue native session",
                         "provider": provider_name,
                         "fallback_action": "start_session",
                     },
@@ -534,9 +522,7 @@ class RelayService:
                         "dispatch.fallback",
                         role=role,
                         payload={
-                            "fallback_reason": _control_result_failure_reason(
-                                continued
-                            ),
+                            "fallback_reason": _control_result_failure_reason(continued),
                             "provider": provider_name,
                             "fallback_action": "start_session",
                         },
@@ -567,8 +553,7 @@ class RelayService:
                 )
                 return
         native_session_id = (
-            str(getattr(result, "native_session_id", "") or "")
-            or existing_native_session_id
+            str(getattr(result, "native_session_id", "") or "") or existing_native_session_id
         )
         agent_run_id = _result_agent_run_id(result)
         if not _control_result_verified(result):
@@ -601,6 +586,7 @@ class RelayService:
                 "role": role,
                 "provider": provider_name,
                 "native_session_id": native_session_id,
+                "round_id": round_id,
             },
         )
         self._events.emit(
@@ -610,6 +596,7 @@ class RelayService:
             payload={
                 "provider": provider_name,
                 "native_session_id": native_session_id,
+                "round_id": round_id,
             },
         )
 
@@ -635,9 +622,7 @@ class RelayService:
         available = self._available_providers()
         if not available:
             available = {self._default_provider}
-        unknown_roles = sorted(
-            str(role) for role in assignments if str(role) not in RELAY_ROLE_IDS
-        )
+        unknown_roles = sorted(str(role) for role in assignments if str(role) not in RELAY_ROLE_IDS)
         if unknown_roles:
             raise ValueError(f"unknown relay role: {unknown_roles[0]}")
         normalized: dict[str, str] = {}
@@ -694,29 +679,39 @@ class RelayService:
                 result.payload,
                 dispatch_next=dispatch_next,
             )
-        if role == "director" and not self._store.get_task_detail(task_id).routing_decision:
-            self._block_role_with_error(
+        detail_for_output = self._store.get_task_detail(task_id)
+        if role == "director" and not detail_for_output.routing_decision:
+            if envelope.handoff_to and self._ensure_followup_routing_decision(
                 task_id,
-                role,
-                (
-                    "director must produce routing_decision before "
-                    f"{envelope.artifact_type}"
-                ),
-                output=output,
-            )
-            return result
+                detail=detail_for_output,
+                envelope_payload=result.payload,
+            ):
+                detail_for_output = self._store.get_task_detail(task_id)
+            else:
+                self._block_role_with_error(
+                    task_id,
+                    role,
+                    (f"director must produce routing_decision before {envelope.artifact_type}"),
+                    output=output,
+                )
+                return result
+        round_id = self._store.current_round_id(task_id)
+        envelope_payload = {
+            **envelope.to_json_dict(),
+            "round_id": round_id,
+        }
         self._events.emit(
             task_id,
             "role.envelope",
             role=role,
-            payload=envelope.to_json_dict(),
+            payload=envelope_payload,
         )
         self._store.save_artifact(
             task_id,
             role,
             envelope.artifact_type,
             {
-                **envelope.to_json_dict(),
+                **envelope_payload,
                 "output": output,
                 "open_questions": envelope.open_questions,
             },
@@ -730,7 +725,7 @@ class RelayService:
             task_id,
             "role.status",
             role=role,
-            payload={"status": role_status},
+            payload={"status": role_status, "round_id": round_id},
         )
         if (
             role == "auditor"
@@ -762,7 +757,7 @@ class RelayService:
                     evidence_refs=envelope.evidence_refs,
                     next_action=envelope.next_action,
                 )
-                self._store.save_handoff_packet(
+                handoff_artifact = self._store.save_handoff_packet(
                     task_id,
                     from_role=role,
                     to_role=next_role,
@@ -774,13 +769,21 @@ class RelayService:
                     task_id,
                     "handoff.created",
                     role=role,
-                    payload=handoff.to_json_dict(),
+                    payload={
+                        **handoff.to_json_dict(),
+                        "round_id": round_id,
+                        "artifact_id": int(getattr(handoff_artifact, "id", 0) or 0),
+                    },
                 )
                 self._events.emit(
                     task_id,
                     "role.queued",
                     role=next_role,
-                    payload={"role": next_role, "reason": "auditor_rework"},
+                    payload={
+                        "role": next_role,
+                        "reason": "auditor_rework",
+                        "round_id": round_id,
+                    },
                 )
                 if dispatch_next:
                     await self.dispatch_role(task_id, next_role)
@@ -807,12 +810,11 @@ class RelayService:
                 task_id,
                 "task.completed",
                 role=role,
-                payload={"summary": envelope.summary},
+                payload={"summary": envelope.summary, "round_id": round_id},
             )
             return result
         if (
-            envelope.status == "passed"
-            or (envelope.status == "waiting" and envelope.handoff_to)
+            envelope.status == "passed" or (envelope.status == "waiting" and envelope.handoff_to)
         ) and result.next_role:
             detail = self._store.get_task_detail(task_id)
             next_role, handoff_error = self._resolve_handoff_target(
@@ -840,7 +842,7 @@ class RelayService:
                 evidence_refs=envelope.evidence_refs,
                 next_action=envelope.next_action,
             )
-            self._store.save_handoff_packet(
+            handoff_artifact = self._store.save_handoff_packet(
                 task_id,
                 from_role=role,
                 to_role=next_role,
@@ -857,13 +859,17 @@ class RelayService:
                 task_id,
                 "handoff.created",
                 role=role,
-                payload=handoff.to_json_dict(),
+                payload={
+                    **handoff.to_json_dict(),
+                    "round_id": round_id,
+                    "artifact_id": int(getattr(handoff_artifact, "id", 0) or 0),
+                },
             )
             self._events.emit(
                 task_id,
                 "role.queued",
                 role=next_role,
-                payload={"role": next_role},
+                payload={"role": next_role, "round_id": round_id},
             )
             if dispatch_next:
                 await self.dispatch_role(task_id, next_role)
@@ -872,6 +878,73 @@ class RelayService:
             self._store.update_task_status(task_id, "waiting_user")
             return result
         return result
+
+    def _ensure_followup_routing_decision(
+        self,
+        task_id: int,
+        *,
+        detail: RelayTaskDetail,
+        envelope_payload: dict[str, Any],
+    ) -> bool:
+        current_round_id = int(getattr(detail, "current_round_id", 1) or 1)
+        target_role = str(envelope_payload.get("handoff_to") or "").strip()
+        if target_role not in RELAY_ROLE_IDS or target_role == "director":
+            return False
+        previous_decision: dict[str, Any] = {}
+        for artifact in reversed(detail.artifacts):
+            if str(artifact.get("artifact_type") or "") == "routing_decision":
+                previous_decision = dict(artifact)
+                break
+        required_roles = _clean_required_roles(previous_decision.get("required_roles"))
+        if target_role not in required_roles:
+            required_roles = ["director", target_role]
+            if target_role != "auditor":
+                required_roles.append("auditor")
+        required_roles = _ordered_required_roles(required_roles, route="core_relay")
+        route = str(previous_decision.get("route") or "core_relay")
+        if route == "director_only":
+            route = "core_relay"
+        artifact_payload = {
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "status": "passed",
+            "reason": "接续回合沿用当前任务接力链路。",
+            "summary": str(
+                envelope_payload.get("summary")
+                or envelope_payload.get("reason")
+                or previous_decision.get("summary")
+                or "接续回合进入接力处理。"
+            ),
+            "handoff_to": target_role,
+            "next_action": str(
+                envelope_payload.get("next_action") or previous_decision.get("next_action") or ""
+            ),
+            "evidence_refs": list(envelope_payload.get("evidence_refs") or []),
+            "open_questions": list(envelope_payload.get("open_questions") or []),
+            "complexity": str(previous_decision.get("complexity") or "medium"),
+            "risk": str(previous_decision.get("risk") or "medium"),
+            "route": route,
+            "required_roles": required_roles,
+            "acceptance_criteria": _clean_string_list(previous_decision.get("acceptance_criteria")),
+            "stop_conditions": _clean_string_list(previous_decision.get("stop_conditions")),
+            "requires_user_approval": False,
+            "round_id": current_round_id,
+            "output": json.dumps(envelope_payload, ensure_ascii=False),
+        }
+        self._store.save_artifact(
+            task_id,
+            "director",
+            "routing_decision",
+            artifact_payload,
+            summary=str(artifact_payload.get("summary") or "接续回合进入接力处理。"),
+        )
+        self._events.emit(
+            task_id,
+            "routing.decision",
+            role="director",
+            payload=artifact_payload,
+        )
+        return True
 
     def _reset_required_roles_after_handoff(
         self,
@@ -928,9 +1001,11 @@ class RelayService:
             self._block_role_with_error(task_id, role, error, output=output)
             return result
 
+        round_id = self._store.current_round_id(task_id)
         artifact_payload = {
             **envelope.to_json_dict(),
             **decision,
+            "round_id": round_id,
             "output": output,
             "open_questions": envelope.open_questions,
         }
@@ -962,7 +1037,7 @@ class RelayService:
                 task_id,
                 "role.status",
                 role=role,
-                payload={"status": "blocked"},
+                payload={"status": "blocked", "round_id": round_id},
             )
             return result
         if route == "waiting_user" or decision["requires_user_approval"]:
@@ -972,7 +1047,7 @@ class RelayService:
                 task_id,
                 "role.status",
                 role=role,
-                payload={"status": "waiting"},
+                payload={"status": "waiting", "round_id": round_id},
             )
             return result
 
@@ -982,7 +1057,7 @@ class RelayService:
             task_id,
             "role.status",
             role=role,
-            payload={"status": "passed"},
+            payload={"status": "passed", "round_id": round_id},
         )
         next_role = _first_required_role_after_director(
             decision["required_roles"],
@@ -994,7 +1069,11 @@ class RelayService:
                 task_id,
                 "role.queued",
                 role=role,
-                payload={"role": role, "reason": "director_only_final_summary"},
+                payload={
+                    "role": role,
+                    "reason": "director_only_final_summary",
+                    "round_id": round_id,
+                },
             )
             await self.dispatch_role(task_id, role)
             return result
@@ -1008,7 +1087,7 @@ class RelayService:
                 evidence_refs=envelope.evidence_refs,
                 next_action=envelope.next_action,
             )
-            self._store.save_handoff_packet(
+            handoff_artifact = self._store.save_handoff_packet(
                 task_id,
                 from_role=role,
                 to_role=next_role,
@@ -1019,13 +1098,17 @@ class RelayService:
                 task_id,
                 "handoff.created",
                 role=role,
-                payload=handoff.to_json_dict(),
+                payload={
+                    **handoff.to_json_dict(),
+                    "round_id": round_id,
+                    "artifact_id": int(getattr(handoff_artifact, "id", 0) or 0),
+                },
             )
             self._events.emit(
                 task_id,
                 "role.queued",
                 role=next_role,
-                payload={"role": next_role},
+                payload={"role": next_role, "round_id": round_id},
             )
             if dispatch_next:
                 await self.dispatch_role(task_id, next_role)
@@ -1075,9 +1158,7 @@ class RelayService:
             "risk": risk,
             "route": route,
             "required_roles": required_roles,
-            "acceptance_criteria": _clean_string_list(
-                payload.get("acceptance_criteria")
-            ),
+            "acceptance_criteria": _clean_string_list(payload.get("acceptance_criteria")),
             "stop_conditions": _clean_string_list(payload.get("stop_conditions")),
             "requires_user_approval": bool(payload.get("requires_user_approval")),
         }, ""
@@ -1091,14 +1172,10 @@ class RelayService:
             return ""
         required_roles = _clean_required_roles(decision.get("required_roles"))
         completed_roles = {
-            str(job.role)
-            for job in detail.role_jobs
-            if str(job.status) in {"passed", "completed"}
+            str(job.role) for job in detail.role_jobs if str(job.status) in {"passed", "completed"}
         }
         missing_roles = [
-            role
-            for role in required_roles
-            if role != "director" and role not in completed_roles
+            role for role in required_roles if role != "director" and role not in completed_roles
         ]
         if missing_roles:
             labels = ", ".join(RELAY_ROLE_DISPLAY_NAMES.get(role, role) for role in missing_roles)
@@ -1165,6 +1242,7 @@ class RelayService:
         *,
         output: str = "",
     ) -> None:
+        round_id = self._store.current_round_id(task_id)
         self._store.save_artifact(
             task_id,
             role,
@@ -1172,6 +1250,7 @@ class RelayService:
             {
                 "error": reason,
                 "output": output,
+                "round_id": round_id,
             },
             summary=reason,
         )
@@ -1181,7 +1260,7 @@ class RelayService:
             task_id,
             "role.status",
             role=role,
-            payload={"status": "blocked", "error": reason},
+            payload={"status": "blocked", "error": reason, "round_id": round_id},
         )
 
     async def _retry_role_envelope_format(
@@ -1384,14 +1463,11 @@ class RelayService:
                 text=text,
             )
             return True
-        if (
-            not parse_result.ok
-            and await self._recover_director_routing_decision(
-                task_id,
-                role,
-                error=parse_result.error or "invalid role envelope",
-                output=text,
-            )
+        if not parse_result.ok and await self._recover_director_routing_decision(
+            task_id,
+            role,
+            error=parse_result.error or "invalid role envelope",
+            output=text,
         ):
             self._mark_native_agent_run_done(agent_run_id, text)
             return True
@@ -1488,6 +1564,7 @@ class RelayService:
             "failed",
             "interrupted",
         }
+        round_id = self._store.next_round_id(task_id)
         board = detail.board
         self._store.save_artifact(
             task_id,
@@ -1495,6 +1572,7 @@ class RelayService:
             "relay_board",
             {
                 **board.to_json_dict(),
+                "round_id": round_id,
                 "latest_user_input": prompt_text,
                 "current_dispatch": "director",
                 "next_step": "director review latest user input",
@@ -1512,7 +1590,11 @@ class RelayService:
                         task_id,
                         "role.status",
                         role=job.role,
-                        payload={"status": "idle", "reason": "new_followup_turn"},
+                        payload={
+                            "status": "idle",
+                            "reason": "new_followup_turn",
+                            "round_id": round_id,
+                        },
                     )
         self._store.update_role_status(task_id, "director", "queued")
         refreshed = self._store.get_task_detail(task_id)
@@ -1536,6 +1618,7 @@ class RelayService:
                 "text": text,
                 "target_role": "director",
                 "context_packet_id": int(getattr(context_record, "id", 0) or 0),
+                "round_id": round_id,
                 **_relay_attachment_payload(images=clean_images, files=clean_files),
             },
             summary=text,
@@ -1551,6 +1634,7 @@ class RelayService:
                 **_relay_attachment_payload(images=clean_images, files=clean_files),
                 "artifact_id": int(getattr(followup, "id", 0) or 0),
                 "context_packet_id": int(getattr(context_record, "id", 0) or 0),
+                "round_id": round_id,
             },
         )
         self._events.emit(
@@ -1560,6 +1644,7 @@ class RelayService:
             payload={
                 "latest_user_input": prompt_text,
                 "reason": "new_followup_turn",
+                "round_id": round_id,
             },
         )
         director = next(
@@ -1628,8 +1713,7 @@ class RelayService:
                     )
                     return
                 native_session_id = str(
-                    getattr(result, "native_session_id", "")
-                    or director.native_session_id
+                    getattr(result, "native_session_id", "") or director.native_session_id
                 )
                 self._store.update_role_metadata(
                     task_id,
@@ -1651,6 +1735,7 @@ class RelayService:
                     payload={
                         "role": "director",
                         "native_session_id": native_session_id,
+                        "round_id": round_id,
                     },
                 )
                 self._events.emit(
@@ -1660,6 +1745,7 @@ class RelayService:
                     payload={
                         "provider": director.provider,
                         "native_session_id": native_session_id,
+                        "round_id": round_id,
                     },
                 )
                 return
@@ -1776,11 +1862,13 @@ class RelayService:
         if runtime_event_id > 0:
             self._handled_runtime_completion_ids.add(runtime_event_id)
         clean_text = _plain_followup_visible_text(text.strip())
+        round_id = self._store.current_round_id(task_id)
         response_payload = {
             "text": clean_text,
             "target_role": "user",
             "status": "passed",
             "runtime_event_id": runtime_event_id,
+            "round_id": round_id,
         }
         if runtime_event_id > 0:
             try:
@@ -1809,19 +1897,20 @@ class RelayService:
                 "text": clean_text,
                 "status": "passed",
                 "artifact_id": int(getattr(response_artifact, "id", 0) or 0),
+                "round_id": round_id,
             },
         )
         self._events.emit(
             task_id,
             "role.status",
             role=role,
-            payload={"status": "passed"},
+            payload={"status": "passed", "round_id": round_id},
         )
         self._events.emit(
             task_id,
             "task.completed",
             role=role,
-            payload={"summary": clean_text},
+            payload={"summary": clean_text, "round_id": round_id},
         )
         return None
 
@@ -1966,11 +2055,7 @@ class RelayService:
                 await asyncio.sleep(0)
                 refreshed = self._store.get_task_detail(task_detail.task.id)
                 refreshed_job = next(
-                    (
-                        candidate
-                        for candidate in refreshed.role_jobs
-                        if candidate.role == job.role
-                    ),
+                    (candidate for candidate in refreshed.role_jobs if candidate.role == job.role),
                     None,
                 )
                 if refreshed_job is None or refreshed_job.status not in {
@@ -2135,6 +2220,40 @@ class RelayService:
             return
         await interrupt(job.native_session_id)
 
+    def _runtime_event_round_id(
+        self,
+        task_id: int,
+        role: str,
+        agent_run_id: int | None,
+    ) -> int:
+        try:
+            fallback_round = self._store.current_round_id(task_id)
+        except Exception:
+            fallback_round = 1
+        if agent_run_id is None:
+            return fallback_round
+        try:
+            artifacts = self._store.get_task_detail(task_id).artifacts
+        except Exception:
+            return fallback_round
+        for artifact in reversed(artifacts):
+            if str(artifact.get("artifact_type") or "") != "role_dispatch_metadata":
+                continue
+            if str(artifact.get("relay_role") or artifact.get("role") or "") != str(role):
+                continue
+            try:
+                artifact_agent_run_id = int(artifact.get("agent_run_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if artifact_agent_run_id != int(agent_run_id):
+                continue
+            try:
+                round_id = int(artifact.get("round_id") or fallback_round)
+            except (TypeError, ValueError):
+                return fallback_round
+            return round_id if round_id > 0 else fallback_round
+        return fallback_round
+
     def _project_native_event(
         self,
         runtime_event: Any,
@@ -2150,6 +2269,7 @@ class RelayService:
             if mapping is None:
                 return False
             task_id, role = mapping
+        round_id = self._runtime_event_round_id(int(task_id), role, agent_run_id)
         stream_event = stream_event_from_runtime(runtime_event)
         self._events.emit(
             int(task_id),
@@ -2162,6 +2282,7 @@ class RelayService:
                 "kind": stream_event.kind,
                 "native_event": stream_event.to_json_dict(),
                 "payload": stream_event.payload,
+                "round_id": round_id,
             },
         )
         return True
@@ -2183,6 +2304,7 @@ class RelayService:
             if mapping is None:
                 return True
             task_id, role = mapping
+        round_id = self._runtime_event_round_id(int(task_id), role, agent_run_id)
         delta = _runtime_event_text(runtime_event)
         self._events.emit(
             int(task_id),
@@ -2193,6 +2315,7 @@ class RelayService:
                 "agent_run_id": agent_run_id,
                 "runtime_event_id": int(getattr(runtime_event, "id", 0) or 0),
                 "delta": delta,
+                "round_id": round_id,
             },
         )
         return True
@@ -2232,18 +2355,12 @@ class RelayService:
             events = runtime_store.list_by_agent_run_tail(int(agent_run_id), limit=5000)
         current_turn_id = _runtime_event_turn_id(runtime_event)
         if current_turn_id:
-            events = [
-                event
-                for event in events
-                if _runtime_event_turn_id(event) == current_turn_id
-            ]
+            events = [event for event in events if _runtime_event_turn_id(event) == current_turn_id]
         completed = _completed_role_envelope_text(events)
         if completed is not None:
             return completed
         return "".join(
-            _runtime_event_text(event)
-            for event in events
-            if _is_runtime_model_text_delta(event)
+            _runtime_event_text(event) for event in events if _is_runtime_model_text_delta(event)
         )
 
     async def _runtime_completion_text_from_native_session(
@@ -2301,9 +2418,7 @@ class RelayService:
             events = runtime_store.list_by_agent_run_tail(agent_run_id, limit=5000)
         if current_turn_id:
             events = [
-                event
-                for event in events
-                if _runtime_event_matches_turn(event, current_turn_id)
+                event for event in events if _runtime_event_matches_turn(event, current_turn_id)
             ]
         if current_turn_id and not events:
             tail_events = runtime_store.list_by_agent_run_tail(agent_run_id, limit=5000)
@@ -2549,9 +2664,7 @@ def _completed_required_roles(
     current_role: str,
 ) -> set[str]:
     completed = {
-        str(job.role)
-        for job in detail.role_jobs
-        if str(job.status) in {"passed", "completed"}
+        str(job.role) for job in detail.role_jobs if str(job.status) in {"passed", "completed"}
     }
     if current_role:
         completed.add(current_role)
@@ -2723,7 +2836,9 @@ def _recover_routing_decision_from_payload(
         risk = "medium"
     return {
         "status": "passed",
-        "reason": str(payload.get("reason") or "总工程师路由语义明确，已恢复为合法 routing_decision。"),
+        "reason": str(
+            payload.get("reason") or "总工程师路由语义明确，已恢复为合法 routing_decision。"
+        ),
         "role": "director",
         "artifact_type": "routing_decision",
         "handoff_to": "",
@@ -2795,10 +2910,7 @@ def _is_runtime_completion_event(runtime_event: Any) -> bool:
 
 def _completed_role_envelope_event(events: list[Any]) -> Any | None:
     for event in reversed(events):
-        if not (
-            _is_runtime_model_message_completed(event)
-            or _is_runtime_model_text_delta(event)
-        ):
+        if not (_is_runtime_model_message_completed(event) or _is_runtime_model_text_delta(event)):
             continue
         text = _runtime_event_text(event)
         if text.strip() and parse_role_envelope(text).ok:
@@ -3057,7 +3169,7 @@ def _trim_protocol_field_value(text: str) -> str:
         marker_index = text.find(marker)
         if marker_index > 0:
             cut_at = min(cut_at, marker_index)
-    return text[:cut_at].strip(" ,，。\"{}")
+    return text[:cut_at].strip(' ,，。"{}')
 
 
 def _latest_artifact_id(
