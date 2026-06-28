@@ -58,6 +58,30 @@ def test_parse_role_envelope_accepts_role_envelope_wrapper() -> None:
     assert result.next_role == "tester"
 
 
+def test_parse_role_envelope_normalizes_role_aliases() -> None:
+    result = parse_role_envelope(
+        {
+            "status": "waiting",
+            "reason": "continue through implementation",
+            "role": "chief_engineer",
+            "artifact_type": "final_summary",
+            "handoff_to": "developer_engineer",
+            "summary": "Continue the relay through implementation.",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "implement",
+            "required_roles": ["chief_engineer", "developer_engineer", "audit_engineer"],
+        }
+    )
+
+    assert result.ok is True
+    assert result.envelope is not None
+    assert result.envelope.role == "director"
+    assert result.envelope.handoff_to == "implementer"
+    assert result.next_role == "implementer"
+    assert result.payload["required_roles"] == ["director", "implementer", "auditor"]
+
+
 def test_parse_role_envelope_extracts_json_from_provider_chatter() -> None:
     text = """
 Let me inspect the relay files first.

@@ -37,6 +37,20 @@ _ARTIFACT_TYPE_ALIASES = {
     "implementation": "implementation_report",
     "implementation_patch": "implementation_report",
 }
+_ROLE_ID_ALIASES = {
+    "chief_engineer": "director",
+    "lead_engineer": "director",
+    "developer": "implementer",
+    "developer_engineer": "implementer",
+    "development_engineer": "implementer",
+    "dev_engineer": "implementer",
+    "implement_engineer": "implementer",
+    "audit_engineer": "auditor",
+    "review_engineer": "auditor",
+    "reviewer": "auditor",
+    "qa_engineer": "tester",
+    "test_engineer": "tester",
+}
 _ROLE_OUTPUT_ARTIFACT_TYPES = {
     "architect": "architecture_plan",
     "implementer": "implementation_report",
@@ -120,6 +134,18 @@ def _parse_role_envelope_payload(payload: Any) -> EnvelopeParseResult:
 
 def _normalize_role_envelope_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
+    role = str(normalized.get("role") or "").strip()
+    if role in _ROLE_ID_ALIASES:
+        normalized["role"] = _ROLE_ID_ALIASES[role]
+    handoff_to = str(normalized.get("handoff_to") or "").strip()
+    if handoff_to in _ROLE_ID_ALIASES:
+        normalized["handoff_to"] = _ROLE_ID_ALIASES[handoff_to]
+    required_roles = normalized.get("required_roles")
+    if isinstance(required_roles, list):
+        normalized["required_roles"] = [
+            _ROLE_ID_ALIASES.get(str(role_id).strip(), role_id)
+            for role_id in required_roles
+        ]
     artifact_type = str(normalized.get("artifact_type") or "").strip()
     alias = _ARTIFACT_TYPE_ALIASES.get(artifact_type)
     if alias:

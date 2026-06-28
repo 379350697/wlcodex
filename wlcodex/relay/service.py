@@ -2188,7 +2188,13 @@ class RelayService:
         delta_events = [event for event in events if _is_runtime_model_text_delta(event)]
         if not delta_events:
             return False
-        output = "".join(_runtime_event_text(event) for event in delta_events)
+        protocol_delta_event = _complete_protocol_delta_event(delta_events)
+        if protocol_delta_event is not None:
+            output = _runtime_event_text(protocol_delta_event)
+            runtime_event_id = int(getattr(protocol_delta_event, "id", 0) or 0)
+        else:
+            output = "".join(_runtime_event_text(event) for event in delta_events)
+            runtime_event_id = int(getattr(delta_events[-1], "id", 0) or 0)
         parse_result = parse_role_envelope(output)
         if not parse_result.ok:
             if self._should_accept_plain_followup_response(
@@ -2210,8 +2216,15 @@ class RelayService:
                 output=output,
             ):
                 return True
+            if _looks_like_relay_protocol_attempt(output):
+                self._block_role_with_error(
+                    task_id,
+                    role,
+                    parse_result.error or "invalid role envelope",
+                    output=output,
+                )
+                return True
             return False
-        runtime_event_id = int(getattr(delta_events[-1], "id", 0) or 0)
         await self.handle_role_completion_event(
             task_id,
             role,
@@ -2659,7 +2672,10 @@ def _is_runtime_completion_event(runtime_event: Any) -> bool:
 
 def _completed_role_envelope_event(events: list[Any]) -> Any | None:
     for event in reversed(events):
-        if not _is_runtime_model_message_completed(event):
+        if not (
+            _is_runtime_model_message_completed(event)
+            or _is_runtime_model_text_delta(event)
+        ):
             continue
         text = _runtime_event_text(event)
         if text.strip() and parse_role_envelope(text).ok:
@@ -2672,6 +2688,18 @@ def _completed_role_envelope_text(events: list[Any]) -> str | None:
     if event is None:
         return None
     return _runtime_event_text(event)
+
+
+def _complete_protocol_delta_event(events: list[Any]) -> Any | None:
+    for event in reversed(events):
+        if not _is_runtime_model_text_delta(event):
+            continue
+        text = _runtime_event_text(event).strip()
+        if not text.startswith("{") or not text.endswith("}"):
+            continue
+        if parse_role_envelope(text).ok or _looks_like_relay_protocol_attempt(text):
+            return event
+    return None
 
 
 def _is_turn_completed_activity(runtime_event: Any) -> bool:

@@ -2219,6 +2219,128 @@ def test_scan_stale_native_role_recovers_interrupted_task_with_active_role(
     assert ("sync_session", "native-1") in provider.calls
 
 
+def test_scan_stale_native_role_uses_complete_protocol_delta_before_fragments(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="claude",
+        provider_engine="sdk-test",
+        native_session_id="native-1",
+        agent_run_id=101,
+        turn_id="turn-current",
+        active_turn_id="turn-current",
+        turn_running=True,
+        dispatch_verified=True,
+    )
+    detail = service.get_task(task.id)
+    director = next(job for job in detail.role_jobs if job.role == "director")
+    turn_id = director.active_turn_id or director.turn_id
+    service._store.update_task_status(task.id, "interrupted")
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    now = datetime(2026, 6, 16, 8, 0, 0, tzinfo=timezone.utc)
+    for delta in (
+        '{"artifact_type":"routing_decision"',
+        '"summary":"broken prefix"',
+    ):
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.MODEL_TEXT_DELTA,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id="101",
+                correlation_id="corr-101",
+                source=EventSource.CLAUDE,
+                actor="claude",
+                visibility=Visibility.USER,
+                payload={"delta": delta, "native_turn_id": turn_id},
+                occurred_at=(now - timedelta(seconds=303)).isoformat(),
+                agent_run_id=101,
+            )
+        )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={
+                "delta": """
+                {
+                  "status": "passed",
+                  "reason": "implementation and audit required",
+                  "role": "director",
+                  "artifact_type": "routing_decision",
+                  "handoff_to": "",
+                  "summary": "继续处理接续任务。",
+                  "evidence_refs": [],
+                  "open_questions": [],
+                  "next_action": "implement",
+                  "complexity": "medium",
+                  "risk": "medium",
+                  "route": "core_relay",
+                  "required_roles": ["director", "developer_engineer", "audit_engineer"],
+                  "acceptance_criteria": ["implemented", "audited"],
+                  "stop_conditions": [],
+                  "requires_user_approval": false
+                }
+                """,
+                "native_turn_id": turn_id,
+            },
+            occurred_at=(now - timedelta(seconds=302)).isoformat(),
+            agent_run_id=101,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={
+                "action": "turn_completed",
+                "status": "completed",
+                "native_turn_id": turn_id,
+            },
+            occurred_at=(now - timedelta(seconds=301)).isoformat(),
+            agent_run_id=101,
+        )
+    )
+
+    changed = asyncio.run(
+        service.scan_stale_native_roles(max_idle_seconds=300, now=now)
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert changed == 1
+    assert detail.routing_decision is not None
+    assert detail.routing_decision["required_roles"] == [
+        "director",
+        "implementer",
+        "auditor",
+    ]
+    assert jobs["director"].status == "passed"
+    assert jobs["implementer"].status == "streaming"
+
+
 def test_scan_stale_native_role_prefers_late_complete_delta_over_bad_stream(
     tmp_path,
 ) -> None:
