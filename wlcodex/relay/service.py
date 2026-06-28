@@ -667,16 +667,15 @@ class RelayService:
             },
             summary=envelope.summary,
         )
-        self._store.update_role_status(
-            task_id,
-            role,
-            "passed" if envelope.status == "passed" else envelope.status,
-        )
+        role_status = "passed" if envelope.status == "passed" else envelope.status
+        if envelope.status == "waiting" and envelope.handoff_to:
+            role_status = "passed"
+        self._store.update_role_status(task_id, role, role_status)
         self._events.emit(
             task_id,
             "role.status",
             role=role,
-            payload={"status": "passed" if envelope.status == "passed" else envelope.status},
+            payload={"status": role_status},
         )
         if (
             role == "auditor"
@@ -734,9 +733,6 @@ class RelayService:
         if envelope.status == "blocked":
             self._store.update_task_status(task_id, "blocked")
             return result
-        if envelope.status == "waiting":
-            self._store.update_task_status(task_id, "waiting_user")
-            return result
         if envelope.status == "failed":
             self._store.update_task_status(task_id, "failed")
             return result
@@ -759,7 +755,10 @@ class RelayService:
                 payload={"summary": envelope.summary},
             )
             return result
-        if envelope.status == "passed" and result.next_role:
+        if (
+            envelope.status == "passed"
+            or (envelope.status == "waiting" and envelope.handoff_to)
+        ) and result.next_role:
             detail = self._store.get_task_detail(task_id)
             next_role, handoff_error = self._resolve_handoff_target(
                 detail,
@@ -793,6 +792,11 @@ class RelayService:
                 packet=handoff,
             )
             self._store.update_task_status(task_id, "running")
+            self._reset_required_roles_after_handoff(
+                task_id,
+                detail=detail,
+                next_role=next_role,
+            )
             self._store.update_role_status(task_id, next_role, "queued")
             self._events.emit(
                 task_id,
@@ -808,7 +812,33 @@ class RelayService:
             )
             if dispatch_next:
                 await self.dispatch_role(task_id, next_role)
+            return result
+        if envelope.status == "waiting":
+            self._store.update_task_status(task_id, "waiting_user")
+            return result
         return result
+
+    def _reset_required_roles_after_handoff(
+        self,
+        task_id: int,
+        *,
+        detail: RelayTaskDetail,
+        next_role: str,
+    ) -> None:
+        if next_role == "director":
+            return
+        decision = detail.routing_decision or {}
+        route = str(decision.get("route") or "")
+        ordered_roles = _ordered_required_roles(
+            _clean_required_roles(decision.get("required_roles")),
+            route=route,
+        )
+        if next_role not in ordered_roles:
+            return
+        for relay_role in ordered_roles[ordered_roles.index(next_role) + 1 :]:
+            if relay_role == "director":
+                continue
+            self._store.update_role_status(task_id, relay_role, "idle")
 
     async def _handle_routing_decision(
         self,

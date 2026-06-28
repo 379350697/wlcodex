@@ -1281,6 +1281,93 @@ def test_followup_malformed_routing_envelope_recovers_instead_of_plain_response(
     )
 
 
+def test_followup_director_waiting_handoff_dispatches_implementer(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="修复 Marvis relay UI",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "status": "passed",
+            "reason": "需要开发和审核闭环",
+            "role": "director",
+            "artifact_type": "routing_decision",
+            "handoff_to": "implementer",
+            "summary": "按核心接力处理。",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交给开发工程师处理",
+            "route": "core_relay",
+            "required_roles": ["director", "implementer", "auditor"],
+            "requires_user_approval": False,
+        },
+        summary="按核心接力处理。",
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_role_status(task.id, "implementer", "passed")
+    service._store.update_role_status(task.id, "auditor", "passed")
+    service._store.update_task_status(task.id, "completed")
+
+    asyncio.run(service.add_user_message(task.id, "把附件区白底改成和对话页同底色"))
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    completed = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="201",
+            correlation_id="corr-followup-201",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={
+                "status": "completed",
+                "text": json.dumps(
+                    {
+                        "status": "waiting",
+                        "reason": "用户要求修改 UI，需要开发处理。",
+                        "role": "director",
+                        "artifact_type": "final_summary",
+                        "handoff_to": "implementer",
+                        "summary": "我懂你的意思：附件区不应该有独立白底，下一步交给开发工程师改成和对话页同底色。",
+                        "evidence_refs": [],
+                        "open_questions": [],
+                        "next_action": "开发工程师修改附件区背景并提交审核",
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+            occurred_at=now_iso(),
+            agent_run_id=201,
+        )
+    )
+
+    service.project_runtime_event(completed)
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.task.status == "running"
+    assert jobs["director"].status == "passed"
+    assert jobs["implementer"].status == "streaming"
+    assert jobs["auditor"].status == "idle"
+    assert any(
+        artifact.get("artifact_type") == "handoff_packet"
+        and artifact.get("from_role") == "director"
+        and artifact.get("handoff_to") == "implementer"
+        for artifact in detail.artifacts
+    )
+    assert provider.calls[-1][0] == "start_session"
+
+
 def test_followup_completion_uses_current_native_turn_delta_not_old_completed_text(
     tmp_path,
 ) -> None:
