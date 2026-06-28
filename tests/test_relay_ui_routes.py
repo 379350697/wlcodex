@@ -678,6 +678,38 @@ def _relay_message_bodies_html(panel_html: str) -> str:
     )
 
 
+def test_marvis_relay_source_does_not_keep_legacy_board_projection() -> None:
+    server_source = Path("wlcodex/live_stream/server.py").read_text()
+    css_source = Path("wlcodex/live_stream/static/relay_marvis.css").read_text()
+
+    for legacy_symbol in [
+        "_relay_role_progress_html",
+        "_relay_routing_decision_html",
+        "_relay_conversation_html_from_events",
+        "_relay_initial_conversation_html",
+        "_relay_role_panel_html",
+        "_relay_native_conversation_html",
+    ]:
+        assert legacy_symbol not in server_source
+
+    for legacy_dom in [
+        "data-activity-log",
+        "data-board-",
+        "data-progress-role",
+        "data-role-output",
+        "data-role-preview",
+        "data-routing-",
+        "relay-board-grid",
+        "relay-activity",
+        "role-lane",
+        "role-canonical-json",
+        "relay-board h2",
+        "查看结构化数据",
+    ]:
+        assert legacy_dom not in server_source
+        assert legacy_dom not in css_source
+
+
 @pytest.mark.asyncio
 async def test_marvis_relay_composer_has_real_attachment_sheet(
     tmp_path: Path,
@@ -2933,6 +2965,11 @@ async def test_relay_task_detail_does_not_show_stale_round_final_summary_as_assi
         1,
     )[0]
     assert "if (!isCurrentRoundEvent(payload)) return;" in followup_handler
+    routing_handler = response.split('source.addEventListener("routing.decision"', 1)[1]
+    routing_handler = routing_handler.split('source.addEventListener("role.envelope"', 1)[0]
+    assert "if (!isCurrentRoundEvent(payload)) return;" in routing_handler
+    assert "renderRoleEnvelope" in routing_handler
+    assert "artifact_type: payload.artifact_type || \"routing_decision\"" in routing_handler
     status_handler = response.split('source.addEventListener("role.status"', 1)[1]
     status_handler = status_handler.split('source.addEventListener("task.completed"', 1)[0]
     assert "if (!isCurrentRoundEvent(payload)) return;" in status_handler
@@ -4759,6 +4796,11 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     delta_handler = delta_handler.split('source.addEventListener("routing.decision"', 1)[0]
     assert "appendRolePreview" in delta_handler
     assert "roleOutputs[payload.role]" not in delta_handler
+    routing_handler = response.split('source.addEventListener("routing.decision"', 1)[1]
+    routing_handler = routing_handler.split('source.addEventListener("role.envelope"', 1)[0]
+    assert "renderRoleEnvelope" in routing_handler
+    assert "data-routing-" not in routing_handler
+    assert "data-board-" not in routing_handler
     envelope_handler = response.split('source.addEventListener("role.envelope"', 1)[1]
     envelope_handler = envelope_handler.split('source.addEventListener("handoff.created"', 1)[0]
     assert "renderRoleEnvelope" in envelope_handler

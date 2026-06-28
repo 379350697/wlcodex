@@ -5950,31 +5950,6 @@ def _marvis_relay_command_label_from_text(value: str) -> str:
     return Path(parts[0]).name if parts else value
 
 
-def _marvis_relay_static_work_log_body_html(body_html: str) -> str:
-    live_markers = (
-        "data-role-output",
-        "data-activity-log",
-        "data-routing-card",
-        "data-routing-summary",
-        "data-routing-route",
-        "data-routing-complexity",
-        "data-routing-risk",
-        "data-routing-path",
-        "data-routing-roles",
-        "data-routing-acceptance",
-        "data-routing-stops",
-        "data-board-current-goal",
-        "data-board-phase",
-        "data-board-dispatch",
-        "data-board-next-step",
-        "data-board-latest-user",
-        "data-board-director-summary",
-    )
-    for marker in live_markers:
-        body_html = body_html.replace(marker, marker.replace("data-", "data-marvis-snapshot-"))
-    return body_html
-
-
 def _relay_role_config_html(
     relay_config: dict[str, Any],
     providers: list[Any],
@@ -6141,207 +6116,6 @@ def _relay_activity_label(value: Any) -> str:
     return f"最近活动 {parsed.astimezone(_RELAY_ACTIVITY_DISPLAY_TZ):%m-%d %H:%M}"
 
 
-def _relay_current_dispatch_label(board: Any) -> str:
-    current = str(
-        getattr(board, "current_dispatch", "") or getattr(board, "phase", "") or "director"
-    )
-    return _relay_role_label(current) if current in RELAY_ROLE_IDS else _relay_phase_label(current)
-
-
-def _relay_director_summary_text(
-    role_jobs: list[Any],
-    canonical_payloads: dict[str, dict[str, Any]],
-) -> str:
-    for job in role_jobs:
-        if str(getattr(job, "role", "") or "") != "director":
-            continue
-        display = _relay_role_display_from_job(
-            job,
-            canonical_payload=canonical_payloads.get("director"),
-        )
-        summary = str(display.get("summary_text") or "").strip()
-        if summary:
-            return summary
-        error = str(getattr(job, "error_message", "") or "").strip()
-        if error:
-            return f"执行问题：{error}"
-    return "等待总工程师接收并形成决策摘要"
-
-
-def _relay_role_progress_html(role_jobs: list[Any]) -> str:
-    jobs_by_role = {str(job.role): job for job in role_jobs}
-    rows = []
-    for role in RELAY_ROLE_IDS:
-        status = str(getattr(jobs_by_role.get(role), "status", "idle") or "idle")
-        rows.append(
-            f"""
-            <div class="relay-progress-step" data-progress-role="{escape(role)}" data-progress-status="{escape(status)}">
-              <span class="relay-progress-dot" aria-hidden="true"></span>
-              <div>
-                <strong>{escape(_relay_role_label(role))}</strong>
-                <span class="relay-progress-status">{escape(_relay_role_status_label(status))}</span>
-              </div>
-            </div>
-            """
-        )
-    return "\n".join(rows)
-
-
-def _relay_initial_activity_html(detail: Any) -> str:
-    items = [f"任务已创建，等待总工程师接收：{detail.task.title}"]
-    decision = getattr(detail, "routing_decision", None) or {}
-    if decision:
-        items.append(
-            "总工程师调度决策："
-            f"{_relay_routing_route_label(str(decision.get('route') or ''))}"
-            f" · 风险{_relay_routing_risk_label(str(decision.get('risk') or ''))}"
-        )
-    for job in detail.role_jobs:
-        status = str(job.status or "idle")
-        if status == "idle":
-            continue
-        provider = _native_provider_display_name(str(job.provider or detail.task.provider))
-        items.append(f"{job.display_name} · {_relay_role_status_label(status)} · {provider}")
-        if job.latest_handoff_summary:
-            items.append(f"{job.display_name}交接摘要：{job.latest_handoff_summary}")
-        if job.fallback_reason:
-            items.append(f"{job.display_name}调度降级：{job.fallback_reason}")
-        if getattr(job, "error_message", ""):
-            items.append(f"{job.display_name}执行问题：{job.error_message}")
-    if getattr(detail, "latest_handoff", None):
-        handoff = detail.latest_handoff
-        items.append(
-            f"{_relay_role_label(handoff.from_role)} 已交接给 "
-            f"{_relay_role_label(handoff.to_role)}：{handoff.summary}"
-        )
-    return "\n".join(
-        '<li><span class="relay-activity-dot" aria-hidden="true"></span>'
-        f"<span>{escape(item)}</span></li>"
-        for item in items
-    )
-
-
-def _relay_routing_decision_html(detail: Any) -> str:
-    decision = getattr(detail, "routing_decision", None) or {}
-    if not decision:
-        decision = _relay_missing_routing_decision(detail)
-    required_roles = [
-        _relay_role_label(str(role)) for role in decision.get("required_roles", []) if str(role)
-    ]
-    acceptance = [
-        str(item) for item in decision.get("acceptance_criteria", []) if str(item).strip()
-    ]
-    stop_conditions = [
-        str(item) for item in decision.get("stop_conditions", []) if str(item).strip()
-    ]
-    required_text = "、".join(required_roles) or "等待总工程师判断"
-    acceptance_text = "、".join(acceptance) or "等待总工程师给出验收依据"
-    stop_text = "、".join(stop_conditions) or "暂无额外停止条件"
-    approval_text = (
-        "需要用户确认" if bool(decision.get("requires_user_approval")) else "无需额外确认"
-    )
-    route = str(decision.get("route") or "")
-    summary = _relay_humanize_display_text(
-        str(decision.get("summary") or "等待总工程师接收任务并形成调度决策。")
-    )
-    return f"""
-    <section class="relay-routing" aria-label="调度决策" data-routing-card>
-      <div class="relay-board-head">
-        <div>
-          <h2>调度决策</h2>
-          <p class="relay-muted" data-routing-summary>{escape(summary)}</p>
-        </div>
-        <span class="relay-status-badge" data-routing-route>{escape(_relay_routing_route_label(route))}</span>
-      </div>
-      <div class="relay-board-grid">
-        <div class="relay-board-item"><strong>任务难度</strong><p data-routing-complexity>{escape(str(decision.get("complexity") or "待判断"))}</p></div>
-        <div class="relay-board-item"><strong>风险等级</strong><p data-routing-risk>{escape(_relay_routing_risk_label(str(decision.get("risk") or "")))}</p></div>
-        <div class="relay-board-item"><strong>执行路径</strong><p data-routing-path>{escape(_relay_routing_route_label(route))}</p></div>
-        <div class="relay-board-item"><strong>本轮角色</strong><p data-routing-roles>{escape(required_text)}</p></div>
-        <div class="relay-board-item"><strong>验收依据</strong><p data-routing-acceptance>{escape(acceptance_text)}</p></div>
-        <div class="relay-board-item"><strong>停止条件</strong><p data-routing-stops>{escape(stop_text)} · {escape(approval_text)}</p></div>
-      </div>
-    </section>
-    """
-
-
-def _relay_missing_routing_decision(detail: Any) -> dict[str, Any]:
-    task_status = str(getattr(getattr(detail, "task", None), "status", "") or "")
-    director_error = next(
-        (
-            str(getattr(job, "error_message", "") or "").strip()
-            for job in getattr(detail, "role_jobs", [])
-            if str(getattr(job, "role", "") or "") == "director"
-            and str(getattr(job, "error_message", "") or "").strip()
-        ),
-        "",
-    )
-    if task_status == "blocked":
-        summary = "调度决策未生成。"
-        if director_error:
-            summary = f"调度决策未生成。总工程师输出协议错误：{director_error}"
-        return {
-            "summary": summary,
-            "complexity": "未生成",
-            "risk": "high",
-            "route": "blocked",
-            "required_roles": [],
-            "acceptance_criteria": [],
-            "stop_conditions": ["需要重新发起或补充后生成调度决策"],
-            "requires_user_approval": True,
-        }
-    if task_status == "waiting_user":
-        return {
-            "summary": "等待用户补充后形成调度决策。",
-            "complexity": "待判断",
-            "risk": "",
-            "route": "waiting_user",
-            "required_roles": [],
-            "acceptance_criteria": [],
-            "stop_conditions": [],
-            "requires_user_approval": True,
-        }
-    return {
-        "summary": "等待总工程师接收任务并形成调度决策。",
-        "complexity": "待判断",
-        "risk": "",
-        "route": "",
-        "required_roles": [],
-        "acceptance_criteria": [],
-        "stop_conditions": [],
-        "requires_user_approval": False,
-    }
-
-
-def _relay_conversation_message_html(
-    *,
-    kind: str,
-    role: str,
-    speaker: str,
-    body: str,
-    meta: str = "",
-) -> str:
-    meta_html = f'<span class="relay-message-meta">{escape(meta)}</span>' if meta else ""
-    return f"""
-      <article class="relay-message" data-conversation-kind="{escape(kind)}" data-conversation-role="{escape(role)}">
-        <div class="relay-message-head">
-          <strong>{escape(speaker)}</strong>
-          {meta_html}
-        </div>
-        <div class="relay-message-body" data-conversation-body>{escape(body)}</div>
-      </article>
-    """
-
-
-def _relay_conversation_event_html(text: str, *, role: str = "system") -> str:
-    return _relay_conversation_message_html(
-        kind="event",
-        role=role,
-        speaker="系统",
-        body=text,
-    )
-
-
 def _relay_event_dict(event: Any) -> dict[str, Any]:
     if hasattr(event, "to_dict"):
         return dict(event.to_dict())
@@ -6356,189 +6130,6 @@ def _relay_latest_event_sequence(events: list[Any] | tuple[Any, ...]) -> int:
         except (TypeError, ValueError):
             continue
     return latest
-
-
-def _relay_event_payload(event: Any) -> tuple[str, dict[str, Any]]:
-    raw = _relay_event_dict(event)
-    nested = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
-    payload = dict(nested or {})
-    for key, value in raw.items():
-        if key == "payload":
-            continue
-        if value not in (None, ""):
-            payload[key] = value
-    event_type = str(payload.get("event_type") or "")
-    role = str(payload.get("role") or nested.get("role") or "")
-    if role:
-        payload["role"] = role
-    return event_type, payload
-
-
-def _relay_conversation_html_from_events(events: list[Any] | tuple[Any, ...]) -> str:
-    items: list[str] = []
-    active_role = ""
-    active_body: list[str] = []
-
-    def flush_delta() -> None:
-        nonlocal active_role, active_body
-        body = "".join(active_body)
-        if body:
-            items.append(
-                _relay_conversation_message_html(
-                    kind="role",
-                    role=active_role,
-                    speaker=_relay_role_label(active_role),
-                    body=body,
-                )
-            )
-        active_role = ""
-        active_body = []
-
-    def append_event(text: str, *, role: str = "system") -> None:
-        if not str(text or "").strip():
-            return
-        flush_delta()
-        items.append(_relay_conversation_event_html(str(text), role=role))
-
-    def append_user(text: str) -> None:
-        if not str(text or "").strip():
-            return
-        flush_delta()
-        items.append(
-            _relay_conversation_message_html(
-                kind="user",
-                role="user",
-                speaker="你",
-                body=str(text).strip(),
-            )
-        )
-
-    def append_delta(role: str, text: str) -> None:
-        nonlocal active_role, active_body
-        delta = str(text or "")
-        if not delta:
-            return
-        if active_role != role:
-            flush_delta()
-            active_role = role
-            active_body = []
-        active_body.append(delta)
-
-    for event in sorted(events, key=lambda item: _relay_latest_event_sequence([item])):
-        event_type, payload = _relay_event_payload(event)
-        role = str(payload.get("role") or "")
-        if event_type == "task.created":
-            append_event(f"任务已创建：{payload.get('title') or '接力任务'}")
-        elif event_type == "role.queued":
-            if payload.get("latest_user_input"):
-                append_user(str(payload.get("latest_user_input") or ""))
-            append_event(f"{_relay_role_label(role)} 已进入队列，等待启动。", role=role)
-        elif event_type == "role.streaming":
-            append_event(f"{_relay_role_label(role)} 开始执行。", role=role)
-        elif event_type == "dispatch.verified":
-            append_event(f"{_relay_role_label(role)} 的原生会话已启动。", role=role)
-        elif event_type == "dispatch.fallback":
-            reason = str(payload.get("reason") or "使用可用 provider 继续")
-            append_event(f"{_relay_role_label(role)} 调度降级：{reason}", role=role)
-        elif event_type == "role.output_delta":
-            append_delta(role, str(payload.get("delta") or payload.get("text") or ""))
-        elif event_type == "routing.decision":
-            route = _relay_routing_route_label(str(payload.get("route") or ""))
-            summary = str(payload.get("summary") or "")
-            append_event(f"总工程师调度决策：{route}。{summary}", role="director")
-        elif event_type == "role.envelope":
-            summary = str(payload.get("summary") or "")
-            if summary:
-                append_event(f"{_relay_role_label(role)} 产出摘要：{summary}", role=role)
-        elif event_type == "handoff.created":
-            from_role = str(payload.get("from_role") or role)
-            to_role = str(payload.get("to_role") or payload.get("handoff_to") or "")
-            summary = str(payload.get("summary") or "等待下一角色处理")
-            append_event(
-                f"{_relay_role_label(from_role)} 已交接给 {_relay_role_label(to_role)}：{summary}",
-                role=to_role or from_role,
-            )
-        elif event_type == "role.status":
-            status = str(payload.get("status") or "")
-            append_event(
-                f"{_relay_role_label(role)} 状态更新为 {_relay_role_status_label(status)}。",
-                role=role,
-            )
-        elif event_type == "task.completed":
-            append_event("任务已完成，可以继续补充给总工程师进行追问或追加验收。")
-        elif event_type == "task.interrupted":
-            append_event("任务已中断。")
-    flush_delta()
-    return "\n".join(items)
-
-
-def _relay_initial_conversation_html(
-    detail: Any,
-    *,
-    events: list[Any] | tuple[Any, ...] | None = None,
-) -> str:
-    if events:
-        event_html = _relay_conversation_html_from_events(events)
-        if event_html:
-            return event_html
-
-    task = getattr(detail, "task", None)
-    board = getattr(detail, "board", None)
-    items: list[str] = []
-    latest_user_input = str(getattr(board, "latest_user_input", "") or "").strip()
-    if latest_user_input:
-        items.append(
-            _relay_conversation_message_html(
-                kind="user",
-                role="user",
-                speaker="你",
-                body=latest_user_input,
-            )
-        )
-
-    decision = getattr(detail, "routing_decision", None) or {}
-    if decision:
-        route = _relay_routing_route_label(str(decision.get("route") or ""))
-        summary = str(decision.get("summary") or "总工程师已形成调度决策。")
-        items.append(_relay_conversation_event_html(f"调度决策：{route}。{summary}"))
-    elif str(getattr(task, "status", "") or "") in ("blocked", "waiting_user"):
-        fallback = _relay_missing_routing_decision(detail)
-        items.append(_relay_conversation_event_html(str(fallback.get("summary") or "")))
-
-    for job in getattr(detail, "role_jobs", []):
-        role = str(getattr(job, "role", "") or "")
-        output = str(getattr(job, "output", "") or "").strip()
-        if output:
-            items.append(
-                _relay_conversation_message_html(
-                    kind="role",
-                    role=role,
-                    speaker=str(getattr(job, "display_name", "") or _relay_role_label(role)),
-                    body=output,
-                    meta=_relay_role_status_label(str(getattr(job, "status", "") or "idle")),
-                )
-            )
-        error_message = str(getattr(job, "error_message", "") or "").strip()
-        if error_message:
-            items.append(
-                _relay_conversation_event_html(
-                    f"{_relay_role_label(role)} 执行问题：{error_message}",
-                    role=role,
-                )
-            )
-        handoff_summary = str(getattr(job, "latest_handoff_summary", "") or "").strip()
-        if handoff_summary:
-            items.append(
-                _relay_conversation_event_html(
-                    f"{_relay_role_label(role)} 交接摘要：{handoff_summary}",
-                    role=role,
-                )
-            )
-
-    if not items:
-        title = str(getattr(task, "title", "") or "接力任务")
-        items.append(_relay_conversation_event_html(f"{title} 已创建，等待总工程师接收。"))
-    return "\n".join(items)
 
 
 def _relay_task_detail_page(
@@ -6701,7 +6292,17 @@ def _relay_task_detail_page(
             ensure_ascii=False,
         )
     };
-    const roleOutputs = {{}};
+    const roleStatuses = {
+        json.dumps(
+            {
+                str(getattr(job, "role", "") or ""): str(
+                    getattr(job, "status", "") or "idle"
+                )
+                for job in detail.role_jobs
+            },
+            ensure_ascii=False,
+        )
+    };
     const marvisWorkLog = document.querySelector("[data-marvis-work-log]");
     const marvisWorkLogBackdrop = document.querySelector("[data-marvis-work-log-backdrop]");
     function marvisWorkLogIsDesktop() {{
@@ -6735,13 +6336,6 @@ def _relay_task_detail_page(
     }});
     document.querySelectorAll("[data-marvis-close-log], [data-marvis-work-log-backdrop]").forEach((button) => {{
       button.addEventListener("click", closeMarvisWorkLog);
-    }});
-    document.querySelectorAll("[data-role-output]").forEach((node) => {{
-      roleOutputs[node.dataset.roleOutput] = node;
-    }});
-    const rolePreviews = {{}};
-    document.querySelectorAll("[data-role-preview]").forEach((node) => {{
-      rolePreviews[node.dataset.rolePreview] = node;
     }});
     function labelForRole(role) {{
       return ROLE_LABELS[role] || role || "角色";
@@ -7747,12 +7341,6 @@ def _relay_task_detail_page(
       const eventKey = previewEventKey(role, eventId);
       if (eventKey && seenPreviewEventKeys.has(eventKey)) return;
       if (eventKey) seenPreviewEventKeys.add(eventKey);
-      const preview = rolePreviews[role];
-      if (preview) {{
-        preview.classList.remove("is-idle");
-        preview.textContent = relayPreviewDisplayText(role, text);
-        preview.scrollTop = preview.scrollHeight;
-      }}
       if (!conversationTimeline) return;
       if (conversationTimeline.querySelector(`[data-conversation-role-final="${{role}}"]`)) return;
       let node = conversationTimeline.querySelector(`[data-conversation-role-preview="${{role}}"]`);
@@ -7764,34 +7352,10 @@ def _relay_task_detail_page(
       setNativeBodyText(node, relayPreviewDisplayText(role, text));
     }}
     function clearRolePreview(role) {{
-      const preview = rolePreviews[role];
-      if (preview) {{
-        preview.textContent = "";
-        preview.classList.add("is-idle");
-      }}
       conversationTimeline?.querySelector(`[data-conversation-role-preview="${{role}}"]`)?.remove();
     }}
     function clearAllRolePreviews() {{
-      Object.keys(rolePreviews).forEach(clearRolePreview);
-    }}
-    function canonicalEnvelopeJson(envelope) {{
-      return JSON.stringify(envelope || {{}}, null, 2);
-    }}
-    function ensureCanonicalDetails(container, role, envelope) {{
-      if (!container || !envelope) return;
-      let details = container.querySelector(".role-canonical-json");
-      if (!details) {{
-        details = document.createElement("details");
-        details.className = "role-canonical-json";
-        const summary = document.createElement("summary");
-        summary.textContent = "查看结构化数据";
-        const pre = document.createElement("pre");
-        pre.dataset.roleCanonicalJson = role;
-        details.append(summary, pre);
-        container.appendChild(details);
-      }}
-      const pre = details.querySelector("[data-role-canonical-json]");
-      if (pre) pre.textContent = canonicalEnvelopeJson(envelope);
+      Object.keys(roleStatuses).forEach(clearRolePreview);
     }}
     function renderRoleEnvelope(role, envelope) {{
       if (!role || !envelope) return;
@@ -7803,12 +7367,6 @@ def _relay_task_detail_page(
         String(envelope.artifact_type || "") === "final_summary" &&
         String(envelope.status || "") === "waiting" &&
         Boolean(envelope.handoff_to);
-      const output = roleOutputs[role];
-      if (output) {{
-        output.classList.remove("is-idle");
-        output.textContent = summaryText;
-        ensureCanonicalDetails(output.parentElement, role, envelope);
-      }}
       if (conversationTimeline) {{
         const key = `canonical:${{role}}:${{envelope.artifact_type || "role_envelope"}}`;
         let node = conversationTimeline.querySelector(`[data-conversation-role-final="${{role}}"]`);
@@ -7826,18 +7384,10 @@ def _relay_task_detail_page(
         node.dataset.nativeKind = "role_envelope";
         node.dataset.nativeRoundId = roundId;
         setNativeBodyText(node, summaryText);
-        ensureCanonicalDetails(node, role, envelope);
       }}
     }}
     document.querySelectorAll("[data-conversation-role-preview]").forEach((node) => {{
       const role = node.dataset.conversationRolePreview;
-      const rawPreview = node.dataset.rawPreview || "";
-      const preview = rolePreviews[role];
-      if (preview && rawPreview) {{
-        preview.dataset.rawPreview = rawPreview;
-        preview.textContent = relayPreviewDisplayText(role, rawPreview);
-        preview.classList.remove("is-idle");
-      }}
       (node.dataset.previewEventIds || "").split(",").filter(Boolean).forEach((eventId) => {{
         const eventKey = previewEventKey(role, eventId);
         if (eventKey) seenPreviewEventKeys.add(eventKey);
@@ -7845,9 +7395,7 @@ def _relay_task_detail_page(
     }});
     const TERMINAL_ROLE_STATUSES = new Set(["passed", "completed", "blocked", "failed", "interrupted"]);
     function currentRoleStatus(role) {{
-      const lane = document.querySelector(`[data-role="${{role}}"]`);
-      const statusNode = lane?.querySelector(".role-status");
-      return statusNode?.dataset.status || "";
+      return roleStatuses[role] || "";
     }}
     function canApplyRoleStatus(role, status, options = {{}}) {{
       if (!status) return false;
@@ -7858,28 +7406,7 @@ def _relay_task_detail_page(
     }}
     function setRoleStatus(role, status, options = {{}}) {{
       if (!canApplyRoleStatus(role, status, options)) return;
-      const lane = document.querySelector(`[data-role="${{role}}"]`);
-      const statusNode = lane?.querySelector(".role-status");
-      if (statusNode && status) {{
-        statusNode.textContent = labelForStatus(status);
-        statusNode.dataset.status = status;
-      }}
-      const progress = document.querySelector(`[data-progress-role="${{role}}"]`);
-      if (progress && status) {{
-        progress.dataset.progressStatus = status;
-        const textNode = progress.querySelector(".relay-progress-status");
-        if (textNode) textNode.textContent = labelForStatus(status);
-      }}
-      const output = roleOutputs[role];
-      if (output && status && status !== "idle") output.classList.remove("is-idle");
-    }}
-    function appendActivity(text) {{
-      const log = document.querySelector("[data-activity-log]");
-      if (!log || !text) return;
-      const item = document.createElement("li");
-      item.innerHTML = '<span class="relay-activity-dot" aria-hidden="true"></span><span></span>';
-      item.querySelector("span:last-child").textContent = text;
-      log.prepend(item);
+      if (role && status) roleStatuses[role] = status;
     }}
     const followupComposer = document.querySelector("[data-marvis-followup-composer]");
     const followupTextInput = followupComposer?.querySelector("textarea[name='text']");
@@ -7909,14 +7436,6 @@ def _relay_task_detail_page(
       }});
       updateRelayComposerAction();
     }}
-    function updateNativeLink(role, provider, nativeSessionId) {{
-      const lane = document.querySelector(`[data-role="${{role}}"]`);
-      const linkWrap = lane?.querySelector("[data-native-link]");
-      const linkProvider = provider || lane?.dataset.roleProvider || "";
-      if (!linkWrap || !linkProvider || !nativeSessionId) return;
-      const separator = TOKEN_SUFFIX ? `&${{TOKEN_SUFFIX.slice(1)}}` : "";
-      linkWrap.innerHTML = `<a class="role-link" href="/native/${{encodeURIComponent(linkProvider)}}?native_thread_id=${{encodeURIComponent(nativeSessionId)}}${{separator}}">打开原生会话</a>`;
-    }}
     const source = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{EVENTS_SUFFIX}}`);
     source.addEventListener("role.queued", (event) => {{
       const payload = parseRelayEvent(event);
@@ -7924,25 +7443,21 @@ def _relay_task_detail_page(
       const force = payload.reason === "new_followup_turn";
       if (force) clearMarvisConversationPausedRows();
       setRoleStatus(payload.role, "queued", {{ force }});
-      appendActivity(`${{labelForRole(payload.role)}} 已进入队列，等待启动。`);
     }});
     source.addEventListener("role.streaming", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       setRoleStatus(payload.role, "streaming");
-      updateNativeLink(payload.role, payload.provider, payload.native_session_id);
-      appendActivity(`${{labelForRole(payload.role)}} 开始执行。`);
     }});
     source.addEventListener("dispatch.verified", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       setRoleStatus(payload.role, "streaming");
-      updateNativeLink(payload.role, payload.provider, payload.native_session_id);
-      appendActivity(`${{labelForRole(payload.role)}} 的原生会话已启动。`);
     }});
     source.addEventListener("dispatch.fallback", (event) => {{
       const payload = parseRelayEvent(event);
-      appendActivity(`${{labelForRole(payload.role)}} 调度降级：${{payload.reason || "使用可用 provider 继续"}}`);
+      if (!isCurrentRoundEvent(payload)) return;
+      setRoleStatus(payload.role, "queued", {{ force: true }});
     }});
     source.addEventListener("user.followup", (event) => {{
       const payload = parseRelayEvent(event);
@@ -7986,34 +7501,14 @@ def _relay_task_detail_page(
     source.addEventListener("routing.decision", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
-      const routeLabels = {{
-        director_only: "总工程师直接完成",
-        core_relay: "核心接力",
-        full_relay: "完整五角色接力",
-        audit_first: "审计优先",
-        waiting_user: "等待用户确认",
-        blocked: "已阻塞",
-      }};
-      const riskLabels = {{ low: "低", medium: "中", high: "高", critical: "关键" }};
-      const routeText = routeLabels[payload.route] || payload.route || "等待总工程师判断";
-      const stops = relayHumanizeDisplayText((payload.stop_conditions || []).join("、")) || "暂无额外停止条件";
-      const routingSummary = document.querySelector("[data-routing-summary]");
-      const routingRoute = document.querySelector("[data-routing-route]");
-      const routingComplexity = document.querySelector("[data-routing-complexity]");
-      const routingRisk = document.querySelector("[data-routing-risk]");
-      const routingPath = document.querySelector("[data-routing-path]");
-      const routingRoles = document.querySelector("[data-routing-roles]");
-      const routingAcceptance = document.querySelector("[data-routing-acceptance]");
-      const routingStops = document.querySelector("[data-routing-stops]");
-      if (routingSummary) routingSummary.textContent = relayHumanizeDisplayText(payload.summary || "总工程师已形成调度决策。");
-      if (routingRoute) routingRoute.textContent = routeText;
-      if (routingComplexity) routingComplexity.textContent = payload.complexity || "待判断";
-      if (routingRisk) routingRisk.textContent = riskLabels[payload.risk] || payload.risk || "待判断";
-      if (routingPath) routingPath.textContent = routeText;
-      if (routingRoles) routingRoles.textContent = (payload.required_roles || []).map(labelForRole).join("、") || "等待总工程师判断";
-      if (routingAcceptance) routingAcceptance.textContent = relayHumanizeDisplayText((payload.acceptance_criteria || []).join("、")) || "等待总工程师给出验收依据";
-      if (routingStops) routingStops.textContent = `${{stops}} · ${{payload.requires_user_approval ? "需要用户确认" : "无需额外确认"}}`;
-      appendActivity(`总工程师调度决策：${{routeText}}。`);
+      const role = payload.role || "director";
+      renderRoleEnvelope(role, {{
+        ...payload,
+        role,
+        artifact_type: payload.artifact_type || "routing_decision",
+        status: payload.status || "passed",
+      }});
+      setRoleStatus(role, payload.status || "passed");
     }});
     source.addEventListener("role.envelope", (event) => {{
       const payload = parseRelayEvent(event);
@@ -8022,19 +7517,6 @@ def _relay_task_detail_page(
       if (payload.display_text && !envelope.display_text) envelope.display_text = payload.display_text;
       const role = payload.role || envelope.role;
       renderRoleEnvelope(role, envelope);
-      if (envelope.summary) {{
-        const summaryText = relayHumanizeDisplayText(envelope.summary);
-        appendActivity(`${{labelForRole(role)}} 产出摘要：${{summaryText}}`);
-        if (role === "director") {{
-          const summary = document.querySelector("[data-board-director-summary]");
-          if (summary) summary.textContent = summaryText;
-        }}
-      }}
-      if (envelope.next_action) {{
-        const nextActionText = relayHumanizeDisplayText(envelope.next_action);
-        const next = document.querySelector("[data-board-next-step]");
-        if (next) next.textContent = nextActionText;
-      }}
       if (envelope.status) setRoleStatus(role, envelope.status);
     }});
     source.addEventListener("handoff.created", (event) => {{
@@ -8046,7 +7528,6 @@ def _relay_task_detail_page(
       if (toRole) setRoleStatus(toRole, "queued");
       const handoffKey = `handoff:${{roundId}}:${{fromRole}}:${{toRole || ""}}:${{payload.artifact_id || payload.summary || event.lastEventId || ""}}`;
       appendMarvisConversationHandoff(toRole, handoffKey, fromRole, roundId);
-      appendActivity(`${{labelForRole(payload.from_role)}} 已交接给 ${{labelForRole(toRole)}}：${{payload.summary || "等待下一角色处理"}}`);
     }});
     source.addEventListener("role.status", (event) => {{
       const payload = parseRelayEvent(event);
@@ -8056,21 +7537,18 @@ def _relay_task_detail_page(
       if (force) clearMarvisConversationPausedRows();
       setRoleStatus(payload.role, payload.status, {{ force }});
       if (TERMINAL_ROLE_STATUSES.has(payload.status)) clearRolePreview(payload.role);
-      appendActivity(`${{labelForRole(payload.role)}} 状态更新为 ${{labelForStatus(payload.status)}}。`);
     }});
     source.addEventListener("task.completed", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       updateTaskStatus("completed");
       clearAllRolePreviews();
-      appendActivity("任务已完成，可以继续补充给总工程师进行追问或追加验收。");
     }});
     source.addEventListener("task.interrupted", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       updateTaskStatus("interrupted");
       clearAllRolePreviews();
-      appendActivity("任务已中断。");
     }});
     followupTextInput?.addEventListener("input", updateRelayComposerAction);
     document.addEventListener("marvis-relay-attachments-changed", updateRelayComposerAction);
@@ -8092,10 +7570,7 @@ def _relay_task_detail_page(
           if (relayTaskIsRunning()) {{
             updateTaskStatus("interrupted");
             clearAllRolePreviews();
-            appendActivity("你已中断任务。");
           }}
-        }} else {{
-          appendActivity("中断失败，请稍后重试。");
         }}
         return;
       }}
@@ -8107,7 +7582,6 @@ def _relay_task_detail_page(
       appendMarvisConversationWaiting();
       updateTaskStatus("running");
       setRoleStatus("director", "queued", {{ force: true }});
-      appendActivity("你已补充需求，已发送给总工程师。");
       const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/message${{TOKEN_SUFFIX}}`, {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
@@ -8116,7 +7590,6 @@ def _relay_task_detail_page(
       if (!response.ok) {{
         markMarvisConversationUserFailed(localKey);
         clearMarvisConversationWaiting();
-        appendActivity("补充发送失败，请稍后重试。");
         return;
       }}
       form.reset();
@@ -8128,75 +7601,11 @@ def _relay_task_detail_page(
       const response = await fetch(`${{target.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{ method: "POST" }});
       if (response.ok) {{
         updateTaskStatus("interrupted");
-        appendActivity("你已中断任务。");
-      }} else {{
-        appendActivity("中断失败，请稍后重试。");
       }}
     }});
   </script>
 </body>
 </html>""")
-
-
-def _relay_role_panel_html(
-    job: Any,
-    *,
-    canonical_payload: dict[str, Any] | None = None,
-) -> str:
-    link = (
-        f'<a class="role-link" href="{escape(_native_session_path(job.provider, job.native_session_id))}">打开原生会话</a>'
-        if job.provider and job.native_session_id
-        else '<span class="relay-muted">原生会话未启动</span>'
-    )
-    fallback = (
-        f'<div class="relay-muted">调度降级：{escape(job.fallback_reason)}</div>'
-        if job.fallback_reason
-        else ""
-    )
-    error_message = str(getattr(job, "error_message", "") or "")
-    error_html = (
-        f'<div class="relay-muted relay-error">执行问题：{escape(error_message)}</div>'
-        if error_message
-        else ""
-    )
-    questions = "、".join(str(item) for item in job.open_questions) or "无"
-    status = str(job.status or "idle")
-    provider = _native_provider_display_name(str(job.provider or ""))
-    display = _relay_role_display_from_job(job, canonical_payload=canonical_payload)
-    output_text = str(display.get("summary_text") or "")
-    output_class = "role-output is-idle" if status == "idle" else "role-output"
-    canonical_json = str(display.get("canonical_json") or "")
-    canonical_html = (
-        '<details class="role-canonical-json">'
-        "<summary>查看结构化数据</summary>"
-        f'<pre data-role-canonical-json="{escape(job.role)}">{escape(canonical_json)}</pre>'
-        "</details>"
-        if canonical_json
-        else ""
-    )
-    handoff = str(job.latest_handoff_summary or "暂无交接摘要")
-    return f"""
-      <article class="role-lane" data-role="{escape(job.role)}" data-role-provider="{escape(str(job.provider or ""))}">
-        <div class="role-head">
-          <h3>{escape(job.display_name)}</h3>
-          <span class="role-status" data-status="{escape(status)}">{escape(_relay_role_status_label(status))}</span>
-        </div>
-        <div class="role-meta">
-          <span class="role-provider">Provider：{escape(provider or "未配置")}</span>
-          <span class="relay-muted">{escape(job.model or "默认模型")}</span>
-        </div>
-        {fallback}
-        {error_html}
-        <div class="{output_class}" data-role-output="{escape(job.role)}">{escape(output_text)}</div>
-        {canonical_html}
-        <div class="role-preview is-idle" data-role-preview="{escape(job.role)}"></div>
-        <div class="role-notes">
-          <div class="relay-muted">交接摘要：{escape(handoff)}</div>
-          <div class="relay-muted">待确认问题：{escape(questions)}</div>
-          <div data-native-link>{link}</div>
-        </div>
-      </article>
-    """
 
 
 def _relay_worker_events_for_roles(
@@ -9051,141 +8460,6 @@ def _marvis_relay_attachment_list_html(row: dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _relay_native_conversation_html(
-    role_jobs: list[Any],
-    *,
-    hub: WorkerLiveStreamHub | None,
-    canonical_payloads: dict[str, dict[str, Any]] | None = None,
-) -> str:
-    canonical_payloads = canonical_payloads or {}
-    events: list[tuple[str, int, str, str, WorkerStreamEvent]] = []
-    job_by_role = {str(getattr(job, "role", "") or ""): job for job in role_jobs}
-    if hub is not None:
-        for job in role_jobs:
-            agent_run_id = getattr(job, "agent_run_id", None)
-            if agent_run_id is None:
-                continue
-            role = str(getattr(job, "role", "") or "")
-            display_name = str(getattr(job, "display_name", "") or _relay_role_label(role))
-            for worker_event in hub.snapshot(
-                agent_run_id=int(agent_run_id),
-                after_id=0,
-                limit=500,
-            ):
-                events.append(
-                    (
-                        str(worker_event.occurred_at or ""),
-                        int(worker_event.id),
-                        role,
-                        display_name,
-                        worker_event,
-                    )
-                )
-    if not events and not canonical_payloads:
-        return _relay_native_empty_conversation_html()
-
-    events.sort(key=lambda item: (item[0], item[1]))
-    completed_keys = {
-        _relay_native_message_key(role, worker_event, bucket="assistant")
-        for _occurred_at, _event_id, role, _display_name, worker_event in events
-        if worker_event.kind == "message_completed"
-        and _relay_native_event_text(worker_event).strip()
-    }
-    rows: list[dict[str, str]] = []
-    row_by_key: dict[str, dict[str, str]] = {}
-    for _occurred_at, _event_id, role, display_name, worker_event in events:
-        kind = str(worker_event.kind or "event")
-        text = _relay_native_event_text(worker_event)
-        if kind in {"text_delta", "message_completed"} and role in canonical_payloads:
-            continue
-        if kind == "text_delta":
-            key = _relay_native_message_key(
-                role,
-                worker_event,
-                bucket="assistant",
-            )
-            if key in completed_keys:
-                continue
-            if key not in row_by_key:
-                row = {
-                    "role": role,
-                    "kind": kind,
-                    "speaker": display_name,
-                    "meta": str(worker_event.source or ""),
-                    "body": "",
-                    "key": key,
-                    "preview_event_ids": str(worker_event.id),
-                }
-                rows.append(row)
-                row_by_key[key] = row
-            event_ids = set(filter(None, row_by_key[key].get("preview_event_ids", "").split(",")))
-            event_ids.add(str(worker_event.id))
-            row_by_key[key]["preview_event_ids"] = ",".join(sorted(event_ids, key=int))
-            row_by_key[key]["body"] += text
-            continue
-        row = _relay_native_event_row(role, display_name, worker_event)
-        if row is not None:
-            rows.append(row)
-    projected_rows: list[dict[str, str]] = []
-    seen_keys: set[str] = set()
-    seen_user_bodies: set[str] = set()
-    for row in rows:
-        projected = _relay_project_native_conversation_row(
-            row,
-            job=job_by_role.get(str(row.get("role") or "")),
-        )
-        if projected is None:
-            continue
-        if _relay_conversation_row_is_task_status_noise(projected):
-            continue
-        if str(projected.get("kind") or "") == "user_message":
-            body = str(projected.get("body") or "").strip()
-            if not body or body in seen_user_bodies:
-                continue
-            seen_user_bodies.add(body)
-        key = str(projected.get("key") or "")
-        if key and key in seen_keys:
-            continue
-        if key:
-            seen_keys.add(key)
-        projected_rows.append(projected)
-    for role in RELAY_ROLE_IDS:
-        payload = canonical_payloads.get(role)
-        if payload is None:
-            continue
-        key = f"canonical:{role}:{payload.get('artifact_type') or 'role_envelope'}"
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        projected_rows.append(
-            {
-                "role": role,
-                "kind": "role_envelope",
-                "speaker": _relay_role_label(role),
-                "meta": _relay_conversation_artifact_meta(payload),
-                "body": _relay_humanize_role_envelope(payload),
-                "key": key,
-                "canonical_json": _relay_canonical_envelope_json(payload),
-            }
-        )
-    blocked_role = _relay_first_blocked_role(role_jobs)
-    if blocked_role:
-        projected_rows.append(
-            {
-                "role": blocked_role,
-                "kind": "status",
-                "speaker": "系统",
-                "meta": "",
-                "body": f"接力暂停在{_relay_role_label(blocked_role)}，详情见任务状态。",
-                "key": f"relay-paused:{blocked_role}",
-            }
-        )
-    rows = projected_rows
-    if not rows:
-        return _relay_native_empty_conversation_html()
-    return "\n".join(_relay_native_message_html(row) for row in rows)
-
-
 def _relay_native_empty_conversation_html() -> str:
     return """
       <article class="relay-message" data-native-role="system" data-native-kind="status" data-native-empty>
@@ -9326,7 +8600,6 @@ def _relay_humanized_role_output_row(
             **row,
             "kind": "role_envelope",
             "body": _relay_humanize_role_envelope(parsed_payload),
-            "canonical_json": _relay_canonical_envelope_json(parsed_payload),
         }
 
     if not _relay_text_looks_like_role_envelope(body):
@@ -9340,7 +8613,6 @@ def _relay_humanized_role_output_row(
             **row,
             "kind": "role_envelope",
             "body": _relay_humanize_role_envelope(parsed),
-            "canonical_json": _relay_canonical_envelope_json(parsed),
         }
 
     error = str(getattr(job, "error_message", "") or "").strip() if job else ""
@@ -9467,15 +8739,6 @@ def _relay_native_message_html(row: dict[str, str]) -> str:
         if kind == "text_delta" and preview_event_ids
         else ""
     )
-    canonical_json = str(row.get("canonical_json") or "")
-    canonical_html = (
-        '<details class="role-canonical-json">'
-        "<summary>查看结构化数据</summary>"
-        f'<pre data-role-canonical-json="{escape(role)}">{escape(canonical_json)}</pre>'
-        "</details>"
-        if canonical_json
-        else ""
-    )
     return f"""
       <article class="relay-message" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(row.get("key", "") or "")}"{role_final_attr}{role_preview_attr}{raw_preview_attr}{preview_event_ids_attr}>
         {_marvis_relay_avatar_html(role, label=str(row.get("speaker", "") or "系统"))}
@@ -9484,7 +8747,6 @@ def _relay_native_message_html(row: dict[str, str]) -> str:
           {meta_html}
         </div>
         <div class="relay-message-body" data-native-message-body>{escape(row.get("body", "") or "")}</div>
-        {canonical_html}
       </article>
     """
 
@@ -9501,65 +8763,6 @@ def _relay_native_event_text(worker_event: WorkerStreamEvent) -> str:
         or payload.get("chunk")
         or ""
     )
-
-
-def _relay_role_display_from_job(
-    job: Any,
-    *,
-    canonical_payload: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    status = str(getattr(job, "status", "") or "idle")
-    output = str(getattr(job, "output", "") or "").strip()
-    error_message = str(getattr(job, "error_message", "") or "").strip()
-    payload = canonical_payload or _relay_parse_role_envelope_payload(output)
-    if payload is not None:
-        return {
-            "summary_text": _relay_humanize_role_envelope(payload),
-            "canonical_json": _relay_canonical_envelope_json(payload),
-            "is_preview": False,
-            "debug_raw": output
-            if output and output != _relay_canonical_envelope_json(payload)
-            else "",
-        }
-    if error_message and status in {"blocked", "failed"}:
-        return {
-            "summary_text": _relay_role_output_error_text(
-                str(getattr(job, "role", "") or ""),
-                error_message,
-            ),
-            "canonical_json": "",
-            "is_preview": False,
-            "debug_raw": output,
-        }
-    if output:
-        return {
-            "summary_text": _relay_sanitize_protocol_leak_text(
-                str(getattr(job, "role", "") or ""),
-                output,
-            ),
-            "canonical_json": "",
-            "is_preview": status == "streaming",
-            "debug_raw": output,
-        }
-    if error_message:
-        return {
-            "summary_text": _relay_role_output_error_text(
-                str(getattr(job, "role", "") or ""),
-                error_message,
-            ),
-            "canonical_json": "",
-            "is_preview": False,
-            "debug_raw": output,
-        }
-    idle_output = "未调度，等待总工程师分配或上一角色交接。"
-    if getattr(job, "idle_reason", ""):
-        idle_output = f"未调度，{job.idle_reason}。"
-    return {
-        "summary_text": idle_output if status == "idle" else "已启动，等待角色输出。",
-        "canonical_json": "",
-        "is_preview": status not in {"idle", "passed", "completed", "blocked", "failed"},
-        "debug_raw": "",
-    }
 
 
 def _relay_role_canonical_payloads_by_role(
@@ -9635,10 +8838,6 @@ def _relay_parse_role_envelope_payload(
     if result.ok and result.payload:
         return dict(result.payload)
     return None
-
-
-def _relay_canonical_envelope_json(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def _relay_native_message_key(

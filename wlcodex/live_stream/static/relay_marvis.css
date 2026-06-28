@@ -427,11 +427,7 @@ body[data-marvis-relay-view] .relay-task-list {
 body[data-marvis-relay-view] .relay-workspace-nav,
 body[data-marvis-relay-view] .relay-config-summary,
 body[data-marvis-relay-view] .relay-empty-state,
-body[data-marvis-relay-view] .relay-task-card,
-body[data-marvis-relay-view] .relay-board,
-body[data-marvis-relay-view] .relay-routing,
-body[data-marvis-relay-view] .role-lane,
-body[data-marvis-relay-view] .relay-activity {
+body[data-marvis-relay-view] .relay-task-card {
   border: 0;
   border-radius: 22px;
   background: #fff;
@@ -448,10 +444,7 @@ body[data-marvis-relay-view] .relay-history-head {
   align-items: flex-start;
 }
 
-body[data-marvis-relay-view] .relay-history-title h2,
-body[data-marvis-relay-view] .relay-board h2,
-body[data-marvis-relay-view] .relay-routing h2,
-body[data-marvis-relay-view] .relay-activity h2 {
+body[data-marvis-relay-view] .relay-history-title h2 {
   color: #111;
   font-size: 20px;
   font-weight: 800;
@@ -678,17 +671,6 @@ body[data-marvis-relay-view] .relay-message[data-native-kind="status"] .relay-me
   padding: 3px 0;
   font-size: 15px;
   text-align: center;
-}
-
-body[data-marvis-relay-view] .role-canonical-json {
-  grid-column: 2;
-  margin-top: -10px;
-  border: 0;
-  color: #999;
-}
-
-body[data-marvis-relay-view] .role-canonical-json summary {
-  color: #9a9a9a;
 }
 
 body[data-marvis-relay-view] .marvis-relay-avatar {
