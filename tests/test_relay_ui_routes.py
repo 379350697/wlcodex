@@ -1152,7 +1152,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Other workspace relay" not in response
     assert "relay-task-card" in response
     assert "marvis-relay-task-card" in response
-    assert 'class="relay-status-badge"' in response
+    assert "relay-status-badge" in response
     assert 'class="relay-open relay-card-open"' in response
     assert "总工程师：" not in response
     assert "等待总工程师接收" not in response
@@ -1187,7 +1187,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "Other workspace relay" not in populated
     assert "relay-task-card" in populated
     assert "marvis-relay-task-card" in populated
-    assert 'class="relay-status-badge"' in populated
+    assert "relay-status-badge" in populated
     assert 'class="relay-role-chips"' not in populated
     assert "总工程师 · 阻塞 · Codex" not in populated
     assert "架构工程师 · 未调度 · Antigravity" not in populated
@@ -1222,13 +1222,80 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         relay_service=service,
     )
     assert 'class="marvis-relay-task-card-footer"' in polished
-    assert polished.index('class="relay-status-badge"') < polished.index(
+    assert polished.index("relay-status-badge") < polished.index(
         'class="relay-open relay-card-open"'
     )
+    assert 'class="relay-card-topline"' in polished
+    assert 'class="relay-card-project">repo</span>' in polished
+    assert 'class="relay-card-activity">最近活动 06-16 15:51</span>' in polished
+    assert polished.index('class="relay-card-avatar-row"') < polished.index('class="relay-title"')
+    assert "当前阶段：" not in polished
+    assert "/repo ·" not in polished
+    assert "is-completed" in polished
     assert "最近活动 06-16 15:51" in polished
     assert "2026-06-16T07:51:57.510982123+00:00" not in polished
     assert "最近接棒：" not in polished
     assert "按完整五角色接力处理" not in polished
+
+
+@pytest.mark.asyncio
+async def test_relay_task_list_paginates_ten_tasks_per_page(tmp_path: Path) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    workspace = "/Users/wl/projects/wlcodex"
+    tasks = [
+        service.create_task(
+            title=f"Paged relay task {index:02d}",
+            prompt="Prompt",
+            workspace=workspace,
+            provider="claude",
+        )
+        for index in range(12)
+    ]
+    for index, task in enumerate(tasks):
+        service._store._ledger._conn.execute(
+            "UPDATE team_runs SET updated_at = ? WHERE id = ?",
+            (f"2026-06-{index + 1:02d}T00:00:00+00:00", task.id),
+        )
+    service._store._ledger._conn.commit()
+
+    await server.start()
+    try:
+        page_one = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/workflows/relay?token=secret&workspace=%2FUsers%2Fwl%2Fprojects%2Fwlcodex HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+        page_two = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/workflows/relay?token=secret&workspace=%2FUsers%2Fwl%2Fprojects%2Fwlcodex&page=2 HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert page_one.count('class="relay-task-card marvis-relay-task-card"') == 10
+    assert "Paged relay task 11" in page_one
+    assert "Paged relay task 02" in page_one
+    assert "Paged relay task 01" not in page_one
+    assert "Paged relay task 00" not in page_one
+    assert 'class="relay-pagination"' in page_one
+    assert "第 1 / 2 页" in page_one
+    assert (
+        'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex&amp;page=2"'
+        in page_one
+    )
+
+    assert page_two.count('class="relay-task-card marvis-relay-task-card"') == 2
+    assert "Paged relay task 01" in page_two
+    assert "Paged relay task 00" in page_two
+    assert "Paged relay task 02" not in page_two
+    assert "第 2 / 2 页" in page_two
+    assert (
+        'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex&amp;page=1"'
+        in page_two
+    )
 
 
 @pytest.mark.asyncio

@@ -1234,6 +1234,7 @@ class WorkerLiveStreamServer:
             )
             return
         if path == "/native/workflows/relay":
+            page = _relay_page_number(str((query.get("page") or ["1"])[0] or "1"))
             summaries = (
                 self._relay_service.list_tasks(workspace=selected_workspace)
                 if self._relay_service is not None
@@ -1255,6 +1256,7 @@ class WorkerLiveStreamServer:
                     projects=project_rows,
                     selected_workspace=selected_workspace,
                     access_token=token,
+                    page=page,
                 ),
             )
             return
@@ -3502,6 +3504,7 @@ def _relay_task_list_page(
     projects: list[Any] | None = None,
     selected_workspace: str = "",
     access_token: str = "",
+    page: int = 1,
 ) -> str:
     token_suffix = _token_suffix(access_token)
     relay_config = relay_config or {}
@@ -3524,9 +3527,21 @@ def _relay_task_list_page(
         f"<span>{counts.get(status, 0)}</span></button>"
         for status in filters
     )
-    if sorted_summaries:
+    page_size = 10
+    task_count = len(sorted_summaries)
+    total_pages = max(1, (task_count + page_size - 1) // page_size)
+    current_page = min(max(1, int(page or 1)), total_pages)
+    page_start = (current_page - 1) * page_size
+    visible_summaries = sorted_summaries[page_start : page_start + page_size]
+    pagination_html = _relay_task_pagination_html(
+        current_page=current_page,
+        total_pages=total_pages,
+        selected_workspace=selected_workspace,
+        access_token=access_token,
+    )
+    if visible_summaries:
         task_list_html = "\n".join(
-            _relay_task_card_html(summary, token_suffix) for summary in sorted_summaries
+            _relay_task_card_html(summary, token_suffix) for summary in visible_summaries
         )
     else:
         task_list_html = """
@@ -3536,7 +3551,6 @@ def _relay_task_list_page(
             <p>当前工作区还没有接力任务，可以从底部导航的对话开始第一个任务。</p>
           </section>
         """
-    task_count = len(sorted_summaries)
     active_count = sum(
         1
         for summary in sorted_summaries
@@ -3610,14 +3624,23 @@ def _relay_task_list_page(
     .relay-filter-chip {{ min-height: 32px; border: 1px solid var(--border-subtle); border-radius: 999px; background: transparent; color: var(--text-muted); padding: 0 10px; }}
     .relay-filter-chip.active {{ border-color: var(--color-link); color: var(--text-primary); background: rgba(88, 166, 255, .1); }}
     .relay-task-list {{ display: grid; gap: 10px; min-width: 0; }}
-    .relay-task-card {{ display: grid; gap: 10px; border: 1px solid var(--border-card); border-radius: 8px; padding: 14px; background: var(--bg-surface); min-width: 0; overflow-wrap: anywhere; }}
-    .relay-card-head {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }}
+    .relay-task-card {{ display: grid; gap: 12px; border: 1px solid var(--border-card); border-radius: 8px; padding: 14px; background: var(--bg-surface); min-width: 0; overflow-wrap: anywhere; }}
+    .relay-card-topline {{ display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--text-muted); font-size: 13px; line-height: 1.3; }}
+    .relay-card-project {{ color: var(--text-primary); font-weight: var(--weight-bold); white-space: nowrap; }}
+    .relay-card-activity {{ color: var(--text-muted); min-width: 0; }}
+    .relay-card-avatar-row {{ display: flex; align-items: center; min-height: 42px; }}
     .relay-card-meta {{ display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }}
     .relay-card-open {{ white-space: nowrap; }}
-    .relay-title {{ font-size: 17px; font-weight: var(--weight-bold); }}
+    .relay-title {{ font-size: 17px; font-weight: var(--weight-bold); line-height: 1.35; }}
     .relay-muted {{ color: var(--text-muted); font-size: 13px; }}
     .relay-summary {{ color: var(--text-primary); font-size: 14px; line-height: 1.45; }}
-    .relay-status-badge {{ border: 1px solid var(--border-subtle); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: var(--text-primary); background: rgba(255,255,255,.05); white-space: nowrap; }}
+    .relay-status-badge {{ display: inline-grid; place-items: center; min-height: 30px; border: 1px solid var(--border-subtle); border-radius: 999px; padding: 0 12px; font-size: 12px; line-height: 1; color: var(--text-primary); background: rgba(255,255,255,.05); white-space: nowrap; }}
+    .relay-status-badge.is-completed {{ background: #f3eded; border-color: #efe3e3; color: #755f5f; }}
+    .relay-pagination {{ display: flex; align-items: center; justify-content: center; gap: 10px; padding: 2px 0 0; }}
+    .relay-page-link, .relay-page-disabled {{ min-height: 34px; display: inline-grid; place-items: center; border: 1px solid var(--border-subtle); border-radius: 999px; padding: 0 12px; font-size: 13px; text-decoration: none; }}
+    .relay-page-link {{ color: var(--text-primary); background: rgba(255,255,255,.04); }}
+    .relay-page-disabled {{ color: var(--text-muted); opacity: .55; }}
+    .relay-page-indicator {{ color: var(--text-muted); font-size: 13px; }}
     .relay-empty-state {{ display: grid; justify-items: start; gap: 10px; border: 1px dashed var(--border-subtle); border-radius: 8px; padding: 18px; color: var(--text-muted); }}
     .relay-empty-state h2 {{ color: var(--text-primary); font-size: 18px; }}
     .relay-empty-state p {{ margin: 0; max-width: 58ch; line-height: 1.55; }}
@@ -3644,6 +3667,7 @@ def _relay_task_list_page(
         <div class="relay-task-list" aria-label="relay tasks">
           {task_list_html}
         </div>
+        {pagination_html}
       </section>
     </div>
   </main>
@@ -3898,6 +3922,59 @@ def _relay_workspace_href(workspace: str, access_token: str) -> str:
         params.append(f"workspace={quote(workspace)}")
     suffix = "?" + "&".join(params) if params else ""
     return f"/native/workflows/relay{suffix}"
+
+
+def _relay_page_number(raw_page: str) -> int:
+    try:
+        return max(1, int(raw_page))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _relay_task_list_href(workspace: str, access_token: str, page: int) -> str:
+    params = []
+    if access_token:
+        params.append(f"token={quote(access_token)}")
+    if workspace:
+        params.append(f"workspace={quote(workspace)}")
+    params.append(f"page={max(1, int(page))}")
+    return f"/native/workflows/relay?{'&'.join(params)}"
+
+
+def _relay_task_pagination_html(
+    *,
+    current_page: int,
+    total_pages: int,
+    selected_workspace: str,
+    access_token: str,
+) -> str:
+    if total_pages <= 1:
+        return ""
+    previous_html: str
+    next_html: str
+    if current_page > 1:
+        previous_html = (
+            '<a class="relay-page-link" '
+            f'href="{escape(_relay_task_list_href(selected_workspace, access_token, current_page - 1))}">'
+            "上一页</a>"
+        )
+    else:
+        previous_html = '<span class="relay-page-disabled" aria-disabled="true">上一页</span>'
+    if current_page < total_pages:
+        next_html = (
+            '<a class="relay-page-link" '
+            f'href="{escape(_relay_task_list_href(selected_workspace, access_token, current_page + 1))}">'
+            "下一页</a>"
+        )
+    else:
+        next_html = '<span class="relay-page-disabled" aria-disabled="true">下一页</span>'
+    return f"""
+      <nav class="relay-pagination" aria-label="任务分页">
+        {previous_html}
+        <span class="relay-page-indicator">第 {current_page} / {total_pages} 页</span>
+        {next_html}
+      </nav>
+    """
 
 
 def _relay_task_view_href(task_id: int, access_token: str, view: str) -> str:
@@ -5798,26 +5875,34 @@ def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
     status = str(summary.status)
     status_label = _relay_task_status_label(status)
     activity = _relay_activity_label(summary.last_activity_at)
-    workspace = str(summary.workspace or "未指定工作目录")
-    phase = _relay_phase_label(str(summary.phase or "director"))
+    workspace = str(summary.workspace or "")
+    project_name = Path(workspace).name or workspace or "wlcodex"
+    status_class = "relay-status-badge"
+    if status:
+        status_class += f" is-{_relay_status_class_name(status)}"
     return f"""
       <article class="relay-task-card marvis-relay-task-card" data-status="{escape(status)}">
-        <div class="relay-card-head">
-          {_marvis_relay_avatar_html("marvis", label="Marvis")}
-          <div>
-            <div class="relay-title">{escape(summary.title)}</div>
-            <div class="relay-muted">{escape(workspace)} · 当前阶段：{escape(phase)}</div>
-          </div>
+        <div class="relay-card-topline">
+          <span class="relay-card-project">{escape(project_name)}</span>
+          <span class="relay-card-activity">{escape(activity)}</span>
         </div>
+        <div class="relay-card-avatar-row">
+          {_marvis_relay_avatar_html("marvis", label="Marvis")}
+        </div>
+        <div class="relay-title">{escape(summary.title)}</div>
         <div class="marvis-relay-task-card-footer">
           <div class="relay-card-meta">
-            <span class="relay-status-badge">{escape(status_label)}</span>
-            <span class="relay-muted">{escape(activity)}</span>
+            <span class="{escape(status_class)}">{escape(status_label)}</span>
           </div>
           <a class="relay-open relay-card-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">打开任务</a>
         </div>
       </article>
     """
+
+
+def _relay_status_class_name(status: str) -> str:
+    safe = "".join(char if char.isalnum() else "-" for char in status.lower()).strip("-")
+    return safe or "unknown"
 
 
 def _relay_task_status_label(status: str) -> str:
