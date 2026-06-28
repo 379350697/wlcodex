@@ -460,8 +460,18 @@ class RelayService:
         )
         await self.dispatch_role(task_id, role)
 
-    async def dispatch_role(self, task_id: int, role: str) -> None:
+    async def dispatch_role(
+        self,
+        task_id: int,
+        role: str,
+        *,
+        prefer_continue: bool = True,
+    ) -> None:
         detail = self._store.get_task_detail(task_id)
+        job = next(
+            (candidate for candidate in detail.role_jobs if candidate.role == role),
+            None,
+        )
         provider_name = (
             detail.task.role_providers.get(role)
             or detail.task.provider
@@ -479,15 +489,11 @@ class RelayService:
             )
             return
         capabilities = provider.capabilities()
-        if not bool(getattr(capabilities, "can_start_session", False)):
-            await self._mark_role_fallback(
-                task_id,
-                role,
-                provider_name=provider_name,
-                provider_engine=str(getattr(provider, "provider_engine", "")),
-                reason="provider cannot start native sessions",
-            )
-            return
+        can_start = bool(getattr(capabilities, "can_start_session", False))
+        can_continue = bool(getattr(capabilities, "can_continue_session", False))
+        existing_native_session_id = ""
+        if prefer_continue and job is not None and job.provider == provider_name:
+            existing_native_session_id = str(job.native_session_id or "").strip()
 
         packet = build_role_context_packet(
             task=detail.task,
@@ -499,22 +505,71 @@ class RelayService:
         context_record = self._store.save_context_packet(task_id, role, packet)
         images = _relay_images_for_role(detail.artifacts, role)
         provider_kwargs = {"images": images} if images else {}
-        try:
-            result = await provider.start_session(
-                detail.task.workspace,
-                context_record.prompt_text,
-                **provider_kwargs,
-            )
-        except Exception as exc:
-            await self._mark_role_fallback(
-                task_id,
-                role,
-                provider_name=provider_name,
-                provider_engine=str(getattr(provider, "provider_engine", "")),
-                reason=str(exc) or "provider failed to start native session",
-            )
-            return
-        native_session_id = str(getattr(result, "native_session_id", "") or "")
+        result: Any | None = None
+        if can_continue and existing_native_session_id:
+            try:
+                continued = await provider.continue_session(
+                    existing_native_session_id,
+                    context_record.prompt_text,
+                    **provider_kwargs,
+                )
+            except Exception as exc:
+                self._events.emit(
+                    task_id,
+                    "dispatch.fallback",
+                    role=role,
+                    payload={
+                        "fallback_reason": str(exc)
+                        or "provider failed to continue native session",
+                        "provider": provider_name,
+                        "fallback_action": "start_session",
+                    },
+                )
+            else:
+                if _control_result_verified(continued):
+                    result = continued
+                else:
+                    self._events.emit(
+                        task_id,
+                        "dispatch.fallback",
+                        role=role,
+                        payload={
+                            "fallback_reason": _control_result_failure_reason(
+                                continued
+                            ),
+                            "provider": provider_name,
+                            "fallback_action": "start_session",
+                        },
+                    )
+        if result is None:
+            if not can_start:
+                await self._mark_role_fallback(
+                    task_id,
+                    role,
+                    provider_name=provider_name,
+                    provider_engine=str(getattr(provider, "provider_engine", "")),
+                    reason="provider cannot start native sessions",
+                )
+                return
+            try:
+                result = await provider.start_session(
+                    detail.task.workspace,
+                    context_record.prompt_text,
+                    **provider_kwargs,
+                )
+            except Exception as exc:
+                await self._mark_role_fallback(
+                    task_id,
+                    role,
+                    provider_name=provider_name,
+                    provider_engine=str(getattr(provider, "provider_engine", "")),
+                    reason=str(exc) or "provider failed to start native session",
+                )
+                return
+        native_session_id = (
+            str(getattr(result, "native_session_id", "") or "")
+            or existing_native_session_id
+        )
         agent_run_id = _result_agent_run_id(result)
         if not _control_result_verified(result):
             await self._mark_role_fallback(
@@ -1375,7 +1430,7 @@ class RelayService:
             try:
                 provider = self._registry.get(director.provider)
             except KeyError:
-                await self.dispatch_role(task_id, "director")
+                await self.dispatch_role(task_id, "director", prefer_continue=False)
                 return
             capabilities = provider.capabilities()
             can_steer = bool(getattr(capabilities, "can_steer_active_turn", False))
@@ -1406,10 +1461,14 @@ class RelayService:
                             "fallback_reason": str(exc)
                             or "provider failed to continue native session",
                             "provider": director.provider,
-                            "fallback_action": "dispatch_role",
+                            "fallback_action": "start_session",
                         },
                     )
-                    await self.dispatch_role(task_id, "director")
+                    await self.dispatch_role(
+                        task_id,
+                        "director",
+                        prefer_continue=False,
+                    )
                     return
                 if not _control_result_verified(result):
                     self._events.emit(
@@ -1419,10 +1478,14 @@ class RelayService:
                         payload={
                             "fallback_reason": _control_result_failure_reason(result),
                             "provider": director.provider,
-                            "fallback_action": "dispatch_role",
+                            "fallback_action": "start_session",
                         },
                     )
-                    await self.dispatch_role(task_id, "director")
+                    await self.dispatch_role(
+                        task_id,
+                        "director",
+                        prefer_continue=False,
+                    )
                     return
                 native_session_id = str(
                     getattr(result, "native_session_id", "")

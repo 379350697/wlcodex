@@ -246,6 +246,40 @@ def test_dispatch_role_uses_native_agent_registry_provider(tmp_path) -> None:
     assert director.status == "streaming"
 
 
+def test_dispatch_role_continues_existing_role_native_session(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "implementer",
+        provider="claude",
+        provider_engine="sdk-test",
+        native_session_id="native-implementer-old",
+        agent_run_id=155,
+        turn_id="turn-old",
+        active_turn_id="turn-old",
+        turn_running=False,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "implementer", "queued")
+
+    asyncio.run(service.dispatch_role(task.id, "implementer"))
+
+    assert provider.calls[0][0] == "continue_session"
+    assert provider.calls[0][1] == "native-implementer-old"
+    assert all(call[0] != "start_session" for call in provider.calls)
+    detail = service.get_task(task.id)
+    implementer = next(job for job in detail.role_jobs if job.role == "implementer")
+    assert implementer.native_session_id == "native-implementer-old"
+    assert implementer.agent_run_id == 201
+    assert implementer.status == "streaming"
+
+
 def test_resume_role_redispatches_blocked_role(tmp_path) -> None:
     service, provider = _service(tmp_path)
     task = service.create_task(
@@ -297,8 +331,11 @@ def test_resume_role_force_redispatches_streaming_role(tmp_path) -> None:
     jobs = {job.role: job for job in detail.role_jobs}
     assert detail.task.status == "running"
     assert jobs["implementer"].status == "streaming"
-    assert jobs["implementer"].native_session_id == "native-2"
-    assert [call[0] for call in provider.calls] == ["start_session", "start_session"]
+    assert jobs["implementer"].native_session_id == "native-1"
+    assert [call[0] for call in provider.calls] == [
+        "start_session",
+        "continue_session",
+    ]
 
 
 def test_create_task_snapshots_role_providers_and_dispatches_each_role_provider(
@@ -3283,7 +3320,10 @@ def test_director_only_routing_decision_dispatches_director_final_summary(
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
     event_types = [event.event_type for event in service.events_for_task(task.id)]
-    assert [call[0] for call in provider.calls] == ["start_session", "start_session"]
+    assert [call[0] for call in provider.calls] == [
+        "start_session",
+        "continue_session",
+    ]
     assert detail.task.status == "running"
     assert jobs["director"].status == "streaming"
     assert event_types[-2:] == ["role.streaming", "dispatch.verified"]
