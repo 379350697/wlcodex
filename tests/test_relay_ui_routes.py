@@ -1095,7 +1095,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-worklog-no-artifacts">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-token-details-coffee">'
         in response
     )
     assert 'class="marvis-relay-bottom-nav"' in response
@@ -1353,7 +1353,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-worklog-no-artifacts">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-token-details-coffee">'
         in response
     )
     assert "Marvis办公室" in response
@@ -1416,7 +1416,8 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert "今日消耗Token" in response
     assert "总消耗Token" in response
     assert "今日节省Token" not in response
-    assert "marvis-token-beans" in response
+    assert "☕" in response
+    assert "marvis-token-beans" not in response
     legacy_avatar_slugs = [
         "-".join(("app", "agent")),
         "-".join(("computer", "agent")),
@@ -1557,6 +1558,17 @@ async def test_marvis_relay_office_page_displays_today_token_usage(
     assert '"today_tokens": 700' in stats_response
     assert "local_tokens" not in stats_response
     assert "saved_tokens" not in stats_response
+
+
+def test_marvis_relay_office_token_details_sheet_uses_fixed_modal_css() -> None:
+    css = Path("wlcodex/live_stream/static/relay_marvis.css").read_text()
+    selector_start = css.index("[data-marvis-token-details-modal]")
+    selector_block = css[selector_start : selector_start + 360]
+    assert "position: fixed" in selector_block
+    assert "bottom: 0" in selector_block
+    assert "z-index: 43" in selector_block
+    assert "var(--marvis-s25-phone-width)" in selector_block
+    assert "var(--marvis-relay-phone-width)" not in selector_block
 
 
 @pytest.mark.asyncio
@@ -1897,7 +1909,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-worklog-no-artifacts">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-token-details-coffee">'
         in response
     )
     assert 'class="marvis-relay-topbar"' in response

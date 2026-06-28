@@ -150,7 +150,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-worklog-no-artifacts"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-token-details-coffee"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4810,11 +4810,11 @@ def _marvis_relay_office_page(
       <section class="marvis-office-token-row" aria-label="Token统计" data-marvis-token-stats data-token-endpoint="/api/relay/token-stats{token_suffix}">
         <button type="button" class="marvis-office-token-card" data-marvis-token-details-open="today">
           <span>今日消耗Token</span>
-          <strong data-token-consumed="{consumed_tokens}"><b data-token-consumed-label>{escape(consumed_label)}</b> <span class="marvis-token-beans" aria-hidden="true"><span></span><span></span></span></strong>
+          <strong data-token-consumed="{consumed_tokens}"><b data-token-consumed-label>{escape(consumed_label)}</b> <span class="marvis-office-token-coffee" aria-hidden="true">☕</span></strong>
         </button>
         <button type="button" class="marvis-office-token-card" data-marvis-token-details-open="total">
           <span>总消耗Token</span>
-          <strong data-token-total="{total_consumed_tokens}"><b data-token-total-label>{escape(total_consumed_label)}</b> <span class="marvis-token-beans" aria-hidden="true"><span></span><span></span></span></strong>
+          <strong data-token-total="{total_consumed_tokens}"><b data-token-total-label>{escape(total_consumed_label)}</b> <span class="marvis-office-token-coffee" aria-hidden="true">☕</span></strong>
         </button>
       </section>
     </main>
