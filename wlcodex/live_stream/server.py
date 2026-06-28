@@ -145,7 +145,7 @@ _STATIC_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-native-icons"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-s25-image-preview"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4394,23 +4394,40 @@ def _marvis_relay_attachment_script() -> str:
         });
       }
       function renderRelayAttachmentStrip() {
+        const hasImages = state.images.length > 0;
+        const hasFiles = state.files.length > 0;
+        composer?.classList.toggle("has-image-attachments", hasImages);
         if (!strip) return;
         strip.innerHTML = "";
-        const items = [
-          ...state.images.map((item, index) => ({...item, type: "image", index})),
-          ...state.files.map((item, index) => ({...item, type: "file", index}))
-        ];
-        strip.hidden = items.length === 0;
-        items.forEach((item) => {
+        strip.hidden = !hasImages && !hasFiles;
+        state.images.forEach((item, index) => {
+          const preview = document.createElement("button");
+          preview.type = "button";
+          preview.className = "marvis-relay-composer-image-preview";
+          preview.title = "移除图片";
+          const img = document.createElement("img");
+          img.src = item.url || "";
+          img.alt = "";
+          const remove = document.createElement("span");
+          remove.className = "marvis-relay-composer-image-remove";
+          remove.setAttribute("aria-hidden", "true");
+          remove.textContent = "\\u00d7";
+          preview.append(img, remove);
+          preview.addEventListener("click", () => {
+            state.images.splice(index, 1);
+            renderRelayAttachmentStrip();
+          });
+          strip.appendChild(preview);
+        });
+        state.files.forEach((item, index) => {
           const chip = document.createElement("button");
           chip.type = "button";
-          chip.className = `marvis-relay-composer-attachment is-${item.type}`;
-          chip.title = item.filename || (item.type === "image" ? "图片" : "文件");
-          chip.innerHTML = '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span><span></span><b aria-hidden="true">×</b>';
-          chip.querySelector("span:nth-child(2)").textContent = item.filename || (item.type === "image" ? "图片" : "文件");
+          chip.className = "marvis-relay-composer-attachment is-file";
+          chip.title = item.filename || "文件";
+          chip.innerHTML = '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span><span></span><b aria-hidden="true">&#215;</b>';
+          chip.querySelector("span:nth-child(2)").textContent = item.filename || "文件";
           chip.addEventListener("click", () => {
-            if (item.type === "image") state.images.splice(item.index, 1);
-            else state.files.splice(item.index, 1);
+            state.files.splice(index, 1);
             renderRelayAttachmentStrip();
           });
           strip.appendChild(chip);
@@ -4484,17 +4501,30 @@ def _marvis_relay_attachment_script() -> str:
       const images = Array.isArray(attachments.images) ? attachments.images : [];
       const files = Array.isArray(attachments.files) ? attachments.files : [];
       if (!images.length && !files.length) return;
+      const imageList = document.createElement("div");
+      imageList.className = "marvis-relay-message-images";
+      images.forEach((item) => {
+        const src = String(item?.url || item?.data_url || "");
+        if (!src) return;
+        const image = document.createElement("img");
+        image.className = "marvis-relay-message-image";
+        image.src = src;
+        image.alt = "";
+        image.loading = "lazy";
+        imageList.appendChild(image);
+      });
+      if (imageList.children.length) parent.appendChild(imageList);
+      if (!files.length) return;
       const list = document.createElement("div");
       list.className = "marvis-relay-attachment-list";
-      const addChip = (item, type) => {
+      const addChip = (item) => {
         const chip = document.createElement("span");
-        chip.className = `marvis-relay-attachment-chip marvis-relay-attachment-chip-${type}`;
+        chip.className = "marvis-relay-attachment-chip marvis-relay-attachment-chip-file";
         chip.innerHTML = '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span><span></span>';
-        chip.querySelector("span:last-child").textContent = item.filename || (type === "image" ? "图片" : "文件");
+        chip.querySelector("span:last-child").textContent = item.filename || "文件";
         list.appendChild(chip);
       };
-      images.forEach((item) => addChip(item, "image"));
-      files.forEach((item) => addChip(item, "file"));
+      files.forEach((item) => addChip(item));
       parent.appendChild(list);
     }
     setupMarvisRelayAttachments();
@@ -7068,11 +7098,13 @@ def _relay_task_detail_page(
       node.dataset.nativeKind = "user_message";
       if (key) node.dataset.nativeKey = key;
       if (pending) node.dataset.pendingFollowup = "true";
-      const bubble = document.createElement("div");
-      bubble.className = "marvis-relay-user-bubble";
-      bubble.dataset.nativeMessageBody = "";
-      bubble.textContent = body || "已添加附件";
-      node.appendChild(bubble);
+      if (body) {{
+        const bubble = document.createElement("div");
+        bubble.className = "marvis-relay-user-bubble";
+        bubble.dataset.nativeMessageBody = "";
+        bubble.textContent = body;
+        node.appendChild(bubble);
+      }}
       appendMarvisAttachmentList(node, attachments);
       conversationTimeline.appendChild(node);
       if (key) nativeTranscriptNodes.set(key, node);
@@ -8202,9 +8234,14 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
     key = str(row.get("key") or "")
     if kind == "user_message":
         attachment_html = _marvis_relay_attachment_list_html(row)
+        bubble_html = (
+            f'<div class="marvis-relay-user-bubble" data-native-message-body>{escape(body)}</div>'
+            if body
+            else ""
+        )
         return f"""
       <article class="marvis-relay-user-message" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(key)}">
-        <div class="marvis-relay-user-bubble" data-native-message-body>{escape(body)}</div>
+        {bubble_html}
         {attachment_html}
       </article>
         """
@@ -8246,30 +8283,44 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
 
 
 def _marvis_relay_attachment_list_html(row: dict[str, Any]) -> str:
-    items: list[str] = []
+    image_items: list[str] = []
+    file_items: list[str] = []
     for raw in list(row.get("images") or [])[:_MAX_NATIVE_IMAGE_ATTACHMENTS]:
         if not isinstance(raw, dict):
             continue
-        filename = str(raw.get("filename") or "图片")
-        items.append(
-            '<span class="marvis-relay-attachment-chip marvis-relay-attachment-chip-image">'
-            '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span>'
-            f"<span>{escape(filename)}</span>"
-            "</span>"
+        src = str(raw.get("url") or raw.get("data_url") or "")
+        if not (
+            src.startswith("data:image/")
+            or src.startswith("http://")
+            or src.startswith("https://")
+        ):
+            continue
+        image_items.append(
+            '<img class="marvis-relay-message-image" '
+            f'src="{escape(src, quote=True)}" alt="" loading="lazy">'
         )
     for raw in list(row.get("files") or [])[:_MAX_RELAY_TEXT_ATTACHMENTS]:
         if not isinstance(raw, dict):
             continue
         filename = str(raw.get("filename") or "文件")
-        items.append(
+        file_items.append(
             '<span class="marvis-relay-attachment-chip marvis-relay-attachment-chip-file">'
             '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span>'
             f"<span>{escape(filename)}</span>"
             "</span>"
         )
-    if not items:
+    parts: list[str] = []
+    if image_items:
+        parts.append(
+            '<div class="marvis-relay-message-images">' + "".join(image_items) + "</div>"
+        )
+    if file_items:
+        parts.append(
+            '<div class="marvis-relay-attachment-list">' + "".join(file_items) + "</div>"
+        )
+    if not parts:
         return ""
-    return '<div class="marvis-relay-attachment-list">' + "".join(items) + "</div>"
+    return "".join(parts)
 
 
 def _relay_native_conversation_html(

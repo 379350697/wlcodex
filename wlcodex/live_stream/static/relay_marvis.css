@@ -63,6 +63,10 @@ body[data-marvis-relay-view] {
   --marvis-s25-composer-input-size: 17px;
   --marvis-s25-composer-icon: 42px;
   --marvis-s25-composer-symbol-size: 32px;
+  --marvis-s25-composer-image-height: 204px;
+  --marvis-s25-composer-preview: 76px;
+  --marvis-s25-message-image-max-width: 132px;
+  --marvis-s25-message-image-max-height: 220px;
   --marvis-s25-bottom-nav-height: 78px;
   --marvis-s25-bottom-nav-icon: 24px;
   --marvis-s25-bottom-nav-text: 12px;
@@ -755,6 +759,87 @@ body[data-marvis-relay-view] .marvis-relay-composer-attachments::-webkit-scrollb
   display: none;
 }
 
+body[data-marvis-relay-view] .marvis-relay-composer.has-image-attachments {
+  grid-template-rows: minmax(var(--marvis-s25-composer-preview), auto) 32px var(--marvis-s25-composer-icon);
+  row-gap: 5px;
+  align-items: start;
+  min-height: var(--marvis-s25-composer-image-height);
+  border-radius: 22px;
+  padding: 18px 20px 12px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer.has-image-attachments .marvis-relay-composer-attachments {
+  position: static;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  overflow-x: auto;
+  min-height: calc(var(--marvis-s25-composer-preview) + 10px);
+  padding: 0;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer.has-image-attachments .marvis-relay-plus {
+  grid-column: 1;
+  grid-row: 3;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer.has-image-attachments textarea,
+body[data-marvis-relay-view] .marvis-relay-composer.has-image-attachments input {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  height: 32px;
+  min-height: 32px;
+  max-height: 32px;
+  padding: 1px 0 0;
+  overflow: hidden;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer.has-image-attachments .marvis-relay-submit {
+  grid-column: 3;
+  grid-row: 3;
+  justify-self: end;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-image-preview {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  width: var(--marvis-s25-composer-preview);
+  height: var(--marvis-s25-composer-preview);
+  border: 0;
+  border-radius: 11px;
+  background: #f5f5f5;
+  padding: 0;
+  overflow: visible;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-image-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 11px;
+  object-fit: cover;
+}
+
+body[data-marvis-relay-view] .marvis-relay-composer-image-remove {
+  position: absolute;
+  z-index: 1;
+  top: -8px;
+  right: -8px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(70, 70, 70, .76);
+  color: #fff;
+  font-size: 22px;
+  font-weight: 300;
+  line-height: 1;
+}
+
 body[data-marvis-relay-view] .marvis-relay-composer-attachment,
 body[data-marvis-relay-view] .marvis-relay-attachment-chip {
   display: inline-flex;
@@ -797,6 +882,27 @@ body[data-marvis-relay-view] .marvis-relay-attachment-list {
   flex-wrap: wrap;
   max-width: 76%;
   margin: 7px 0 0 auto;
+}
+
+body[data-marvis-relay-view] .marvis-relay-message-images {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-self: end;
+  max-width: 76%;
+  margin: 8px 0 0 auto;
+}
+
+body[data-marvis-relay-view] .marvis-relay-message-image {
+  display: block;
+  max-width: min(var(--marvis-s25-message-image-max-width), 42vw);
+  max-height: var(--marvis-s25-message-image-max-height);
+  width: auto;
+  height: auto;
+  border-radius: 12px;
+  background: #fff;
+  object-fit: contain;
 }
 
 body[data-marvis-relay-view] .marvis-relay-attachment-icon {
