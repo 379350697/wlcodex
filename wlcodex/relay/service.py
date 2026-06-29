@@ -17,6 +17,14 @@ from wlcodex.relay.models import HandoffPacket, RelayPendingInput, RelayTask, Re
 from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
 from wlcodex.relay.store import RELAY_ASSIGNMENT_PREFIX
 from wlcodex.runtime_event_store import RuntimeEventStore
+from wlcodex.runtime_events import (
+    AggregateType,
+    EventSource,
+    EventType,
+    RuntimeEvent,
+    Visibility,
+    now_iso,
+)
 
 
 _ROUTING_DECISION_ROUTES = {
@@ -888,6 +896,14 @@ class RelayService:
     ):
         result = parse_role_envelope(output)
         if not result.ok or result.envelope is None:
+            if _looks_like_relay_protocol_attempt(output):
+                self._record_invalid_semantic_artifact(
+                    task_id,
+                    role,
+                    error=result.error or "invalid role envelope",
+                    output=output.strip(),
+                    runtime_event_id=runtime_event_id,
+                )
             if dispatch_next and await self._retry_role_envelope_format(
                 task_id,
                 role,
@@ -1679,6 +1695,70 @@ class RelayService:
             payload={"status": "blocked", "error": reason, "round_id": round_id},
         )
 
+    def _record_invalid_semantic_artifact(
+        self,
+        task_id: int,
+        role: str,
+        *,
+        error: str,
+        output: str,
+        runtime_event_id: int = 0,
+        agent_run_id: int | None = None,
+        completed_event: Any | None = None,
+    ) -> Any:
+        round_id = self._store.current_round_id(task_id)
+        native_turn_id = _runtime_event_turn_id(completed_event) if completed_event is not None else ""
+        payload = {
+            "error": error,
+            "output": output,
+            "runtime_event_id": runtime_event_id,
+            "agent_run_id": agent_run_id,
+            "native_turn_id": native_turn_id,
+            "round_id": round_id,
+            "relay_role": role,
+            "artifact_type": "role_artifact_invalid",
+        }
+        artifact = self._store.save_artifact(
+            task_id,
+            role,
+            "role_artifact_invalid",
+            payload,
+            summary="结构化产物未采用，已保留原始回答。",
+        )
+        runtime_payload = {
+            "role": role,
+            "round_id": round_id,
+            "error": error,
+            "artifact_type": "role_artifact_invalid",
+            "artifact_id": int(getattr(artifact, "id", 0) or 0),
+            "runtime_event_id": runtime_event_id,
+            "agent_run_id": agent_run_id,
+            "native_turn_id": native_turn_id,
+        }
+        RuntimeEventStore(self._store._ledger._conn).append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.PROVIDER_SEMANTIC_ARTIFACT_INVALID,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id=str(agent_run_id or runtime_event_id or task_id),
+                task_id=task_id,
+                agent_run_id=agent_run_id,
+                correlation_id=f"relay-artifact-invalid:{task_id}:{role}:{round_id}",
+                source=EventSource.PROJECTOR,
+                actor=role,
+                visibility=Visibility.OPERATOR,
+                payload=runtime_payload,
+                occurred_at=now_iso(),
+            )
+        )
+        self._events.emit(
+            task_id,
+            EventType.PROVIDER_SEMANTIC_ARTIFACT_INVALID,
+            role=role,
+            payload=runtime_payload,
+        )
+        return artifact
+
     async def _retry_role_envelope_format(
         self,
         task_id: int,
@@ -1835,17 +1915,37 @@ class RelayService:
         if (
             not parse_result.ok
             and self._should_accept_plain_followup_response(task_id, role)
-            and not _looks_like_relay_protocol_attempt(text)
         ):
             self._mark_native_agent_run_done(agent_run_id, text)
+            invalid_artifact = None
+            if _looks_like_relay_protocol_attempt(text):
+                invalid_artifact = self._record_invalid_semantic_artifact(
+                    task_id,
+                    role,
+                    error=parse_result.error or "invalid role envelope",
+                    output=text,
+                    runtime_event_id=runtime_event_id,
+                    agent_run_id=agent_run_id,
+                    completed_event=completed_event,
+                )
             await self._handle_plain_followup_response(
                 task_id,
                 role,
                 runtime_event_id=runtime_event_id,
                 text=text,
+                semantic_invalid=invalid_artifact is not None,
             )
             return True
         if not parse_result.ok and _looks_like_relay_protocol_attempt(text):
+            self._record_invalid_semantic_artifact(
+                task_id,
+                role,
+                error=parse_result.error or "invalid role envelope",
+                output=text,
+                runtime_event_id=runtime_event_id,
+                agent_run_id=agent_run_id,
+                completed_event=completed_event,
+            )
             if await self._retry_role_envelope_format(
                 task_id,
                 role,
@@ -2860,6 +2960,7 @@ class RelayService:
         *,
         runtime_event_id: int,
         text: str,
+        semantic_invalid: bool = False,
     ):
         if runtime_event_id > 0 and runtime_event_id in self._handled_runtime_completion_ids:
             return None
@@ -2867,10 +2968,12 @@ class RelayService:
             self._handled_runtime_completion_ids.add(runtime_event_id)
         clean_text = _plain_followup_visible_text(text.strip())
         round_id = self._store.current_round_id(task_id)
+        final_role_status = "waiting" if semantic_invalid else "passed"
+        final_task_status = "waiting_user" if semantic_invalid else "completed"
         response_payload = {
             "text": clean_text,
             "target_role": "user",
-            "status": "passed",
+            "status": final_role_status,
             "runtime_event_id": runtime_event_id,
             "round_id": round_id,
         }
@@ -2890,8 +2993,8 @@ class RelayService:
             response_payload,
             summary=clean_text,
         )
-        self._store.update_role_status(task_id, role, "passed")
-        self._store.update_task_status(task_id, "completed")
+        self._store.update_role_status(task_id, role, final_role_status)
+        self._store.update_task_status(task_id, final_task_status)
         self._events.emit(
             task_id,
             "role.followup_response",
@@ -2900,23 +3003,35 @@ class RelayService:
                 "role": role,
                 "text": clean_text,
                 "display_text": clean_text,
-                "status": "passed",
+                "status": final_role_status,
                 "artifact_id": int(getattr(response_artifact, "id", 0) or 0),
                 "round_id": round_id,
+                "semantic_invalid": semantic_invalid,
             },
         )
         self._events.emit(
             task_id,
             "role.status",
             role=role,
-            payload={"status": "passed", "round_id": round_id},
+            payload={"status": final_role_status, "round_id": round_id},
         )
-        self._events.emit(
-            task_id,
-            "task.completed",
-            role=role,
-            payload={"summary": clean_text, "round_id": round_id},
-        )
+        if semantic_invalid:
+            self._events.emit(
+                task_id,
+                "task.waiting_user",
+                role=role,
+                payload={
+                    "summary": "结构化产物未采用，自动流转暂停。",
+                    "round_id": round_id,
+                },
+            )
+        else:
+            self._events.emit(
+                task_id,
+                "task.completed",
+                role=role,
+                payload={"summary": clean_text, "round_id": round_id},
+            )
         return None
 
     async def scan_active_native_runtime_events(

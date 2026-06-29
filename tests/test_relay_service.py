@@ -1090,6 +1090,12 @@ def test_invalid_streamed_envelope_retries_format_once(tmp_path) -> None:
         and artifact.get("retry_kind") == "format"
         for artifact in detail.artifacts
     )
+    assert any(
+        artifact.get("artifact_type") == "role_artifact_invalid"
+        and artifact.get("relay_role") == "director"
+        and str(artifact.get("error") or "").startswith("missing required fields")
+        for artifact in detail.artifacts
+    )
 
 
 def test_malformed_director_routing_blocks_explicit_full_relay_after_retry(tmp_path) -> None:
@@ -2426,7 +2432,7 @@ def test_director_followup_bad_json_provider_display_delta_streams_to_ui(
     assert output_events[-1].payload["delta"] == '{"routing_decision":'
 
 
-def test_followup_malformed_routing_envelope_retries_strict_json_instead_of_recovering(
+def test_followup_malformed_routing_envelope_records_visible_response_and_invalid_semantic(
     tmp_path,
 ) -> None:
     service, provider = _service(tmp_path)
@@ -2480,10 +2486,20 @@ def test_followup_malformed_routing_envelope_retries_strict_json_instead_of_reco
 
     detail = service.get_task(task.id)
     jobs = {job.role: job for job in detail.role_jobs}
+    runtime_events = RuntimeEventStore(service._store._ledger._conn).list_by_agent_run_tail(
+        201,
+        limit=20,
+    )
     followup_responses = [
         artifact
         for artifact in detail.artifacts
         if artifact.get("artifact_type") == "followup_response"
+    ]
+    invalid_artifacts = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_artifact_invalid"
+        and artifact.get("relay_role") == "director"
     ]
     role_errors = [
         artifact
@@ -2491,14 +2507,21 @@ def test_followup_malformed_routing_envelope_retries_strict_json_instead_of_reco
         if artifact.get("artifact_type") == "role_error"
         and artifact.get("relay_role") == "director"
     ]
-    assert followup_responses == []
-    assert detail.task.status == "running"
+    semantic_invalid = [
+        event
+        for event in runtime_events
+        if event.event_type == EventType.PROVIDER_SEMANTIC_ARTIFACT_INVALID
+    ]
+    assert followup_responses[-1]["text"] == _plain_followup_visible_text(bad_protocol_text)
+    assert invalid_artifacts[-1]["error"].startswith("missing required fields")
+    assert invalid_artifacts[-1]["runtime_event_id"] == completed.id
+    assert semantic_invalid[-1].payload["error"].startswith("missing required fields")
+    assert detail.task.status == "waiting_user"
     assert detail.routing_decision is None
-    assert jobs["director"].status == "streaming"
+    assert jobs["director"].status == "waiting"
     assert jobs["implementer"].status == "idle"
-    assert any(call[0] == "continue_session" for call in provider.calls)
-    assert role_errors[-1]["retry_kind"] == "format"
-    assert all("recovered_as" not in artifact for artifact in role_errors)
+    assert len([call for call in provider.calls if call[0] == "continue_session"]) == 1
+    assert role_errors == []
 
 
 def test_malformed_routing_envelope_blocks_after_format_retry_is_spent(tmp_path) -> None:
@@ -3155,7 +3178,7 @@ def test_followup_plain_text_can_complete_from_provider_read_session(
     assert followup_responses[-1]["native_turn_id"] == "turn-followup"
 
 
-def test_followup_malformed_read_session_protocol_retries_not_plain_response(
+def test_followup_malformed_read_session_protocol_records_visible_response(
     tmp_path,
 ) -> None:
     service, provider = _service(tmp_path)
@@ -3214,10 +3237,17 @@ def test_followup_malformed_read_session_protocol_retries_not_plain_response(
         for artifact in detail.artifacts
         if artifact.get("artifact_type") == "followup_response"
     ]
-    assert followup_responses == []
-    assert detail.task.status == "running"
+    invalid_artifacts = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_artifact_invalid"
+        and artifact.get("relay_role") == "director"
+    ]
+    assert followup_responses[-1]["text"] == _plain_followup_visible_text(bad_protocol_text)
+    assert invalid_artifacts[-1]["error"].startswith("missing required fields")
+    assert detail.task.status == "waiting_user"
     assert detail.routing_decision is None
-    assert jobs["director"].status == "streaming"
+    assert jobs["director"].status == "waiting"
     assert jobs["implementer"].status == "idle"
 
 

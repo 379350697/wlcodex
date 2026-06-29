@@ -5673,6 +5673,9 @@ def _marvis_relay_work_log_segments(
 ) -> list[WorkLogSegment]:
     canonical_payloads = canonical_payloads or {}
     role_errors = _marvis_relay_role_error_payloads_by_role(getattr(detail, "artifacts", []) or [])
+    invalid_artifacts = _marvis_relay_invalid_artifact_payloads_by_role(
+        getattr(detail, "artifacts", []) or []
+    )
     dispatch_payloads = _marvis_relay_dispatch_payloads_by_role(
         getattr(detail, "artifacts", []) or []
     )
@@ -5866,6 +5869,19 @@ def _marvis_relay_work_log_segments(
                 ),
             )
             existing_roles.add(role)
+        invalid_payload = invalid_artifacts.get(role) or {}
+        if invalid_payload:
+            append_entry(
+                role,
+                WorkLogEntry(
+                    kind="artifact_invalid",
+                    key=f"artifact_invalid:{invalid_payload.get('id') or role}",
+                    text="结构化产物未采用，自动流转暂停。已保留 provider 原始可见输出。",
+                    chip="等待修正",
+                    output=str(invalid_payload.get("error") or ""),
+                ),
+            )
+            existing_roles.add(role)
         if role not in existing_roles and status and status not in {"idle", "passed", "completed"}:
             _persona, display_name = _marvis_relay_public_role(role)
             append_entry(
@@ -5946,6 +5962,29 @@ def _marvis_relay_role_error_payloads_by_role(
             success_roles.add(role)
             errors.pop(role, None)
     return errors
+
+
+def _marvis_relay_invalid_artifact_payloads_by_role(
+    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, dict[str, Any]]:
+    payloads: dict[str, dict[str, Any]] = {}
+    success_roles_by_round: dict[str, set[str]] = {}
+    for artifact in artifacts:
+        payload = dict(artifact or {})
+        role = str(payload.get("role") or payload.get("relay_role") or "")
+        if not role:
+            continue
+        round_id = str(payload.get("round_id") or "")
+        success_roles = success_roles_by_round.setdefault(round_id, set())
+        artifact_type = str(payload.get("artifact_type") or "")
+        if artifact_type == "role_artifact_invalid":
+            payloads[role] = payload
+            continue
+        normalized_status = _relay_lifecycle_status_for_payload(payload, success_roles)
+        if _relay_payload_status_is_success(normalized_status):
+            success_roles.add(role)
+            payloads.pop(role, None)
+    return payloads
 
 
 def _marvis_relay_summary_payloads_by_role(
@@ -8933,21 +8972,22 @@ def _relay_conversation_row_from_artifact(
             "to_role": to_role,
             "round_id": str(artifact.get("round_id") or ""),
         }
-    if artifact_type in {"role_dispatch_metadata", "role_error"}:
+    if artifact_type in {"role_dispatch_metadata", "role_error", "role_artifact_invalid"}:
         return None
     if artifact_type == "followup_response":
         text = str(artifact.get("text") or artifact.get("summary") or "").strip()
         if not text:
             return None
         role = str(artifact.get("role") or artifact.get("relay_role") or "director")
+        status = _relay_lifecycle_status_for_payload(artifact)
         return {
             "role": role,
             "kind": "followup_response",
             "speaker": _relay_role_label(role),
-            "meta": "passed",
+            "meta": status,
             "body": _relay_followup_response_display_text(role, text),
             "key": f"followup_response:{artifact_key}",
-            "status": "passed",
+            "status": status,
             "round_id": str(artifact.get("round_id") or ""),
         }
     payload = _relay_canonical_payload_from_artifact(artifact)
@@ -9731,7 +9771,7 @@ def _relay_role_canonical_payload_sequence(
 def _relay_canonical_payload_from_artifact(
     artifact: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if str((artifact or {}).get("artifact_type") or "") == "role_error":
+    if str((artifact or {}).get("artifact_type") or "") in {"role_error", "role_artifact_invalid"}:
         return None
     payload = {
         key: value

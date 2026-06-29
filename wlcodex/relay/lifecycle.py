@@ -201,6 +201,7 @@ class RelayLifecycleStore:
         trigger_artifact_id: int | None = None,
     ) -> int:
         current = self.current_round_id(team_run_id)
+        current_execution = self.round_execution(team_run_id, current)
         next_round = current + 1
         now = _now()
         self._conn.execute(
@@ -230,11 +231,25 @@ class RelayLifecycleStore:
             trigger_kind="user_followup",
             trigger_artifact_id=trigger_artifact_id,
         )
+        self.set_round_execution(
+            team_run_id,
+            next_round,
+            execution_mode=str(current_execution.get("execution_mode") or "simple"),
+            execution_goal=str(current_execution.get("execution_goal") or ""),
+            execution_strategy=dict(current_execution.get("execution_strategy") or {}),
+            waiting_reason=str(current_execution.get("waiting_reason") or "none"),
+        )
         self.ensure_attempt(
             team_run_id,
             round_id=next_round,
             role="director",
             status="queued",
+        )
+        self.set_attempt_execution(
+            team_run_id,
+            next_round,
+            "director",
+            execution_mode=str(current_execution.get("execution_mode") or "simple"),
         )
         self.sync_legacy_projection(team_run_id)
         return next_round
@@ -830,6 +845,25 @@ class RelayLifecycleStore:
                 status=error_status,
                 error_artifact_id=artifact_id if should_record_error else None,
                 increment_retry=should_record_error,
+            )
+            return
+        if artifact_type == "role_artifact_invalid":
+            if self._attempt_artifact_link_exists(
+                team_run_id,
+                round_id,
+                role,
+                "completion_artifact_id",
+                artifact_id,
+            ):
+                return
+            self.ensure_attempt(team_run_id, round_id=round_id, role=role, status="waiting")
+            self.update_attempt(
+                team_run_id,
+                round_id,
+                role,
+                status="waiting",
+                completion_event_id=_coerce_round_id(payload.get("runtime_event_id")) or None,
+                completion_artifact_id=artifact_id,
             )
             return
         if artifact_type not in RESULT_ARTIFACT_TYPES:

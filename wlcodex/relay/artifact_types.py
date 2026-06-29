@@ -15,6 +15,7 @@ ROLE_ENVELOPE_ARTIFACT_TYPES = (
 
 INTERNAL_RELAY_ARTIFACT_TYPES = (
     "role_error",
+    "role_artifact_invalid",
     "role_resume",
     "user_attachments",
     "user_followup",

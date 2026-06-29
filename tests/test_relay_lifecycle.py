@@ -6,7 +6,6 @@ from typing import Any
 from wlcodex.db import Ledger
 from wlcodex.native_agents.models import NativeAgentCapabilities, NativeAgentControlResult
 from wlcodex.native_agents.provider import NativeAgentRegistry
-from wlcodex.relay.lifecycle import RelayLifecycleStore
 from wlcodex.relay.service import RelayService
 from wlcodex.relay.store import RelayStore
 from wlcodex.runtime_event_store import RuntimeEventStore
@@ -216,6 +215,48 @@ def test_followup_supersedes_previous_round_and_opens_clean_director_round(
     assert active_attempts[0]["role"] == "director"
     assert active_attempts[0]["status"] in {"queued", "streaming"}
     assert director.status in {"queued", "streaming"}
+
+
+def test_followup_round_inherits_previous_execution_mode(tmp_path: Path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Lifecycle relay",
+        prompt="Initial task",
+        workspace="/repo",
+        provider="claude",
+        execution_mode="plan_first",
+        execution_goal="保持计划模式接续",
+    )
+    service._store.lifecycle.set_round_execution(
+        task.id,
+        1,
+        execution_mode="plan_first",
+        execution_goal="保持计划模式接续",
+        execution_strategy={"allow_subagents": True, "phase": "design"},
+    )
+    expected_execution = service._store.lifecycle.round_execution(task.id, 1)
+
+    asyncio.run(service.add_user_message(task.id, "继续按计划模式走"))
+
+    round_execution = service._store.lifecycle.round_execution(task.id, 2)
+    attempts = _attempt_rows(service)
+    director_attempt = next(
+        attempt
+        for attempt in attempts
+        if attempt["team_run_id"] == task.id
+        and attempt["round_id"] == 2
+        and attempt["role"] == "director"
+    )
+    assert round_execution["execution_mode"] == expected_execution["execution_mode"]
+    assert round_execution["execution_goal"] == expected_execution["execution_goal"]
+    assert round_execution["execution_strategy"].get("allow_subagents") in {
+        True,
+        "auto",
+    }
+    assert round_execution["execution_strategy"].get("subagent_decision_json") or round_execution[
+        "execution_strategy"
+    ].get("phase")
+    assert director_attempt["execution_mode"] == expected_execution["execution_mode"]
 
 
 def test_audit_first_routing_decision_projects_required_roles(tmp_path: Path) -> None:

@@ -820,6 +820,78 @@ async def test_relay_task_detail_projects_followup_turns_into_marvis_chat(
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_keeps_invalid_artifact_out_of_marvis_chat(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Invalid semantic follow-up",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_task_status(task.id, "waiting_user")
+    service._store.update_role_status(task.id, "director", "waiting")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {
+            "text": "继续按计划模式走",
+            "target_role": "director",
+            "round_id": 2,
+        },
+        summary="继续按计划模式走",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "followup_response",
+        {
+            "text": "这是 provider 原始正文，应该完整出现在主对话。",
+            "target_role": "user",
+            "status": "waiting",
+            "round_id": 2,
+            "semantic_invalid": True,
+        },
+        summary="这是 provider 原始正文，应该完整出现在主对话。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_artifact_invalid",
+        {
+            "relay_role": "director",
+            "error": "missing required fields: status",
+            "output": '{"summary":"正文里带了坏 JSON"}',
+            "round_id": 2,
+        },
+        summary="结构化产物未采用，已保留原始回答。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
+    assert "继续按计划模式走" in conversation_html
+    assert "这是 provider 原始正文，应该完整出现在主对话。" in conversation_html
+    assert 'data-native-kind="role_artifact_invalid"' not in conversation_html
+    assert "结构化结果缺少必填字段" not in conversation_html
+    assert "missing required fields: status" not in conversation_html
+    assert "结构化产物未采用，自动流转暂停" in work_log_html
+    assert "missing required fields: status" in work_log_html
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_projects_running_followup_as_marvis_waiting(
     tmp_path: Path,
 ) -> None:
