@@ -1441,6 +1441,7 @@ class WorkerLiveStreamServer:
                         files=_safe_relay_file_attachments(body.get("files")),
                         execution_mode=str(body.get("execution_mode") or "simple"),
                         execution_goal=str(body.get("execution_goal") or ""),
+                        allow_subagents=str(body.get("allow_subagents") or "auto"),
                         team_strategy=str(body.get("team_strategy") or "none"),
                     )
                     await self._relay_service.dispatch_role(task.id, "director")
@@ -4441,18 +4442,9 @@ def _marvis_relay_task_composer(
         <label><input type="radio" name="execution_mode" value="simple" checked><span>简单</span></label>
         <label><input type="radio" name="execution_mode" value="plan_first"><span>计划</span></label>
         <label><input type="radio" name="execution_mode" value="goal"><span>目标</span></label>
-        <label><input type="radio" name="execution_mode" value="team"><span>团队</span></label>
         <label><input type="radio" name="execution_mode" value="auto"><span>自动</span></label>
-        <select name="team_strategy" aria-label="团队策略">
-          <option value="none">默认策略</option>
-          <option value="research">研究</option>
-          <option value="planning">规划</option>
-          <option value="implementation">实现</option>
-          <option value="code_review">审查</option>
-          <option value="testing">测试</option>
-          <option value="debugging">调试</option>
-          <option value="red_team">风险</option>
-        </select>
+        <label><input type="radio" name="allow_subagents" value="auto" checked><span>子代理自动</span></label>
+        <label><input type="radio" name="allow_subagents" value="off"><span>子代理关闭</span></label>
       </div>
       <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
       <input name="title" autocomplete="off" placeholder="{escape(placeholder)}">
@@ -5460,6 +5452,9 @@ def _marvis_relay_work_log_segments(
 ) -> list[WorkLogSegment]:
     canonical_payloads = canonical_payloads or {}
     role_errors = _marvis_relay_role_error_payloads_by_role(getattr(detail, "artifacts", []) or [])
+    dispatch_payloads = _marvis_relay_dispatch_payloads_by_role(
+        getattr(detail, "artifacts", []) or []
+    )
     artifact_payloads = _marvis_relay_summary_payloads_by_role(
         getattr(detail, "artifacts", []) or []
     )
@@ -5536,6 +5531,20 @@ def _marvis_relay_work_log_segments(
         )
         artifact_keys_added.add(key)
 
+    for role, payload in dispatch_payloads.items():
+        decision_text = _marvis_relay_dispatch_decision_text(payload)
+        if not decision_text:
+            continue
+        append_entry(
+            role,
+            WorkLogEntry(
+                kind="dispatch",
+                key=f"dispatch:{payload.get('id') or role}",
+                text=decision_text,
+                chip="调度",
+            ),
+        )
+
     _marvis_relay_finalize_work_log_segments(segments)
     existing_roles = {segment.role for segment in segments}
     for job in detail.role_jobs:
@@ -5605,6 +5614,49 @@ def _marvis_relay_work_log_segments(
 
     _marvis_relay_finalize_work_log_segments(segments)
     return segments
+
+
+def _marvis_relay_dispatch_payloads_by_role(
+    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, dict[str, Any]]:
+    payloads: dict[str, dict[str, Any]] = {}
+    for artifact in artifacts:
+        payload = dict(artifact or {})
+        if str(payload.get("artifact_type") or "") != "role_dispatch_metadata":
+            continue
+        role = str(payload.get("role") or payload.get("relay_role") or "")
+        if role:
+            payloads[role] = payload
+    return payloads
+
+
+def _marvis_relay_dispatch_decision_text(payload: dict[str, Any]) -> str:
+    provider_mode = payload.get("provider_mode")
+    if not isinstance(provider_mode, dict):
+        provider_mode = {}
+    provider_mode_key = str(provider_mode.get("provider_mode") or "default")
+    decision = provider_mode.get("subagent_decision_json")
+    if not isinstance(decision, dict):
+        decision = {}
+    if provider_mode_key == "default" and not decision:
+        return ""
+    mode_label = {
+        "codex_plan": "Codex plan",
+        "claude_plan": "Claude plan",
+        "prompt_plan_fallback": "Plan fallback",
+        "prompt_goal_contract": "Goal contract",
+        "default": "默认调度",
+    }.get(provider_mode_key, provider_mode_key)
+    allow_subagents = str(provider_mode.get("allow_subagents") or "auto")
+    subagent_label = "子代理关闭" if allow_subagents == "off" else "子代理自动"
+    capability = str(decision.get("capability") or "").strip()
+    provider = str(payload.get("provider") or decision.get("provider") or "").strip()
+    parts = [mode_label, subagent_label]
+    if capability:
+        parts.append(capability)
+    if provider:
+        parts.append(provider)
+    return " · ".join(_relay_humanize_display_text(part) for part in parts if part)
 
 
 def _marvis_relay_role_error_payloads_by_role(
