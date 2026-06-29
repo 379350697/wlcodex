@@ -321,6 +321,7 @@ class RelayTaskDetail:
     routing_decision: dict[str, Any] | None = None
     current_round_id: int = 1
     pending_inputs: list[RelayPendingInput] = field(default_factory=list)
+    round_execution: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -333,6 +334,7 @@ class RelayTaskDetail:
             "routing_decision": self.routing_decision,
             "current_round_id": self.current_round_id,
             "pending_inputs": [item.to_dict() for item in self.pending_inputs],
+            "round_execution": self.round_execution,
         }
 
 
