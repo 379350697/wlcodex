@@ -294,6 +294,7 @@ class WorkerLiveStreamServer:
         self._native_transcript_file_signatures: dict[tuple[str, str], str] = {}
         self._council_runs: dict[str, dict[str, Any]] = {}
         self._council_run_tasks: set[asyncio.Task[None]] = set()
+        self._relay_dispatch_tasks: set[asyncio.Task[None]] = set()
         self._login_tickets: dict[str, float] = {}
 
     async def start(self) -> None:
@@ -318,6 +319,7 @@ class WorkerLiveStreamServer:
             if task is not asyncio.current_task()
         )
         tasks.extend(task for task in self._council_run_tasks if task is not asyncio.current_task())
+        tasks.extend(task for task in self._relay_dispatch_tasks if task is not asyncio.current_task())
         for task in tasks:
             task.cancel()
         if tasks:
@@ -1564,10 +1566,14 @@ class WorkerLiveStreamServer:
                         selected_option_instruction=str(
                             body.get("selected_option_instruction") or ""
                         ),
+                        dispatch_next=False,
                     )
                 except (KeyError, ValueError) as exc:
                     await self._send_json(writer, 400, {"error": str(exc)})
                     return
+                next_role = str(result.get("next_role") or result.get("role") or "").strip()
+                if next_role:
+                    self._schedule_relay_dispatch(task_id, next_role)
                 await self._send_json(writer, 200, {"control": result})
                 return
             if suffix == "/sessions":
@@ -2175,6 +2181,28 @@ class WorkerLiveStreamServer:
         self._council_run_tasks.add(task)
         task.add_done_callback(self._council_run_tasks.discard)
         return _council_run_public_payload(run)
+
+    def _schedule_relay_dispatch(self, task_id: int, role: str) -> None:
+        if self._relay_service is None or not role:
+            return
+
+        async def dispatch() -> None:
+            try:
+                await self._relay_service.dispatch_role(task_id, role)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                marker = getattr(self._relay_service, "_mark_role_blocked", None)
+                if callable(marker):
+                    marker(
+                        task_id,
+                        role,
+                        reason=f"round control dispatch failed: {exc}",
+                    )
+
+        task = asyncio.create_task(dispatch())
+        self._relay_dispatch_tasks.add(task)
+        task.add_done_callback(self._relay_dispatch_tasks.discard)
 
     async def _run_async_council_review(
         self,
@@ -7983,6 +8011,12 @@ def _relay_task_detail_page(
         controlPayload.selected_option_label = selected.getAttribute("data-confirmation-option-label") || "";
         controlPayload.selected_option_instruction = selected.getAttribute("data-confirmation-option-instruction") || "";
       }}
+      const shouldLeaveWaiting = decision === "approve_plan" || decision === "continue" || decision === "cancel_plan";
+      if (shouldLeaveWaiting) {{
+        hidePlanControlSurface();
+        updateTaskStatus(decision === "cancel_plan" ? "interrupted" : "running");
+        waitingControlInput = "";
+      }}
       try {{
         const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/rounds/${{encodeURIComponent(roundId)}}/control${{TOKEN_SUFFIX}}`, {{
           method: "POST",
@@ -7991,22 +8025,27 @@ def _relay_task_detail_page(
         }});
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         if (decision === "approve_plan" || decision === "continue") {{
-          hidePlanControlSurface();
           updateTaskStatus("running");
           waitingControlInput = "";
         }} else if (decision === "cancel_plan") {{
-          hidePlanControlSurface();
           updateTaskStatus("interrupted");
           waitingControlInput = "";
         }}
       }} catch (_error) {{
         target.removeAttribute("disabled");
+        if (shouldLeaveWaiting) {{
+          activePlanControl.hidden = false;
+          planControl = activePlanControl;
+          updateTaskStatus("waiting_user");
+        }}
       }}
     }});
     const source = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{EVENTS_SUFFIX}}`);
     source.addEventListener("role.queued", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
+      hidePlanControlSurface();
+      updateTaskStatus("running");
       const force = payload.reason === "new_followup_turn";
       if (force) clearMarvisConversationPausedRows();
       setRoleStatus(payload.role, "queued", {{ force }});
@@ -8014,12 +8053,29 @@ def _relay_task_detail_page(
     source.addEventListener("role.streaming", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
+      hidePlanControlSurface();
+      updateTaskStatus("running");
       setRoleStatus(payload.role, "streaming");
     }});
     source.addEventListener("dispatch.verified", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
+      hidePlanControlSurface();
+      updateTaskStatus("running");
       setRoleStatus(payload.role, "streaming");
+    }});
+    source.addEventListener("round.control", (event) => {{
+      const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
+      hidePlanControlSurface();
+      if (payload.decision === "cancel_plan") {{
+        updateTaskStatus("interrupted");
+      }} else {{
+        updateTaskStatus("running");
+        const nextRole = payload.next_role || payload.role || "";
+        if (nextRole) setRoleStatus(nextRole, "queued", {{ force: true }});
+      }}
+      waitingControlInput = "";
     }});
     source.addEventListener("dispatch.fallback", (event) => {{
       const payload = parseRelayEvent(event);
@@ -8117,7 +8173,10 @@ def _relay_task_detail_page(
       const force = reason === "new_followup_turn";
       if (force) clearMarvisConversationPausedRows();
       setRoleStatus(payload.role, payload.status, {{ force }});
-      if (TERMINAL_ROLE_STATUSES.has(payload.status)) clearRolePreview(payload.role);
+      if (TERMINAL_ROLE_STATUSES.has(payload.status)) {{
+        hidePlanControlSurface();
+        clearRolePreview(payload.role);
+      }}
     }});
     source.addEventListener("task.waiting_user", (event) => {{
       const payload = parseRelayEvent(event);
@@ -8129,12 +8188,14 @@ def _relay_task_detail_page(
     source.addEventListener("task.completed", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
+      hidePlanControlSurface();
       updateTaskStatus("completed");
       clearAllRolePreviews();
     }});
     source.addEventListener("task.interrupted", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
+      hidePlanControlSurface();
       updateTaskStatus("interrupted");
       clearAllRolePreviews();
     }});

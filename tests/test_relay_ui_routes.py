@@ -1031,6 +1031,75 @@ async def test_relay_task_detail_shows_generic_waiting_confirmation_card_with_op
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_clears_waiting_confirmation_when_control_advances(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Waiting confirmation",
+        prompt="Need explicit confirmation",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.handle_role_output(
+        task.id,
+        "director",
+        json.dumps(
+            {
+                "status": "waiting",
+                "reason": "needs user input",
+                "role": "director",
+                "artifact_type": "routing_decision",
+                "handoff_to": "",
+                "summary": "Need confirmation before work.",
+                "evidence_refs": [],
+                "open_questions": ["Continue?"],
+                "next_action": "wait for confirmation",
+                "complexity": "standard",
+                "risk": "medium",
+                "route": "waiting_user",
+                "required_roles": ["director"],
+                "acceptance_criteria": ["user confirmed path"],
+                "stop_conditions": [],
+                "requires_user_approval": True,
+            }
+        ),
+        dispatch_next=False,
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    click_segment = response.split(
+        'const decision = target.getAttribute("data-plan-decision");',
+        1,
+    )[1].split("} catch", 1)[0]
+    assert click_segment.index("hidePlanControlSurface();") < click_segment.index(
+        "const response = await fetch"
+    )
+
+    assert 'source.addEventListener("round.control"' in response
+    round_control_segment = response.split('source.addEventListener("round.control"', 1)[
+        1
+    ].split("});", 1)[0]
+    assert "hidePlanControlSurface();" in round_control_segment
+
+    queued_segment = response.split('source.addEventListener("role.queued"', 1)[1].split(
+        "});",
+        1,
+    )[0]
+    assert "hidePlanControlSurface();" in queued_segment
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_projects_followup_attachments_into_user_bubble(
     tmp_path: Path,
 ) -> None:

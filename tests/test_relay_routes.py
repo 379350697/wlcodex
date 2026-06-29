@@ -122,6 +122,19 @@ class ActiveTurnProvider(FakeProvider):
         )
 
 
+class SlowProvider(FakeProvider):
+    async def start_session(self, cwd: str, prompt: str, **kwargs: Any):
+        self.calls.append(("start_session", cwd, prompt, kwargs))
+        await asyncio.sleep(30)
+        return NativeAgentControlResult(
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            native_session_id="native-slow",
+            agent_run_id=901,
+            status="started",
+        )
+
+
 async def _read_response(host: str, port: int, request: str) -> str:
     reader, writer = await asyncio.open_connection(host, port)
     writer.write(request.encode("utf-8"))
@@ -194,6 +207,18 @@ def _active_relay_service(tmp_path: Path) -> tuple[RelayService, ActiveTurnProvi
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
     provider = ActiveTurnProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    )
+    return service, provider
+
+
+def _slow_relay_service(tmp_path: Path) -> tuple[RelayService, SlowProvider]:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    provider = SlowProvider()
     service = RelayService(
         store=RelayStore(ledger),
         registry=NativeAgentRegistry([provider]),
@@ -440,6 +465,64 @@ async def test_relay_round_control_approves_plan_in_current_round(tmp_path: Path
         "queued",
         "streaming",
     }
+
+
+@pytest.mark.asyncio
+async def test_relay_round_control_returns_before_provider_dispatch_finishes(
+    tmp_path: Path,
+) -> None:
+    service, provider = _slow_relay_service(tmp_path)
+    task = service.create_task(
+        title="Waiting control",
+        prompt="Need confirmation",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.handle_role_output(
+        task.id,
+        "director",
+        json.dumps(
+            {
+                "status": "waiting",
+                "reason": "needs user input",
+                "role": "director",
+                "artifact_type": "routing_decision",
+                "handoff_to": "",
+                "summary": "Confirm before running.",
+                "evidence_refs": [],
+                "open_questions": ["Continue?"],
+                "next_action": "wait for user",
+                "complexity": "standard",
+                "risk": "medium",
+                "route": "waiting_user",
+                "required_roles": ["director"],
+                "acceptance_criteria": ["confirmed"],
+                "stop_conditions": [],
+                "requires_user_approval": True,
+            }
+        ),
+        dispatch_next=False,
+    )
+    body = json.dumps({"decision": "continue"})
+
+    response = await _request_relay(
+        tmp_path,
+        f"POST /api/relay/tasks/{task.id}/rounds/1/control HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["control"]["decision"] == "continue"
+    assert payload["control"]["role"] == "director"
+    assert len(provider.calls) == 1
+    assert provider.calls[0][0] == "start_session"
+    assert provider.calls[0][1] == "/repo"
 
 
 @pytest.mark.asyncio
