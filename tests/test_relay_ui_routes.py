@@ -1463,8 +1463,10 @@ async def test_marvis_relay_chat_home_is_the_only_new_task_entry(
     assert 'name="execution_mode" value="goal"' in response
     assert 'name="execution_mode" value="auto"' in response
     assert 'name="execution_mode" value="team"' not in response
-    assert 'name="allow_subagents" value="auto" checked' in response
-    assert 'name="allow_subagents" value="off"' in response
+    assert 'type="hidden" name="allow_subagents" value="off"' in response
+    assert 'type="checkbox" name="allow_subagents" value="auto" checked' in response
+    assert "使用子代理" in response
+    assert "子代理关闭" not in response
     assert 'select name="team_strategy"' not in response
     assert "团队策略" not in response
     assert '<input name="title" autocomplete="off" placeholder="请在此输入任务">' in response

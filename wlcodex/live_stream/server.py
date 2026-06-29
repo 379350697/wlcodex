@@ -4443,8 +4443,8 @@ def _marvis_relay_task_composer(
         <label><input type="radio" name="execution_mode" value="plan_first"><span>计划</span></label>
         <label><input type="radio" name="execution_mode" value="goal"><span>目标</span></label>
         <label><input type="radio" name="execution_mode" value="auto"><span>自动</span></label>
-        <label><input type="radio" name="allow_subagents" value="auto" checked><span>子代理自动</span></label>
-        <label><input type="radio" name="allow_subagents" value="off"><span>子代理关闭</span></label>
+        <input type="hidden" name="allow_subagents" value="off">
+        <label><input type="checkbox" name="allow_subagents" value="auto" checked><span>使用子代理</span></label>
       </div>
       <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
       <input name="title" autocomplete="off" placeholder="{escape(placeholder)}">
