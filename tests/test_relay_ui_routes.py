@@ -1100,6 +1100,67 @@ async def test_relay_task_detail_clears_waiting_confirmation_when_control_advanc
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_does_not_revive_confirmation_card_after_blocked(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Blocked after confirmation",
+        prompt="Need explicit confirmation",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.handle_role_output(
+        task.id,
+        "director",
+        json.dumps(
+            {
+                "status": "waiting",
+                "reason": "needs user input",
+                "role": "director",
+                "artifact_type": "routing_decision",
+                "handoff_to": "",
+                "summary": "Need confirmation before work.",
+                "evidence_refs": [],
+                "open_questions": ["Continue?"],
+                "next_action": "wait for confirmation",
+                "complexity": "standard",
+                "risk": "medium",
+                "route": "waiting_user",
+                "required_roles": ["director"],
+                "acceptance_criteria": ["user confirmed path"],
+                "stop_conditions": [],
+                "requires_user_approval": True,
+            }
+        ),
+        dispatch_next=False,
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {"error": "invalid json", "round_id": 1},
+        summary="invalid json",
+    )
+    service._store.update_role_status(task.id, "director", "blocked")
+    service._store.update_task_status(task.id, "blocked")
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert '<section class="marvis-relay-confirmation-card"' not in response
+    assert 'data-task-status-value="blocked"' in response
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_projects_followup_attachments_into_user_bubble(
     tmp_path: Path,
 ) -> None:

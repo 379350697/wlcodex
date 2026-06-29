@@ -5304,6 +5304,8 @@ def _marvis_relay_followup_composer(
 
 
 def _marvis_relay_plan_control_html(detail: Any) -> str:
+    if str(getattr(getattr(detail, "task", None), "status", "") or "") != "waiting_user":
+        return ""
     round_id = int(getattr(detail, "current_round_id", 1) or 1)
     waiting_artifact: dict[str, Any] | None = None
     for artifact in reversed(getattr(detail, "artifacts", []) or []):
@@ -5324,8 +5326,6 @@ def _marvis_relay_plan_control_html(detail: Any) -> str:
             waiting_artifact = artifact
             break
     if waiting_artifact is None:
-        if str(getattr(getattr(detail, "task", None), "status", "") or "") != "waiting_user":
-            return ""
         waiting_artifact = {
             "id": 0,
             "artifact_type": "",
