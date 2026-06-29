@@ -5240,6 +5240,7 @@ def _marvis_relay_followup_composer(
     workspace: str = "",
     access_token: str = "",
     task_status: str = "",
+    current_round_id: int = 1,
     pending_inputs: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> str:
     workspace_dock = _marvis_relay_workspace_dock(
@@ -5256,7 +5257,7 @@ def _marvis_relay_followup_composer(
     return f"""
     {workspace_dock}
     <div class="marvis-relay-pending-inputs" data-marvis-pending-inputs{" hidden" if not pending_visible else ""}></div>
-    <form class="marvis-relay-composer" data-marvis-followup-composer data-task-status-value="{escape(task_status)}" data-interrupt-url="/api/relay/tasks/{task_id}/interrupt" method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
+    <form class="marvis-relay-composer" data-marvis-followup-composer data-task-status-value="{escape(task_status)}" data-current-round-id="{int(current_round_id)}" data-interrupt-url="/api/relay/tasks/{task_id}/interrupt" method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
       <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
       <textarea name="text" placeholder="{escape(placeholder)}" aria-label="继续补充给总工程师"></textarea>
       <button class="marvis-relay-submit" type="submit" aria-label="发送补充" data-marvis-submit>
@@ -5282,11 +5283,21 @@ def _marvis_relay_plan_control_html(detail: Any) -> str:
         plan_artifact = artifact
         break
     if plan_artifact is None:
-        return ""
+        if str(getattr(getattr(detail, "task", None), "status", "") or "") != "waiting_user":
+            return ""
+        return f"""
+    <section class="marvis-relay-plan-control" data-marvis-plan-control data-round-id="{round_id}" data-artifact-id="0" aria-label="确认操作">
+      <strong>等待确认</strong>
+      <button type="button" data-plan-decision="continue">确认继续</button>
+      <button type="button" data-waiting-input>补充说明</button>
+      <button type="button" data-plan-decision="cancel_plan">停止</button>
+    </section>
+    """
     return f"""
     <section class="marvis-relay-plan-control" data-marvis-plan-control data-round-id="{round_id}" data-artifact-id="{int(plan_artifact.get("id") or 0)}" aria-label="计划操作">
       <strong>计划等待确认</strong>
       <button type="button" data-plan-decision="approve_plan">执行计划</button>
+      <button type="button" data-waiting-input>补充说明</button>
       <button type="button" data-plan-decision="revise_plan">修改计划</button>
       <button type="button" data-plan-decision="cancel_plan">停止</button>
     </section>
@@ -6390,6 +6401,7 @@ def _relay_task_detail_page(
         workspace=str(task.workspace or ""),
         access_token=access_token,
         task_status=str(task.status or ""),
+        current_round_id=int(getattr(detail, "current_round_id", 1) or 1),
         pending_inputs=[
             item.to_dict() if hasattr(item, "to_dict") else dict(item)
             for item in (getattr(detail, "pending_inputs", []) or [])
@@ -7369,7 +7381,10 @@ def _relay_task_detail_page(
     }}
     function activateRelayRound(payload) {{
       const roundId = relayEventRoundId(payload);
-      if (roundId) activeRelayRoundId = roundId;
+      if (roundId) {{
+        activeRelayRoundId = roundId;
+        if (followupComposer) followupComposer.dataset.currentRoundId = roundId;
+      }}
       return activeRelayRoundId;
     }}
     function appendMarvisConversationWaiting(roundId = "") {{
@@ -7622,6 +7637,7 @@ def _relay_task_detail_page(
     const followupSubmitButton = followupComposer?.querySelector("[data-marvis-submit]");
     const pendingInputs = new Map();
     let relayTaskStatus = followupComposer?.dataset.taskStatusValue || "";
+    let waitingControlInput = "";
     function relayTaskIsRunning() {{
       return ["queued", "running", "streaming"].includes(String(relayTaskStatus || "").trim());
     }}
@@ -7724,18 +7740,28 @@ def _relay_task_detail_page(
     }});
     let planControl = document.querySelector("[data-marvis-plan-control]");
     function ensurePlanControl(payload = {{}}) {{
-      if (planControl || payload.waiting_reason !== "plan_approval") return;
+      if (planControl && !planControl.hidden) return;
+      if (planControl && planControl.hidden) {{
+        planControl.remove();
+        planControl = null;
+      }}
       const roundId = String(payload.round_id || activeRelayRoundId || CURRENT_ROUND_ID || "1");
       const artifactId = String(payload.artifact_id || "0");
+      const isPlanApproval = payload.waiting_reason === "plan_approval";
       const node = document.createElement("section");
+      if (followupComposer) followupComposer.dataset.currentRoundId = roundId;
       node.className = "marvis-relay-plan-control";
       node.setAttribute("data-marvis-plan-control", "");
       node.setAttribute("data-round-id", roundId);
       node.setAttribute("data-artifact-id", artifactId);
-      node.setAttribute("aria-label", "计划操作");
-      node.innerHTML = `<strong>计划等待确认</strong>
+      node.setAttribute("aria-label", isPlanApproval ? "计划操作" : "确认操作");
+      node.innerHTML = isPlanApproval ? `<strong>计划等待确认</strong>
         <button type="button" data-plan-decision="approve_plan">执行计划</button>
+        <button type="button" data-waiting-input>补充说明</button>
         <button type="button" data-plan-decision="revise_plan">修改计划</button>
+        <button type="button" data-plan-decision="cancel_plan">停止</button>` : `<strong>等待确认</strong>
+        <button type="button" data-plan-decision="continue">确认继续</button>
+        <button type="button" data-waiting-input>补充说明</button>
         <button type="button" data-plan-decision="cancel_plan">停止</button>`;
       document.querySelector(".marvis-relay-phone")?.appendChild(node);
       planControl = node;
@@ -7743,8 +7769,20 @@ def _relay_task_detail_page(
     document.addEventListener("click", async (event) => {{
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
+      if (target.hasAttribute("data-waiting-input")) {{
+        waitingControlInput = "revise_plan";
+        followupTextInput?.setAttribute("placeholder", "说明你的想法或修改要求");
+        followupTextInput?.focus();
+        return;
+      }}
       const decision = target.getAttribute("data-plan-decision");
       if (!decision) return;
+      if (decision === "revise_plan") {{
+        waitingControlInput = "revise_plan";
+        followupTextInput?.setAttribute("placeholder", "说明你的想法或修改要求");
+        followupTextInput?.focus();
+        return;
+      }}
       const activePlanControl = target.closest("[data-marvis-plan-control]");
       if (!(activePlanControl instanceof HTMLElement)) return;
       target.setAttribute("disabled", "disabled");
@@ -7759,10 +7797,14 @@ def _relay_task_detail_page(
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         if (decision === "approve_plan" || decision === "continue") {{
           activePlanControl.hidden = true;
+          if (activePlanControl === planControl) planControl = null;
           updateTaskStatus("running");
+          waitingControlInput = "";
         }} else if (decision === "cancel_plan") {{
           activePlanControl.hidden = true;
+          if (activePlanControl === planControl) planControl = null;
           updateTaskStatus("interrupted");
+          waitingControlInput = "";
         }}
       }} catch (_error) {{
         target.removeAttribute("disabled");
@@ -7888,6 +7930,7 @@ def _relay_task_detail_page(
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       updateTaskStatus("waiting_user");
+      setRoleStatus(payload.role || "director", "waiting", {{ force: true }});
       ensurePlanControl(payload);
     }});
     source.addEventListener("task.completed", (event) => {{
@@ -7928,6 +7971,24 @@ def _relay_task_detail_page(
       }}
       if ((attachments.images || []).length) data.images = attachments.images;
       if ((attachments.files || []).length) data.files = attachments.files;
+      if (String(relayTaskStatus || "").trim() === "waiting_user" && waitingControlInput) {{
+        const roundId = activeRelayRoundId || form.dataset.currentRoundId || CURRENT_ROUND_ID;
+        const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/rounds/${{encodeURIComponent(roundId)}}/control${{TOKEN_SUFFIX}}`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ decision: waitingControlInput, comment: String(data.text || "").trim() }}),
+        }});
+        if (!response.ok) return;
+        waitingControlInput = "";
+        form.reset();
+        window.marvisRelayAttachments?.clear();
+        const activePlanControl = document.querySelector("[data-marvis-plan-control]");
+        activePlanControl?.setAttribute("hidden", "");
+        if (activePlanControl === planControl) planControl = null;
+        updateTaskStatus("running");
+        updateRelayComposerAction();
+        return;
+      }}
       if (relayTaskAcceptsPendingInput()) {{
         const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/inputs${{TOKEN_SUFFIX}}`, {{
           method: "POST",

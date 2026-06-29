@@ -1899,8 +1899,53 @@ class RelayService:
             self._events.emit(task_id, "round.control", role="user", payload=payload)
             return payload
         if decision in {"revise_plan", "continue"}:
-            payload = {"decision": decision, "round_id": round_id, "comment": comment}
+            waiting_role = self._waiting_role_for_round(detail, round_id)
+            if comment.strip():
+                self._store.save_artifact(
+                    task_id,
+                    waiting_role,
+                    "user_followup",
+                    {
+                        "text": comment,
+                        "target_role": waiting_role,
+                        "round_id": round_id,
+                        "round_control_decision": decision,
+                        "input_disposition": "current_waiting_round",
+                    },
+                    summary=comment,
+                )
+            execution = self._store.lifecycle.round_execution(task_id, round_id)
+            self._store.lifecycle.set_round_execution(
+                task_id,
+                round_id,
+                execution_mode=str(execution.get("execution_mode") or "simple"),
+                execution_goal=str(execution.get("execution_goal") or ""),
+                execution_strategy=execution.get("execution_strategy")
+                if isinstance(execution.get("execution_strategy"), dict)
+                else {},
+                waiting_reason="none",
+            )
+            self._store.update_task_status(task_id, "running")
+            self._store.update_role_status(task_id, waiting_role, "queued")
+            payload = {
+                "decision": decision,
+                "round_id": round_id,
+                "comment": comment,
+                "role": waiting_role,
+            }
             self._events.emit(task_id, "round.control", role="user", payload=payload)
+            self._events.emit(
+                task_id,
+                "role.queued",
+                role=waiting_role,
+                payload={
+                    "role": waiting_role,
+                    "reason": "user_confirmed" if decision == "continue" else "user_revised",
+                    "round_id": round_id,
+                },
+            )
+            if dispatch_next:
+                await self.dispatch_role(task_id, waiting_role)
             return payload
 
         plan_artifact = None
@@ -1986,6 +2031,17 @@ class RelayService:
         }
         self._events.emit(task_id, "round.control", role="user", payload=payload)
         return payload
+
+    def _waiting_role_for_round(self, detail: RelayTaskDetail, round_id: int) -> str:
+        for role in RELAY_ROLE_IDS:
+            attempt = self._store.lifecycle.latest_attempt(detail.task.id, round_id, role)
+            if attempt is not None and attempt.status == "waiting":
+                return role
+        for job in detail.role_jobs:
+            role = str(getattr(job, "role", "") or "")
+            if role in RELAY_ROLE_IDS and str(getattr(job, "status", "") or "") == "waiting":
+                return role
+        return "director"
 
     async def consume_pending_after_round(
         self,

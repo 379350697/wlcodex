@@ -936,8 +936,75 @@ async def test_relay_task_detail_shows_plan_waiting_control_bar(
     assert 'class="marvis-relay-plan-control"' in response
     assert "计划等待确认" in response
     assert "执行计划" in response
+    assert "补充说明" in response
     assert "修改计划" in response
     assert "停止" in response
+    assert "/rounds/${encodeURIComponent(roundId)}/control" in response
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_shows_generic_waiting_confirmation_bar(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Waiting confirmation",
+        prompt="Need explicit confirmation",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.handle_role_output(
+        task.id,
+        "director",
+        json.dumps(
+            {
+                "status": "waiting",
+                "reason": "needs user input",
+                "role": "director",
+                "artifact_type": "routing_decision",
+                "handoff_to": "",
+                "summary": "Need confirmation before work.",
+                "evidence_refs": [],
+                "open_questions": ["Confirm output path and style?"],
+                "next_action": "wait for confirmation",
+                "complexity": "standard",
+                "risk": "medium",
+                "route": "waiting_user",
+                "required_roles": ["director"],
+                "acceptance_criteria": ["user confirmed path"],
+                "stop_conditions": [],
+                "requires_user_approval": True,
+            }
+        ),
+        dispatch_next=False,
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    control_match = re.search(
+        r'<section class="marvis-relay-plan-control"(?P<html>.*?)</section>',
+        response,
+        re.S,
+    )
+    assert control_match is not None
+    control_html = control_match.group("html")
+    assert "等待确认" in control_html
+    assert "计划等待确认" not in control_html
+    assert "确认继续" in control_html
+    assert "补充说明" in control_html
+    assert "停止" in control_html
+    assert 'data-plan-decision="continue"' in control_html
+    assert "data-waiting-input" in control_html
+    assert "说明你的想法或修改要求" in response
     assert "/rounds/${encodeURIComponent(roundId)}/control" in response
 
 

@@ -1656,6 +1656,120 @@ def test_user_followup_moves_waiting_task_back_to_running(tmp_path) -> None:
     assert {job.role: job.status for job in detail.role_jobs}["director"] == "streaming"
 
 
+def test_round_control_continue_resumes_waiting_role_in_same_round(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "waiting",
+              "reason": "needs user input",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "",
+              "summary": "Need clarification",
+              "evidence_refs": [],
+              "open_questions": ["Which path should we take?"],
+              "next_action": "wait for user",
+              "complexity": "standard",
+              "risk": "medium",
+              "route": "waiting_user",
+              "required_roles": ["director"],
+              "acceptance_criteria": ["clarify route"],
+              "stop_conditions": [],
+              "requires_user_approval": true
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+
+    result = asyncio.run(
+        service.apply_round_control(
+            task.id,
+            1,
+            decision="continue",
+        )
+    )
+
+    detail = service.get_task(task.id)
+    assert result["role"] == "director"
+    assert result["round_id"] == 1
+    assert detail.current_round_id == 1
+    assert detail.task.status == "running"
+    assert service._store.lifecycle.round_execution(task.id, 1)["waiting_reason"] == "none"
+    assert {job.role: job.status for job in detail.role_jobs}["director"] == "streaming"
+    assert provider.calls[-1][0] == "start_session"
+
+
+def test_round_control_revise_records_comment_for_current_waiting_round(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "waiting",
+              "reason": "needs user input",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "",
+              "summary": "Need clarification",
+              "evidence_refs": [],
+              "open_questions": ["Which path should we take?"],
+              "next_action": "wait for user",
+              "complexity": "standard",
+              "risk": "medium",
+              "route": "waiting_user",
+              "required_roles": ["director"],
+              "acceptance_criteria": ["clarify route"],
+              "stop_conditions": [],
+              "requires_user_approval": true
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+
+    asyncio.run(
+        service.apply_round_control(
+            task.id,
+            1,
+            decision="revise_plan",
+            comment="我不同意默认选项，先只生成 HTML。",
+            dispatch_next=False,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    assert detail.current_round_id == 1
+    assert detail.task.status == "running"
+    assert {job.role: job.status for job in detail.role_jobs}["director"] == "queued"
+    followup = next(
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "user_followup"
+    )
+    assert followup["round_id"] == 1
+    assert followup["input_disposition"] == "current_waiting_round"
+    assert "先只生成 HTML" in followup["text"]
+
+
 def test_user_followup_starts_clean_visible_turn_after_blocked_role(tmp_path) -> None:
     service, provider = _service(tmp_path)
     task = service.create_task(
