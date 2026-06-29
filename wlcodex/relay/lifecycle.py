@@ -70,6 +70,10 @@ class RelayLifecycleAttempt:
     completion_artifact_id: int | None = None
     error_artifact_id: int | None = None
     retry_count: int = 0
+    execution_mode: str = "simple"
+    team_strategy: str = "none"
+    provider_mode: dict[str, Any] | None = None
+    provider_child_activity: dict[str, Any] | None = None
 
 
 class RelayLifecycleStore:
@@ -299,6 +303,67 @@ class RelayLifecycleStore:
         )
         self._conn.commit()
 
+    def set_round_execution(
+        self,
+        team_run_id: int,
+        round_id: int,
+        *,
+        execution_mode: str = "simple",
+        execution_goal: str = "",
+        execution_strategy: dict[str, Any] | None = None,
+        waiting_reason: str = "none",
+    ) -> None:
+        self.ensure_round(team_run_id, round_id=round_id, trigger_kind="backfill")
+        mode = str(execution_mode or "simple").strip() or "simple"
+        self._conn.execute(
+            """
+            UPDATE relay_rounds
+            SET execution_mode = ?,
+                execution_goal = ?,
+                execution_strategy_json = ?,
+                waiting_reason = ?,
+                updated_at = ?
+            WHERE team_run_id = ? AND round_id = ?
+            """,
+            (
+                mode,
+                str(execution_goal or ""),
+                json.dumps(execution_strategy or {}, ensure_ascii=False),
+                str(waiting_reason or "none") or "none",
+                _now(),
+                team_run_id,
+                round_id,
+            ),
+        )
+        self._conn.commit()
+
+    def round_execution(self, team_run_id: int, round_id: int) -> dict[str, Any]:
+        row = self._conn.execute(
+            """
+            SELECT execution_mode, execution_goal, execution_strategy_json, waiting_reason
+            FROM relay_rounds
+            WHERE team_run_id = ? AND round_id = ?
+            """,
+            (team_run_id, round_id),
+        ).fetchone()
+        if row is None:
+            return {
+                "execution_mode": "simple",
+                "execution_goal": "",
+                "execution_strategy": {},
+                "waiting_reason": "none",
+            }
+        try:
+            strategy = json.loads(str(row["execution_strategy_json"] or "{}"))
+        except json.JSONDecodeError:
+            strategy = {}
+        return {
+            "execution_mode": str(row["execution_mode"] or "simple"),
+            "execution_goal": str(row["execution_goal"] or ""),
+            "execution_strategy": strategy if isinstance(strategy, dict) else {},
+            "waiting_reason": str(row["waiting_reason"] or "none"),
+        }
+
     def ensure_attempt(
         self,
         team_run_id: int,
@@ -476,6 +541,49 @@ class RelayLifecycleStore:
         )
         self._conn.commit()
 
+    def set_attempt_execution(
+        self,
+        team_run_id: int,
+        round_id: int,
+        role: str,
+        *,
+        execution_mode: str = "simple",
+        team_strategy: str = "none",
+        provider_mode: dict[str, Any] | None = None,
+        provider_child_activity: dict[str, Any] | None = None,
+    ) -> None:
+        row = self._latest_attempt_row(team_run_id, round_id, role)
+        if row is None:
+            self.ensure_attempt(
+                team_run_id,
+                round_id=round_id,
+                role=role,
+                status="queued",
+            )
+            row = self._latest_attempt_row(team_run_id, round_id, role)
+        if row is None:
+            return
+        self._conn.execute(
+            """
+            UPDATE relay_role_attempts
+            SET execution_mode = ?,
+                team_strategy = ?,
+                provider_mode_json = ?,
+                provider_child_activity_json = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                str(execution_mode or "simple") or "simple",
+                str(team_strategy or "none") or "none",
+                json.dumps(provider_mode or {}, ensure_ascii=False),
+                json.dumps(provider_child_activity or {}, ensure_ascii=False),
+                _now(),
+                int(row["id"]),
+            ),
+        )
+        self._conn.commit()
+
     def observe_artifact(
         self,
         team_run_id: int,
@@ -498,6 +606,9 @@ class RelayLifecycleStore:
         if not role:
             return
         if artifact_type == "role_dispatch_metadata":
+            provider_mode = payload.get("provider_mode")
+            if not isinstance(provider_mode, dict):
+                provider_mode = {}
             if self._attempt_artifact_link_exists(
                 team_run_id,
                 round_id,
@@ -505,6 +616,14 @@ class RelayLifecycleStore:
                 "dispatch_artifact_id",
                 artifact_id,
             ):
+                self.set_attempt_execution(
+                    team_run_id,
+                    round_id,
+                    role,
+                    execution_mode=str(provider_mode.get("execution_mode") or "simple"),
+                    team_strategy=str(provider_mode.get("team_strategy") or "none"),
+                    provider_mode=provider_mode,
+                )
                 return
             round_status = self.round_status(team_run_id, round_id)
             row = self._latest_attempt_row(team_run_id, round_id, role)
@@ -534,6 +653,14 @@ class RelayLifecycleStore:
                 turn_id=str(payload.get("turn_id") or ""),
                 active_turn_id=str(payload.get("active_turn_id") or ""),
                 dispatch_artifact_id=artifact_id,
+            )
+            self.set_attempt_execution(
+                team_run_id,
+                round_id,
+                role,
+                execution_mode=str(provider_mode.get("execution_mode") or "simple"),
+                team_strategy=str(provider_mode.get("team_strategy") or "none"),
+                provider_mode=provider_mode,
             )
             if status is not None:
                 self.update_attempt(team_run_id, round_id, role, status=status)
@@ -797,6 +924,16 @@ class RelayLifecycleStore:
         ).fetchone()
 
     def _attempt_from_row(self, row: Any) -> RelayLifecycleAttempt:
+        try:
+            provider_mode = json.loads(str(row["provider_mode_json"] or "{}"))
+        except json.JSONDecodeError:
+            provider_mode = {}
+        try:
+            provider_child_activity = json.loads(
+                str(row["provider_child_activity_json"] or "{}")
+            )
+        except json.JSONDecodeError:
+            provider_child_activity = {}
         return RelayLifecycleAttempt(
             team_run_id=int(row["team_run_id"]),
             round_id=int(row["round_id"]),
@@ -829,4 +966,12 @@ class RelayLifecycleStore:
                 int(row["error_artifact_id"]) if row["error_artifact_id"] is not None else None
             ),
             retry_count=int(row["retry_count"] or 0),
+            execution_mode=str(row["execution_mode"] or "simple"),
+            team_strategy=str(row["team_strategy"] or "none"),
+            provider_mode=provider_mode if isinstance(provider_mode, dict) else {},
+            provider_child_activity=(
+                provider_child_activity
+                if isinstance(provider_child_activity, dict)
+                else {}
+            ),
         )

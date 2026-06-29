@@ -81,6 +81,47 @@ class FakeAntigravityProvider(FakeProvider):
     provider_engine = "cli-local"
 
 
+class ActiveTurnProvider(FakeProvider):
+    def capabilities(self) -> NativeAgentCapabilities:
+        return NativeAgentCapabilities(
+            can_start_session=True,
+            can_continue_session=True,
+            can_steer_active_turn=True,
+        )
+
+    async def start_session(self, cwd: str, prompt: str, **kwargs: Any):
+        self.calls.append(("start_session", cwd, prompt, kwargs))
+        return NativeAgentControlResult(
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            native_session_id="native-active",
+            agent_run_id=301,
+            turn_id="turn-1",
+            active_turn_id="turn-1",
+            turn_running=True,
+            status="started",
+        )
+
+    async def steer_session(
+        self,
+        native_session_id: str,
+        expected_turn_id: str,
+        prompt: str,
+        **kwargs: Any,
+    ):
+        self.calls.append(("steer_session", native_session_id, expected_turn_id, prompt, kwargs))
+        return NativeAgentControlResult(
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            native_session_id=native_session_id,
+            agent_run_id=302,
+            turn_id=expected_turn_id,
+            active_turn_id=expected_turn_id,
+            turn_running=True,
+            status="steered",
+        )
+
+
 async def _read_response(host: str, port: int, request: str) -> str:
     reader, writer = await asyncio.open_connection(host, port)
     writer.write(request.encode("utf-8"))
@@ -149,6 +190,18 @@ def _relay_service(tmp_path: Path) -> RelayService:
     )
 
 
+def _active_relay_service(tmp_path: Path) -> tuple[RelayService, ActiveTurnProvider]:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    provider = ActiveTurnProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    )
+    return service, provider
+
+
 async def _request_relay(
     tmp_path: Path,
     request: str,
@@ -183,6 +236,9 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
             "prompt": "Implement the task workspace",
             "workspace": "/repo",
             "provider": "claude",
+            "execution_mode": "goal",
+            "execution_goal": "ship relay lifecycle",
+            "team_strategy": "code_review",
         }
     )
     service = _relay_service(tmp_path)
@@ -209,6 +265,10 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
     assert director.status == "streaming"
     assert director.native_session_id == "native-1"
     assert architect.status == "idle"
+    round_execution = service._store.lifecycle.round_execution(task_id, 1)
+    assert round_execution["execution_mode"] == "goal"
+    assert round_execution["execution_goal"] == "ship relay lifecycle"
+    assert round_execution["execution_strategy"]["team_strategy"] == "code_review"
 
     get_response = await _request_relay(
         tmp_path,
@@ -227,6 +287,153 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
         "tester",
         "auditor",
     ]
+
+
+@pytest.mark.asyncio
+async def test_relay_inputs_route_queues_pending_input(tmp_path: Path) -> None:
+    service, provider = _active_relay_service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build relay",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    body = json.dumps({"text": "queue this next"})
+
+    response = await _request_relay(
+        tmp_path,
+        f"POST /api/relay/tasks/{task.id}/inputs HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["pending_input"]["status"] == "pending"
+    assert payload["pending_input"]["queued_after_round_id"] == 1
+    assert _json_body(
+        await _request_relay(
+            tmp_path,
+            f"GET /api/relay/tasks/{task.id} HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+            relay_service=service,
+        )
+    )["pending_inputs"][0]["text"] == "queue this next"
+    assert [call[0] for call in provider.calls] == ["start_session"]
+
+
+@pytest.mark.asyncio
+async def test_relay_pending_input_steer_route_guides_active_attempt(tmp_path: Path) -> None:
+    service, provider = _active_relay_service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build relay",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    pending = service.queue_user_input(task.id, "guide now")
+
+    response = await _request_relay(
+        tmp_path,
+        f"POST /api/relay/tasks/{task.id}/inputs/{pending.id}/steer HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: 2\r\n"
+        "Connection: close\r\n\r\n{}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["pending_input"]["status"] == "steered"
+    assert payload["pending_input"]["steered_role"] == "director"
+    assert [call[0] for call in provider.calls] == ["start_session", "steer_session"]
+
+
+@pytest.mark.asyncio
+async def test_relay_round_control_approves_plan_in_current_round(tmp_path: Path) -> None:
+    service = _relay_service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Plan then execute",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.handle_role_output(
+        task.id,
+        "director",
+        json.dumps(
+            {
+                "status": "passed",
+                "reason": "plan first",
+                "role": "director",
+                "artifact_type": "routing_decision",
+                "handoff_to": "",
+                "summary": "Architect should plan.",
+                "evidence_refs": [],
+                "open_questions": [],
+                "next_action": "plan",
+                "complexity": "medium",
+                "risk": "medium",
+                "route": "core_relay",
+                "required_roles": ["director", "architect", "implementer"],
+                "acceptance_criteria": ["approved plan", "implemented"],
+                "stop_conditions": [],
+                "requires_user_approval": False,
+            }
+        ),
+        dispatch_next=False,
+    )
+    await service.handle_role_output(
+        task.id,
+        "architect",
+        json.dumps(
+            {
+                "status": "waiting",
+                "reason": "needs approval",
+                "role": "architect",
+                "artifact_type": "architecture_plan",
+                "handoff_to": "",
+                "summary": "Plan A",
+                "evidence_refs": [],
+                "open_questions": [],
+                "next_action": "approve plan",
+            }
+        ),
+        dispatch_next=False,
+    )
+    detail = service.get_task(task.id)
+    plan_artifact = next(
+        artifact
+        for artifact in reversed(detail.artifacts)
+        if artifact["artifact_type"] == "architecture_plan"
+    )
+    body = json.dumps({"decision": "approve_plan", "artifact_id": plan_artifact["id"]})
+
+    response = await _request_relay(
+        tmp_path,
+        f"POST /api/relay/tasks/{task.id}/rounds/{detail.current_round_id}/control HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    refreshed = service.get_task(task.id)
+    assert refreshed.current_round_id == detail.current_round_id
+    assert next(job for job in refreshed.role_jobs if job.role == "implementer").status in {
+        "queued",
+        "streaming",
+    }
 
 
 @pytest.mark.asyncio

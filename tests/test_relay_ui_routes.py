@@ -867,6 +867,81 @@ async def test_relay_task_detail_projects_running_followup_as_marvis_waiting(
 
 
 @pytest.mark.asyncio
+async def test_relay_task_detail_shows_plan_waiting_control_bar(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Plan control",
+        prompt="Plan first",
+        workspace="/repo",
+        provider="claude",
+        execution_mode="plan_first",
+    )
+    await service.handle_role_output(
+        task.id,
+        "director",
+        json.dumps(
+            {
+                "status": "passed",
+                "reason": "plan first",
+                "role": "director",
+                "artifact_type": "routing_decision",
+                "handoff_to": "",
+                "summary": "Plan before implementation.",
+                "evidence_refs": [],
+                "open_questions": [],
+                "next_action": "plan",
+                "complexity": "medium",
+                "risk": "medium",
+                "route": "core_relay",
+                "required_roles": ["director", "architect", "implementer"],
+                "acceptance_criteria": ["approved plan"],
+                "stop_conditions": [],
+                "requires_user_approval": False,
+            }
+        ),
+        dispatch_next=False,
+    )
+    await service.handle_role_output(
+        task.id,
+        "architect",
+        json.dumps(
+            {
+                "status": "waiting",
+                "reason": "needs approval",
+                "role": "architect",
+                "artifact_type": "architecture_plan",
+                "handoff_to": "",
+                "summary": "Use Plan A.",
+                "evidence_refs": [],
+                "open_questions": [],
+                "next_action": "approve plan",
+            }
+        ),
+        dispatch_next=False,
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert 'class="marvis-relay-plan-control"' in response
+    assert "计划等待确认" in response
+    assert "执行计划" in response
+    assert "修改计划" in response
+    assert "停止" in response
+    assert "/rounds/${encodeURIComponent(roundId)}/control" in response
+
+
+@pytest.mark.asyncio
 async def test_relay_task_detail_projects_followup_attachments_into_user_bubble(
     tmp_path: Path,
 ) -> None:
@@ -1382,8 +1457,16 @@ async def test_marvis_relay_chat_home_is_the_only_new_task_entry(
     assert 'class="marvis-relay-suggestion"' not in response
     assert 'class="marvis-relay-composer"' in response
     assert 'action="/api/relay/tasks?token=secret"' in response
+    assert 'class="marvis-relay-mode-strip"' in response
+    assert 'name="execution_mode" value="simple" checked' in response
+    assert 'name="execution_mode" value="plan_first"' in response
+    assert 'name="execution_mode" value="goal"' in response
+    assert 'name="execution_mode" value="team"' in response
+    assert 'name="execution_mode" value="auto"' in response
+    assert 'select name="team_strategy"' in response
     assert '<input name="title" autocomplete="off" placeholder="请在此输入任务">' in response
     assert '<input type="hidden" name="prompt" value="">' in response
+    assert '<input type="hidden" name="execution_goal" value="">' in response
     assert '<input type="hidden" name="workspace" value="/repo">' in response
     assert 'data-marvis-nav="chat" aria-current="page"' in response
     assert 'href="/native/workflows/relay?token=secret&amp;workspace=/repo"' in response
@@ -2070,6 +2153,11 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "结构化结果不是合法 JSON，系统无法直接收口。" in work_log_html
     assert "等待总工程师接收并形成决策摘要" not in response
     assert f"/api/relay/tasks/{task.id}/message" in response
+    assert 'data-marvis-pending-inputs' in response
+    assert "/inputs${TOKEN_SUFFIX}" in response
+    assert "已排队，当前 round 结束后自动开始" in response
+    assert 'source.addEventListener("user.input_queued"' in response
+    assert 'source.addEventListener("user.input_consumed"' in response
     assert "data-marvis-followup-composer" in response
     assert 'followupComposer?.addEventListener("submit"' in response
     assert 'document.querySelector(".relay-composer")?.addEventListener("submit"' not in response

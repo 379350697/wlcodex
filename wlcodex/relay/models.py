@@ -101,6 +101,25 @@ class RelayRoleJob:
 
 
 @dataclass(frozen=True)
+class RelayPendingInput:
+    id: int
+    task_id: int
+    queued_after_round_id: int
+    status: str
+    text: str
+    attachments: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str = ""
+    consumed_round_id: int | None = None
+    steered_round_id: int | None = None
+    steered_role: str = ""
+    steered_attempt_no: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class RelayBoard:
     task_id: int
     current_goal: str
@@ -253,6 +272,7 @@ class RelayTaskDetail:
     session_links: list[RelaySessionLink]
     routing_decision: dict[str, Any] | None = None
     current_round_id: int = 1
+    pending_inputs: list[RelayPendingInput] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -264,6 +284,7 @@ class RelayTaskDetail:
             "session_links": [link.to_dict() for link in self.session_links],
             "routing_decision": self.routing_decision,
             "current_round_id": self.current_round_id,
+            "pending_inputs": [item.to_dict() for item in self.pending_inputs],
         }
 
 

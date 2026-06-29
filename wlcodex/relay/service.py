@@ -13,7 +13,7 @@ from wlcodex.relay.display import (
 )
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.events import RelayEvent, RelayEventBus
-from wlcodex.relay.models import HandoffPacket, RelayTask, RelayTaskDetail
+from wlcodex.relay.models import HandoffPacket, RelayPendingInput, RelayTask, RelayTaskDetail
 from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
 from wlcodex.relay.store import RELAY_ASSIGNMENT_PREFIX
 from wlcodex.runtime_event_store import RuntimeEventStore
@@ -192,6 +192,66 @@ def _relay_images_for_role(artifacts: list[dict[str, Any]], role: str) -> list[d
     return []
 
 
+def _clean_execution_mode(value: str) -> str:
+    mode = str(value or "simple").strip()
+    return mode if mode in {"simple", "plan_first", "goal", "team", "auto"} else "simple"
+
+
+def _clean_team_strategy(value: str) -> str:
+    strategy = str(value or "none").strip()
+    allowed = {
+        "none",
+        "research",
+        "planning",
+        "plan_review",
+        "implementation",
+        "code_review",
+        "testing",
+        "debugging",
+        "red_team",
+        "migration_split",
+    }
+    return strategy if strategy in allowed else "none"
+
+
+def _provider_mode_for_attempt(
+    *,
+    provider_name: str,
+    role: str,
+    round_execution: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    execution_mode = _clean_execution_mode(str(round_execution.get("execution_mode") or "simple"))
+    strategy = round_execution.get("execution_strategy")
+    if not isinstance(strategy, dict):
+        strategy = {}
+    team_strategy = _clean_team_strategy(str(strategy.get("team_strategy") or "none"))
+    provider_key = str(provider_name or "").strip().lower()
+    kwargs: dict[str, Any] = {}
+    metadata: dict[str, Any] = {
+        "execution_mode": execution_mode,
+        "team_strategy": team_strategy,
+        "provider_mode": "default",
+        "fallback": False,
+    }
+    if execution_mode == "plan_first" and role == "architect":
+        if provider_key == "codex":
+            kwargs["collaboration_mode"] = {"mode": "plan"}
+            metadata["provider_mode"] = "codex_plan"
+        elif provider_key.startswith("claude"):
+            kwargs["permission_mode"] = "plan"
+            metadata["provider_mode"] = "claude_plan"
+        else:
+            metadata["provider_mode"] = "prompt_plan_fallback"
+            metadata["fallback"] = True
+    elif execution_mode == "goal":
+        metadata["provider_mode"] = "prompt_goal_contract"
+        metadata["fallback"] = True
+    elif execution_mode == "team" or team_strategy != "none":
+        metadata["provider_mode"] = "provider_team_topology"
+        metadata["fallback"] = True
+    return kwargs, metadata
+
+
 class RelayNativeRunWatchdog:
     def __init__(self, service: "RelayService", *, max_idle_seconds: int) -> None:
         self._service = service
@@ -281,9 +341,14 @@ class RelayService:
         role_providers: dict[str, str] | None = None,
         images: list[dict[str, Any]] | None = None,
         files: list[dict[str, Any]] | None = None,
+        execution_mode: str = "simple",
+        execution_goal: str = "",
+        team_strategy: str = "none",
     ) -> RelayTask:
         clean_images = _relay_clean_image_attachments(images)
         clean_files = _relay_clean_text_file_attachments(files)
+        clean_execution_mode = _clean_execution_mode(execution_mode)
+        clean_team_strategy = _clean_team_strategy(team_strategy)
         base_provider = provider or self._default_provider
         assignments = (
             self._normalize_assignments(role_providers)
@@ -296,6 +361,13 @@ class RelayService:
             workspace=workspace,
             provider=base_provider,
             role_providers=assignments,
+        )
+        self._store.lifecycle.set_round_execution(
+            task.id,
+            1,
+            execution_mode=clean_execution_mode,
+            execution_goal=str(execution_goal or ""),
+            execution_strategy={"team_strategy": clean_team_strategy},
         )
         if clean_images or clean_files:
             self._store.save_artifact(
@@ -536,7 +608,14 @@ class RelayService:
         )
         context_record = self._store.save_context_packet(task_id, role, packet)
         images = _relay_images_for_role(detail.artifacts, role)
+        round_execution = self._store.lifecycle.round_execution(task_id, round_id)
+        mode_kwargs, provider_mode = _provider_mode_for_attempt(
+            provider_name=provider_name,
+            role=role,
+            round_execution=round_execution,
+        )
         provider_kwargs = {"images": images} if images else {}
+        provider_kwargs.update(mode_kwargs)
         result: Any | None = None
         if can_continue and existing_native_session_id:
             try:
@@ -619,6 +698,7 @@ class RelayService:
             active_turn_id=_result_active_turn_id(result),
             turn_running=_result_turn_running(result),
             dispatch_verified=bool(native_session_id),
+            provider_mode=provider_mode,
         )
         self._store.update_role_status(task_id, role, "streaming")
         self._events.emit(
@@ -768,6 +848,36 @@ class RelayService:
             role=role,
             payload={"status": role_status, "round_id": round_id},
         )
+        if envelope.status == "waiting" and not envelope.handoff_to:
+            waiting_reason = (
+                "plan_approval"
+                if envelope.artifact_type == "architecture_plan"
+                else "user_input"
+            )
+            execution = self._store.lifecycle.round_execution(task_id, round_id)
+            self._store.lifecycle.set_round_execution(
+                task_id,
+                round_id,
+                execution_mode=str(execution.get("execution_mode") or "simple"),
+                execution_goal=str(execution.get("execution_goal") or ""),
+                execution_strategy=execution.get("execution_strategy")
+                if isinstance(execution.get("execution_strategy"), dict)
+                else {},
+                waiting_reason=waiting_reason,
+            )
+            self._store.update_task_status(task_id, "waiting_user")
+            self._events.emit(
+                task_id,
+                "task.waiting_user",
+                role=role,
+                payload={
+                    "role": role,
+                    "round_id": round_id,
+                    "waiting_reason": waiting_reason,
+                    "artifact_type": envelope.artifact_type,
+                },
+            )
+            return result
         if (
             role == "auditor"
             and envelope.status in {"blocked", "failed"}
@@ -852,6 +962,11 @@ class RelayService:
                 "task.completed",
                 role=role,
                 payload={"summary": envelope.summary, "round_id": round_id},
+            )
+            await self.consume_pending_after_round(
+                task_id,
+                round_id,
+                dispatch_next=dispatch_next,
             )
             return result
         if (
@@ -1212,12 +1327,30 @@ class RelayService:
         route = str(decision.get("route") or "")
         if not route:
             return "missing routing_decision before final_summary"
-        if route == "director_only":
-            return ""
-        required_roles = _clean_required_roles(decision.get("required_roles"))
         completed_roles = {
             str(job.role) for job in detail.role_jobs if str(job.status) in {"passed", "completed"}
         }
+        execution = self._store.lifecycle.round_execution(
+            detail.task.id,
+            int(detail.current_round_id or 1),
+        )
+        if str(execution.get("execution_mode") or "simple") == "goal":
+            missing_goal_roles: list[str] = []
+            if "implementer" not in completed_roles:
+                missing_goal_roles.append("implementer")
+            if "tester" not in completed_roles and "auditor" not in completed_roles:
+                missing_goal_roles.append("tester_or_auditor")
+            if missing_goal_roles:
+                labels = ", ".join(
+                    "测试员或审计员"
+                    if role == "tester_or_auditor"
+                    else RELAY_ROLE_DISPLAY_NAMES.get(role, role)
+                    for role in missing_goal_roles
+                )
+                return f"goal mode final_summary before acceptance evidence completed: {labels}"
+        if route == "director_only":
+            return ""
+        required_roles = _clean_required_roles(decision.get("required_roles"))
         missing_roles = [
             role for role in required_roles if role != "director" and role not in completed_roles
         ]
@@ -1549,6 +1682,329 @@ class RelayService:
             token_output=current.token_output,
             completion_summary=reason[:2000],
         )
+
+    def queue_user_input(
+        self,
+        task_id: int,
+        text: str,
+        *,
+        images: list[dict[str, Any]] | None = None,
+        files: list[dict[str, Any]] | None = None,
+    ) -> RelayPendingInput:
+        clean_images = _relay_clean_image_attachments(images)
+        clean_files = _relay_clean_text_file_attachments(files)
+        pending = self._store.queue_pending_input(
+            task_id,
+            text=str(text or ""),
+            attachments=_relay_attachment_payload(images=clean_images, files=clean_files),
+            queued_after_round_id=self._store.current_round_id(task_id),
+        )
+        self._events.emit(
+            task_id,
+            "user.input_queued",
+            role="user",
+            payload=pending.to_dict(),
+        )
+        return pending
+
+    async def steer_active_attempt(
+        self,
+        task_id: int,
+        pending_input_id: int,
+    ) -> RelayPendingInput:
+        pending = self._store.get_pending_input(task_id, pending_input_id)
+        if pending.status != "pending":
+            raise ValueError("pending input is not steerable")
+        detail = self._store.get_task_detail(task_id)
+        active = next(
+            (
+                job
+                for job in detail.role_jobs
+                if job.status == "streaming"
+                and job.native_session_id
+                and job.provider
+                and (job.active_turn_id or job.turn_id)
+            ),
+            None,
+        )
+        if active is None:
+            raise ValueError("no active relay attempt can be steered")
+        provider = self._registry.get(active.provider)
+        capabilities = provider.capabilities()
+        if not bool(getattr(capabilities, "can_steer_active_turn", False)):
+            raise ValueError(f"{active.provider} does not support active-turn guidance")
+        attachments = pending.attachments or {}
+        clean_images = _relay_clean_image_attachments(attachments.get("images"))
+        clean_files = _relay_clean_text_file_attachments(attachments.get("files"))
+        prompt = _relay_user_input_with_attachments(
+            pending.text,
+            images=clean_images,
+            files=clean_files,
+        )
+        result = await provider.steer_session(
+            active.native_session_id,
+            active.active_turn_id or active.turn_id,
+            prompt,
+            **({"images": clean_images} if clean_images else {}),
+        )
+        if not _control_result_verified(result):
+            raise RuntimeError(_control_result_failure_reason(result))
+        round_id = detail.current_round_id
+        attempt = self._store.lifecycle.latest_attempt(task_id, round_id, active.role)
+        self._store.save_artifact(
+            task_id,
+            active.role,
+            "user_followup",
+            {
+                "text": pending.text,
+                "target_role": active.role,
+                "round_id": round_id,
+                "pending_input_id": pending.id,
+                "input_disposition": "steered",
+                **_relay_attachment_payload(images=clean_images, files=clean_files),
+            },
+            summary=pending.text,
+        )
+        steered = self._store.mark_pending_input_steered(
+            task_id,
+            pending.id,
+            round_id=round_id,
+            role=active.role,
+            attempt_no=attempt.attempt_no,
+        )
+        self._events.emit(
+            task_id,
+            "user.input_steered",
+            role="user",
+            payload=steered.to_dict(),
+        )
+        return steered
+
+    def cancel_pending_input(
+        self,
+        task_id: int,
+        pending_input_id: int,
+    ) -> RelayPendingInput:
+        cancelled = self._store.cancel_pending_input(task_id, pending_input_id)
+        self._events.emit(
+            task_id,
+            "user.input_cancelled",
+            role="user",
+            payload=cancelled.to_dict(),
+        )
+        return cancelled
+
+    async def apply_round_control(
+        self,
+        task_id: int,
+        round_id: int,
+        *,
+        decision: str,
+        artifact_id: int = 0,
+        comment: str = "",
+        dispatch_next: bool = True,
+    ) -> dict[str, Any]:
+        current_round = self._store.current_round_id(task_id)
+        if int(round_id) != current_round:
+            raise ValueError("round control may only target the current round")
+        decision = str(decision or "").strip()
+        if decision not in {"approve_plan", "revise_plan", "cancel_plan", "continue"}:
+            raise ValueError(f"unsupported relay round control decision: {decision}")
+        detail = self._store.get_task_detail(task_id)
+        if decision == "cancel_plan":
+            self._store.update_task_status(task_id, "interrupted")
+            payload = {"decision": decision, "round_id": round_id, "comment": comment}
+            self._events.emit(task_id, "round.control", role="user", payload=payload)
+            return payload
+        if decision in {"revise_plan", "continue"}:
+            payload = {"decision": decision, "round_id": round_id, "comment": comment}
+            self._events.emit(task_id, "round.control", role="user", payload=payload)
+            return payload
+
+        plan_artifact = None
+        for artifact in reversed(detail.artifacts):
+            if artifact_id and int(artifact.get("id") or 0) != int(artifact_id):
+                continue
+            if str(artifact.get("artifact_type") or "") == "architecture_plan":
+                plan_artifact = artifact
+                break
+        if plan_artifact is None:
+            raise ValueError("approve_plan requires a current architecture_plan artifact")
+        plan_round_id = int(plan_artifact.get("round_id") or round_id)
+        if plan_round_id != int(round_id):
+            raise ValueError("approve_plan artifact must belong to the current round")
+        role = str(plan_artifact.get("relay_role") or plan_artifact.get("role") or "architect")
+        self._store.update_role_status(task_id, role, "passed")
+        self._store.update_task_status(task_id, "running")
+        execution = self._store.lifecycle.round_execution(task_id, round_id)
+        self._store.lifecycle.set_round_execution(
+            task_id,
+            round_id,
+            execution_mode=str(execution.get("execution_mode") or "simple"),
+            execution_goal=str(execution.get("execution_goal") or ""),
+            execution_strategy=execution.get("execution_strategy")
+            if isinstance(execution.get("execution_strategy"), dict)
+            else {},
+            waiting_reason="none",
+        )
+        refreshed = self._store.get_task_detail(task_id)
+        decision_payload = refreshed.routing_decision or {}
+        required_roles = _clean_required_roles(decision_payload.get("required_roles"))
+        route = str(decision_payload.get("route") or "")
+        completed = _completed_required_roles(refreshed, current_role=role)
+        next_role = _next_uncompleted_required_role(
+            required_roles,
+            completed_roles=completed,
+            route=route,
+        )
+        if next_role:
+            handoff = HandoffPacket(
+                from_role=role,
+                to_role=next_role,
+                summary=str(plan_artifact.get("summary") or "Plan approved"),
+                confirmed_facts=[],
+                open_questions=[],
+                evidence_refs=[],
+                next_action="execute approved plan",
+            )
+            handoff_artifact = self._store.save_handoff_packet(
+                task_id,
+                from_role=role,
+                to_role=next_role,
+                packet=handoff,
+            )
+            self._store.update_role_status(task_id, next_role, "queued")
+            self._events.emit(
+                task_id,
+                "handoff.created",
+                role=role,
+                payload={
+                    **handoff.to_json_dict(),
+                    "round_id": round_id,
+                    "artifact_id": int(getattr(handoff_artifact, "id", 0) or 0),
+                },
+            )
+            self._events.emit(
+                task_id,
+                "role.queued",
+                role=next_role,
+                payload={
+                    "role": next_role,
+                    "reason": "approved_plan",
+                    "round_id": round_id,
+                },
+            )
+            if dispatch_next:
+                await self.dispatch_role(task_id, next_role)
+        payload = {
+            "decision": decision,
+            "round_id": round_id,
+            "artifact_id": artifact_id,
+            "next_role": next_role or "",
+        }
+        self._events.emit(task_id, "round.control", role="user", payload=payload)
+        return payload
+
+    async def consume_pending_after_round(
+        self,
+        task_id: int,
+        round_id: int,
+        *,
+        dispatch_next: bool = True,
+    ) -> RelayPendingInput | None:
+        pending = self._store.first_pending_input_after_round(task_id, round_id)
+        if pending is None:
+            return None
+        detail = self._store.get_task_detail(task_id)
+        attachments = pending.attachments or {}
+        clean_images = _relay_clean_image_attachments(attachments.get("images"))
+        clean_files = _relay_clean_text_file_attachments(attachments.get("files"))
+        prompt_text = _relay_user_input_with_attachments(
+            pending.text,
+            images=clean_images,
+            files=clean_files,
+        )
+        next_round_id = self._store.start_followup_round(task_id)
+        board = detail.board
+        self._store.save_artifact(
+            task_id,
+            "director",
+            "relay_board",
+            {
+                **board.to_json_dict(),
+                "round_id": next_round_id,
+                "latest_user_input": prompt_text,
+                "current_dispatch": "director",
+                "next_step": "director review queued user input",
+                "pending_input_id": pending.id,
+            },
+            summary="Queued user input routed to director",
+        )
+        self._store.update_role_status(task_id, "director", "queued")
+        refreshed = self._store.get_task_detail(task_id)
+        packet = build_role_context_packet(
+            task=refreshed.task,
+            role="director",
+            board=refreshed.board,
+            handoffs=self._store.handoffs_for_role(task_id, "director"),
+            artifacts=refreshed.artifacts,
+        )
+        context_record = self._store.save_context_packet(task_id, "director", packet)
+        followup = self._store.save_artifact(
+            task_id,
+            "director",
+            "user_followup",
+            {
+                "text": pending.text,
+                "target_role": "director",
+                "context_packet_id": int(getattr(context_record, "id", 0) or 0),
+                "round_id": next_round_id,
+                "pending_input_id": pending.id,
+                "input_disposition": "consumed",
+                **_relay_attachment_payload(images=clean_images, files=clean_files),
+            },
+            summary=pending.text,
+        )
+        consumed = self._store.mark_pending_input_consumed(
+            task_id,
+            pending.id,
+            consumed_round_id=next_round_id,
+        )
+        self._events.emit(
+            task_id,
+            "user.followup",
+            role="user",
+            payload={
+                "role": "user",
+                "text": pending.text,
+                "target_role": "director",
+                **_relay_attachment_payload(images=clean_images, files=clean_files),
+                "artifact_id": int(getattr(followup, "id", 0) or 0),
+                "context_packet_id": int(getattr(context_record, "id", 0) or 0),
+                "round_id": next_round_id,
+                "pending_input_id": pending.id,
+            },
+        )
+        self._events.emit(
+            task_id,
+            "role.queued",
+            role="director",
+            payload={
+                "latest_user_input": prompt_text,
+                "reason": "queued_input_consumed",
+                "round_id": next_round_id,
+                "pending_input_id": pending.id,
+            },
+        )
+        self._events.emit(
+            task_id,
+            "user.input_consumed",
+            role="user",
+            payload=consumed.to_dict(),
+        )
+        if dispatch_next:
+            await self.dispatch_role(task_id, "director", prefer_continue=False)
+        return consumed
 
     async def add_user_message(
         self,

@@ -406,6 +406,10 @@ class Ledger:
                 trigger_artifact_id INTEGER,
                 route TEXT NOT NULL DEFAULT '',
                 required_roles_json TEXT NOT NULL DEFAULT '[]',
+                execution_mode TEXT NOT NULL DEFAULT 'simple',
+                execution_goal TEXT NOT NULL DEFAULT '',
+                execution_strategy_json TEXT NOT NULL DEFAULT '{}',
+                waiting_reason TEXT NOT NULL DEFAULT 'none',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 closed_at TEXT,
@@ -433,6 +437,10 @@ class Ledger:
                 completion_artifact_id INTEGER,
                 error_artifact_id INTEGER,
                 retry_count INTEGER NOT NULL DEFAULT 0,
+                execution_mode TEXT NOT NULL DEFAULT 'simple',
+                team_strategy TEXT NOT NULL DEFAULT 'none',
+                provider_mode_json TEXT NOT NULL DEFAULT '{}',
+                provider_child_activity_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 closed_at TEXT,
@@ -444,6 +452,25 @@ class Ledger:
                 ON relay_role_attempts(team_run_id, round_id, role, attempt_no);
             CREATE INDEX IF NOT EXISTS idx_relay_attempts_agent_run
                 ON relay_role_attempts(agent_run_id, active_turn_id);
+
+            CREATE TABLE IF NOT EXISTS relay_pending_inputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_run_id INTEGER NOT NULL,
+                queued_after_round_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                text TEXT NOT NULL DEFAULT '',
+                attachments_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                consumed_round_id INTEGER,
+                steered_round_id INTEGER,
+                steered_role TEXT NOT NULL DEFAULT '',
+                steered_attempt_no INTEGER,
+                FOREIGN KEY(team_run_id) REFERENCES team_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_pending_inputs_task_status
+                ON relay_pending_inputs(team_run_id, status, queued_after_round_id, id);
 
             CREATE TABLE IF NOT EXISTS team_assignments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -707,6 +734,38 @@ class Ledger:
         self._add_column_if_missing(
             "orchestration_runs", "diagnose_json",
             "diagnose_json TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "execution_mode",
+            "execution_mode TEXT NOT NULL DEFAULT 'simple'",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "execution_goal",
+            "execution_goal TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "execution_strategy_json",
+            "execution_strategy_json TEXT NOT NULL DEFAULT '{}'",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "waiting_reason",
+            "waiting_reason TEXT NOT NULL DEFAULT 'none'",
+        )
+        self._add_column_if_missing(
+            "relay_role_attempts", "execution_mode",
+            "execution_mode TEXT NOT NULL DEFAULT 'simple'",
+        )
+        self._add_column_if_missing(
+            "relay_role_attempts", "team_strategy",
+            "team_strategy TEXT NOT NULL DEFAULT 'none'",
+        )
+        self._add_column_if_missing(
+            "relay_role_attempts", "provider_mode_json",
+            "provider_mode_json TEXT NOT NULL DEFAULT '{}'",
+        )
+        self._add_column_if_missing(
+            "relay_role_attempts", "provider_child_activity_json",
+            "provider_child_activity_json TEXT NOT NULL DEFAULT '{}'",
         )
         # codex_request_id values are scoped to a task/thread by the app-server.
         # Older databases had a global unique index, which incorrectly dropped

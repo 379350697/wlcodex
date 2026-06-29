@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from wlcodex.models import TeamAgentJob, TeamArtifact, TeamRun
@@ -11,6 +12,7 @@ from wlcodex.relay.models import (
     RELAY_ROLE_IDS,
     HandoffPacket,
     RelayBoard,
+    RelayPendingInput,
     RelayRoleJob,
     RelaySessionLink,
     RelayTask,
@@ -160,6 +162,7 @@ class RelayStore:
             ],
             routing_decision=routing_decision,
             current_round_id=current_round_id,
+            pending_inputs=self.list_pending_inputs(task_id),
         )
 
     def save_context_packet(
@@ -241,8 +244,146 @@ class RelayStore:
     def next_round_id(self, task_id: int) -> int:
         return self.current_round_id(task_id) + 1
 
-    def start_followup_round(self, task_id: int) -> int:
-        return self.lifecycle.start_followup_round(task_id)
+    def start_followup_round(self, task_id: int, *, trigger_artifact_id: int | None = None) -> int:
+        return self.lifecycle.start_followup_round(
+            task_id,
+            trigger_artifact_id=trigger_artifact_id,
+        )
+
+    def queue_pending_input(
+        self,
+        task_id: int,
+        *,
+        text: str,
+        attachments: dict[str, Any] | None = None,
+        queued_after_round_id: int | None = None,
+    ) -> RelayPendingInput:
+        now = _now_text()
+        round_id = queued_after_round_id or self.current_round_id(task_id)
+        self._ledger._conn.execute(
+            """
+            INSERT INTO relay_pending_inputs (
+                team_run_id, queued_after_round_id, status, text, attachments_json,
+                created_at, updated_at
+            )
+            VALUES (?, ?, 'pending', ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                round_id,
+                text,
+                json.dumps(attachments or {}, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        self._ledger._conn.commit()
+        row = self._ledger._conn.execute(
+            "SELECT * FROM relay_pending_inputs WHERE id = last_insert_rowid()"
+        ).fetchone()
+        return _pending_input_from_row(row)
+
+    def get_pending_input(self, task_id: int, pending_input_id: int) -> RelayPendingInput:
+        row = self._ledger._conn.execute(
+            """
+            SELECT * FROM relay_pending_inputs
+            WHERE id = ? AND team_run_id = ?
+            """,
+            (pending_input_id, task_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown relay pending input: {pending_input_id}")
+        return _pending_input_from_row(row)
+
+    def list_pending_inputs(self, task_id: int, *, status: str | None = None) -> list[RelayPendingInput]:
+        sql = """
+            SELECT * FROM relay_pending_inputs
+            WHERE team_run_id = ?
+        """
+        params: list[Any] = [task_id]
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY id ASC"
+        rows = self._ledger._conn.execute(sql, params).fetchall()
+        return [_pending_input_from_row(row) for row in rows]
+
+    def first_pending_input_after_round(
+        self,
+        task_id: int,
+        round_id: int,
+    ) -> RelayPendingInput | None:
+        row = self._ledger._conn.execute(
+            """
+            SELECT * FROM relay_pending_inputs
+            WHERE team_run_id = ?
+              AND queued_after_round_id <= ?
+              AND status = 'pending'
+            ORDER BY queued_after_round_id ASC, id ASC
+            LIMIT 1
+            """,
+            (task_id, round_id),
+        ).fetchone()
+        return _pending_input_from_row(row) if row is not None else None
+
+    def mark_pending_input_steered(
+        self,
+        task_id: int,
+        pending_input_id: int,
+        *,
+        round_id: int,
+        role: str,
+        attempt_no: int,
+    ) -> RelayPendingInput:
+        now = _now_text()
+        self._ledger._conn.execute(
+            """
+            UPDATE relay_pending_inputs
+            SET status = 'steered',
+                updated_at = ?,
+                steered_round_id = ?,
+                steered_role = ?,
+                steered_attempt_no = ?
+            WHERE id = ? AND team_run_id = ? AND status = 'pending'
+            """,
+            (now, round_id, role, attempt_no, pending_input_id, task_id),
+        )
+        self._ledger._conn.commit()
+        return self.get_pending_input(task_id, pending_input_id)
+
+    def mark_pending_input_consumed(
+        self,
+        task_id: int,
+        pending_input_id: int,
+        *,
+        consumed_round_id: int,
+    ) -> RelayPendingInput:
+        now = _now_text()
+        self._ledger._conn.execute(
+            """
+            UPDATE relay_pending_inputs
+            SET status = 'consumed',
+                updated_at = ?,
+                consumed_round_id = ?
+            WHERE id = ? AND team_run_id = ? AND status = 'pending'
+            """,
+            (now, consumed_round_id, pending_input_id, task_id),
+        )
+        self._ledger._conn.commit()
+        return self.get_pending_input(task_id, pending_input_id)
+
+    def cancel_pending_input(self, task_id: int, pending_input_id: int) -> RelayPendingInput:
+        now = _now_text()
+        self._ledger._conn.execute(
+            """
+            UPDATE relay_pending_inputs
+            SET status = 'cancelled', updated_at = ?
+            WHERE id = ? AND team_run_id = ? AND status = 'pending'
+            """,
+            (now, pending_input_id, task_id),
+        )
+        self._ledger._conn.commit()
+        return self.get_pending_input(task_id, pending_input_id)
 
     def update_role_status(self, task_id: int, role: str, status: str) -> RelayRoleJob:
         if status == "idle":
@@ -301,6 +442,7 @@ class RelayStore:
         turn_running: bool = False,
         dispatch_verified: bool = False,
         fallback_reason: str = "",
+        provider_mode: dict[str, Any] | None = None,
     ) -> RelayRoleJob:
         job = self._team_job_for_role(task_id, role)
         if agent_run_id is not None:
@@ -309,6 +451,7 @@ class RelayStore:
                 (agent_run_id, job.id),
             )
             self._ledger._conn.commit()
+        round_id = self.current_round_id(task_id)
         artifact = self.save_artifact(
             task_id,
             role,
@@ -325,6 +468,7 @@ class RelayStore:
                 "turn_running": turn_running,
                 "dispatch_verified": dispatch_verified,
                 "fallback_reason": fallback_reason,
+                "provider_mode": provider_mode or {},
             },
             summary=(
                 fallback_reason
@@ -332,9 +476,10 @@ class RelayStore:
                 else f"{role} dispatched via {provider or 'provider'}"
             ),
         )
+        mode_payload = provider_mode if isinstance(provider_mode, dict) else {}
         self.lifecycle.update_attempt(
             task_id,
-            self.current_round_id(task_id),
+            round_id,
             role,
             status="streaming" if dispatch_verified else None,
             provider=provider,
@@ -343,6 +488,14 @@ class RelayStore:
             turn_id=turn_id,
             active_turn_id=active_turn_id,
             dispatch_artifact_id=artifact.id,
+        )
+        self.lifecycle.set_attempt_execution(
+            task_id,
+            round_id,
+            role,
+            execution_mode=str(mode_payload.get("execution_mode") or "simple"),
+            team_strategy=str(mode_payload.get("team_strategy") or "none"),
+            provider_mode=mode_payload,
         )
         self.lifecycle.sync_legacy_projection(task_id)
         return next(
@@ -718,6 +871,39 @@ def _decode_goal(goal: str) -> dict[str, Any]:
         "phase": "director",
         "role_providers": _normalize_role_providers(None, fallback="codex"),
     }
+
+
+def _now_text() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _pending_input_from_row(row: Any) -> RelayPendingInput:
+    try:
+        attachments = json.loads(str(row["attachments_json"] or "{}"))
+    except json.JSONDecodeError:
+        attachments = {}
+    if not isinstance(attachments, dict):
+        attachments = {}
+    return RelayPendingInput(
+        id=int(row["id"]),
+        task_id=int(row["team_run_id"]),
+        queued_after_round_id=int(row["queued_after_round_id"] or 1),
+        status=str(row["status"] or "pending"),
+        text=str(row["text"] or ""),
+        attachments=attachments,
+        created_at=str(row["created_at"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+        consumed_round_id=(
+            int(row["consumed_round_id"]) if row["consumed_round_id"] is not None else None
+        ),
+        steered_round_id=(
+            int(row["steered_round_id"]) if row["steered_round_id"] is not None else None
+        ),
+        steered_role=str(row["steered_role"] or ""),
+        steered_attempt_no=(
+            int(row["steered_attempt_no"]) if row["steered_attempt_no"] is not None else None
+        ),
+    )
 
 
 def _normalize_role_providers(

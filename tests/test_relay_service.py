@@ -195,6 +195,18 @@ def _service(tmp_path) -> tuple[RelayService, FakeProvider]:
     return service, provider
 
 
+def _active_turn_service(tmp_path) -> tuple[RelayService, ActiveTurnProvider]:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    provider = ActiveTurnProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    )
+    return service, provider
+
+
 def test_create_task_records_board_and_queues_director(tmp_path) -> None:
     service, _provider = _service(tmp_path)
 
@@ -214,6 +226,332 @@ def test_create_task_records_board_and_queues_director(tmp_path) -> None:
         "role.queued",
         "artifact.created",
     ]
+
+
+def test_codex_plan_first_architect_dispatches_provider_plan_mode(tmp_path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    provider = FakeCodexProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="codex",
+    )
+    task = service.create_task(
+        title="Relay",
+        prompt="Plan it",
+        workspace="/repo",
+        provider="codex",
+        execution_mode="plan_first",
+    )
+
+    asyncio.run(service.dispatch_role(task.id, "architect"))
+
+    assert provider.calls[-1][0] == "start_session"
+    assert provider.calls[-1][3]["collaboration_mode"] == {"mode": "plan"}
+
+
+def test_claude_plan_first_architect_dispatches_permission_plan_mode(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Plan it",
+        workspace="/repo",
+        provider="claude",
+        execution_mode="plan_first",
+    )
+
+    asyncio.run(service.dispatch_role(task.id, "architect"))
+
+    assert provider.calls[-1][0] == "start_session"
+    assert provider.calls[-1][3]["permission_mode"] == "plan"
+
+
+def test_antigravity_plan_first_uses_prompt_fallback_without_unknown_flags(tmp_path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    provider = FakeAntigravityProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="antigravity",
+    )
+    task = service.create_task(
+        title="Relay",
+        prompt="Plan it",
+        workspace="/repo",
+        provider="antigravity",
+        execution_mode="plan_first",
+    )
+
+    asyncio.run(service.dispatch_role(task.id, "architect"))
+
+    kwargs = provider.calls[-1][3]
+    assert "permission_mode" not in kwargs
+    assert "collaboration_mode" not in kwargs
+    metadata = [
+        artifact
+        for artifact in service.get_task(task.id).artifacts
+        if artifact.get("artifact_type") == "role_dispatch_metadata"
+        and artifact.get("relay_role") == "architect"
+    ][-1]
+    assert metadata["provider_mode"]["provider_mode"] == "prompt_plan_fallback"
+    attempt = service._store.lifecycle.latest_attempt(task.id, 1, "architect")
+    assert attempt.execution_mode == "plan_first"
+    assert attempt.team_strategy == "none"
+    assert attempt.provider_mode["provider_mode"] == "prompt_plan_fallback"
+
+
+@pytest.mark.asyncio
+async def test_running_user_input_defaults_to_pending_next_round(tmp_path) -> None:
+    service, provider = _active_turn_service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    assert service.get_task(task.id).current_round_id == 1
+
+    pending = service.queue_user_input(task.id, "do this after the current turn")
+
+    assert pending.status == "pending"
+    assert pending.queued_after_round_id == 1
+    assert service.get_task(task.id).current_round_id == 1
+    assert [call[0] for call in provider.calls] == ["start_session"]
+
+
+@pytest.mark.asyncio
+async def test_pending_input_can_be_steered_into_active_attempt(tmp_path) -> None:
+    service, provider = _active_turn_service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    pending = service.queue_user_input(task.id, "use this constraint now")
+
+    steered = await service.steer_active_attempt(task.id, pending.id)
+
+    assert steered.status == "steered"
+    assert steered.steered_round_id == 1
+    assert steered.steered_role == "director"
+    assert service.get_task(task.id).current_round_id == 1
+    assert [call[0] for call in provider.calls] == ["start_session", "steer_session"]
+    assert provider.calls[-1][2] == "turn-1"
+
+
+@pytest.mark.asyncio
+async def test_terminal_round_consumes_pending_input_into_next_round(tmp_path) -> None:
+    service, provider = _active_turn_service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    pending = service.queue_user_input(task.id, "start this next")
+    service._store.update_task_status(task.id, "completed")
+
+    consumed = await service.consume_pending_after_round(task.id, 1, dispatch_next=False)
+
+    detail = service.get_task(task.id)
+    assert consumed is not None
+    assert consumed.id == pending.id
+    assert consumed.status == "consumed"
+    assert consumed.consumed_round_id == 2
+    assert detail.current_round_id == 2
+    assert detail.task.status == "running"
+    assert next(job for job in detail.role_jobs if job.role == "director").status == "queued"
+    assert [call[0] for call in provider.calls] == ["start_session"]
+
+
+@pytest.mark.asyncio
+async def test_final_summary_auto_consumes_pending_input_after_terminal_round(tmp_path) -> None:
+    service, provider = _active_turn_service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.handle_role_output(
+        task.id,
+        "director",
+        json.dumps(
+            {
+                "status": "passed",
+                "reason": "director only",
+                "role": "director",
+                "artifact_type": "routing_decision",
+                "handoff_to": "",
+                "summary": "Director can answer directly.",
+                "evidence_refs": [],
+                "open_questions": [],
+                "next_action": "finish",
+                "complexity": "low",
+                "risk": "low",
+                "route": "director_only",
+                "required_roles": ["director"],
+                "acceptance_criteria": ["final summary"],
+                "stop_conditions": [],
+                "requires_user_approval": False,
+            }
+        ),
+        dispatch_next=False,
+    )
+    pending = service.queue_user_input(task.id, "run this after the summary")
+
+    await service.handle_role_output(
+        task.id,
+        "director",
+        json.dumps(
+            {
+                "status": "passed",
+                "reason": "done",
+                "role": "director",
+                "artifact_type": "final_summary",
+                "handoff_to": "",
+                "summary": "First round complete.",
+                "evidence_refs": [],
+                "open_questions": [],
+                "next_action": "done",
+            }
+        ),
+        dispatch_next=False,
+    )
+
+    detail = service.get_task(task.id)
+    consumed = service._store.get_pending_input(task.id, pending.id)
+    assert consumed is not None
+    assert consumed.status == "consumed"
+    assert consumed.consumed_round_id == 2
+    assert detail.current_round_id == 2
+    assert detail.task.status == "running"
+    assert next(job for job in detail.role_jobs if job.role == "director").status == "queued"
+    assert [call[0] for call in provider.calls] == []
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_continues_current_round(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Plan then execute",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.handle_role_output(
+        task.id,
+        "director",
+        json.dumps(
+            {
+                "status": "passed",
+                "reason": "plan first",
+                "role": "director",
+                "artifact_type": "routing_decision",
+                "handoff_to": "",
+                "summary": "Architect should plan.",
+                "evidence_refs": [],
+                "open_questions": [],
+                "next_action": "plan",
+                "complexity": "medium",
+                "risk": "medium",
+                "route": "core_relay",
+                "required_roles": ["director", "architect", "implementer"],
+                "acceptance_criteria": ["approved plan", "implemented"],
+                "stop_conditions": [],
+                "requires_user_approval": False,
+            }
+        ),
+        dispatch_next=False,
+    )
+    await service.handle_role_output(
+        task.id,
+        "architect",
+        json.dumps(
+            {
+                "status": "waiting",
+                "reason": "needs approval",
+                "role": "architect",
+                "artifact_type": "architecture_plan",
+                "handoff_to": "",
+                "summary": "Plan A",
+                "evidence_refs": [],
+                "open_questions": [],
+                "next_action": "approve plan",
+            }
+        ),
+        dispatch_next=False,
+    )
+    waiting_detail = service.get_task(task.id)
+    waiting_execution = service._store.lifecycle.round_execution(task.id, 1)
+    assert waiting_detail.task.status == "waiting_user"
+    assert waiting_execution["waiting_reason"] == "plan_approval"
+    plan_artifact = next(
+        artifact
+        for artifact in reversed(waiting_detail.artifacts)
+        if artifact["artifact_type"] == "architecture_plan"
+    )
+
+    result = await service.apply_round_control(
+        task.id,
+        waiting_detail.current_round_id,
+        decision="approve_plan",
+        artifact_id=int(plan_artifact["id"]),
+        dispatch_next=False,
+    )
+
+    detail = service.get_task(task.id)
+    assert result["round_id"] == 1
+    assert detail.current_round_id == 1
+    assert detail.task.status == "running"
+    assert service._store.lifecycle.round_execution(task.id, 1)["waiting_reason"] == "none"
+    assert next(job for job in detail.role_jobs if job.role == "architect").status == "passed"
+    assert next(job for job in detail.role_jobs if job.role == "implementer").status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_rejects_plan_artifact_from_old_round(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Plan then supersede",
+        workspace="/repo",
+        provider="claude",
+    )
+    old_plan = service._store.save_artifact(
+        task.id,
+        "architect",
+        "architecture_plan",
+        {
+            "role": "architect",
+            "relay_role": "architect",
+            "status": "waiting",
+            "artifact_type": "architecture_plan",
+            "round_id": 1,
+            "summary": "Old plan",
+        },
+        summary="Old plan",
+    )
+    service.queue_user_input(task.id, "new boundary")
+    await service.consume_pending_after_round(task.id, 1, dispatch_next=False)
+    current_round = service.get_task(task.id).current_round_id
+
+    with pytest.raises(ValueError, match="current round"):
+        await service.apply_round_control(
+            task.id,
+            current_round,
+            decision="approve_plan",
+            artifact_id=old_plan.id,
+            dispatch_next=False,
+        )
+
+    assert service.get_task(task.id).current_round_id == current_round
 
 
 def test_passed_role_does_not_surface_stale_role_error(tmp_path) -> None:
@@ -4314,6 +4652,74 @@ def test_director_only_routing_decision_allows_director_final_summary(tmp_path) 
     assert routing["route"] == "director_only"
     assert routing["complexity"] == "simple"
     assert routing["required_roles"] == ["director"]
+
+
+def test_goal_mode_director_final_summary_requires_acceptance_evidence(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="完成这个目标",
+        workspace="/repo",
+        provider="claude",
+        execution_mode="goal",
+        execution_goal="完成这个目标并通过验收",
+    )
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "goal routing",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "",
+              "summary": "目标模式不能直接收口。",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "direct final summary",
+              "complexity": "simple",
+              "risk": "low",
+              "route": "director_only",
+              "required_roles": ["director"],
+              "acceptance_criteria": ["完成目标"],
+              "stop_conditions": [],
+              "requires_user_approval": false
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "passed",
+              "reason": "premature",
+              "role": "director",
+              "artifact_type": "final_summary",
+              "handoff_to": "",
+              "summary": "目标完成",
+              "evidence_refs": [],
+              "open_questions": [],
+              "next_action": "complete"
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.task.status == "blocked"
+    assert jobs["director"].status == "blocked"
+    assert "goal mode final_summary before acceptance evidence completed" in jobs[
+        "director"
+    ].error_message
 
 
 def test_director_only_routing_decision_dispatches_director_final_summary(

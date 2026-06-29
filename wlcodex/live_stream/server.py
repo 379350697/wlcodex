@@ -1439,6 +1439,9 @@ class WorkerLiveStreamServer:
                         ),
                         images=_safe_image_attachments(body.get("images")),
                         files=_safe_relay_file_attachments(body.get("files")),
+                        execution_mode=str(body.get("execution_mode") or "simple"),
+                        execution_goal=str(body.get("execution_goal") or ""),
+                        team_strategy=str(body.get("team_strategy") or "none"),
                     )
                     await self._relay_service.dispatch_role(task.id, "director")
                     detail = await self._relay_task_detail_after_reconcile(task.id)
@@ -1487,6 +1490,79 @@ class WorkerLiveStreamServer:
                     relay_event_queue=relay_event_queue,
                     live=live,
                 )
+                return
+            if suffix == "/inputs":
+                if method != "POST":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                body = await self._read_request_json(writer, reader, headers)
+                if body is None:
+                    return
+                await self._relay_service.ensure_task_lifecycle_current(task_id)
+                pending = self._relay_service.queue_user_input(
+                    task_id,
+                    str(body.get("text") or body.get("prompt") or ""),
+                    images=_safe_image_attachments(body.get("images")),
+                    files=_safe_relay_file_attachments(body.get("files")),
+                )
+                await self._send_json(writer, 200, {"pending_input": pending.to_dict()})
+                return
+            if suffix.startswith("/inputs/"):
+                parts = [part for part in suffix.strip("/").split("/") if part]
+                if len(parts) != 3 or parts[0] != "inputs" or not parts[1].isdigit():
+                    await self._send_json(writer, 404, {"error": "not found"})
+                    return
+                pending_id = int(parts[1])
+                action = parts[2]
+                if method != "POST":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                if action == "steer":
+                    await self._relay_service.ensure_task_lifecycle_current(task_id)
+                    try:
+                        pending = await self._relay_service.steer_active_attempt(
+                            task_id,
+                            pending_id,
+                        )
+                    except (KeyError, ValueError, RuntimeError) as exc:
+                        await self._send_json(writer, 400, {"error": str(exc)})
+                        return
+                    await self._send_json(writer, 200, {"pending_input": pending.to_dict()})
+                    return
+                if action == "cancel":
+                    try:
+                        pending = self._relay_service.cancel_pending_input(task_id, pending_id)
+                    except (KeyError, ValueError) as exc:
+                        await self._send_json(writer, 400, {"error": str(exc)})
+                        return
+                    await self._send_json(writer, 200, {"pending_input": pending.to_dict()})
+                    return
+                await self._send_json(writer, 404, {"error": "not found"})
+                return
+            if suffix.startswith("/rounds/"):
+                parts = [part for part in suffix.strip("/").split("/") if part]
+                if len(parts) != 3 or parts[0] != "rounds" or not parts[1].isdigit() or parts[2] != "control":
+                    await self._send_json(writer, 404, {"error": "not found"})
+                    return
+                if method != "POST":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                body = await self._read_request_json(writer, reader, headers)
+                if body is None:
+                    return
+                await self._relay_service.ensure_task_lifecycle_current(task_id)
+                try:
+                    result = await self._relay_service.apply_round_control(
+                        task_id,
+                        int(parts[1]),
+                        decision=str(body.get("decision") or ""),
+                        artifact_id=_safe_int(str(body.get("artifact_id") or "0"), default=0),
+                        comment=str(body.get("comment") or ""),
+                    )
+                except (KeyError, ValueError) as exc:
+                    await self._send_json(writer, 400, {"error": str(exc)})
+                    return
+                await self._send_json(writer, 200, {"control": result})
                 return
             if suffix == "/sessions":
                 if method != "GET":
@@ -3802,6 +3878,9 @@ def _relay_chat_home_page(
       if (!title) return;
       data.title = title;
       data.prompt = title;
+      if (String(data.execution_mode || "") === "goal" && !String(data.execution_goal || "").trim()) {{
+        data.execution_goal = title;
+      }}
       if ((attachments.images || []).length) data.images = attachments.images;
       if ((attachments.files || []).length) data.files = attachments.files;
       const response = await fetch(`/api/relay/tasks${{TOKEN_SUFFIX}}`, {{
@@ -4358,9 +4437,27 @@ def _marvis_relay_task_composer(
     return f"""
     {workspace_dock}
     <form class="marvis-relay-composer" data-marvis-task-composer action="/api/relay/tasks{token_suffix}">
+      <div class="marvis-relay-mode-strip" aria-label="接力模式">
+        <label><input type="radio" name="execution_mode" value="simple" checked><span>简单</span></label>
+        <label><input type="radio" name="execution_mode" value="plan_first"><span>计划</span></label>
+        <label><input type="radio" name="execution_mode" value="goal"><span>目标</span></label>
+        <label><input type="radio" name="execution_mode" value="team"><span>团队</span></label>
+        <label><input type="radio" name="execution_mode" value="auto"><span>自动</span></label>
+        <select name="team_strategy" aria-label="团队策略">
+          <option value="none">默认策略</option>
+          <option value="research">研究</option>
+          <option value="planning">规划</option>
+          <option value="implementation">实现</option>
+          <option value="code_review">审查</option>
+          <option value="testing">测试</option>
+          <option value="debugging">调试</option>
+          <option value="red_team">风险</option>
+        </select>
+      </div>
       <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
       <input name="title" autocomplete="off" placeholder="{escape(placeholder)}">
       <input type="hidden" name="prompt" value="">
+      <input type="hidden" name="execution_goal" value="">
       <input type="hidden" name="workspace" value="{escape(selected_workspace)}">
       <button class="marvis-relay-submit" type="submit" aria-label="发送任务" data-marvis-submit>
         <span class="marvis-relay-submit-arrow" aria-hidden="true">↑</span>
@@ -5151,13 +5248,22 @@ def _marvis_relay_followup_composer(
     workspace: str = "",
     access_token: str = "",
     task_status: str = "",
+    pending_inputs: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> str:
     workspace_dock = _marvis_relay_workspace_dock(
         workspace,
         access_token=access_token,
     )
+    pending_visible = bool(
+        [
+            item
+            for item in (pending_inputs or [])
+            if str(item.get("status") or "") in {"pending", "steered"}
+        ]
+    )
     return f"""
     {workspace_dock}
+    <div class="marvis-relay-pending-inputs" data-marvis-pending-inputs{" hidden" if not pending_visible else ""}></div>
     <form class="marvis-relay-composer" data-marvis-followup-composer data-task-status-value="{escape(task_status)}" data-interrupt-url="/api/relay/tasks/{task_id}/interrupt" method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
       <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
       <textarea name="text" placeholder="{escape(placeholder)}" aria-label="继续补充给总工程师"></textarea>
@@ -5168,6 +5274,30 @@ def _marvis_relay_followup_composer(
       <div class="marvis-relay-composer-attachments" data-marvis-attachment-strip hidden></div>
     </form>
     {_marvis_relay_attachment_sheet_html()}
+    """
+
+
+def _marvis_relay_plan_control_html(detail: Any) -> str:
+    round_id = int(getattr(detail, "current_round_id", 1) or 1)
+    plan_artifact: dict[str, Any] | None = None
+    for artifact in reversed(getattr(detail, "artifacts", []) or []):
+        if str(artifact.get("artifact_type") or "") != "architecture_plan":
+            continue
+        if int(artifact.get("round_id") or round_id) != round_id:
+            continue
+        if str(artifact.get("status") or "") != "waiting":
+            continue
+        plan_artifact = artifact
+        break
+    if plan_artifact is None:
+        return ""
+    return f"""
+    <section class="marvis-relay-plan-control" data-marvis-plan-control data-round-id="{round_id}" data-artifact-id="{int(plan_artifact.get("id") or 0)}" aria-label="计划操作">
+      <strong>计划等待确认</strong>
+      <button type="button" data-plan-decision="approve_plan">执行计划</button>
+      <button type="button" data-plan-decision="revise_plan">修改计划</button>
+      <button type="button" data-plan-decision="cancel_plan">停止</button>
+    </section>
     """
 
 
@@ -6202,11 +6332,16 @@ def _relay_task_detail_page(
         token_total=token_total,
         max_event_id=_marvis_relay_max_event_id_from_events(detail.role_jobs, hub=hub),
     )
+    plan_control_html = _marvis_relay_plan_control_html(detail)
     followup_composer_html = _marvis_relay_followup_composer(
         task_id=int(task.id),
         workspace=str(task.workspace or ""),
         access_token=access_token,
         task_status=str(task.status or ""),
+        pending_inputs=[
+            item.to_dict() if hasattr(item, "to_dict") else dict(item)
+            for item in (getattr(detail, "pending_inputs", []) or [])
+        ],
     )
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
@@ -6233,6 +6368,7 @@ def _relay_task_detail_page(
       </div>
     </section>
   </main>
+  {plan_control_html}
   {followup_composer_html}
   <nav class="marvis-relay-bottom-nav" aria-label="Marvis relay navigation">
     {bottom_nav_html}
@@ -6246,6 +6382,15 @@ def _relay_task_detail_page(
     let activeRelayRoundId = CURRENT_ROUND_ID;
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
     const EVENTS_SUFFIX = {json.dumps(events_suffix)};
+    const INITIAL_PENDING_INPUTS = {
+        json.dumps(
+            [
+                item.to_dict() if hasattr(item, "to_dict") else dict(item)
+                for item in (getattr(detail, "pending_inputs", []) or [])
+            ],
+            ensure_ascii=False,
+        )
+    };
     const ROLE_LABELS = {
         json.dumps({role: _relay_role_label(role) for role in RELAY_ROLE_IDS}, ensure_ascii=False)
     };
@@ -7420,11 +7565,16 @@ def _relay_task_detail_page(
       if (role && status) roleStatuses[role] = status;
     }}
     const followupComposer = document.querySelector("[data-marvis-followup-composer]");
+    const pendingInputsContainer = document.querySelector("[data-marvis-pending-inputs]");
     const followupTextInput = followupComposer?.querySelector("textarea[name='text']");
     const followupSubmitButton = followupComposer?.querySelector("[data-marvis-submit]");
+    const pendingInputs = new Map();
     let relayTaskStatus = followupComposer?.dataset.taskStatusValue || "";
     function relayTaskIsRunning() {{
       return ["queued", "running", "streaming"].includes(String(relayTaskStatus || "").trim());
+    }}
+    function relayTaskAcceptsPendingInput() {{
+      return relayTaskIsRunning() || String(relayTaskStatus || "").trim() === "waiting_user";
     }}
     function relayFollowupHasText() {{
       return Boolean(String(followupTextInput?.value || "").trim());
@@ -7438,6 +7588,52 @@ def _relay_task_detail_page(
       followupSubmitButton.classList.toggle("is-stop", showStop);
       followupSubmitButton.setAttribute("aria-label", showStop ? "中断任务" : "发送补充");
     }}
+    function marvisEscapeText(value) {{
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }}
+    function pendingInputId(item) {{
+      return String(item?.id || item?.pending_input_id || "");
+    }}
+    function upsertPendingInput(item) {{
+      const id = pendingInputId(item);
+      if (!id) return;
+      pendingInputs.set(id, {{ ...(pendingInputs.get(id) || {{}}), ...(item || {{}}), id }});
+      renderPendingInputs();
+    }}
+    function removePendingInput(id) {{
+      const key = String(id || "");
+      if (key) pendingInputs.delete(key);
+      renderPendingInputs();
+    }}
+    function visiblePendingInputs() {{
+      return Array.from(pendingInputs.values()).filter((item) =>
+        ["pending", "steered"].includes(String(item.status || ""))
+      );
+    }}
+    function renderPendingInputs() {{
+      if (!pendingInputsContainer) return;
+      const rows = visiblePendingInputs();
+      pendingInputsContainer.hidden = rows.length === 0;
+      pendingInputsContainer.innerHTML = rows.map((item) => {{
+        const id = pendingInputId(item);
+        const isSteered = String(item.status || "") === "steered";
+        const text = String(item.text || "").trim() || "已添加附件";
+        const statusText = isSteered ? "已引导当前" : "已排队，当前 round 结束后自动开始";
+        return `<article class="marvis-relay-pending-input" data-pending-input-id="${{marvisEscapeText(id)}}">
+          <span class="marvis-relay-pending-status">${{statusText}}</span>
+          <strong>${{marvisEscapeText(text)}}</strong>
+          <span class="marvis-relay-pending-actions">
+            <button type="button" data-pending-steer="${{marvisEscapeText(id)}}"${{isSteered ? " disabled" : ""}}>引导当前</button>
+            <button type="button" data-pending-cancel="${{marvisEscapeText(id)}}">取消</button>
+          </span>
+        </article>`;
+      }}).join("");
+    }}
+    (INITIAL_PENDING_INPUTS || []).forEach(upsertPendingInput);
     function updateTaskStatus(status) {{
       if (!status) return;
       relayTaskStatus = String(status || "");
@@ -7447,6 +7643,79 @@ def _relay_task_detail_page(
       }});
       updateRelayComposerAction();
     }}
+    pendingInputsContainer?.addEventListener("click", async (event) => {{
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const steerId = target.getAttribute("data-pending-steer");
+      const cancelId = target.getAttribute("data-pending-cancel");
+      const pendingId = steerId || cancelId;
+      if (!pendingId) return;
+      target.setAttribute("disabled", "disabled");
+      const action = steerId ? "steer" : "cancel";
+      try {{
+        const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/inputs/${{encodeURIComponent(pendingId)}}/${{action}}${{TOKEN_SUFFIX}}`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{}}),
+        }});
+        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+        const payload = await response.json();
+        const item = payload.pending_input || payload;
+        if (action === "cancel") {{
+          removePendingInput(pendingId);
+        }} else {{
+          upsertPendingInput(item);
+        }}
+      }} catch (_error) {{
+        target.removeAttribute("disabled");
+      }}
+    }});
+    let planControl = document.querySelector("[data-marvis-plan-control]");
+    function ensurePlanControl(payload = {{}}) {{
+      if (planControl || payload.waiting_reason !== "plan_approval") return;
+      const roundId = String(payload.round_id || activeRelayRoundId || CURRENT_ROUND_ID || "1");
+      const artifactId = String(payload.artifact_id || "0");
+      const node = document.createElement("section");
+      node.className = "marvis-relay-plan-control";
+      node.setAttribute("data-marvis-plan-control", "");
+      node.setAttribute("data-round-id", roundId);
+      node.setAttribute("data-artifact-id", artifactId);
+      node.setAttribute("aria-label", "计划操作");
+      node.innerHTML = `<strong>计划等待确认</strong>
+        <button type="button" data-plan-decision="approve_plan">执行计划</button>
+        <button type="button" data-plan-decision="revise_plan">修改计划</button>
+        <button type="button" data-plan-decision="cancel_plan">停止</button>`;
+      document.querySelector(".marvis-relay-phone")?.appendChild(node);
+      planControl = node;
+    }}
+    document.addEventListener("click", async (event) => {{
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const decision = target.getAttribute("data-plan-decision");
+      if (!decision) return;
+      const activePlanControl = target.closest("[data-marvis-plan-control]");
+      if (!(activePlanControl instanceof HTMLElement)) return;
+      target.setAttribute("disabled", "disabled");
+      const roundId = activePlanControl.getAttribute("data-round-id") || CURRENT_ROUND_ID;
+      const artifactId = activePlanControl.getAttribute("data-artifact-id") || "0";
+      try {{
+        const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/rounds/${{encodeURIComponent(roundId)}}/control${{TOKEN_SUFFIX}}`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ decision, artifact_id: Number(artifactId) || 0 }}),
+        }});
+        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+        if (decision === "approve_plan" || decision === "continue") {{
+          activePlanControl.hidden = true;
+          updateTaskStatus("running");
+        }} else if (decision === "cancel_plan") {{
+          activePlanControl.hidden = true;
+          updateTaskStatus("interrupted");
+        }}
+      }} catch (_error) {{
+        target.removeAttribute("disabled");
+      }}
+    }});
     const source = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{EVENTS_SUFFIX}}`);
     source.addEventListener("role.queued", (event) => {{
       const payload = parseRelayEvent(event);
@@ -7482,6 +7751,20 @@ def _relay_task_detail_page(
       appendMarvisConversationWaiting(roundId);
       updateTaskStatus("running");
       setRoleStatus("director", "queued", {{ force: true }});
+    }});
+    source.addEventListener("user.input_queued", (event) => {{
+      upsertPendingInput(parseRelayEvent(event));
+    }});
+    source.addEventListener("user.input_steered", (event) => {{
+      upsertPendingInput(parseRelayEvent(event));
+    }});
+    source.addEventListener("user.input_cancelled", (event) => {{
+      const payload = parseRelayEvent(event);
+      removePendingInput(payload.id || payload.pending_input_id);
+    }});
+    source.addEventListener("user.input_consumed", (event) => {{
+      const payload = parseRelayEvent(event);
+      removePendingInput(payload.id || payload.pending_input_id);
     }});
     source.addEventListener("role.native_event", (event) => {{
       const payload = parseRelayEvent(event);
@@ -7549,6 +7832,12 @@ def _relay_task_detail_page(
       setRoleStatus(payload.role, payload.status, {{ force }});
       if (TERMINAL_ROLE_STATUSES.has(payload.status)) clearRolePreview(payload.role);
     }});
+    source.addEventListener("task.waiting_user", (event) => {{
+      const payload = parseRelayEvent(event);
+      if (!isCurrentRoundEvent(payload)) return;
+      updateTaskStatus("waiting_user");
+      ensurePlanControl(payload);
+    }});
     source.addEventListener("task.completed", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
@@ -7587,6 +7876,20 @@ def _relay_task_detail_page(
       }}
       if ((attachments.images || []).length) data.images = attachments.images;
       if ((attachments.files || []).length) data.files = attachments.files;
+      if (relayTaskAcceptsPendingInput()) {{
+        const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/inputs${{TOKEN_SUFFIX}}`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify(data),
+        }});
+        if (!response.ok) return;
+        const payload = await response.json();
+        upsertPendingInput(payload.pending_input || payload);
+        form.reset();
+        window.marvisRelayAttachments?.clear();
+        updateRelayComposerAction();
+        return;
+      }}
       const localKey = `local-followup:${{Date.now()}}`;
       clearMarvisConversationPausedRows();
       appendMarvisConversationUser(data.text || "已添加附件", localKey, true, attachments);
