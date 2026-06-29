@@ -475,6 +475,7 @@ def test_reconcile_recovers_late_valid_delta_for_current_round(tmp_path: Path) -
         for attempt in _attempt_rows(service)
         if attempt["round_id"] == 1 and attempt["role"] == "director"
     )
+    current_round = _round_rows(service)[0]
     routing = [
         artifact
         for artifact in refreshed.artifacts
@@ -483,6 +484,7 @@ def test_reconcile_recovers_late_valid_delta_for_current_round(tmp_path: Path) -
 
     assert changed is True
     assert refreshed.task.status == "running"
+    assert current_round["closed_at"] is None
     assert jobs["director"].status == "passed"
     assert jobs["auditor"].status == "streaming"
     assert director_attempt["completion_event_id"] == completed.id

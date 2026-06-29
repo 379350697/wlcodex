@@ -266,7 +266,7 @@ class RelayLifecycleStore:
         self._conn.execute(
             """
             UPDATE relay_rounds
-            SET status = ?, updated_at = ?, closed_at = COALESCE(?, closed_at)
+            SET status = ?, updated_at = ?, closed_at = ?
             WHERE team_run_id = ? AND round_id = ?
             """,
             (status, now, closed_at, team_run_id, round_id),
@@ -450,7 +450,7 @@ class RelayLifecycleStore:
                 error_artifact_id = COALESCE(?, error_artifact_id),
                 retry_count = retry_count + ?,
                 updated_at = ?,
-                closed_at = COALESCE(?, closed_at)
+                closed_at = ?
             WHERE id = ?
             """,
             (
