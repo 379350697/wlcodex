@@ -397,6 +397,54 @@ class Ledger:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS relay_rounds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_run_id INTEGER NOT NULL,
+                round_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                trigger_kind TEXT NOT NULL DEFAULT '',
+                trigger_artifact_id INTEGER,
+                route TEXT NOT NULL DEFAULT '',
+                required_roles_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                closed_at TEXT,
+                UNIQUE(team_run_id, round_id),
+                FOREIGN KEY(team_run_id) REFERENCES team_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_rounds_task_status
+                ON relay_rounds(team_run_id, status, round_id);
+
+            CREATE TABLE IF NOT EXISTS relay_role_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_run_id INTEGER NOT NULL,
+                round_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                attempt_no INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT '',
+                native_session_id TEXT NOT NULL DEFAULT '',
+                agent_run_id INTEGER,
+                turn_id TEXT NOT NULL DEFAULT '',
+                active_turn_id TEXT NOT NULL DEFAULT '',
+                dispatch_artifact_id INTEGER,
+                completion_event_id INTEGER,
+                completion_artifact_id INTEGER,
+                error_artifact_id INTEGER,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                closed_at TEXT,
+                UNIQUE(team_run_id, round_id, role, attempt_no),
+                FOREIGN KEY(team_run_id) REFERENCES team_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_attempts_task_round_role
+                ON relay_role_attempts(team_run_id, round_id, role, attempt_no);
+            CREATE INDEX IF NOT EXISTS idx_relay_attempts_agent_run
+                ON relay_role_attempts(agent_run_id, active_turn_id);
+
             CREATE TABLE IF NOT EXISTS team_assignments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 team_run_id INTEGER NOT NULL,

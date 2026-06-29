@@ -583,7 +583,7 @@ async def test_relay_events_snapshot_does_not_duplicate_projected_runtime_delta(
 
 
 @pytest.mark.asyncio
-async def test_relay_sse_snapshot_does_not_advance_role_completion(
+async def test_relay_sse_snapshot_accepts_durable_valid_role_completion(
     tmp_path: Path,
 ) -> None:
     service = _relay_service(tmp_path)
@@ -660,8 +660,8 @@ async def test_relay_sse_snapshot_does_not_advance_role_completion(
     assert "event: role.native_event" in response
     assert '"kind": "message_completed"' in response
     jobs = {job.role: job for job in service.get_task(task.id).role_jobs}
-    assert jobs["implementer"].status == "streaming"
-    assert jobs["tester"].status == "idle"
+    assert jobs["implementer"].status == "passed"
+    assert jobs["tester"].status == "streaming"
 
 
 @pytest.mark.asyncio

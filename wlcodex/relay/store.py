@@ -6,6 +6,7 @@ from typing import Any
 from wlcodex.models import TeamAgentJob, TeamArtifact, TeamRun
 from wlcodex.relay.artifact_types import is_relay_artifact_type
 from wlcodex.relay.context import build_relay_board
+from wlcodex.relay.lifecycle import RelayLifecycleStore
 from wlcodex.relay.models import (
     RELAY_ROLE_IDS,
     HandoffPacket,
@@ -25,6 +26,8 @@ RELAY_ASSIGNMENT_PREFIX = "relay.assignment."
 class RelayStore:
     def __init__(self, ledger: Any) -> None:
         self._ledger = ledger
+        self.lifecycle = RelayLifecycleStore(ledger)
+        self.lifecycle.backfill_all_relay_tasks()
 
     def create_task(
         self,
@@ -59,6 +62,7 @@ class RelayStore:
                 model_profile=role_provider_snapshot.get(role, provider),
                 status="queued" if role == "director" else "idle",
             )
+        self.lifecycle.create_initial_round(team_run.id)
         task = self._task_from_run(team_run)
         board = build_relay_board(
             task,
@@ -127,9 +131,12 @@ class RelayStore:
         team_run = self._ledger.get_team_run(task_id)
         if team_run is None or team_run.route != "relay":
             raise KeyError(f"unknown relay task id: {task_id}")
+        self.lifecycle.backfill_task(task_id)
+        self.lifecycle.sync_legacy_projection(task_id)
+        team_run = self._ledger.get_team_run(task_id)
         task = self._task_from_run(team_run)
         artifacts = self._relay_artifacts(task_id)
-        current_round_id = _current_round_id(artifacts)
+        current_round_id = self.current_round_id(task_id)
         current_artifacts = _artifacts_for_round(artifacts, current_round_id)
         board = self._latest_board(task, current_artifacts or artifacts)
         latest_handoff = self._latest_handoff(current_artifacts)
@@ -185,14 +192,18 @@ class RelayStore:
         next_payload = dict(payload)
         if role:
             next_payload.setdefault("relay_role", role)
+        next_payload.setdefault("artifact_type", artifact_type)
         next_payload.setdefault("round_id", self.current_round_id(task_id))
-        return self._ledger.record_team_artifact(
+        artifact = self._ledger.record_team_artifact(
             team_run_id=task_id,
             agent_job_id=job.id if job else None,
             artifact_type=artifact_type,
             summary=summary or str(next_payload.get("summary") or artifact_type),
             payload=next_payload,
         )
+        self.lifecycle.observe_artifact(task_id, artifact.id, artifact.payload)
+        self.lifecycle.sync_legacy_projection(task_id)
+        return artifact
 
     def save_handoff_packet(
         self,
@@ -222,18 +233,41 @@ class RelayStore:
         ]
 
     def current_round_id(self, task_id: int) -> int:
-        return _current_round_id(self._relay_artifacts(task_id))
+        return self.lifecycle.current_round_id(
+            task_id,
+            fallback=_current_round_id(self._relay_artifacts(task_id)),
+        )
 
     def next_round_id(self, task_id: int) -> int:
         return self.current_round_id(task_id) + 1
 
+    def start_followup_round(self, task_id: int) -> int:
+        return self.lifecycle.start_followup_round(task_id)
+
     def update_role_status(self, task_id: int, role: str, status: str) -> RelayRoleJob:
-        job = self._team_job_for_role(task_id, role)
-        self._ledger.update_team_agent_job_status(job.id, status)
+        if status == "idle":
+            round_id = self.current_round_id(task_id)
+            try:
+                self.lifecycle.latest_attempt(task_id, round_id, role)
+            except KeyError:
+                job = self._team_job_for_role(task_id, role)
+                self._ledger.update_team_agent_job_status(job.id, status)
+            else:
+                self.lifecycle.update_attempt(task_id, round_id, role, status="superseded")
+                self.lifecycle.sync_legacy_projection(task_id)
+            return next(
+                role_job
+                for role_job in self._role_jobs(task_id)
+                if role_job.role == role
+            )
+        round_id = self.current_round_id(task_id)
+        self.lifecycle.update_attempt(task_id, round_id, role, status=status)
+        self.lifecycle.sync_legacy_projection(task_id)
         return next(role_job for role_job in self._role_jobs(task_id) if role_job.role == role)
 
     def update_task_status(self, task_id: int, status: str) -> None:
-        self._ledger.update_team_run_status(task_id, status)
+        self.lifecycle.set_round_status(task_id, self.current_round_id(task_id), status)
+        self.lifecycle.sync_legacy_projection(task_id)
 
     def find_role_by_agent_run_id(self, agent_run_id: int) -> tuple[int, str] | None:
         row = self._ledger._conn.execute(
@@ -275,7 +309,7 @@ class RelayStore:
                 (agent_run_id, job.id),
             )
             self._ledger._conn.commit()
-        self.save_artifact(
+        artifact = self.save_artifact(
             task_id,
             role,
             "role_dispatch_metadata",
@@ -298,6 +332,19 @@ class RelayStore:
                 else f"{role} dispatched via {provider or 'provider'}"
             ),
         )
+        self.lifecycle.update_attempt(
+            task_id,
+            self.current_round_id(task_id),
+            role,
+            status="streaming" if dispatch_verified else None,
+            provider=provider,
+            native_session_id=native_session_id,
+            agent_run_id=agent_run_id,
+            turn_id=turn_id,
+            active_turn_id=active_turn_id,
+            dispatch_artifact_id=artifact.id,
+        )
+        self.lifecycle.sync_legacy_projection(task_id)
         return next(
             role_job
             for role_job in self._role_jobs(task_id, artifacts=self._relay_artifacts(task_id))

@@ -410,6 +410,41 @@ class RelayService:
     def get_task(self, task_id: int) -> RelayTaskDetail:
         return self._store.get_task_detail(task_id)
 
+    async def ensure_task_lifecycle_current(
+        self,
+        task_id: int,
+        runtime_store: RuntimeEventStore | None = None,
+    ) -> bool:
+        self._store.lifecycle.backfill_task(task_id)
+        self._store.lifecycle.sync_legacy_projection(task_id)
+        runtime_store = runtime_store or RuntimeEventStore(self._store._ledger._conn)
+        round_id = self._store.current_round_id(task_id)
+        attempts = self._store.lifecycle.attempts_for_round(task_id, round_id)
+        changed = False
+        for role, attempt in attempts.items():
+            if not attempt.agent_run_id:
+                continue
+            if attempt.status in {"passed", "waiting", "interrupted", "superseded"}:
+                continue
+            turn_id = attempt.active_turn_id or attempt.turn_id
+            events = runtime_store.list_by_agent_run_tail(attempt.agent_run_id, limit=5000)
+            if turn_id:
+                events = [event for event in events if _runtime_event_matches_turn(event, turn_id)]
+            completed = _completed_role_envelope_event(events)
+            if completed is None:
+                continue
+            applied = await self._apply_native_completion_output(
+                task_id,
+                role,
+                runtime_event_id=int(getattr(completed, "id", 0) or 0),
+                output=_runtime_event_text(completed),
+                agent_run_id=attempt.agent_run_id,
+                completed_event=completed,
+            )
+            changed = changed or applied
+        self._store.lifecycle.sync_legacy_projection(task_id)
+        return changed
+
     def events_for_task(self, task_id: int, *, after: int = 0) -> list[RelayEvent]:
         return self._events.list_events(task_id, after=after)
 
@@ -653,6 +688,7 @@ class RelayService:
         output: str,
         *,
         dispatch_next: bool = True,
+        runtime_event_id: int = 0,
     ):
         result = parse_role_envelope(output)
         if not result.ok or result.envelope is None:
@@ -679,6 +715,7 @@ class RelayService:
                 output,
                 result.payload,
                 dispatch_next=dispatch_next,
+                runtime_event_id=runtime_event_id,
             )
         detail_for_output = self._store.get_task_detail(task_id)
         if role == "director" and not detail_for_output.routing_decision:
@@ -701,6 +738,8 @@ class RelayService:
             **envelope.to_json_dict(),
             "round_id": round_id,
         }
+        if runtime_event_id > 0:
+            envelope_payload["runtime_event_id"] = runtime_event_id
         display_text = humanize_role_envelope(envelope_payload)
         self._events.emit(
             task_id,
@@ -978,6 +1017,7 @@ class RelayService:
         payload: dict[str, Any],
         *,
         dispatch_next: bool,
+        runtime_event_id: int = 0,
     ):
         result = parse_role_envelope(payload)
         if role != "director":
@@ -1011,6 +1051,8 @@ class RelayService:
             "output": output,
             "open_questions": envelope.open_questions,
         }
+        if runtime_event_id > 0:
+            artifact_payload["runtime_event_id"] = runtime_event_id
         self._store.save_artifact(
             task_id,
             role,
@@ -1386,7 +1428,12 @@ class RelayService:
             return None
         if runtime_event_id > 0:
             self._handled_runtime_completion_ids.add(runtime_event_id)
-        return await self.handle_role_output(task_id, role, output)
+        return await self.handle_role_output(
+            task_id,
+            role,
+            output,
+            runtime_event_id=runtime_event_id,
+        )
 
     async def _apply_native_completion_output(
         self,
@@ -1519,14 +1566,7 @@ class RelayService:
             images=clean_images,
             files=clean_files,
         )
-        starts_new_visible_turn = detail.task.status in {
-            "waiting_user",
-            "completed",
-            "blocked",
-            "failed",
-            "interrupted",
-        }
-        round_id = self._store.next_round_id(task_id)
+        round_id = self._store.start_followup_round(task_id)
         board = detail.board
         self._store.save_artifact(
             task_id,
@@ -1541,23 +1581,6 @@ class RelayService:
             },
             summary="User follow-up routed to director",
         )
-        if starts_new_visible_turn:
-            self._store.update_task_status(task_id, "running")
-            for job in detail.role_jobs:
-                if job.role == "director":
-                    continue
-                if job.status != "idle":
-                    self._store.update_role_status(task_id, job.role, "idle")
-                    self._events.emit(
-                        task_id,
-                        "role.status",
-                        role=job.role,
-                        payload={
-                            "status": "idle",
-                            "reason": "new_followup_turn",
-                            "round_id": round_id,
-                        },
-                    )
         self._store.update_role_status(task_id, "director", "queued")
         refreshed = self._store.get_task_detail(task_id)
         packet = build_role_context_packet(
@@ -1716,6 +1739,15 @@ class RelayService:
     def project_runtime_event(self, runtime_event: Any) -> None:
         self._project_native_event(runtime_event)
         if self._project_runtime_delta(runtime_event):
+            if _runtime_delta_is_complete_role_envelope(runtime_event):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(self.handle_runtime_event(runtime_event))
+                    return
+                task = loop.create_task(self.handle_runtime_event(runtime_event))
+                self._runtime_tasks.add(task)
+                task.add_done_callback(self._runtime_task_done)
             return
         if not self._is_runtime_completion(runtime_event) and not _is_runtime_failure(
             runtime_event
@@ -1924,6 +1956,8 @@ class RelayService:
                         role=job.role,
                     ):
                         projected += 1
+                        if _runtime_delta_is_complete_role_envelope(event):
+                            await self.handle_runtime_event(event)
                         continue
                     if self._is_runtime_completion(event) or _is_runtime_failure(event):
                         await self.handle_runtime_event(event)

@@ -1190,6 +1190,12 @@ class WorkerLiveStreamServer:
         self._native_background_tasks[key] = task
         return True
 
+    async def _relay_task_detail_after_reconcile(self, task_id: int) -> Any:
+        if self._relay_service is None:
+            raise KeyError(f"unknown relay task id: {task_id}")
+        await self._relay_service.ensure_task_lifecycle_current(task_id)
+        return self._relay_service.get_task(task_id)
+
     async def _handle_relay_ui_route(
         self,
         writer: asyncio.StreamWriter,
@@ -1318,7 +1324,7 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 503, {"error": "relay service unavailable"})
             return
         try:
-            detail = self._relay_service.get_task(task_id)
+            detail = await self._relay_task_detail_after_reconcile(task_id)
         except KeyError:
             await self._send_json(writer, 404, {"error": "relay task not found"})
             return
@@ -1435,10 +1441,11 @@ class WorkerLiveStreamServer:
                         files=_safe_relay_file_attachments(body.get("files")),
                     )
                     await self._relay_service.dispatch_role(task.id, "director")
+                    detail = await self._relay_task_detail_after_reconcile(task.id)
                     await self._send_json(
                         writer,
                         200,
-                        {"task": self._relay_service.get_task(task.id).task.to_dict()},
+                        {"task": detail.task.to_dict()},
                     )
                     return
                 await self._send_json(writer, 405, {"error": "method not allowed"})
@@ -1453,7 +1460,7 @@ class WorkerLiveStreamServer:
                 if method != "GET":
                     await self._send_json(writer, 405, {"error": "method not allowed"})
                     return
-                detail = self._relay_service.get_task(task_id)
+                detail = await self._relay_task_detail_after_reconcile(task_id)
                 await self._send_json(writer, 200, detail.to_dict())
                 return
             if suffix == "/events":
@@ -1464,6 +1471,7 @@ class WorkerLiveStreamServer:
                 live = "text/event-stream" in headers.get("accept", "").lower()
                 relay_event_queue = self._relay_service.subscribe_events(task_id) if live else None
                 try:
+                    await self._relay_service.ensure_task_lifecycle_current(task_id)
                     events = self._relay_service.events_for_task(task_id, after=after)
                     detail = self._relay_service.get_task(task_id)
                 except Exception:
@@ -1484,7 +1492,7 @@ class WorkerLiveStreamServer:
                 if method != "GET":
                     await self._send_json(writer, 405, {"error": "method not allowed"})
                     return
-                detail = self._relay_service.get_task(task_id)
+                detail = await self._relay_task_detail_after_reconcile(task_id)
                 await self._send_json(
                     writer,
                     200,
@@ -1498,6 +1506,7 @@ class WorkerLiveStreamServer:
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
                     return
+                await self._relay_service.ensure_task_lifecycle_current(task_id)
                 await self._relay_service.add_user_message(
                     task_id,
                     str(body.get("text") or body.get("prompt") or ""),
@@ -1507,7 +1516,7 @@ class WorkerLiveStreamServer:
                 await self._send_json(
                     writer,
                     200,
-                    self._relay_service.get_task(task_id).to_dict(),
+                    (await self._relay_task_detail_after_reconcile(task_id)).to_dict(),
                 )
                 return
             if suffix == "/resume":
@@ -1517,6 +1526,7 @@ class WorkerLiveStreamServer:
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
                     return
+                await self._relay_service.ensure_task_lifecycle_current(task_id)
                 role = _optional_nonempty_string(body.get("role"))
                 if not role:
                     detail = self._relay_service.get_task(task_id)
@@ -1536,7 +1546,7 @@ class WorkerLiveStreamServer:
                 await self._send_json(
                     writer,
                     200,
-                    self._relay_service.get_task(task_id).to_dict(),
+                    (await self._relay_task_detail_after_reconcile(task_id)).to_dict(),
                 )
                 return
             if suffix == "/interrupt":
@@ -1546,6 +1556,7 @@ class WorkerLiveStreamServer:
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
                     return
+                await self._relay_service.ensure_task_lifecycle_current(task_id)
                 await self._relay_service.interrupt(
                     task_id,
                     role=_optional_nonempty_string(body.get("role")),
@@ -1553,7 +1564,7 @@ class WorkerLiveStreamServer:
                 await self._send_json(
                     writer,
                     200,
-                    self._relay_service.get_task(task_id).to_dict(),
+                    (await self._relay_task_detail_after_reconcile(task_id)).to_dict(),
                 )
                 return
             await self._send_json(writer, 404, {"error": "not found"})
