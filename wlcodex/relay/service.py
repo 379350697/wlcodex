@@ -194,7 +194,9 @@ def _relay_images_for_role(artifacts: list[dict[str, Any]], role: str) -> list[d
 
 def _clean_execution_mode(value: str) -> str:
     mode = str(value or "simple").strip()
-    return mode if mode in {"simple", "plan_first", "goal", "team", "auto"} else "simple"
+    if mode == "team":
+        return "auto"
+    return mode if mode in {"simple", "plan_first", "goal", "auto"} else "simple"
 
 
 def _clean_team_strategy(value: str) -> str:
@@ -214,6 +216,65 @@ def _clean_team_strategy(value: str) -> str:
     return strategy if strategy in allowed else "none"
 
 
+def _clean_allow_subagents(value: str) -> str:
+    mode = str(value or "auto").strip()
+    return mode if mode in {"auto", "off"} else "auto"
+
+
+def _subagent_execution_strategy(
+    *,
+    allow_subagents: str = "auto",
+    legacy_team_strategy: str = "none",
+) -> dict[str, Any]:
+    allow = _clean_allow_subagents(allow_subagents)
+    if _clean_team_strategy(legacy_team_strategy) != "none":
+        allow = "auto"
+    return {
+        "allow_subagents": allow,
+        "subagent_decision_json": {},
+    }
+
+
+def _subagent_decision_for_provider(
+    *,
+    provider_name: str,
+    allow_subagents: str,
+) -> dict[str, Any]:
+    provider_key = str(provider_name or "").strip().lower()
+    allow = _clean_allow_subagents(allow_subagents)
+    if allow == "off":
+        capability = "disabled_by_relay"
+        allowed = False
+    elif provider_key == "codex":
+        capability = "explicit_subagents"
+        allowed = True
+    elif provider_key.startswith("claude"):
+        capability = "builtin_subagents"
+        allowed = True
+    else:
+        capability = "prompt_fallback"
+        allowed = True
+    return {
+        "provider": provider_key or str(provider_name or ""),
+        "allowed": allowed,
+        "capability": capability,
+        "reason": "子代理由当前角色按任务需要自行判断；Relay 不暴露手工子代理用途。",
+    }
+
+
+def _merge_subagent_decision_into_strategy(
+    execution_strategy: dict[str, Any] | None,
+    provider_mode: dict[str, Any],
+) -> dict[str, Any]:
+    strategy = dict(execution_strategy) if isinstance(execution_strategy, dict) else {}
+    strategy["allow_subagents"] = _clean_allow_subagents(
+        str(provider_mode.get("allow_subagents") or strategy.get("allow_subagents") or "auto")
+    )
+    decision = provider_mode.get("subagent_decision_json")
+    strategy["subagent_decision_json"] = decision if isinstance(decision, dict) else {}
+    return strategy
+
+
 def _provider_mode_for_attempt(
     *,
     provider_name: str,
@@ -224,12 +285,18 @@ def _provider_mode_for_attempt(
     strategy = round_execution.get("execution_strategy")
     if not isinstance(strategy, dict):
         strategy = {}
-    team_strategy = _clean_team_strategy(str(strategy.get("team_strategy") or "none"))
+    allow_subagents = _clean_allow_subagents(str(strategy.get("allow_subagents") or "auto"))
+    subagent_decision = _subagent_decision_for_provider(
+        provider_name=provider_name,
+        allow_subagents=allow_subagents,
+    )
     provider_key = str(provider_name or "").strip().lower()
     kwargs: dict[str, Any] = {}
     metadata: dict[str, Any] = {
         "execution_mode": execution_mode,
-        "team_strategy": team_strategy,
+        "team_strategy": "none",
+        "allow_subagents": allow_subagents,
+        "subagent_decision_json": subagent_decision,
         "provider_mode": "default",
         "fallback": False,
     }
@@ -245,9 +312,6 @@ def _provider_mode_for_attempt(
             metadata["fallback"] = True
     elif execution_mode == "goal":
         metadata["provider_mode"] = "prompt_goal_contract"
-        metadata["fallback"] = True
-    elif execution_mode == "team" or team_strategy != "none":
-        metadata["provider_mode"] = "provider_team_topology"
         metadata["fallback"] = True
     return kwargs, metadata
 
@@ -343,12 +407,17 @@ class RelayService:
         files: list[dict[str, Any]] | None = None,
         execution_mode: str = "simple",
         execution_goal: str = "",
+        allow_subagents: str = "auto",
         team_strategy: str = "none",
     ) -> RelayTask:
         clean_images = _relay_clean_image_attachments(images)
         clean_files = _relay_clean_text_file_attachments(files)
         clean_execution_mode = _clean_execution_mode(execution_mode)
         clean_team_strategy = _clean_team_strategy(team_strategy)
+        execution_strategy = _subagent_execution_strategy(
+            allow_subagents=allow_subagents,
+            legacy_team_strategy=clean_team_strategy,
+        )
         base_provider = provider or self._default_provider
         assignments = (
             self._normalize_assignments(role_providers)
@@ -367,7 +436,7 @@ class RelayService:
             1,
             execution_mode=clean_execution_mode,
             execution_goal=str(execution_goal or ""),
-            execution_strategy={"team_strategy": clean_team_strategy},
+            execution_strategy=execution_strategy,
         )
         if clean_images or clean_files:
             self._store.save_artifact(
@@ -613,6 +682,19 @@ class RelayService:
             provider_name=provider_name,
             role=role,
             round_execution=round_execution,
+        )
+        self._store.lifecycle.set_round_execution(
+            task_id,
+            round_id,
+            execution_mode=str(round_execution.get("execution_mode") or "simple"),
+            execution_goal=str(round_execution.get("execution_goal") or ""),
+            execution_strategy=_merge_subagent_decision_into_strategy(
+                round_execution.get("execution_strategy")
+                if isinstance(round_execution.get("execution_strategy"), dict)
+                else {},
+                provider_mode,
+            ),
+            waiting_reason=str(round_execution.get("waiting_reason") or "none"),
         )
         provider_kwargs = {"images": images} if images else {}
         provider_kwargs.update(mode_kwargs)

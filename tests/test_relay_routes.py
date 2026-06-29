@@ -238,7 +238,7 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
             "provider": "claude",
             "execution_mode": "goal",
             "execution_goal": "ship relay lifecycle",
-            "team_strategy": "code_review",
+            "allow_subagents": "auto",
         }
     )
     service = _relay_service(tmp_path)
@@ -268,7 +268,13 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
     round_execution = service._store.lifecycle.round_execution(task_id, 1)
     assert round_execution["execution_mode"] == "goal"
     assert round_execution["execution_goal"] == "ship relay lifecycle"
-    assert round_execution["execution_strategy"]["team_strategy"] == "code_review"
+    assert round_execution["execution_strategy"]["allow_subagents"] == "auto"
+    assert round_execution["execution_strategy"]["subagent_decision_json"]["provider"] == "claude"
+    assert (
+        round_execution["execution_strategy"]["subagent_decision_json"]["capability"]
+        == "builtin_subagents"
+    )
+    assert "team_strategy" not in round_execution["execution_strategy"]
 
     get_response = await _request_relay(
         tmp_path,

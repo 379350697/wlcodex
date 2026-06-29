@@ -302,6 +302,157 @@ def test_antigravity_plan_first_uses_prompt_fallback_without_unknown_flags(tmp_p
     assert attempt.provider_mode["provider_mode"] == "prompt_plan_fallback"
 
 
+def test_legacy_team_mode_normalizes_to_auto_with_subagents_allowed(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Use helpers if useful",
+        workspace="/repo",
+        provider="claude",
+        execution_mode="team",
+    )
+
+    execution = service._store.lifecycle.round_execution(task.id, 1)
+
+    assert execution["execution_mode"] == "auto"
+    assert execution["execution_strategy"] == {
+        "allow_subagents": "auto",
+        "subagent_decision_json": {},
+    }
+
+
+def test_legacy_team_strategy_allows_subagents_without_preserving_manual_strategy(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Review if useful",
+        workspace="/repo",
+        provider="claude",
+        execution_mode="goal",
+        team_strategy="code_review",
+    )
+
+    execution = service._store.lifecycle.round_execution(task.id, 1)
+
+    assert execution["execution_mode"] == "goal"
+    assert execution["execution_strategy"] == {
+        "allow_subagents": "auto",
+        "subagent_decision_json": {},
+    }
+    assert "team_strategy" not in execution["execution_strategy"]
+
+
+def test_plan_first_with_subagents_keeps_provider_plan_mapping(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Plan it",
+        workspace="/repo",
+        provider="claude",
+        execution_mode="plan_first",
+        allow_subagents="auto",
+    )
+
+    asyncio.run(service.dispatch_role(task.id, "architect"))
+
+    assert provider.calls[-1][0] == "start_session"
+    assert provider.calls[-1][3]["permission_mode"] == "plan"
+    metadata = [
+        artifact
+        for artifact in service.get_task(task.id).artifacts
+        if artifact.get("artifact_type") == "role_dispatch_metadata"
+        and artifact.get("relay_role") == "architect"
+    ][-1]
+    assert metadata["provider_mode"]["provider_mode"] == "claude_plan"
+    assert metadata["provider_mode"]["allow_subagents"] == "auto"
+    assert metadata["provider_mode"]["subagent_decision_json"]["provider"] == "claude"
+    assert metadata["provider_mode"]["subagent_decision_json"]["capability"] == "builtin_subagents"
+    execution = service._store.lifecycle.round_execution(task.id, 1)
+    assert execution["execution_strategy"]["allow_subagents"] == "auto"
+    assert execution["execution_strategy"]["subagent_decision_json"]["provider"] == "claude"
+    assert (
+        execution["execution_strategy"]["subagent_decision_json"]["capability"]
+        == "builtin_subagents"
+    )
+    assert service._store.lifecycle.latest_attempt(task.id, 1, "architect").team_strategy == "none"
+
+
+def test_subagents_do_not_use_provider_team_topology_mode(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Use helpers if useful",
+        workspace="/repo",
+        provider="claude",
+        execution_mode="team",
+    )
+
+    asyncio.run(service.dispatch_role(task.id, "director"))
+
+    metadata = [
+        artifact
+        for artifact in service.get_task(task.id).artifacts
+        if artifact.get("artifact_type") == "role_dispatch_metadata"
+        and artifact.get("relay_role") == "director"
+    ][-1]
+    assert metadata["provider_mode"]["execution_mode"] == "auto"
+    assert metadata["provider_mode"]["allow_subagents"] == "auto"
+    assert metadata["provider_mode"]["provider_mode"] != "provider_team_topology"
+    assert service._store.lifecycle.latest_attempt(task.id, 1, "director").team_strategy == "none"
+
+
+def test_subagent_decision_is_scoped_to_each_role_provider(tmp_path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    claude = FakeProvider()
+    codex = FakeCodexProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([claude, codex]),
+        default_provider="claude",
+    )
+    task = service.create_task(
+        title="Relay",
+        prompt="Plan with mixed providers",
+        workspace="/repo",
+        provider="claude",
+        role_providers={
+            "director": "claude",
+            "architect": "codex",
+            "implementer": "claude",
+            "tester": "claude",
+            "auditor": "claude",
+        },
+        execution_mode="plan_first",
+        allow_subagents="auto",
+    )
+
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    asyncio.run(service.dispatch_role(task.id, "architect"))
+
+    artifacts = [
+        artifact
+        for artifact in service.get_task(task.id).artifacts
+        if artifact.get("artifact_type") == "role_dispatch_metadata"
+    ]
+    director_metadata = next(
+        artifact for artifact in artifacts if artifact.get("relay_role") == "director"
+    )
+    architect_metadata = next(
+        artifact for artifact in artifacts if artifact.get("relay_role") == "architect"
+    )
+    assert (
+        director_metadata["provider_mode"]["subagent_decision_json"]["capability"]
+        == "builtin_subagents"
+    )
+    assert (
+        architect_metadata["provider_mode"]["subagent_decision_json"]["capability"]
+        == "explicit_subagents"
+    )
+    execution = service._store.lifecycle.round_execution(task.id, 1)
+    assert execution["execution_strategy"]["subagent_decision_json"]["provider"] == "codex"
+
+
 @pytest.mark.asyncio
 async def test_running_user_input_defaults_to_pending_next_round(tmp_path) -> None:
     service, provider = _active_turn_service(tmp_path)

@@ -1461,9 +1461,12 @@ async def test_marvis_relay_chat_home_is_the_only_new_task_entry(
     assert 'name="execution_mode" value="simple" checked' in response
     assert 'name="execution_mode" value="plan_first"' in response
     assert 'name="execution_mode" value="goal"' in response
-    assert 'name="execution_mode" value="team"' in response
     assert 'name="execution_mode" value="auto"' in response
-    assert 'select name="team_strategy"' in response
+    assert 'name="execution_mode" value="team"' not in response
+    assert 'name="allow_subagents" value="auto" checked' in response
+    assert 'name="allow_subagents" value="off"' in response
+    assert 'select name="team_strategy"' not in response
+    assert "团队策略" not in response
     assert '<input name="title" autocomplete="off" placeholder="请在此输入任务">' in response
     assert '<input type="hidden" name="prompt" value="">' in response
     assert '<input type="hidden" name="execution_goal" value="">' in response
@@ -1472,6 +1475,57 @@ async def test_marvis_relay_chat_home_is_the_only_new_task_entry(
     assert 'href="/native/workflows/relay?token=secret&amp;workspace=/repo"' in response
     assert "新接力任务" not in response
     assert "relay-create-modal" not in response
+
+
+@pytest.mark.asyncio
+async def test_relay_work_log_shows_subagent_dispatch_decision(tmp_path: Path) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Plan with helpers",
+        prompt="Plan with helpers",
+        workspace="/repo",
+        provider="claude",
+        execution_mode="plan_first",
+        allow_subagents="auto",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "architect",
+        provider="claude",
+        provider_engine="sdk-test",
+        native_session_id="native-architect-1",
+        dispatch_verified=True,
+        provider_mode={
+            "execution_mode": "plan_first",
+            "team_strategy": "none",
+            "allow_subagents": "auto",
+            "provider_mode": "claude_plan",
+            "fallback": False,
+            "subagent_decision_json": {
+                "provider": "claude",
+                "allowed": True,
+                "capability": "builtin_subagents",
+                "reason": "子代理由当前角色按任务需要自行判断；Relay 不暴露手工子代理用途。",
+            },
+        },
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    work_log_html = _relay_work_log_html(response)
+    assert "Claude plan" in work_log_html
+    assert "子代理自动" in work_log_html
+    assert "builtin_subagents" in work_log_html
+    assert "provider_team_topology" not in work_log_html
 
 
 @pytest.mark.asyncio
