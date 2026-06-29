@@ -1770,6 +1770,151 @@ def test_round_control_revise_records_comment_for_current_waiting_round(tmp_path
     assert "先只生成 HTML" in followup["text"]
 
 
+def test_waiting_envelope_persists_confirmation_options(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Waiting options",
+        prompt="Need a style decision",
+        workspace="/repo",
+        provider="claude",
+    )
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            json.dumps(
+                {
+                    "status": "waiting",
+                    "reason": "needs user direction",
+                    "role": "director",
+                    "artifact_type": "routing_decision",
+                    "handoff_to": "",
+                    "summary": "Need UI style direction.",
+                    "evidence_refs": [],
+                    "open_questions": ["Which visual style should be used?"],
+                    "confirmation_options": [
+                        {
+                            "id": "minimal",
+                            "label": "简约风格",
+                            "summary": "更接近原生 Codex。",
+                            "instruction": "采用简约、克制、手机原生风格。",
+                        },
+                        {
+                            "id": "cyber",
+                            "label": "赛博风格",
+                            "summary": "更强视觉冲击。",
+                            "instruction": "采用赛博风格，但仍保持可读。",
+                        },
+                    ],
+                    "next_action": "wait for user choice",
+                    "complexity": "standard",
+                    "risk": "medium",
+                    "route": "waiting_user",
+                    "required_roles": ["director"],
+                    "acceptance_criteria": ["style confirmed"],
+                    "stop_conditions": [],
+                    "requires_user_approval": True,
+                }
+            ),
+            dispatch_next=False,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    routing = next(
+        artifact
+        for artifact in reversed(detail.artifacts)
+        if artifact.get("artifact_type") == "routing_decision"
+    )
+    assert detail.task.status == "waiting_user"
+    assert routing["confirmation_options"] == [
+        {
+            "id": "minimal",
+            "label": "简约风格",
+            "summary": "更接近原生 Codex。",
+            "instruction": "采用简约、克制、手机原生风格。",
+        },
+        {
+            "id": "cyber",
+            "label": "赛博风格",
+            "summary": "更强视觉冲击。",
+            "instruction": "采用赛博风格，但仍保持可读。",
+        },
+    ]
+
+
+def test_round_control_continue_records_selected_confirmation_option(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Waiting options",
+        prompt="Need a style decision",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            json.dumps(
+                {
+                    "status": "waiting",
+                    "reason": "needs user direction",
+                    "role": "director",
+                    "artifact_type": "routing_decision",
+                    "handoff_to": "",
+                    "summary": "Need UI style direction.",
+                    "evidence_refs": [],
+                    "open_questions": ["Which visual style should be used?"],
+                    "confirmation_options": [
+                        {
+                            "id": "minimal",
+                            "label": "简约风格",
+                            "summary": "更接近原生 Codex。",
+                            "instruction": "采用简约、克制、手机原生风格。",
+                        }
+                    ],
+                    "next_action": "wait for user choice",
+                    "complexity": "standard",
+                    "risk": "medium",
+                    "route": "waiting_user",
+                    "required_roles": ["director"],
+                    "acceptance_criteria": ["style confirmed"],
+                    "stop_conditions": [],
+                    "requires_user_approval": True,
+                }
+            ),
+            dispatch_next=False,
+        )
+    )
+
+    result = asyncio.run(
+        service.apply_round_control(
+            task.id,
+            1,
+            decision="continue",
+            selected_option_id="minimal",
+            selected_option_label="简约风格",
+            selected_option_instruction="采用简约、克制、手机原生风格。",
+            dispatch_next=False,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    followup = next(
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "user_followup"
+    )
+    assert result["selected_option_id"] == "minimal"
+    assert followup["round_id"] == 1
+    assert followup["input_disposition"] == "current_waiting_round"
+    assert followup["selected_option_label"] == "简约风格"
+    assert followup["text"] == "采用简约、克制、手机原生风格。"
+    assert detail.current_round_id == 1
+    assert detail.task.status == "running"
+
+
 def test_user_followup_starts_clean_visible_turn_after_blocked_role(tmp_path) -> None:
     service, provider = _service(tmp_path)
     task = service.create_task(

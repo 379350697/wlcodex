@@ -50,6 +50,50 @@ def _clean_list(values: list[Any] | tuple[Any, ...] | None) -> list[str]:
     return [str(value) for value in values if str(value).strip()]
 
 
+def _clean_confirmation_options(values: Any) -> list[dict[str, str]]:
+    if not isinstance(values, list):
+        return []
+    options: list[dict[str, str]] = []
+    for index, item in enumerate(values[:6], start=1):
+        if isinstance(item, str):
+            label = item.strip()
+            summary = ""
+            instruction = label
+            option_id = f"option_{index}"
+        elif isinstance(item, dict):
+            option_id = str(item.get("id") or f"option_{index}").strip()
+            label = str(
+                item.get("label")
+                or item.get("title")
+                or item.get("name")
+                or item.get("summary")
+                or option_id
+            ).strip()
+            summary = str(item.get("summary") or item.get("description") or "").strip()
+            instruction = str(
+                item.get("instruction")
+                or item.get("prompt")
+                or item.get("value")
+                or item.get("text")
+                or label
+            ).strip()
+        else:
+            continue
+        if not label and not instruction:
+            continue
+        if not option_id:
+            option_id = f"option_{index}"
+        options.append(
+            {
+                "id": option_id,
+                "label": label or instruction,
+                "summary": summary,
+                "instruction": instruction or label,
+            }
+        )
+    return options
+
+
 @dataclass(frozen=True)
 class RelayTask:
     id: int
@@ -164,6 +208,7 @@ class RoleEnvelope:
     evidence_refs: list[str]
     open_questions: list[str]
     next_action: str
+    confirmation_options: list[dict[str, str]] = field(default_factory=list)
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "RoleEnvelope":
@@ -177,6 +222,9 @@ class RoleEnvelope:
             evidence_refs=_clean_list(payload.get("evidence_refs")),
             open_questions=_clean_list(payload.get("open_questions")),
             next_action=str(payload.get("next_action", "")).strip(),
+            confirmation_options=_clean_confirmation_options(
+                payload.get("confirmation_options")
+            ),
         )
 
     def to_json_dict(self) -> dict[str, Any]:

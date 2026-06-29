@@ -167,7 +167,7 @@ _STATIC_CONTENT_TYPES = {
     ".webp": "image/webp",
     ".svg": "image/svg+xml; charset=utf-8",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260628-task-list-construction"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260629-confirmation-card"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -1559,6 +1559,11 @@ class WorkerLiveStreamServer:
                         decision=str(body.get("decision") or ""),
                         artifact_id=_safe_int(str(body.get("artifact_id") or "0"), default=0),
                         comment=str(body.get("comment") or ""),
+                        selected_option_id=str(body.get("selected_option_id") or ""),
+                        selected_option_label=str(body.get("selected_option_label") or ""),
+                        selected_option_instruction=str(
+                            body.get("selected_option_instruction") or ""
+                        ),
                     )
                 except (KeyError, ValueError) as exc:
                     await self._send_json(writer, 400, {"error": str(exc)})
@@ -5272,7 +5277,7 @@ def _marvis_relay_followup_composer(
 
 def _marvis_relay_plan_control_html(detail: Any) -> str:
     round_id = int(getattr(detail, "current_round_id", 1) or 1)
-    plan_artifact: dict[str, Any] | None = None
+    waiting_artifact: dict[str, Any] | None = None
     for artifact in reversed(getattr(detail, "artifacts", []) or []):
         if str(artifact.get("artifact_type") or "") != "architecture_plan":
             continue
@@ -5280,28 +5285,132 @@ def _marvis_relay_plan_control_html(detail: Any) -> str:
             continue
         if str(artifact.get("status") or "") != "waiting":
             continue
-        plan_artifact = artifact
+        waiting_artifact = artifact
         break
-    if plan_artifact is None:
+    if waiting_artifact is None:
+        for artifact in reversed(getattr(detail, "artifacts", []) or []):
+            if int(artifact.get("round_id") or round_id) != round_id:
+                continue
+            if str(artifact.get("status") or "") != "waiting":
+                continue
+            waiting_artifact = artifact
+            break
+    if waiting_artifact is None:
         if str(getattr(getattr(detail, "task", None), "status", "") or "") != "waiting_user":
             return ""
-        return f"""
-    <section class="marvis-relay-plan-control" data-marvis-plan-control data-round-id="{round_id}" data-artifact-id="0" aria-label="确认操作">
-      <strong>等待确认</strong>
-      <button type="button" data-plan-decision="continue">确认继续</button>
-      <button type="button" data-waiting-input>补充说明</button>
-      <button type="button" data-plan-decision="cancel_plan">停止</button>
-    </section>
-    """
+        waiting_artifact = {
+            "id": 0,
+            "artifact_type": "",
+            "status": "waiting",
+            "summary": "当前接力需要你确认下一步。",
+            "open_questions": [],
+            "confirmation_options": [],
+        }
+    artifact_type = str(waiting_artifact.get("artifact_type") or "")
+    is_plan = artifact_type == "architecture_plan"
+    artifact_id = int(waiting_artifact.get("id") or 0)
+    title = "计划等待确认" if is_plan else "等待确认"
+    primary_label = "执行计划" if is_plan else "选择执行"
+    primary_decision = "approve_plan" if is_plan else "continue"
+    summary = str(waiting_artifact.get("summary") or "当前接力需要你确认下一步。").strip()
+    questions = [
+        str(item).strip()
+        for item in list(waiting_artifact.get("open_questions") or [])
+        if str(item).strip()
+    ]
+    options = _marvis_relay_confirmation_options(
+        waiting_artifact.get("confirmation_options")
+    )
+    option_html = "".join(
+        f"""
+        <button class="marvis-relay-confirmation-option" type="button"
+          data-confirmation-option-id="{escape(option["id"])}"
+          data-confirmation-option-label="{escape(option["label"])}"
+          data-confirmation-option-instruction="{escape(option["instruction"])}"
+          aria-pressed="{'true' if index == 0 else 'false'}">
+          <strong>{escape(option["label"])}</strong>
+          <span>{escape(option["summary"] or option["instruction"])}</span>
+        </button>
+        """
+        for index, option in enumerate(options)
+    )
+    question_html = "".join(
+        f"<li>{escape(question)}</li>" for question in questions
+    )
+    detail_body = summary
+    if questions:
+        detail_body = f"{summary}\n\n待确认：\n" + "\n".join(f"- {item}" for item in questions)
     return f"""
-    <section class="marvis-relay-plan-control" data-marvis-plan-control data-round-id="{round_id}" data-artifact-id="{int(plan_artifact.get("id") or 0)}" aria-label="计划操作">
-      <strong>计划等待确认</strong>
-      <button type="button" data-plan-decision="approve_plan">执行计划</button>
-      <button type="button" data-waiting-input>补充说明</button>
-      <button type="button" data-plan-decision="revise_plan">修改计划</button>
-      <button type="button" data-plan-decision="cancel_plan">停止</button>
+    <section class="marvis-relay-confirmation-card" data-marvis-confirmation-card data-marvis-plan-control data-round-id="{round_id}" data-artifact-id="{artifact_id}" aria-label="{escape(title)}">
+      <button class="marvis-relay-confirmation-thumb" type="button" data-marvis-confirmation-open aria-label="查看确认详情">
+        <span>{escape(title)}</span>
+        <strong>{escape(summary)}</strong>
+      </button>
+      <div class="marvis-relay-confirmation-options"{" hidden" if not option_html else ""}>
+        {option_html}
+      </div>
+      <div class="marvis-relay-confirmation-actions">
+        <button type="button" data-plan-decision="{escape(primary_decision)}">{escape(primary_label)}</button>
+        <button type="button" data-waiting-input>补充内容</button>
+        <button type="button" data-plan-decision="cancel_plan">停止</button>
+      </div>
     </section>
+    <div class="marvis-relay-confirmation-page" data-marvis-confirmation-page hidden>
+      <div class="marvis-relay-confirmation-page-shell">
+        <header>
+          <button type="button" data-marvis-confirmation-close aria-label="返回">‹</button>
+          <strong>{escape(title)}</strong>
+        </header>
+        <main>
+          <h2>{escape(summary)}</h2>
+          <p>{escape(detail_body)}</p>
+          <ul{" hidden" if not question_html else ""}>{question_html}</ul>
+        </main>
+      </div>
+    </div>
     """
+
+
+def _marvis_relay_confirmation_options(raw: Any) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    options: list[dict[str, str]] = []
+    for index, item in enumerate(raw[:6], start=1):
+        if isinstance(item, str):
+            label = item.strip()
+            summary = ""
+            instruction = label
+            option_id = f"option_{index}"
+        elif isinstance(item, dict):
+            option_id = str(item.get("id") or f"option_{index}").strip()
+            label = str(
+                item.get("label")
+                or item.get("title")
+                or item.get("name")
+                or item.get("summary")
+                or option_id
+            ).strip()
+            summary = str(item.get("summary") or item.get("description") or "").strip()
+            instruction = str(
+                item.get("instruction")
+                or item.get("prompt")
+                or item.get("value")
+                or item.get("text")
+                or label
+            ).strip()
+        else:
+            continue
+        if not label and not instruction:
+            continue
+        options.append(
+            {
+                "id": option_id or f"option_{index}",
+                "label": label or instruction,
+                "summary": summary,
+                "instruction": instruction or label,
+            }
+        )
+    return options
 
 
 @dataclass
@@ -7739,6 +7848,41 @@ def _relay_task_detail_page(
       }}
     }});
     let planControl = document.querySelector("[data-marvis-plan-control]");
+    function confirmationOptionsFromPayload(payload = {{}}) {{
+      const options = Array.isArray(payload.confirmation_options) ? payload.confirmation_options : [];
+      return options.slice(0, 6).map((item, index) => {{
+        if (typeof item === "string") {{
+          const label = item.trim();
+          return {{ id: `option_${{index + 1}}`, label, summary: "", instruction: label }};
+        }}
+        const source = item && typeof item === "object" ? item : {{}};
+        const id = String(source.id || `option_${{index + 1}}`).trim();
+        const label = String(source.label || source.title || source.name || source.summary || id).trim();
+        const summary = String(source.summary || source.description || "").trim();
+        const instruction = String(source.instruction || source.prompt || source.value || source.text || label).trim();
+        if (!label && !instruction) return null;
+        return {{ id, label: label || instruction, summary, instruction: instruction || label }};
+      }}).filter(Boolean);
+    }}
+    function confirmationOptionsHtml(options) {{
+      return options.map((option, index) => `<button class="marvis-relay-confirmation-option" type="button"
+          data-confirmation-option-id="${{marvisEscapeText(option.id)}}"
+          data-confirmation-option-label="${{marvisEscapeText(option.label)}}"
+          data-confirmation-option-instruction="${{marvisEscapeText(option.instruction)}}"
+          aria-pressed="${{index === 0 ? "true" : "false"}}">
+          <strong>${{marvisEscapeText(option.label)}}</strong>
+          <span>${{marvisEscapeText(option.summary || option.instruction)}}</span>
+        </button>`).join("");
+    }}
+    function hidePlanControlSurface() {{
+      document.querySelectorAll("[data-marvis-plan-control]").forEach((node) => {{
+        if (node instanceof HTMLElement) node.hidden = true;
+      }});
+      document.querySelectorAll("[data-marvis-confirmation-page]").forEach((node) => {{
+        if (node instanceof HTMLElement) node.hidden = true;
+      }});
+      planControl = null;
+    }}
     function ensurePlanControl(payload = {{}}) {{
       if (planControl && !planControl.hidden) return;
       if (planControl && planControl.hidden) {{
@@ -7748,27 +7892,71 @@ def _relay_task_detail_page(
       const roundId = String(payload.round_id || activeRelayRoundId || CURRENT_ROUND_ID || "1");
       const artifactId = String(payload.artifact_id || "0");
       const isPlanApproval = payload.waiting_reason === "plan_approval";
+      const title = isPlanApproval ? "计划等待确认" : "等待确认";
+      const primaryLabel = isPlanApproval ? "执行计划" : "选择执行";
+      const primaryDecision = isPlanApproval ? "approve_plan" : "continue";
+      const summary = String(payload.summary || payload.next_action || "当前接力需要你确认下一步。").trim();
+      const questions = Array.isArray(payload.open_questions) ? payload.open_questions.map((item) => String(item || "").trim()).filter(Boolean) : [];
+      const options = confirmationOptionsFromPayload(payload);
+      const optionHtml = confirmationOptionsHtml(options);
       const node = document.createElement("section");
       if (followupComposer) followupComposer.dataset.currentRoundId = roundId;
-      node.className = "marvis-relay-plan-control";
+      node.className = "marvis-relay-confirmation-card";
       node.setAttribute("data-marvis-plan-control", "");
+      node.setAttribute("data-marvis-confirmation-card", "");
       node.setAttribute("data-round-id", roundId);
       node.setAttribute("data-artifact-id", artifactId);
-      node.setAttribute("aria-label", isPlanApproval ? "计划操作" : "确认操作");
-      node.innerHTML = isPlanApproval ? `<strong>计划等待确认</strong>
-        <button type="button" data-plan-decision="approve_plan">执行计划</button>
-        <button type="button" data-waiting-input>补充说明</button>
-        <button type="button" data-plan-decision="revise_plan">修改计划</button>
-        <button type="button" data-plan-decision="cancel_plan">停止</button>` : `<strong>等待确认</strong>
-        <button type="button" data-plan-decision="continue">确认继续</button>
-        <button type="button" data-waiting-input>补充说明</button>
-        <button type="button" data-plan-decision="cancel_plan">停止</button>`;
+      node.setAttribute("aria-label", title);
+      node.innerHTML = `<button class="marvis-relay-confirmation-thumb" type="button" data-marvis-confirmation-open aria-label="查看确认详情">
+          <span>${{marvisEscapeText(title)}}</span>
+          <strong>${{marvisEscapeText(summary)}}</strong>
+        </button>
+        <div class="marvis-relay-confirmation-options"${{optionHtml ? "" : " hidden"}}>
+          ${{optionHtml}}
+        </div>
+        <div class="marvis-relay-confirmation-actions">
+          <button type="button" data-plan-decision="${{marvisEscapeText(primaryDecision)}}">${{marvisEscapeText(primaryLabel)}}</button>
+          <button type="button" data-waiting-input>补充内容</button>
+          <button type="button" data-plan-decision="cancel_plan">停止</button>
+        </div>`;
       document.querySelector(".marvis-relay-phone")?.appendChild(node);
+      const page = document.createElement("div");
+      page.className = "marvis-relay-confirmation-page";
+      page.setAttribute("data-marvis-confirmation-page", "");
+      page.hidden = true;
+      page.innerHTML = `<div class="marvis-relay-confirmation-page-shell">
+          <header>
+            <button type="button" data-marvis-confirmation-close aria-label="返回">‹</button>
+            <strong>${{marvisEscapeText(title)}}</strong>
+          </header>
+          <main>
+            <h2>${{marvisEscapeText(summary)}}</h2>
+            <p>${{marvisEscapeText(summary + (questions.length ? "\\n\\n待确认：\\n" + questions.map((item) => "- " + item).join("\\n") : ""))}}</p>
+          </main>
+        </div>`;
+      document.querySelector(".marvis-relay-phone")?.appendChild(page);
       planControl = node;
     }}
     document.addEventListener("click", async (event) => {{
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
+      const openConfirmation = target.closest("[data-marvis-confirmation-open]");
+      if (openConfirmation) {{
+        document.querySelector("[data-marvis-confirmation-page]")?.removeAttribute("hidden");
+        return;
+      }}
+      if (target.closest("[data-marvis-confirmation-close]")) {{
+        document.querySelector("[data-marvis-confirmation-page]")?.setAttribute("hidden", "");
+        return;
+      }}
+      const optionButton = target.closest("[data-confirmation-option-id]");
+      if (optionButton instanceof HTMLElement) {{
+        const control = optionButton.closest("[data-marvis-plan-control]");
+        control?.querySelectorAll("[data-confirmation-option-id]").forEach((node) => {{
+          if (node instanceof HTMLElement) node.setAttribute("aria-pressed", node === optionButton ? "true" : "false");
+        }});
+        return;
+      }}
       if (target.hasAttribute("data-waiting-input")) {{
         waitingControlInput = "revise_plan";
         followupTextInput?.setAttribute("placeholder", "说明你的想法或修改要求");
@@ -7788,21 +7976,26 @@ def _relay_task_detail_page(
       target.setAttribute("disabled", "disabled");
       const roundId = activePlanControl.getAttribute("data-round-id") || CURRENT_ROUND_ID;
       const artifactId = activePlanControl.getAttribute("data-artifact-id") || "0";
+      const selected = activePlanControl.querySelector("[data-confirmation-option-id][aria-pressed='true']") || activePlanControl.querySelector("[data-confirmation-option-id]");
+      const controlPayload = {{ decision, artifact_id: Number(artifactId) || 0 }};
+      if (selected instanceof HTMLElement && decision !== "cancel_plan") {{
+        controlPayload.selected_option_id = selected.getAttribute("data-confirmation-option-id") || "";
+        controlPayload.selected_option_label = selected.getAttribute("data-confirmation-option-label") || "";
+        controlPayload.selected_option_instruction = selected.getAttribute("data-confirmation-option-instruction") || "";
+      }}
       try {{
         const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/rounds/${{encodeURIComponent(roundId)}}/control${{TOKEN_SUFFIX}}`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ decision, artifact_id: Number(artifactId) || 0 }}),
+          body: JSON.stringify(controlPayload),
         }});
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         if (decision === "approve_plan" || decision === "continue") {{
-          activePlanControl.hidden = true;
-          if (activePlanControl === planControl) planControl = null;
+          hidePlanControlSurface();
           updateTaskStatus("running");
           waitingControlInput = "";
         }} else if (decision === "cancel_plan") {{
-          activePlanControl.hidden = true;
-          if (activePlanControl === planControl) planControl = null;
+          hidePlanControlSurface();
           updateTaskStatus("interrupted");
           waitingControlInput = "";
         }}
@@ -7982,9 +8175,7 @@ def _relay_task_detail_page(
         waitingControlInput = "";
         form.reset();
         window.marvisRelayAttachments?.clear();
-        const activePlanControl = document.querySelector("[data-marvis-plan-control]");
-        activePlanControl?.setAttribute("hidden", "");
-        if (activePlanControl === planControl) planControl = null;
+        hidePlanControlSurface();
         updateTaskStatus("running");
         updateRelayComposerAction();
         return;

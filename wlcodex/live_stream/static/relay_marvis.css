@@ -885,6 +885,188 @@ body[data-marvis-relay-view] .marvis-relay-plan-control button {
   font-weight: 800;
 }
 
+body[data-marvis-relay-view] .marvis-relay-confirmation-card {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--marvis-s25-composer-bottom) + var(--marvis-s25-composer-height) + 12px);
+  z-index: 11;
+  display: grid;
+  gap: 12px;
+  width: min(var(--marvis-s25-composer-width), calc(100% - var(--marvis-s25-composer-side-gap)));
+  max-height: min(48vh, 430px);
+  box-sizing: border-box;
+  transform: translateX(-50%);
+  overflow: auto;
+  border: 1px solid #ded9d1;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, .98);
+  padding: 14px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .10);
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-card[hidden] {
+  display: none;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-thumb {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #111;
+  text-align: left;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-thumb span {
+  color: #777;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-thumb strong {
+  color: #111;
+  font-size: 16px;
+  line-height: 1.38;
+  font-weight: 900;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-options {
+  display: grid;
+  gap: 8px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-options[hidden] {
+  display: none;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-option {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 11px 12px;
+  border: 1px solid #ded9d1;
+  border-radius: 14px;
+  background: #f7f5f1;
+  color: #111;
+  text-align: left;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-option[aria-pressed="true"] {
+  border-color: #111;
+  background: #fff;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-option strong {
+  color: #111;
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 900;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-option span {
+  color: #666;
+  font-size: 12px;
+  line-height: 1.36;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-actions button {
+  min-height: 38px;
+  border: 1px solid #ded9d1;
+  border-radius: 14px;
+  background: #fff;
+  color: #111;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-actions button:first-child {
+  border-color: #111;
+  background: #111;
+  color: #fff;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-page {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: #fff;
+  color: #111;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-page[hidden] {
+  display: none;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-page-shell {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 100%;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-page header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 68px;
+  box-sizing: border-box;
+  padding: 16px 24px;
+  background: rgba(255, 255, 255, .96);
+  border-bottom: 1px solid #ece8e0;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-page header button {
+  width: 38px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 19px;
+  background: #f4f1ec;
+  color: #111;
+  font-size: 28px;
+  line-height: 1;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-page header strong {
+  font-size: 18px;
+  font-weight: 900;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-page main {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  padding: 26px 28px 160px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-page h2 {
+  margin: 0;
+  color: #111;
+  font-size: 25px;
+  line-height: 1.22;
+  font-weight: 900;
+}
+
+body[data-marvis-relay-view] .marvis-relay-confirmation-page p,
+body[data-marvis-relay-view] .marvis-relay-confirmation-page li {
+  margin: 0;
+  color: #333;
+  font-size: 17px;
+  line-height: 1.62;
+  white-space: pre-wrap;
+}
+
 body[data-marvis-relay-view] .marvis-relay-composer-attachments {
   position: absolute;
   left: 20px;

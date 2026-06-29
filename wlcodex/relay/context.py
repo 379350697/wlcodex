@@ -17,6 +17,7 @@ _RELAY_CONTEXT_CONSTRAINTS = [
     "No role inherits old execution state from another role.",
     "Do not auto commit or auto deploy in relay v1.",
     "Return only one strict JSON object with the required role_envelope fields.",
+    "When status is waiting and the user must choose among clear directions, include confirmation_options with id, label, summary, and instruction.",
 ]
 _DIRECTOR_ROUTING_DECISION_CONSTRAINTS = [
     "Director first action must be a routing_decision artifact before any task execution.",
@@ -122,6 +123,7 @@ def _default_expected_output_envelope(role: str) -> dict[str, Any]:
         "summary": "compact result summary",
         "evidence_refs": [],
         "open_questions": [],
+        "confirmation_options": [],
         "next_action": "what should happen next",
     }
 
@@ -136,6 +138,7 @@ def _director_routing_decision_envelope() -> dict[str, Any]:
         "summary": "director routing decision summary",
         "evidence_refs": [],
         "open_questions": [],
+        "confirmation_options": [],
         "next_action": "dispatch next role, wait for user, block, or complete directly",
         "complexity": "low|medium|high",
         "risk": "low|medium|high|critical",
@@ -157,6 +160,7 @@ def _director_final_summary_envelope() -> dict[str, Any]:
         "summary": "user-facing final answer or relay closure summary",
         "evidence_refs": [],
         "open_questions": [],
+        "confirmation_options": [],
         "next_action": "empty string or no further action",
     }
 

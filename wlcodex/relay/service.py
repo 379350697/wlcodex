@@ -909,7 +909,7 @@ class RelayService:
             role=role,
             payload={**envelope_payload, "display_text": display_text},
         )
-        self._store.save_artifact(
+        saved_artifact = self._store.save_artifact(
             task_id,
             role,
             envelope.artifact_type,
@@ -957,6 +957,10 @@ class RelayService:
                     "round_id": round_id,
                     "waiting_reason": waiting_reason,
                     "artifact_type": envelope.artifact_type,
+                    "artifact_id": int(getattr(saved_artifact, "id", 0) or 0),
+                    "summary": envelope.summary,
+                    "open_questions": envelope.open_questions,
+                    "confirmation_options": envelope.confirmation_options,
                 },
             )
             return result
@@ -1250,7 +1254,7 @@ class RelayService:
         }
         if runtime_event_id > 0:
             artifact_payload["runtime_event_id"] = runtime_event_id
-        self._store.save_artifact(
+        saved_artifact = self._store.save_artifact(
             task_id,
             role,
             "routing_decision",
@@ -1283,12 +1287,38 @@ class RelayService:
             return result
         if route == "waiting_user" or decision["requires_user_approval"]:
             self._store.update_role_status(task_id, role, "waiting")
+            execution = self._store.lifecycle.round_execution(task_id, round_id)
+            self._store.lifecycle.set_round_execution(
+                task_id,
+                round_id,
+                execution_mode=str(execution.get("execution_mode") or "simple"),
+                execution_goal=str(execution.get("execution_goal") or ""),
+                execution_strategy=execution.get("execution_strategy")
+                if isinstance(execution.get("execution_strategy"), dict)
+                else {},
+                waiting_reason="user_input",
+            )
             self._store.update_task_status(task_id, "waiting_user")
             self._events.emit(
                 task_id,
                 "role.status",
                 role=role,
                 payload={"status": "waiting", "round_id": round_id},
+            )
+            self._events.emit(
+                task_id,
+                "task.waiting_user",
+                role=role,
+                payload={
+                    "role": role,
+                    "round_id": round_id,
+                    "waiting_reason": "user_input",
+                    "artifact_type": "routing_decision",
+                    "artifact_id": int(getattr(saved_artifact, "id", 0) or 0),
+                    "summary": envelope.summary,
+                    "open_questions": envelope.open_questions,
+                    "confirmation_options": envelope.confirmation_options,
+                },
             )
             return result
 
@@ -1884,6 +1914,9 @@ class RelayService:
         decision: str,
         artifact_id: int = 0,
         comment: str = "",
+        selected_option_id: str = "",
+        selected_option_label: str = "",
+        selected_option_instruction: str = "",
         dispatch_next: bool = True,
     ) -> dict[str, Any]:
         current_round = self._store.current_round_id(task_id)
@@ -1900,19 +1933,30 @@ class RelayService:
             return payload
         if decision in {"revise_plan", "continue"}:
             waiting_role = self._waiting_role_for_round(detail, round_id)
-            if comment.strip():
+            selected_option_id = str(selected_option_id or "").strip()
+            selected_option_label = str(selected_option_label or "").strip()
+            selected_option_instruction = str(selected_option_instruction or "").strip()
+            followup_text = (
+                str(comment or "").strip()
+                or selected_option_instruction
+                or selected_option_label
+            )
+            if followup_text:
                 self._store.save_artifact(
                     task_id,
                     waiting_role,
                     "user_followup",
                     {
-                        "text": comment,
+                        "text": followup_text,
                         "target_role": waiting_role,
                         "round_id": round_id,
                         "round_control_decision": decision,
                         "input_disposition": "current_waiting_round",
+                        "selected_option_id": selected_option_id,
+                        "selected_option_label": selected_option_label,
+                        "selected_option_instruction": selected_option_instruction,
                     },
-                    summary=comment,
+                    summary=followup_text,
                 )
             execution = self._store.lifecycle.round_execution(task_id, round_id)
             self._store.lifecycle.set_round_execution(
@@ -1932,6 +1976,9 @@ class RelayService:
                 "round_id": round_id,
                 "comment": comment,
                 "role": waiting_role,
+                "selected_option_id": selected_option_id,
+                "selected_option_label": selected_option_label,
+                "selected_option_instruction": selected_option_instruction,
             }
             self._events.emit(task_id, "round.control", role="user", payload=payload)
             self._events.emit(
@@ -3343,6 +3390,8 @@ def _role_envelope_retry_prompt(
         "请只重新输出一个合法 JSON object，不要 Markdown，不要解释，不要代码块。\n"
         "必须包含 required fields: status, reason, role, artifact_type, handoff_to, "
         "summary, evidence_refs, open_questions, next_action。\n"
+        "如果 status=waiting 且需要用户在几个方向中选择，可以额外提供 "
+        "confirmation_options 数组，每项包含 id、label、summary、instruction。\n"
         "不要创造新的 artifact_type；必须使用 expected_output_envelope 里的 artifact_type。\n"
         "如果这是路由决策，内部 route 字段可以继续使用协议枚举，"
         "但 summary/next_action/reason 请用中文白话描述给人看。\n\n"

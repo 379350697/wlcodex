@@ -119,6 +119,13 @@ def _parse_role_envelope_payload(payload: Any) -> EnvelopeParseResult:
             ok=False,
             error="evidence_refs and open_questions must be lists",
         )
+    if "confirmation_options" in payload and not isinstance(
+        payload.get("confirmation_options"), list
+    ):
+        return EnvelopeParseResult(
+            ok=False,
+            error="confirmation_options must be a list",
+        )
 
     next_role = envelope.handoff_to or default_handoff_target(envelope.role)
     return EnvelopeParseResult(

@@ -867,7 +867,7 @@ async def test_relay_task_detail_projects_running_followup_as_marvis_waiting(
 
 
 @pytest.mark.asyncio
-async def test_relay_task_detail_shows_plan_waiting_control_bar(
+async def test_relay_task_detail_shows_plan_waiting_confirmation_card(
     tmp_path: Path,
 ) -> None:
     server, service, _runtime_store = _server(tmp_path)
@@ -933,17 +933,19 @@ async def test_relay_task_detail_shows_plan_waiting_control_bar(
     finally:
         await server.stop()
 
-    assert 'class="marvis-relay-plan-control"' in response
+    assert 'data-marvis-confirmation-card' in response
+    assert 'data-marvis-confirmation-page' in response
     assert "计划等待确认" in response
+    assert "Use Plan A." in response
     assert "执行计划" in response
-    assert "补充说明" in response
-    assert "修改计划" in response
+    assert "补充内容" in response
     assert "停止" in response
+    assert 'class="marvis-relay-plan-control"' not in response
     assert "/rounds/${encodeURIComponent(roundId)}/control" in response
 
 
 @pytest.mark.asyncio
-async def test_relay_task_detail_shows_generic_waiting_confirmation_bar(
+async def test_relay_task_detail_shows_generic_waiting_confirmation_card_with_options(
     tmp_path: Path,
 ) -> None:
     server, service, _runtime_store = _server(tmp_path)
@@ -966,6 +968,20 @@ async def test_relay_task_detail_shows_generic_waiting_confirmation_bar(
                 "summary": "Need confirmation before work.",
                 "evidence_refs": [],
                 "open_questions": ["Confirm output path and style?"],
+                "confirmation_options": [
+                    {
+                        "id": "minimal",
+                        "label": "简约风格",
+                        "summary": "更接近原生 Codex。",
+                        "instruction": "采用简约、克制、手机原生风格。",
+                    },
+                    {
+                        "id": "cyber",
+                        "label": "赛博风格",
+                        "summary": "更强视觉冲击。",
+                        "instruction": "采用赛博风格，但仍保持可读。",
+                    },
+                ],
                 "next_action": "wait for confirmation",
                 "complexity": "standard",
                 "risk": "medium",
@@ -991,7 +1007,7 @@ async def test_relay_task_detail_shows_generic_waiting_confirmation_bar(
         await server.stop()
 
     control_match = re.search(
-        r'<section class="marvis-relay-plan-control"(?P<html>.*?)</section>',
+        r'<section class="marvis-relay-confirmation-card"(?P<html>.*?)</section>',
         response,
         re.S,
     )
@@ -999,12 +1015,18 @@ async def test_relay_task_detail_shows_generic_waiting_confirmation_bar(
     control_html = control_match.group("html")
     assert "等待确认" in control_html
     assert "计划等待确认" not in control_html
-    assert "确认继续" in control_html
-    assert "补充说明" in control_html
+    assert "简约风格" in control_html
+    assert "赛博风格" in control_html
+    assert "选择执行" in response
+    assert "补充内容" in response
     assert "停止" in control_html
-    assert 'data-plan-decision="continue"' in control_html
+    assert 'data-confirmation-option-id="minimal"' in response
+    assert 'data-plan-decision="continue"' in response
     assert "data-waiting-input" in control_html
     assert "说明你的想法或修改要求" in response
+    assert "selected_option_id" in response
+    assert 'data-marvis-confirmation-page' in response
+    assert 'class="marvis-relay-plan-control"' not in response
     assert "/rounds/${encodeURIComponent(roundId)}/control" in response
 
 
@@ -1280,7 +1302,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-task-list-construction">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-card">'
         in response
     )
     assert 'class="marvis-relay-bottom-nav"' in response
@@ -1645,7 +1667,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-task-list-construction">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-card">'
         in response
     )
     assert "Marvis办公室" in response
@@ -2201,7 +2223,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260628-task-list-construction">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-card">'
         in response
     )
     assert 'class="marvis-relay-topbar"' in response
