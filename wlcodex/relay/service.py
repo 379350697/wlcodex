@@ -1946,11 +1946,60 @@ class RelayService:
         )
         return pending
 
+    async def queue_or_followup_user_input(
+        self,
+        task_id: int,
+        text: str,
+        *,
+        images: list[dict[str, Any]] | None = None,
+        files: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        detail = self._store.get_task_detail(task_id)
+        task_status = str(getattr(detail.task, "status", "") or "")
+        current_round_id = int(detail.current_round_id or self._store.current_round_id(task_id))
+        round_status = self._store.lifecycle.round_status(task_id, current_round_id)
+        accepts_pending = task_status in {"queued", "running", "waiting_user"} and round_status in {
+            "open",
+            "running",
+            "waiting_user",
+        }
+        if accepts_pending:
+            pending = self.queue_user_input(
+                task_id,
+                text,
+                images=images,
+                files=files,
+            )
+            return {"disposition": "pending", "pending_input": pending.to_dict()}
+        followup = await self.add_user_message(
+            task_id,
+            text,
+            images=images,
+            files=files,
+        )
+        return {"disposition": "followup", "followup": followup}
+
     async def steer_active_attempt(
         self,
         task_id: int,
         pending_input_id: int,
     ) -> RelayPendingInput:
+        steered, _payload = await self._steer_active_attempt(task_id, pending_input_id)
+        return steered
+
+    async def steer_active_attempt_payload(
+        self,
+        task_id: int,
+        pending_input_id: int,
+    ) -> dict[str, Any]:
+        _steered, payload = await self._steer_active_attempt(task_id, pending_input_id)
+        return payload
+
+    async def _steer_active_attempt(
+        self,
+        task_id: int,
+        pending_input_id: int,
+    ) -> tuple[RelayPendingInput, dict[str, Any]]:
         pending = self._store.get_pending_input(task_id, pending_input_id)
         if pending.status != "pending":
             raise ValueError("pending input is not steerable")
@@ -1990,7 +2039,7 @@ class RelayService:
             raise RuntimeError(_control_result_failure_reason(result))
         round_id = detail.current_round_id
         attempt = self._store.lifecycle.latest_attempt(task_id, round_id, active.role)
-        self._store.save_artifact(
+        guidance = self._store.save_artifact(
             task_id,
             active.role,
             "user_followup",
@@ -2009,15 +2058,23 @@ class RelayService:
             pending.id,
             round_id=round_id,
             role=active.role,
-            attempt_no=attempt.attempt_no,
+            attempt_no=int(getattr(attempt, "attempt_no", 1) or 1),
         )
+        payload = {
+            **steered.to_dict(),
+            "text": pending.text,
+            "target_role": active.role,
+            "round_id": round_id,
+            "guidance_artifact_id": int(getattr(guidance, "id", 0) or 0),
+            **_relay_attachment_payload(images=clean_images, files=clean_files),
+        }
         self._events.emit(
             task_id,
             "user.input_steered",
             role="user",
-            payload=steered.to_dict(),
+            payload=payload,
         )
-        return steered
+        return steered, payload
 
     def cancel_pending_input(
         self,
@@ -2399,7 +2456,7 @@ class RelayService:
         *,
         images: list[dict[str, Any]] | None = None,
         files: list[dict[str, Any]] | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         detail = self._store.get_task_detail(task_id)
         clean_images = _relay_clean_image_attachments(images)
         clean_files = _relay_clean_text_file_attachments(files)
@@ -2450,19 +2507,20 @@ class RelayService:
             },
             summary=text,
         )
+        followup_payload = {
+            "role": "user",
+            "text": text,
+            "target_role": "director",
+            **_relay_attachment_payload(images=clean_images, files=clean_files),
+            "artifact_id": int(getattr(followup, "id", 0) or 0),
+            "context_packet_id": int(getattr(context_record, "id", 0) or 0),
+            "round_id": round_id,
+        }
         self._events.emit(
             task_id,
             "user.followup",
             role="user",
-            payload={
-                "role": "user",
-                "text": text,
-                "target_role": "director",
-                **_relay_attachment_payload(images=clean_images, files=clean_files),
-                "artifact_id": int(getattr(followup, "id", 0) or 0),
-                "context_packet_id": int(getattr(context_record, "id", 0) or 0),
-                "round_id": round_id,
-            },
+            payload=followup_payload,
         )
         self._events.emit(
             task_id,
@@ -2483,7 +2541,7 @@ class RelayService:
                 provider = self._registry.get(director.provider)
             except KeyError:
                 await self.dispatch_role(task_id, "director", prefer_continue=False)
-                return
+                return followup_payload
             capabilities = provider.capabilities()
             can_steer = bool(getattr(capabilities, "can_steer_active_turn", False))
             active_turn_id = director.active_turn_id or director.turn_id
@@ -2521,7 +2579,7 @@ class RelayService:
                         "director",
                         prefer_continue=False,
                     )
-                    return
+                    return followup_payload
                 if not _control_result_verified(result):
                     self._events.emit(
                         task_id,
@@ -2538,7 +2596,7 @@ class RelayService:
                         "director",
                         prefer_continue=False,
                     )
-                    return
+                    return followup_payload
                 native_session_id = str(
                     getattr(result, "native_session_id", "") or director.native_session_id
                 )
@@ -2575,8 +2633,9 @@ class RelayService:
                         "round_id": round_id,
                     },
                 )
-                return
+                return followup_payload
         await self.dispatch_role(task_id, "director")
+        return followup_payload
 
     def project_runtime_event(self, runtime_event: Any) -> None:
         self._project_native_event(runtime_event)

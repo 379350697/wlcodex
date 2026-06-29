@@ -336,6 +336,27 @@ body[data-marvis-relay-view] .marvis-relay-user-message[data-pending-followup="t
   opacity: .72;
 }
 
+body[data-marvis-relay-view] .marvis-relay-guidance-bubble {
+  display: grid;
+  gap: 5px;
+  background: #ecefed;
+}
+
+body[data-marvis-relay-view] .marvis-relay-guidance-label {
+  color: #777;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+body[data-marvis-relay-view] .marvis-relay-guidance-bubble strong {
+  min-width: 0;
+  color: #222;
+  font: inherit;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
 body[data-marvis-relay-view] .marvis-relay-user-message.is-failed .marvis-relay-user-bubble,
 body[data-marvis-relay-view] .marvis-relay-user-message[data-pending-followup="failed"] .marvis-relay-user-bubble {
   background: #f4e7e7;
@@ -781,10 +802,10 @@ body[data-marvis-relay-view] .marvis-relay-mode-strip select {
 body[data-marvis-relay-view] .marvis-relay-pending-inputs {
   position: fixed;
   left: 50%;
-  bottom: calc(var(--marvis-s25-composer-bottom) + var(--marvis-s25-composer-height) + 62px);
+  bottom: calc(var(--marvis-s25-composer-bottom) + var(--marvis-s25-composer-height) + 9px);
   z-index: 11;
   display: grid;
-  gap: 7px;
+  gap: 8px;
   width: min(var(--marvis-s25-composer-width), calc(100% - var(--marvis-s25-composer-side-gap)));
   transform: translateX(-50%);
 }
@@ -800,10 +821,20 @@ body[data-marvis-relay-view] .marvis-relay-pending-input {
   align-items: center;
   box-sizing: border-box;
   border: 1px solid #ded9d1;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, .96);
-  padding: 9px 10px;
-  box-shadow: 0 7px 24px rgba(0, 0, 0, .06);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, .98);
+  padding: 10px 12px;
+  box-shadow: 0 5px 18px rgba(0, 0, 0, .05);
+}
+
+body[data-marvis-relay-view] .marvis-relay-pending-input.is-steered {
+  grid-template-columns: minmax(0, 1fr);
+  background: rgba(246, 248, 247, .98);
+}
+
+body[data-marvis-relay-view] .marvis-relay-pending-input.is-error {
+  border-color: #ead3d3;
+  background: rgba(255, 248, 248, .98);
 }
 
 body[data-marvis-relay-view] .marvis-relay-pending-input strong {
@@ -820,7 +851,12 @@ body[data-marvis-relay-view] .marvis-relay-pending-status {
   grid-column: 1 / -1;
   color: #777;
   font-size: 12px;
+  font-weight: 800;
   line-height: 1.2;
+}
+
+body[data-marvis-relay-view] .marvis-relay-pending-input.is-error .marvis-relay-pending-status {
+  color: #9a3d3d;
 }
 
 body[data-marvis-relay-view] .marvis-relay-pending-actions {

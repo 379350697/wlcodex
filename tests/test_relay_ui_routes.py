@@ -2498,6 +2498,12 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'data-marvis-pending-inputs' in response
     assert "/inputs${TOKEN_SUFFIX}" in response
     assert "已排队，当前 round 结束后自动开始" in response
+    assert "已引导当前，等待当前角色接收" in response
+    assert 'isSteered ? " is-steered" : ""' in response
+    assert 'hasError ? " is-error" : ""' in response
+    assert 'const actions = isSteered ? ""' in response
+    assert "appendMarvisConversationGuidance(payload);" in response
+    assert 'const responseDisposition = String(payload.disposition || "pending");' in response
     assert 'source.addEventListener("user.input_queued"' in response
     assert 'source.addEventListener("user.input_consumed"' in response
     assert "data-marvis-followup-composer" in response

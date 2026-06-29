@@ -1502,13 +1502,13 @@ class WorkerLiveStreamServer:
                 if body is None:
                     return
                 await self._relay_service.ensure_task_lifecycle_current(task_id)
-                pending = self._relay_service.queue_user_input(
+                result = await self._relay_service.queue_or_followup_user_input(
                     task_id,
                     str(body.get("text") or body.get("prompt") or ""),
                     images=_safe_image_attachments(body.get("images")),
                     files=_safe_relay_file_attachments(body.get("files")),
                 )
-                await self._send_json(writer, 200, {"pending_input": pending.to_dict()})
+                await self._send_json(writer, 200, result)
                 return
             if suffix.startswith("/inputs/"):
                 parts = [part for part in suffix.strip("/").split("/") if part]
@@ -1523,14 +1523,14 @@ class WorkerLiveStreamServer:
                 if action == "steer":
                     await self._relay_service.ensure_task_lifecycle_current(task_id)
                     try:
-                        pending = await self._relay_service.steer_active_attempt(
+                        payload = await self._relay_service.steer_active_attempt_payload(
                             task_id,
                             pending_id,
                         )
                     except (KeyError, ValueError, RuntimeError) as exc:
                         await self._send_json(writer, 400, {"error": str(exc)})
                         return
-                    await self._send_json(writer, 200, {"pending_input": pending.to_dict()})
+                    await self._send_json(writer, 200, {"pending_input": payload})
                     return
                 if action == "cancel":
                     try:
@@ -7643,6 +7643,46 @@ def _relay_task_detail_page(
       scrollNativeConversationToEnd();
       return node;
     }}
+    function appendMarvisConversationGuidance(payload = {{}}) {{
+      if (!conversationTimeline) return null;
+      const text = String(payload.text || payload.latest_user_input || "").trim();
+      const hasAttachments = Boolean((payload.images || []).length || (payload.files || []).length);
+      if (!text && !hasAttachments) return null;
+      const id = payload.guidance_artifact_id || payload.artifact_id || payload.id || payload.pending_input_id || Date.now();
+      const key = `user_guidance:${{id}}`;
+      const existing = nativeTranscriptNodes.get(key) || conversationTimeline.querySelector(`[data-native-key='${{CSS.escape(key)}}']`);
+      if (existing) return existing;
+      const roundId = String(payload.steered_round_id || payload.round_id || activeRelayRoundId || CURRENT_ROUND_ID || "1");
+      activateRelayRound({{ round_id: roundId }});
+      const body = relayHumanizeUserMessage(text);
+      const normalizedBody = relayNormalizeConversationText(body);
+      if (normalizedBody) conversationUserBodies.add(normalizedBody);
+      const empty = conversationTimeline.querySelector("[data-native-empty]");
+      if (empty) empty.remove();
+      const node = document.createElement("article");
+      node.className = "marvis-relay-user-message marvis-relay-guidance-message";
+      node.dataset.nativeRole = "user";
+      node.dataset.nativeKind = "user_guidance";
+      node.dataset.nativeRoundId = roundId;
+      node.dataset.nativeKey = key;
+      const bubble = document.createElement("div");
+      bubble.className = "marvis-relay-user-bubble marvis-relay-guidance-bubble";
+      const label = document.createElement("span");
+      label.className = "marvis-relay-guidance-label";
+      label.textContent = "引导当前";
+      const content = document.createElement("strong");
+      content.textContent = body || "已添加附件";
+      bubble.append(label, content);
+      node.appendChild(bubble);
+      appendMarvisAttachmentList(node, {{
+        images: payload.images || [],
+        files: payload.files || []
+      }});
+      conversationTimeline.appendChild(node);
+      nativeTranscriptNodes.set(key, node);
+      scrollNativeConversationToEnd();
+      return node;
+    }}
     function markMarvisConversationUserFailed(key) {{
       if (!key) return;
       const node = nativeTranscriptNodes.get(key) || conversationTimeline?.querySelector(`[data-native-key='${{CSS.escape(key)}}']`);
@@ -7952,7 +7992,9 @@ def _relay_task_detail_page(
     function upsertPendingInput(item) {{
       const id = pendingInputId(item);
       if (!id) return;
-      pendingInputs.set(id, {{ ...(pendingInputs.get(id) || {{}}), ...(item || {{}}), id }});
+      const next = {{ ...(pendingInputs.get(id) || {{}}), ...(item || {{}}), id }};
+      if (!next.error_message) delete next.error_message;
+      pendingInputs.set(id, next);
       renderPendingInputs();
     }}
     function removePendingInput(id) {{
@@ -7972,15 +8014,18 @@ def _relay_task_detail_page(
       pendingInputsContainer.innerHTML = rows.map((item) => {{
         const id = pendingInputId(item);
         const isSteered = String(item.status || "") === "steered";
+        const hasError = Boolean(item.error_message);
         const text = String(item.text || "").trim() || "已添加附件";
-        const statusText = isSteered ? "已引导当前" : "已排队，当前 round 结束后自动开始";
-        return `<article class="marvis-relay-pending-input" data-pending-input-id="${{marvisEscapeText(id)}}">
+        const statusText = hasError ? String(item.error_message || "引导失败，仍已排队") : (isSteered ? "已引导当前，等待当前角色接收" : "已排队，当前 round 结束后自动开始");
+        const className = `marvis-relay-pending-input${{isSteered ? " is-steered" : ""}}${{hasError ? " is-error" : ""}}`;
+        const actions = isSteered ? "" : `<span class="marvis-relay-pending-actions">
+            <button type="button" data-pending-steer="${{marvisEscapeText(id)}}">引导当前</button>
+            <button type="button" data-pending-cancel="${{marvisEscapeText(id)}}">取消</button>
+          </span>`;
+        return `<article class="${{className}}" data-pending-input-id="${{marvisEscapeText(id)}}">
           <span class="marvis-relay-pending-status">${{statusText}}</span>
           <strong>${{marvisEscapeText(text)}}</strong>
-          <span class="marvis-relay-pending-actions">
-            <button type="button" data-pending-steer="${{marvisEscapeText(id)}}"${{isSteered ? " disabled" : ""}}>引导当前</button>
-            <button type="button" data-pending-cancel="${{marvisEscapeText(id)}}">取消</button>
-          </span>
+          ${{actions}}
         </article>`;
       }}).join("");
     }}
@@ -8016,9 +8061,12 @@ def _relay_task_detail_page(
           removePendingInput(pendingId);
         }} else {{
           upsertPendingInput(item);
+          appendMarvisConversationGuidance(item);
         }}
       }} catch (_error) {{
         target.removeAttribute("disabled");
+        const current = pendingInputs.get(String(pendingId)) || {{ id: pendingId, status: "pending" }};
+        upsertPendingInput({{ ...current, error_message: "引导失败，仍已排队" }});
       }}
     }});
     let planControl = document.querySelector("[data-marvis-plan-control]");
@@ -8267,7 +8315,9 @@ def _relay_task_detail_page(
       upsertPendingInput(parseRelayEvent(event));
     }});
     source.addEventListener("user.input_steered", (event) => {{
-      upsertPendingInput(parseRelayEvent(event));
+      const payload = parseRelayEvent(event);
+      upsertPendingInput(payload);
+      appendMarvisConversationGuidance(payload);
     }});
     source.addEventListener("user.input_cancelled", (event) => {{
       const payload = parseRelayEvent(event);
@@ -8418,7 +8468,22 @@ def _relay_task_detail_page(
         }});
         if (!response.ok) return;
         const payload = await response.json();
-        upsertPendingInput(payload.pending_input || payload);
+        const responseDisposition = String(payload.disposition || "pending");
+        if (responseDisposition === "followup") {{
+          const followup = payload.followup || payload;
+          const roundId = activateRelayRound(followup);
+          const key = followup.artifact_id ? `user_followup:${{followup.artifact_id}}` : `user_followup:${{followup.context_packet_id || Date.now()}}`;
+          clearMarvisConversationPausedRows();
+          appendMarvisConversationUser(followup.text || data.text || "已添加附件", key, false, {{
+            images: followup.images || attachments.images || [],
+            files: followup.files || attachments.files || []
+          }});
+          appendMarvisConversationWaiting(roundId);
+          updateTaskStatus("running");
+          setRoleStatus("director", "queued", {{ force: true }});
+        }} else {{
+          upsertPendingInput(payload.pending_input || payload);
+        }}
         form.reset();
         window.marvisRelayAttachments?.clear();
         updateRelayComposerAction();

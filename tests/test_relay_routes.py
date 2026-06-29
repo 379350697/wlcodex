@@ -384,7 +384,40 @@ async def test_relay_pending_input_steer_route_guides_active_attempt(tmp_path: P
     payload = _json_body(response)
     assert payload["pending_input"]["status"] == "steered"
     assert payload["pending_input"]["steered_role"] == "director"
+    assert payload["pending_input"]["guidance_artifact_id"]
     assert [call[0] for call in provider.calls] == ["start_session", "steer_session"]
+
+
+@pytest.mark.asyncio
+async def test_relay_inputs_route_followup_when_task_no_longer_running(tmp_path: Path) -> None:
+    service, provider = _active_relay_service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build relay",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_task_status(task.id, "completed")
+    body = json.dumps({"text": "start the next round now"})
+
+    response = await _request_relay(
+        tmp_path,
+        f"POST /api/relay/tasks/{task.id}/inputs HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["disposition"] == "followup"
+    assert payload["followup"]["text"] == "start the next round now"
+    assert service.get_task(task.id).current_round_id == 2
+    assert service.get_task(task.id).task.status == "running"
+    assert [call[0] for call in provider.calls] == ["start_session"]
 
 
 @pytest.mark.asyncio

@@ -531,6 +531,12 @@ async def test_pending_input_can_be_steered_into_active_attempt(tmp_path) -> Non
     assert service.get_task(task.id).current_round_id == 1
     assert [call[0] for call in provider.calls] == ["start_session", "steer_session"]
     assert provider.calls[-1][2] == "turn-1"
+    event = service.events_for_task(task.id)[-1]
+    assert event.event_type == "user.input_steered"
+    assert event.payload["text"] == "use this constraint now"
+    assert event.payload["steered_round_id"] == 1
+    assert event.payload["steered_role"] == "director"
+    assert event.payload["guidance_artifact_id"]
 
 
 @pytest.mark.asyncio
