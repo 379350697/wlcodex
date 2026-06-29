@@ -448,10 +448,17 @@ class RelayLifecycleStore:
         if artifact_type == "role_error":
             if self._latest_attempt_row(team_run_id, round_id, role) is None:
                 self.ensure_attempt(team_run_id, round_id=round_id, role=role, status="streaming")
+            round_status = self.round_status(team_run_id, round_id)
+            error_status = (
+                round_status
+                if round_status in {"blocked", "failed", "interrupted"}
+                else None
+            )
             self.update_attempt(
                 team_run_id,
                 round_id,
                 role,
+                status=error_status,
                 error_artifact_id=artifact_id,
                 increment_retry=True,
             )

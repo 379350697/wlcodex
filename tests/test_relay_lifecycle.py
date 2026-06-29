@@ -300,6 +300,47 @@ def test_idle_read_model_does_not_write_idle_attempt_status(tmp_path: Path) -> N
     assert "idle" not in {attempt["status"] for attempt in attempts}
 
 
+def test_role_error_closes_attempt_when_round_is_already_blocked(tmp_path: Path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Lifecycle relay",
+        prompt="审计 token 消耗",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    detail = service.get_task(task.id)
+
+    service._store.update_task_status(task.id, "blocked")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "relay_role": "director",
+            "error": "invalid json",
+            "output": "{not-json",
+            "retry_kind": "format",
+            "round_id": detail.current_round_id,
+        },
+        summary="invalid json",
+    )
+
+    refreshed = service.get_task(task.id)
+    director = next(job for job in refreshed.role_jobs if job.role == "director")
+    director_attempt = next(
+        attempt
+        for attempt in _attempt_rows(service)
+        if attempt["round_id"] == 1 and attempt["role"] == "director"
+    )
+
+    assert refreshed.task.status == "blocked"
+    assert director.status == "blocked"
+    assert director_attempt["status"] == "blocked"
+    assert director_attempt["error_artifact_id"] is not None
+    assert director_attempt["retry_count"] == 1
+
+
 def test_reconcile_recovers_late_valid_delta_for_current_round(tmp_path: Path) -> None:
     service, provider = _service(tmp_path)
     task = service.create_task(
