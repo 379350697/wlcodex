@@ -300,6 +300,34 @@ def test_idle_read_model_does_not_write_idle_attempt_status(tmp_path: Path) -> N
     assert "idle" not in {attempt["status"] for attempt in attempts}
 
 
+def test_requeue_after_terminal_attempt_creates_next_attempt(tmp_path: Path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Lifecycle relay",
+        prompt="审计 token 消耗",
+        workspace="/repo",
+        provider="claude",
+    )
+
+    service._store.update_role_status(task.id, "implementer", "passed")
+    service._store.update_role_status(task.id, "implementer", "queued")
+
+    attempts = [
+        attempt
+        for attempt in _attempt_rows(service)
+        if attempt["round_id"] == 1 and attempt["role"] == "implementer"
+    ]
+    implementer = next(
+        job for job in service.get_task(task.id).role_jobs if job.role == "implementer"
+    )
+
+    assert [(attempt["attempt_no"], attempt["status"]) for attempt in attempts] == [
+        (1, "passed"),
+        (2, "queued"),
+    ]
+    assert implementer.status == "queued"
+
+
 def test_role_error_closes_attempt_when_round_is_already_blocked(tmp_path: Path) -> None:
     service, _provider = _service(tmp_path)
     task = service.create_task(
@@ -337,6 +365,68 @@ def test_role_error_closes_attempt_when_round_is_already_blocked(tmp_path: Path)
     assert refreshed.task.status == "blocked"
     assert director.status == "blocked"
     assert director_attempt["status"] == "blocked"
+    assert director_attempt["error_artifact_id"] is not None
+    assert director_attempt["retry_count"] == 1
+
+
+def test_backfill_repairs_followup_round_dispatch_metadata_and_terminal_error(
+    tmp_path: Path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Lifecycle relay",
+        prompt="初始问题",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    asyncio.run(service.add_user_message(task.id, "接续问题"))
+    detail = service.get_task(task.id)
+    director = next(job for job in detail.role_jobs if job.role == "director")
+    service._store.update_task_status(task.id, "blocked")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "role_error",
+        {
+            "relay_role": "director",
+            "error": "invalid json",
+            "output": "{not-json",
+            "retry_kind": "format",
+            "round_id": detail.current_round_id,
+        },
+        summary="invalid json",
+    )
+    ledger = service._store._ledger
+    ledger._conn.execute("DELETE FROM relay_role_attempts")
+    ledger._conn.execute("DELETE FROM relay_rounds")
+    ledger._conn.commit()
+
+    repaired = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    ).get_task(task.id)
+
+    rounds = _round_rows(service)
+    attempts = _attempt_rows(service)
+    repaired_director = next(job for job in repaired.role_jobs if job.role == "director")
+    director_attempt = next(
+        attempt
+        for attempt in attempts
+        if attempt["round_id"] == 2 and attempt["role"] == "director"
+    )
+
+    assert [(row["round_id"], row["status"]) for row in rounds] == [
+        (1, "superseded"),
+        (2, "blocked"),
+    ]
+    assert repaired.current_round_id == 2
+    assert repaired.task.status == "blocked"
+    assert repaired_director.status == "blocked"
+    assert director_attempt["agent_run_id"] == director.agent_run_id
+    assert director_attempt["turn_id"] == director.turn_id
+    assert director_attempt["active_turn_id"] == director.active_turn_id
     assert director_attempt["error_artifact_id"] is not None
     assert director_attempt["retry_count"] == 1
 

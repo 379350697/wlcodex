@@ -76,6 +76,7 @@ class RelayLifecycleStore:
     def __init__(self, ledger: Any) -> None:
         self._ledger = ledger
         self._conn = ledger._conn
+        self._backfilling_task_ids: set[int] = set()
 
     def backfill_all_relay_tasks(self) -> None:
         rows = self._conn.execute(
@@ -85,42 +86,50 @@ class RelayLifecycleStore:
             self.backfill_task(int(row["id"]))
 
     def backfill_task(self, team_run_id: int) -> None:
-        if self._has_rounds(team_run_id):
+        if team_run_id in self._backfilling_task_ids:
             return
         artifacts = self._artifact_rows(team_run_id)
-        round_ids = sorted(
-            {
-                _coerce_round_id(artifact["payload"].get("round_id")) or 1
-                for artifact in artifacts
-            }
-            or {1}
-        )
-        if not round_ids:
-            round_ids = [1]
-        for round_id in round_ids:
-            self.ensure_round(
-                team_run_id,
-                round_id=round_id,
-                trigger_kind="backfill" if round_id > 1 else "initial",
+        self._backfilling_task_ids.add(team_run_id)
+        try:
+            if self._has_rounds(team_run_id):
+                self._repair_task_from_artifacts(team_run_id, artifacts)
+                return
+            round_ids = sorted(
+                {
+                    _coerce_round_id(artifact["payload"].get("round_id")) or 1
+                    for artifact in artifacts
+                }
+                or {1}
             )
-        current_round_id = max(round_ids)
-        team_run = self._ledger.get_team_run(team_run_id)
-        current_status = str(getattr(team_run, "status", "") or "running")
-        self.set_round_status(team_run_id, current_round_id, current_status)
-        for job in self._ledger.list_team_agent_jobs(team_run_id):
-            status = str(job.status or "idle")
-            if status == "idle":
-                continue
-            self.ensure_attempt(
-                team_run_id,
-                round_id=current_round_id,
-                role=job.role,
-                status=status,
-                agent_run_id=job.agent_run_id,
-            )
-        for artifact in artifacts:
-            self.observe_artifact(team_run_id, artifact["id"], artifact["payload"])
-        self.sync_legacy_projection(team_run_id)
+            if not round_ids:
+                round_ids = [1]
+            for round_id in round_ids:
+                self.ensure_round(
+                    team_run_id,
+                    round_id=round_id,
+                    trigger_kind="backfill" if round_id > 1 else "initial",
+                )
+            current_round_id = max(round_ids)
+            team_run = self._ledger.get_team_run(team_run_id)
+            current_status = str(getattr(team_run, "status", "") or "running")
+            self._supersede_prior_rounds(team_run_id, current_round_id)
+            self.set_round_status(team_run_id, current_round_id, current_status)
+            for job in self._ledger.list_team_agent_jobs(team_run_id):
+                status = str(job.status or "idle")
+                if status == "idle":
+                    continue
+                self.ensure_attempt(
+                    team_run_id,
+                    round_id=current_round_id,
+                    role=job.role,
+                    status=status,
+                    agent_run_id=job.agent_run_id,
+                )
+            for artifact in artifacts:
+                self.observe_artifact(team_run_id, artifact["id"], artifact["payload"])
+            self.sync_legacy_projection(team_run_id)
+        finally:
+            self._backfilling_task_ids.discard(team_run_id)
 
     def ensure_round(
         self,
@@ -214,6 +223,9 @@ class RelayLifecycleStore:
 
     def current_round_id(self, team_run_id: int, *, fallback: int = 1) -> int:
         self.backfill_task(team_run_id)
+        return self._active_round_id(team_run_id, fallback=fallback)
+
+    def _active_round_id(self, team_run_id: int, *, fallback: int = 1) -> int:
         row = self._conn.execute(
             """
             SELECT round_id FROM relay_rounds
@@ -384,6 +396,43 @@ class RelayLifecycleStore:
         next_status = status or current_status
         if current_status == "superseded":
             return
+        if (
+            status in {"queued", "streaming"}
+            and current_status in ATTEMPT_TERMINAL_STATUSES
+        ):
+            attempt_no = int(row["attempt_no"] or 1) + 1
+            now = _now()
+            self._conn.execute(
+                """
+                INSERT INTO relay_role_attempts (
+                    team_run_id, round_id, role, attempt_no, status, provider,
+                    native_session_id, agent_run_id, turn_id, active_turn_id,
+                    dispatch_artifact_id, completion_event_id, completion_artifact_id,
+                    error_artifact_id, retry_count, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (
+                    team_run_id,
+                    round_id,
+                    role,
+                    attempt_no,
+                    status,
+                    provider or str(row["provider"] or ""),
+                    native_session_id or str(row["native_session_id"] or ""),
+                    agent_run_id if agent_run_id is not None else row["agent_run_id"],
+                    turn_id or str(row["turn_id"] or ""),
+                    active_turn_id or str(row["active_turn_id"] or ""),
+                    dispatch_artifact_id,
+                    completion_event_id,
+                    completion_artifact_id,
+                    error_artifact_id,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+            return
         now = _now()
         closed_at = now if next_status in ATTEMPT_TERMINAL_STATUSES else None
         self._conn.execute(
@@ -434,7 +483,10 @@ class RelayLifecycleStore:
         payload: dict[str, Any],
     ) -> None:
         role = str(payload.get("relay_role") or payload.get("role") or "")
-        round_id = _coerce_round_id(payload.get("round_id")) or self.current_round_id(team_run_id)
+        round_id = _coerce_round_id(payload.get("round_id")) or self._latest_round_id(
+            team_run_id,
+            fallback=1,
+        )
         artifact_type = str(payload.get("artifact_type") or "")
         if artifact_type == "routing_decision":
             self.set_round_route(
@@ -445,9 +497,65 @@ class RelayLifecycleStore:
             )
         if not role:
             return
+        if artifact_type == "role_dispatch_metadata":
+            if self._attempt_artifact_link_exists(
+                team_run_id,
+                round_id,
+                role,
+                "dispatch_artifact_id",
+                artifact_id,
+            ):
+                return
+            round_status = self.round_status(team_run_id, round_id)
+            row = self._latest_attempt_row(team_run_id, round_id, role)
+            if round_status in {"blocked", "failed", "interrupted"}:
+                status = round_status
+            elif round_status == "superseded":
+                status = "superseded"
+            elif row is None or str(row["status"] or "") not in ATTEMPT_TERMINAL_STATUSES:
+                status = "streaming"
+            else:
+                status = None
+            initial_status = status or "streaming"
+            if row is not None:
+                initial_status = status or str(row["status"] or "streaming")
+            self.ensure_attempt(
+                team_run_id,
+                round_id=round_id,
+                role=role,
+                status=initial_status,
+                provider=str(payload.get("provider") or ""),
+                native_session_id=str(payload.get("native_session_id") or ""),
+                agent_run_id=(
+                    int(payload["agent_run_id"])
+                    if payload.get("agent_run_id") is not None
+                    else None
+                ),
+                turn_id=str(payload.get("turn_id") or ""),
+                active_turn_id=str(payload.get("active_turn_id") or ""),
+                dispatch_artifact_id=artifact_id,
+            )
+            if status is not None:
+                self.update_attempt(team_run_id, round_id, role, status=status)
+            return
         if artifact_type == "role_error":
+            if self._attempt_artifact_link_exists(
+                team_run_id,
+                round_id,
+                role,
+                "error_artifact_id",
+                artifact_id,
+            ):
+                return
             if self._latest_attempt_row(team_run_id, round_id, role) is None:
                 self.ensure_attempt(team_run_id, round_id=round_id, role=role, status="streaming")
+            row = self._latest_attempt_row(team_run_id, round_id, role)
+            current_error_artifact_id = (
+                int(row["error_artifact_id"])
+                if row is not None and row["error_artifact_id"] is not None
+                else 0
+            )
+            should_record_error = int(artifact_id) > current_error_artifact_id
             round_status = self.round_status(team_run_id, round_id)
             error_status = (
                 round_status
@@ -459,11 +567,19 @@ class RelayLifecycleStore:
                 round_id,
                 role,
                 status=error_status,
-                error_artifact_id=artifact_id,
-                increment_retry=True,
+                error_artifact_id=artifact_id if should_record_error else None,
+                increment_retry=should_record_error,
             )
             return
         if artifact_type not in RESULT_ARTIFACT_TYPES:
+            return
+        if self._attempt_artifact_link_exists(
+            team_run_id,
+            round_id,
+            role,
+            "completion_artifact_id",
+            artifact_id,
+        ):
             return
         if (
             self.round_status(team_run_id, round_id) in {"blocked", "failed", "interrupted"}
@@ -472,6 +588,8 @@ class RelayLifecycleStore:
             return
         status = str(payload.get("status") or "passed").strip() or "passed"
         if status in {"completed", "success", "succeeded", "done"}:
+            status = "passed"
+        if status == "waiting" and str(payload.get("handoff_to") or "") in RELAY_ROLE_IDS:
             status = "passed"
         if status not in {
             "queued",
@@ -523,7 +641,7 @@ class RelayLifecycleStore:
         return latest
 
     def sync_legacy_projection(self, team_run_id: int) -> None:
-        round_id = self.current_round_id(team_run_id)
+        round_id = self._active_round_id(team_run_id)
         round_status = self.round_status(team_run_id, round_id)
         self._ledger.update_team_run_status(team_run_id, round_status)
         attempts = self.attempts_for_round(team_run_id, round_id)
@@ -563,6 +681,109 @@ class RelayLifecycleStore:
             payload.setdefault("artifact_type", str(row["artifact_type"] or ""))
             artifacts.append({"id": int(row["id"]), "payload": payload})
         return artifacts
+
+    def _repair_task_from_artifacts(
+        self,
+        team_run_id: int,
+        artifacts: list[dict[str, Any]],
+    ) -> None:
+        round_ids = sorted(
+            {
+                _coerce_round_id(artifact["payload"].get("round_id"))
+                for artifact in artifacts
+                if _coerce_round_id(artifact["payload"].get("round_id")) > 0
+            }
+        )
+        if round_ids:
+            current_round_id = max(round_ids)
+            for round_id in round_ids:
+                self.ensure_round(
+                    team_run_id,
+                    round_id=round_id,
+                    trigger_kind="backfill" if round_id > 1 else "initial",
+                )
+            self._supersede_prior_rounds(team_run_id, current_round_id)
+            team_run = self._ledger.get_team_run(team_run_id)
+            existing_status = self.round_status(team_run_id, current_round_id)
+            current_status = (
+                existing_status
+                if existing_status in ROUND_TERMINAL_STATUSES
+                else str(getattr(team_run, "status", "") or "running")
+            )
+            self.set_round_status(team_run_id, current_round_id, current_status)
+        for artifact in artifacts:
+            self.observe_artifact(team_run_id, artifact["id"], artifact["payload"])
+        self.sync_legacy_projection(team_run_id)
+
+    def _supersede_prior_rounds(self, team_run_id: int, current_round_id: int) -> None:
+        if current_round_id <= 1:
+            return
+        now = _now()
+        self._conn.execute(
+            """
+            UPDATE relay_rounds
+            SET status = 'superseded', updated_at = ?, closed_at = COALESCE(closed_at, ?)
+            WHERE team_run_id = ?
+              AND round_id < ?
+              AND status NOT IN ('completed', 'failed', 'interrupted', 'superseded')
+            """,
+            (now, now, team_run_id, current_round_id),
+        )
+        self._conn.execute(
+            """
+            UPDATE relay_role_attempts
+            SET status = 'superseded', updated_at = ?, closed_at = COALESCE(closed_at, ?)
+            WHERE team_run_id = ?
+              AND round_id < ?
+              AND status NOT IN ('passed', 'failed', 'interrupted', 'superseded')
+            """,
+            (now, now, team_run_id, current_round_id),
+        )
+        self._conn.commit()
+
+    def _latest_round_id(self, team_run_id: int, *, fallback: int = 1) -> int:
+        row = self._conn.execute(
+            """
+            SELECT round_id FROM relay_rounds
+            WHERE team_run_id = ?
+            ORDER BY round_id DESC
+            LIMIT 1
+            """,
+            (team_run_id,),
+        ).fetchone()
+        return int(row["round_id"]) if row is not None else max(1, int(fallback or 1))
+
+    def _attempt_artifact_link_exists(
+        self,
+        team_run_id: int,
+        round_id: int,
+        role: str,
+        column: str,
+        artifact_id: int,
+    ) -> bool:
+        if column not in {
+            "dispatch_artifact_id",
+            "completion_artifact_id",
+            "error_artifact_id",
+        }:
+            raise ValueError(f"unsupported artifact link column: {column}")
+        row = self._conn.execute(
+            f"""
+            SELECT 1 FROM relay_role_attempts
+            WHERE team_run_id = ?
+              AND round_id = ?
+              AND role = ?
+              AND {column} = ?
+            LIMIT 1
+            """,
+            (team_run_id, round_id, role, artifact_id),
+        ).fetchone()
+        if row is not None:
+            return True
+        latest = self._latest_attempt_row(team_run_id, round_id, role)
+        if latest is None or latest[column] is None:
+            return False
+        return int(latest[column]) > int(artifact_id)
 
     def _latest_attempt_row(self, team_run_id: int, round_id: int, role: str) -> Any | None:
         return self._conn.execute(
