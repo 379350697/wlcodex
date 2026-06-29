@@ -126,7 +126,12 @@ class RelayLifecycleStore:
             team_run = self._ledger.get_team_run(team_run_id)
             current_status = str(getattr(team_run, "status", "") or "running")
             self._supersede_prior_rounds(team_run_id, current_round_id)
-            self.set_round_status(team_run_id, current_round_id, current_status)
+            self.set_round_status(
+                team_run_id,
+                current_round_id,
+                current_status,
+                preserve_activity=True,
+            )
             for job in self._ledger.list_team_agent_jobs(team_run_id):
                 status = str(job.status or "idle")
                 if status == "idle":
@@ -140,7 +145,7 @@ class RelayLifecycleStore:
                 )
             for artifact in artifacts:
                 self.observe_artifact(team_run_id, artifact["id"], artifact["payload"])
-            self.sync_legacy_projection(team_run_id)
+            self.sync_legacy_projection(team_run_id, preserve_activity=True)
         finally:
             self._backfilling_task_ids.discard(team_run_id)
 
@@ -272,7 +277,14 @@ class RelayLifecycleStore:
         ).fetchone()
         return str(row["status"]) if row is not None else "running"
 
-    def set_round_status(self, team_run_id: int, round_id: int, status: str) -> None:
+    def set_round_status(
+        self,
+        team_run_id: int,
+        round_id: int,
+        status: str,
+        *,
+        preserve_activity: bool = False,
+    ) -> None:
         self.ensure_round(team_run_id, round_id=round_id, trigger_kind="backfill")
         now = _now()
         closed_at = now if status in ROUND_TERMINAL_STATUSES else None
@@ -285,7 +297,7 @@ class RelayLifecycleStore:
             (status, now, closed_at, team_run_id, round_id),
         )
         self._conn.commit()
-        self.sync_legacy_projection(team_run_id)
+        self.sync_legacy_projection(team_run_id, preserve_activity=preserve_activity)
 
     def set_round_route(
         self,
@@ -889,10 +901,21 @@ class RelayLifecycleStore:
             latest[str(row["role"])] = self._attempt_from_row(row)
         return latest
 
-    def sync_legacy_projection(self, team_run_id: int) -> None:
+    def sync_legacy_projection(
+        self,
+        team_run_id: int,
+        *,
+        preserve_activity: bool = False,
+    ) -> None:
         round_id = self._active_round_id(team_run_id)
         round_status = self.round_status(team_run_id, round_id)
-        self._ledger.update_team_run_status(team_run_id, round_status)
+        if preserve_activity:
+            self._conn.execute(
+                "UPDATE team_runs SET status = ? WHERE id = ? AND status != ?",
+                (round_status, team_run_id, round_status),
+            )
+        else:
+            self._ledger.update_team_run_status(team_run_id, round_status)
         attempts = self.attempts_for_round(team_run_id, round_id)
         for job in self._ledger.list_team_agent_jobs(team_run_id):
             attempt = attempts.get(job.role)
@@ -901,7 +924,19 @@ class RelayLifecycleStore:
                 if attempt is not None and attempt.status != "superseded"
                 else "idle"
             )
-            self._ledger.update_team_agent_job_status(job.id, status)
+            if preserve_activity:
+                self._conn.execute(
+                    """
+                    UPDATE team_agent_jobs
+                    SET status = ?
+                    WHERE id = ? AND status != ?
+                    """,
+                    (status, job.id, status),
+                )
+            else:
+                self._ledger.update_team_agent_job_status(job.id, status)
+        if preserve_activity:
+            self._conn.commit()
 
     def _has_rounds(self, team_run_id: int) -> bool:
         row = self._conn.execute(
@@ -959,10 +994,15 @@ class RelayLifecycleStore:
                 if existing_status in ROUND_TERMINAL_STATUSES
                 else str(getattr(team_run, "status", "") or "running")
             )
-            self.set_round_status(team_run_id, current_round_id, current_status)
+            self.set_round_status(
+                team_run_id,
+                current_round_id,
+                current_status,
+                preserve_activity=True,
+            )
         for artifact in artifacts:
             self.observe_artifact(team_run_id, artifact["id"], artifact["payload"])
-        self.sync_legacy_projection(team_run_id)
+        self.sync_legacy_projection(team_run_id, preserve_activity=True)
 
     def _supersede_prior_rounds(self, team_run_id: int, current_round_id: int) -> None:
         if current_round_id <= 1:

@@ -291,6 +291,7 @@ class RelayTaskSummary:
         role_providers: dict[str, str] | None = None,
         director_decision_summary: str = "",
         latest_handoff_summary: str = "",
+        last_activity_at: str | None = None,
     ) -> "RelayTaskSummary":
         return cls(
             task_id=task.id,
@@ -303,7 +304,7 @@ class RelayTaskSummary:
             latest_handoff_summary=latest_handoff_summary,
             role_statuses=role_statuses,
             role_providers=dict(role_providers or task.role_providers),
-            last_activity_at=task.updated_at,
+            last_activity_at=last_activity_at or task.updated_at,
         )
 
     def to_dict(self) -> dict[str, Any]:

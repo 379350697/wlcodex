@@ -109,9 +109,14 @@ class RelayStore:
                         current_artifacts, "routing_decision"
                     ),
                     latest_handoff_summary=_latest_summary(current_artifacts, "handoff_packet"),
+                    last_activity_at=_latest_activity_at(task, artifacts),
                 )
             )
-        return summaries
+        return sorted(
+            summaries,
+            key=lambda summary: str(summary.last_activity_at or ""),
+            reverse=True,
+        )
 
     def get_runtime_setting(self, key: str, default: str | None = None) -> str | None:
         if hasattr(self._ledger, "get_runtime_setting"):
@@ -1005,6 +1010,15 @@ def _latest_summary(artifacts: list[dict[str, Any]], artifact_type: str) -> str:
         if artifact.get("artifact_type") == artifact_type:
             return str(artifact.get("summary") or "")
     return ""
+
+
+def _latest_activity_at(task: RelayTask, artifacts: list[dict[str, Any]]) -> str:
+    created_at_values = [
+        str(artifact.get("created_at") or "")
+        for artifact in artifacts
+        if str(artifact.get("created_at") or "").strip()
+    ]
+    return max(created_at_values) if created_at_values else task.updated_at
 
 
 def _relay_json_payload(raw: Any) -> dict[str, Any]:

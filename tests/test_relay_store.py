@@ -61,6 +61,83 @@ def test_list_tasks_excludes_non_relay_team_runs(tmp_path: Path) -> None:
     assert [summary.task_id for summary in summaries] == [relay_task.id]
 
 
+def test_backfill_does_not_refresh_task_activity_order(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    store = RelayStore(ledger)
+    older = store.create_task(
+        title="Older relay",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    newer = store.create_task(
+        title="Newer relay",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    older_updated_at = "2026-01-01T00:00:00+00:00"
+    newer_updated_at = "2026-01-02T00:00:00+00:00"
+    ledger._conn.execute(
+        "UPDATE team_runs SET updated_at = ? WHERE id = ?",
+        (older_updated_at, older.id),
+    )
+    ledger._conn.execute(
+        "UPDATE team_runs SET updated_at = ? WHERE id = ?",
+        (newer_updated_at, newer.id),
+    )
+    ledger._conn.commit()
+
+    restarted_store = RelayStore(ledger)
+    summaries = restarted_store.list_tasks()
+    rows = ledger._conn.execute(
+        "SELECT id, updated_at FROM team_runs WHERE id IN (?, ?) ORDER BY id ASC",
+        (older.id, newer.id),
+    ).fetchall()
+
+    assert [summary.task_id for summary in summaries[:2]] == [newer.id, older.id]
+    assert [str(row["updated_at"]) for row in rows] == [older_updated_at, newer_updated_at]
+
+
+def test_list_tasks_orders_by_relay_artifact_activity(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    store = RelayStore(ledger)
+    older = store.create_task(
+        title="Older relay",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    newer = store.create_task(
+        title="Newer relay",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    ledger._conn.execute(
+        "UPDATE team_artifacts SET created_at = ? WHERE team_run_id = ?",
+        ("2026-01-01T00:00:00+00:00", older.id),
+    )
+    ledger._conn.execute(
+        "UPDATE team_artifacts SET created_at = ? WHERE team_run_id = ?",
+        ("2026-01-02T00:00:00+00:00", newer.id),
+    )
+    ledger._conn.execute(
+        "UPDATE team_runs SET updated_at = ? WHERE id = ?",
+        ("2026-01-03T00:00:00+00:00", older.id),
+    )
+    ledger._conn.execute(
+        "UPDATE team_runs SET updated_at = ? WHERE id = ?",
+        ("2026-01-01T00:00:00+00:00", newer.id),
+    )
+    ledger._conn.commit()
+
+    summaries = store.list_tasks()
+
+    assert [summary.task_id for summary in summaries[:2]] == [newer.id, older.id]
+    assert summaries[0].last_activity_at == "2026-01-02T00:00:00+00:00"
+
+
 def test_handoff_packets_are_persisted_and_returned_in_detail(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path)
     store = RelayStore(ledger)

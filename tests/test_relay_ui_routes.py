@@ -1615,6 +1615,10 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         summary="按完整五角色接力处理：先由架构工程师审查。",
     )
     service._store._ledger._conn.execute(
+        "UPDATE team_artifacts SET created_at = ? WHERE team_run_id = ?",
+        ("2026-06-16T07:51:57.510982123+00:00", repo_task.id),
+    )
+    service._store._ledger._conn.execute(
         "UPDATE team_runs SET updated_at = ? WHERE id = ?",
         ("2026-06-16T07:51:57.510982123+00:00", repo_task.id),
     )
