@@ -295,10 +295,14 @@ async def test_cli_provider_start_session_runs_in_background_and_streams_events(
     assert [event.event_type for event in events] == [
         EventType.AGENT_RUN_STARTED,
         EventType.USER_MESSAGE_RECEIVED,
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_DISPLAY_DELTA,
         EventType.MODEL_TEXT_DELTA,
         EventType.AGENT_RUN_COMPLETED,
     ]
-    assert events[2].payload["delta"] == "background hello"
+    assert events[2].payload["raw_frame_id"] > 0
+    assert events[3].payload["delta"] == "background hello"
+    assert events[4].payload["delta"] == "background hello"
 
 
 @pytest.mark.asyncio
@@ -1043,6 +1047,7 @@ async def test_cli_provider_read_session_projects_readable_local_db_transcript(
         for event in events
     ] == [
         (EventType.USER_MESSAGE_RECEIVED, "plan"),
+        (EventType.PROVIDER_DISPLAY_COMPLETED, "complete answer"),
         (EventType.MODEL_MESSAGE_COMPLETED, "complete answer"),
     ]
 

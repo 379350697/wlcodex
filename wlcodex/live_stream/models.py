@@ -11,6 +11,12 @@ _KIND_BY_EVENT_TYPE = {
     EventType.AGENT_RUN_HEARTBEAT: "lifecycle",
     EventType.AGENT_RUN_ACTIVITY: "activity",
     EventType.USER_MESSAGE_RECEIVED: "user_message",
+    EventType.PROVIDER_RAW_FRAME: "provider_raw_frame",
+    EventType.PROVIDER_DISPLAY_DELTA: "text_delta",
+    EventType.PROVIDER_DISPLAY_COMPLETED: "message_completed",
+    EventType.PROVIDER_SEMANTIC_USAGE_UPDATED: "usage_updated",
+    EventType.PROVIDER_SEMANTIC_TOOL_CALL_STARTED: "tool_call_started",
+    EventType.PROVIDER_SEMANTIC_STATUS: "lifecycle",
     EventType.MODEL_TEXT_DELTA: "text_delta",
     EventType.MODEL_MESSAGE_COMPLETED: "message_completed",
     EventType.MODEL_REASONING_DELTA: "reasoning_delta",
@@ -64,7 +70,11 @@ def stream_event_from_runtime(event: RuntimeEvent) -> WorkerStreamEvent:
     return WorkerStreamEvent(
         id=event.id,
         type=event.event_type,
-        kind=_KIND_BY_EVENT_TYPE.get(event.event_type, "event"),
+        kind=(
+            "compatibility_event"
+            if event.payload.get("compatibility_projection")
+            else _KIND_BY_EVENT_TYPE.get(event.event_type, "event")
+        ),
         agent_run_id=event.agent_run_id,
         conversation_id=event.conversation_id,
         occurred_at=event.occurred_at,

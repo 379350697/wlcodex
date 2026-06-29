@@ -627,6 +627,29 @@ class Ledger:
             CREATE INDEX IF NOT EXISTS idx_runtime_events_event_type
                 ON runtime_events(event_type, id);
 
+            CREATE TABLE IF NOT EXISTS provider_raw_frames (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                provider_engine TEXT NOT NULL,
+                native_session_id TEXT NOT NULL,
+                native_turn_id TEXT NOT NULL DEFAULT '',
+                sequence INTEGER NOT NULL,
+                raw_kind TEXT NOT NULL,
+                raw_payload_json TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                conversation_id INTEGER,
+                orchestration_run_id INTEGER,
+                agent_run_id INTEGER,
+                task_id INTEGER
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_provider_raw_frames_session
+                ON provider_raw_frames(
+                    provider, provider_engine, native_session_id, native_turn_id, sequence
+                );
+            CREATE INDEX IF NOT EXISTS idx_provider_raw_frames_agent_run
+                ON provider_raw_frames(agent_run_id, id);
+
             CREATE TABLE IF NOT EXISTS workbench_carryovers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER NOT NULL,

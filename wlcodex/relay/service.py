@@ -2638,6 +2638,8 @@ class RelayService:
         return followup_payload
 
     def project_runtime_event(self, runtime_event: Any) -> None:
+        if _is_runtime_compatibility_projection(runtime_event):
+            return
         self._project_native_event(runtime_event)
         if self._project_runtime_delta(runtime_event):
             if _runtime_delta_is_complete_role_envelope(runtime_event):
@@ -2677,6 +2679,8 @@ class RelayService:
             task_id,
             role,
         ):
+            return None
+        if _is_runtime_compatibility_projection(runtime_event):
             return None
         if str(getattr(runtime_event, "event_type", "") or "") == "approval.requested":
             self._handle_provider_approval_requested(
@@ -2941,6 +2945,8 @@ class RelayService:
                         getattr(event, "id", 0) or 0
                     )
                     if not _runtime_event_matches_turn(event, current_turn_id):
+                        continue
+                    if _is_runtime_compatibility_projection(event):
                         continue
                     self._project_native_event(
                         event,
@@ -3307,6 +3313,8 @@ class RelayService:
         task_id: int | None = None,
         role: str = "",
     ) -> bool:
+        if _is_runtime_compatibility_projection(runtime_event):
+            return False
         if not _is_runtime_delta(runtime_event):
             return False
         agent_run_id = getattr(runtime_event, "agent_run_id", None)
@@ -3340,7 +3348,9 @@ class RelayService:
         if _is_agent_run_completed_event(runtime_event):
             return True
         return _runtime_event_type(runtime_event) in {
+            "provider.display.completed",
             "model.message.completed",
+            "provider_display_completed",
             "model_message_completed",
         }
 
@@ -3372,8 +3382,16 @@ class RelayService:
         completed = _completed_role_envelope_text(events)
         if completed is not None:
             return completed
+        provider_deltas = [
+            event for event in events if _is_runtime_provider_display_delta(event)
+        ]
+        if provider_deltas:
+            return "".join(_runtime_event_text(event) for event in provider_deltas)
         return "".join(
-            _runtime_event_text(event) for event in events if _is_runtime_model_text_delta(event)
+            _runtime_event_text(event)
+            for event in events
+            if _is_runtime_model_text_delta(event)
+            and not _is_runtime_compatibility_projection(event)
         )
 
     async def _runtime_completion_text_from_native_session(
@@ -3597,9 +3615,11 @@ class RelayService:
 
 def _is_runtime_delta(runtime_event: Any) -> bool:
     return _runtime_event_type(runtime_event) in {
+        "provider.display.delta",
         "model.text.delta",
         "model.reasoning.delta",
         "command.output.delta",
+        "provider_display_delta",
         "model_text_delta",
         "model_reasoning_delta",
         "command_output_delta",
@@ -3771,13 +3791,31 @@ def _is_runtime_model_text_delta(runtime_event: Any) -> bool:
     return _runtime_event_type(runtime_event) in {
         "model.text.delta",
         "model_text_delta",
+        "provider.display.delta",
+        "provider_display_delta",
     }
+
+
+def _is_runtime_provider_display_delta(runtime_event: Any) -> bool:
+    return _runtime_event_type(runtime_event) in {
+        "provider.display.delta",
+        "provider_display_delta",
+    }
+
+
+def _is_runtime_compatibility_projection(runtime_event: Any) -> bool:
+    payload = getattr(runtime_event, "payload", {}) or {}
+    if not isinstance(payload, dict):
+        return False
+    return bool(payload.get("compatibility_projection"))
 
 
 def _is_runtime_model_message_completed(runtime_event: Any) -> bool:
     return _runtime_event_type(runtime_event) in {
         "model.message.completed",
         "model_message_completed",
+        "provider.display.completed",
+        "provider_display_completed",
     }
 
 
@@ -3791,6 +3829,8 @@ def _is_runtime_completion_event(runtime_event: Any) -> bool:
 
 def _completed_role_envelope_event(events: list[Any]) -> Any | None:
     for event in reversed(events):
+        if _is_runtime_compatibility_projection(event):
+            continue
         if not (_is_runtime_model_message_completed(event) or _is_runtime_model_text_delta(event)):
             continue
         text = _runtime_event_text(event)

@@ -34,8 +34,14 @@ def test_projector_creates_session_and_text_delta(tmp_path: Path) -> None:
     events = runtime_store.list_by_agent_run(session.agent_run_id)
 
     assert projected == events
-    assert [event.event_type for event in events] == [EventType.MODEL_TEXT_DELTA]
-    event = events[0]
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_DISPLAY_DELTA,
+        EventType.MODEL_TEXT_DELTA,
+    ]
+    raw_frame = runtime_store.get_provider_raw_frame(events[0].payload["raw_frame_id"])
+    assert raw_frame.raw_payload["delta"] == "hello"
+    event = events[1]
     assert event.actor == "codex_native"
     assert event.source == EventSource.CODEX
     assert event.payload["native_thread_id"] == "thread_123"
@@ -60,9 +66,12 @@ def test_projector_updates_last_turn_from_turn_started(tmp_path: Path) -> None:
     assert session is not None
     assert session.last_turn_id == "turn_nested"
     assert session.status == "running"
-    assert [event.event_type for event in events] == [EventType.AGENT_RUN_ACTIVITY]
-    assert events[0].payload["native_thread_id"] == "thread_nested"
-    assert events[0].payload["native_turn_id"] == "turn_nested"
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.AGENT_RUN_ACTIVITY,
+    ]
+    assert events[1].payload["native_thread_id"] == "thread_nested"
+    assert events[1].payload["native_turn_id"] == "turn_nested"
 
 
 def test_projector_ignores_notification_without_thread_id(tmp_path: Path) -> None:
@@ -170,14 +179,18 @@ def test_projector_history_dedupes_sensitive_redacted_items(tmp_path: Path) -> N
     second = projector.project_history(detail)
 
     assert [event.event_type for event in first] == [
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_DISPLAY_DELTA,
         EventType.MODEL_TEXT_DELTA,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
     ]
     assert second == []
     session = session_store.get_by_thread_id("thread_redacted_history")
     assert session is not None
-    assert len(runtime_store.list_by_agent_run(session.agent_run_id)) == 3
+    assert len(runtime_store.list_by_agent_run(session.agent_run_id)) == 7
 
 
 def test_projector_maps_reasoning_and_patch_notifications(tmp_path: Path) -> None:
@@ -207,11 +220,13 @@ def test_projector_maps_reasoning_and_patch_notifications(tmp_path: Path) -> Non
     assert session is not None
     events = runtime_store.list_by_agent_run(session.agent_run_id)
     assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
         EventType.MODEL_REASONING_DELTA,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.DIFF_UPDATED,
     ]
-    assert events[0].payload["delta"] == "thinking"
-    assert events[1].payload["diff"] == "@@ patch"
+    assert events[1].payload["delta"] == "thinking"
+    assert events[3].payload["diff"] == "@@ patch"
 
 
 def test_projector_preserves_approval_resolved_turn_id(tmp_path: Path) -> None:
@@ -229,10 +244,13 @@ def test_projector_preserves_approval_resolved_turn_id(tmp_path: Path) -> None:
     assert session is not None
     events = runtime_store.list_by_agent_run(session.agent_run_id)
     assert projected == events
-    assert [event.event_type for event in events] == [EventType.APPROVAL_RESOLVED]
-    assert events[0].payload["native_thread_id"] == "thread_approval"
-    assert events[0].payload["native_turn_id"] == "turn_approval"
-    assert events[0].payload["codexRequestId"] == "request_1"
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.APPROVAL_RESOLVED,
+    ]
+    assert events[1].payload["native_thread_id"] == "thread_approval"
+    assert events[1].payload["native_turn_id"] == "turn_approval"
+    assert events[1].payload["codexRequestId"] == "request_1"
 
 
 def test_projector_reads_official_thread_turns_and_deduplicates_history(
@@ -298,17 +316,25 @@ def test_projector_reads_official_thread_turns_and_deduplicates_history(
     assert second == []
     assert first == events
     assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.USER_MESSAGE_RECEIVED,
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_DISPLAY_DELTA,
         EventType.MODEL_TEXT_DELTA,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.COMMAND_STARTED,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.COMMAND_OUTPUT_DELTA,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.COMMAND_COMPLETED,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
     ]
-    assert events[1].payload["text"] == "do the work"
-    assert events[2].payload["delta"] == "done"
-    assert events[4].payload["delta"] == "passed"
+    assert events[3].payload["text"] == "do the work"
+    assert events[5].payload["delta"] == "done"
+    assert events[10].payload["delta"] == "passed"
 
 
 def test_projector_maps_official_plan_history_items_to_plan_activity(
@@ -344,15 +370,18 @@ def test_projector_maps_official_plan_history_items_to_plan_activity(
     assert second == []
     assert first == events
     assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
     ]
-    assert events[1].payload["action"] == "plan_updated"
-    assert events[1].payload["plan"].startswith("# WLCodex Plan")
-    assert events[1].payload["itemId"] == "plan_item_1"
-    assert events[1].payload["native_thread_id"] == "thread_plan_history"
-    assert events[1].payload["native_turn_id"] == "turn_plan_history"
+    assert events[3].payload["action"] == "plan_updated"
+    assert events[3].payload["plan"].startswith("# WLCodex Plan")
+    assert events[3].payload["itemId"] == "plan_item_1"
+    assert events[3].payload["native_thread_id"] == "thread_plan_history"
+    assert events[3].payload["native_turn_id"] == "turn_plan_history"
 
 
 def test_projector_restores_dedupe_keys_from_persisted_events(
@@ -374,6 +403,7 @@ def test_projector_restores_dedupe_keys_from_persisted_events(
     session = session_store.get_by_thread_id("thread_persisted")
     assert session is not None
     events = runtime_store.list_by_agent_run(session.agent_run_id)
-    assert len(first) == 1
+    assert len(first) == 3
     assert second == []
-    assert len(events) == 1
+    assert len(events) == 3
+    assert events[1].payload["delta"] == "already projected"

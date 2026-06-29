@@ -26,6 +26,7 @@ from wlcodex.native_agents.ccswitch_deepseek import (
 from wlcodex.native_agents.runtime_events import (
     NativeAgentRuntimeEmitter,
     extract_native_agent_text,
+    provider_raw_payload,
 )
 from wlcodex.native_agents.session_store import NativeAgentSessionStore
 from wlcodex.runtime_event_store import RuntimeEventStore
@@ -448,6 +449,13 @@ class ClaudeSdkDeepSeekProvider:
                 api_key=api_key,
             ):
                 raw_tail.append(_safe_message_summary(_event))
+                if self._runtime_store is not None:
+                    self._emitter().raw_frame(
+                        session,
+                        native_turn_id=native_turn_id,
+                        raw_kind=str(_event.__class__.__name__ or "sdk.message"),
+                        raw_payload=provider_raw_payload(_event),
+                    )
                 event_session_id = _extract_session_id(_event)
                 if event_session_id:
                     claude_session_id = event_session_id

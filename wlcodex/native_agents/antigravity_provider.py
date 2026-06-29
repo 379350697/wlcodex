@@ -15,6 +15,7 @@ from wlcodex.native_agents.models import (
 from wlcodex.native_agents.runtime_events import (
     NativeAgentRuntimeEmitter,
     extract_native_agent_text,
+    provider_raw_payload,
 )
 from wlcodex.native_agents.session_store import NativeAgentSessionStore
 from wlcodex.runtime_event_store import RuntimeEventStore
@@ -246,6 +247,13 @@ class AntigravitySdkProvider:
                 cwd=session.cwd,
                 session_id=session.native_session_id,
             ):
+                if emitter is not None:
+                    emitter.raw_frame(
+                        session,
+                        native_turn_id=native_turn_id,
+                        raw_kind=str(event.__class__.__name__ or "sdk.event"),
+                        raw_payload=provider_raw_payload(event),
+                    )
                 text = extract_native_agent_text(event)
                 if text and emitter is not None:
                     emitter.text_delta(session, native_turn_id=native_turn_id, delta=text)

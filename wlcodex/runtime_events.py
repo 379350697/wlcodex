@@ -125,6 +125,16 @@ class EventType:
     MODEL_USAGE_UPDATED = "model.usage.updated"
     MODEL_API_RETRY = "model.api.retry"
 
+    # Provider-native streaming contract
+    PROVIDER_RAW_FRAME = "provider.raw.frame"
+    PROVIDER_DISPLAY_DELTA = "provider.display.delta"
+    PROVIDER_DISPLAY_COMPLETED = "provider.display.completed"
+    PROVIDER_SEMANTIC_USAGE_UPDATED = "provider.semantic.usage.updated"
+    PROVIDER_SEMANTIC_TOOL_CALL_STARTED = "provider.semantic.tool_call.started"
+    PROVIDER_SEMANTIC_STATUS = "provider.semantic.status"
+    PROVIDER_SEMANTIC_ARTIFACT = "provider.semantic.artifact"
+    PROVIDER_SEMANTIC_ARTIFACT_INVALID = "provider.semantic.artifact_invalid"
+
     # Tool / command / file / approval
     TOOL_CALL_STARTED = "tool.call.started"
     TOOL_CALL_PROGRESS = "tool.call.progress"

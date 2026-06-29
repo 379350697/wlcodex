@@ -56,6 +56,51 @@ def test_model_message_completed_maps_to_message_completed_kind() -> None:
     assert stream.payload == {"text": "final answer"}
 
 
+def test_compatibility_projection_maps_to_non_display_kind() -> None:
+    runtime = _event(
+        EventType.MODEL_TEXT_DELTA,
+        {
+            "delta": "provider 原文的兼容副本",
+            "compatibility_projection": EventType.MODEL_TEXT_DELTA,
+        },
+        event_id=18,
+    )
+
+    stream = stream_event_from_runtime(runtime)
+
+    assert stream.type == EventType.MODEL_TEXT_DELTA
+    assert stream.kind == "compatibility_event"
+    assert stream.payload["delta"] == "provider 原文的兼容副本"
+
+
+def test_provider_display_delta_maps_to_text_delta_kind() -> None:
+    runtime = _event(
+        EventType.PROVIDER_DISPLAY_DELTA,
+        {"delta": '{"routing_decision":', "text": '{"routing_decision":'},
+        event_id=16,
+    )
+
+    stream = stream_event_from_runtime(runtime)
+
+    assert stream.type == EventType.PROVIDER_DISPLAY_DELTA
+    assert stream.kind == "text_delta"
+    assert stream.payload["delta"] == '{"routing_decision":'
+
+
+def test_provider_display_completed_maps_to_message_completed_kind() -> None:
+    runtime = _event(
+        EventType.PROVIDER_DISPLAY_COMPLETED,
+        {"text": "raw visible answer"},
+        event_id=17,
+    )
+
+    stream = stream_event_from_runtime(runtime)
+
+    assert stream.type == EventType.PROVIDER_DISPLAY_COMPLETED
+    assert stream.kind == "message_completed"
+    assert stream.payload == {"text": "raw visible answer"}
+
+
 def test_agent_run_heartbeat_maps_to_lifecycle_kind() -> None:
     runtime = _event(EventType.AGENT_RUN_HEARTBEAT, {"status": "running"}, event_id=14)
 

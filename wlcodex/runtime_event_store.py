@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from collections.abc import Callable
+from typing import Any
 
 from wlcodex.runtime_events import (
     MAX_PAYLOAD_STRING_LENGTH,
@@ -20,6 +21,23 @@ from wlcodex.runtime_events import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ProviderRawFrame:
+    id: int
+    provider: str
+    provider_engine: str
+    native_session_id: str
+    native_turn_id: str
+    sequence: int
+    raw_kind: str
+    raw_payload: dict[str, Any]
+    occurred_at: str
+    conversation_id: int | None = None
+    orchestration_run_id: int | None = None
+    agent_run_id: int | None = None
+    task_id: int | None = None
 
 
 class RuntimeEventStore:
@@ -94,6 +112,95 @@ class RuntimeEventStore:
         stored = replace(event, payload=safe_payload, id=event_id)
         self._notify_projectors(stored)
         return stored
+
+    def next_provider_raw_frame_sequence(
+        self,
+        *,
+        provider: str,
+        provider_engine: str,
+        native_session_id: str,
+        native_turn_id: str,
+    ) -> int:
+        row = self._conn.execute(
+            """
+            SELECT COALESCE(MAX(sequence), 0) AS max_sequence
+            FROM provider_raw_frames
+            WHERE provider = ?
+              AND provider_engine = ?
+              AND native_session_id = ?
+              AND native_turn_id = ?
+            """,
+            (provider, provider_engine, native_session_id, native_turn_id),
+        ).fetchone()
+        if row is None:
+            return 1
+        return int(row["max_sequence"]) + 1
+
+    def append_provider_raw_frame(
+        self,
+        *,
+        provider: str,
+        provider_engine: str,
+        native_session_id: str,
+        native_turn_id: str,
+        sequence: int,
+        raw_kind: str,
+        raw_payload: dict[str, Any],
+        occurred_at: str,
+        conversation_id: int | None = None,
+        orchestration_run_id: int | None = None,
+        agent_run_id: int | None = None,
+        task_id: int | None = None,
+    ) -> ProviderRawFrame:
+        cur = self._conn.execute(
+            """
+            INSERT INTO provider_raw_frames (
+                provider, provider_engine, native_session_id, native_turn_id,
+                sequence, raw_kind, raw_payload_json, occurred_at,
+                conversation_id, orchestration_run_id, agent_run_id, task_id
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                provider,
+                provider_engine,
+                native_session_id,
+                native_turn_id,
+                sequence,
+                raw_kind,
+                json.dumps(raw_payload, ensure_ascii=False),
+                occurred_at,
+                conversation_id,
+                orchestration_run_id,
+                agent_run_id,
+                task_id,
+            ),
+        )
+        self._conn.commit()
+        return ProviderRawFrame(
+            id=int(cur.lastrowid),
+            provider=provider,
+            provider_engine=provider_engine,
+            native_session_id=native_session_id,
+            native_turn_id=native_turn_id,
+            sequence=sequence,
+            raw_kind=raw_kind,
+            raw_payload=raw_payload,
+            occurred_at=occurred_at,
+            conversation_id=conversation_id,
+            orchestration_run_id=orchestration_run_id,
+            agent_run_id=agent_run_id,
+            task_id=task_id,
+        )
+
+    def get_provider_raw_frame(self, frame_id: int) -> ProviderRawFrame:
+        row = self._conn.execute(
+            "SELECT * FROM provider_raw_frames WHERE id = ?", (frame_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown provider raw frame id: {frame_id}")
+        return _row_to_provider_raw_frame(row)
 
     def _notify_projectors(self, event: RuntimeEvent) -> None:
         for projector in list(self._projectors):
@@ -487,4 +594,25 @@ def _row_to_event(row: sqlite3.Row) -> RuntimeEvent:
         payload=json.loads(str(row["payload_json"])),
         occurred_at=str(row["occurred_at"]),
         id=int(row["id"]),
+    )
+
+
+def _row_to_provider_raw_frame(row: sqlite3.Row) -> ProviderRawFrame:
+    payload = json.loads(str(row["raw_payload_json"]))
+    if not isinstance(payload, dict):
+        payload = {"value": payload}
+    return ProviderRawFrame(
+        id=int(row["id"]),
+        provider=str(row["provider"]),
+        provider_engine=str(row["provider_engine"]),
+        native_session_id=str(row["native_session_id"]),
+        native_turn_id=str(row["native_turn_id"]),
+        sequence=int(row["sequence"]),
+        raw_kind=str(row["raw_kind"]),
+        raw_payload=payload,
+        occurred_at=str(row["occurred_at"]),
+        conversation_id=row["conversation_id"],
+        orchestration_run_id=row["orchestration_run_id"],
+        agent_run_id=row["agent_run_id"],
+        task_id=row["task_id"],
     )

@@ -205,11 +205,28 @@ def _map_agent_message_delta(
     item_id = ""
     if isinstance(item, dict):
         item_id = item.get("id", "")
-    return [src._make(
-        EventType.MODEL_TEXT_DELTA,
-        {"delta": delta, "itemId": item_id},
-        visibility=Visibility.USER,
-    )]
+    display_payload = {
+        "delta": delta,
+        "text": delta,
+        "itemId": item_id,
+        "display_source": "provider",
+    }
+    return [
+        src._make(
+            EventType.PROVIDER_DISPLAY_DELTA,
+            display_payload,
+            visibility=Visibility.USER,
+        ),
+        src._make(
+            EventType.MODEL_TEXT_DELTA,
+            {
+                "delta": delta,
+                "itemId": item_id,
+                "compatibility_projection": EventType.MODEL_TEXT_DELTA,
+            },
+            visibility=Visibility.USER,
+        ),
+    ]
 
 
 def _map_agent_message(
@@ -222,11 +239,28 @@ def _map_agent_message(
         item_id = item.get("id", "")
     elif payload.get("itemId"):
         item_id = str(payload.get("itemId"))
-    return [src._make(
-        EventType.MODEL_MESSAGE_COMPLETED,
-        {"text": text, "itemId": item_id},
-        visibility=Visibility.USER,
-    )]
+    display_payload = {
+        "text": text,
+        "summary": text,
+        "itemId": item_id,
+        "display_source": "provider",
+    }
+    return [
+        src._make(
+            EventType.PROVIDER_DISPLAY_COMPLETED,
+            display_payload,
+            visibility=Visibility.USER,
+        ),
+        src._make(
+            EventType.MODEL_MESSAGE_COMPLETED,
+            {
+                "text": text,
+                "itemId": item_id,
+                "compatibility_projection": EventType.MODEL_MESSAGE_COMPLETED,
+            },
+            visibility=Visibility.USER,
+        ),
+    ]
 
 
 def _map_reasoning_delta(

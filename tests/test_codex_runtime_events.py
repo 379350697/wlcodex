@@ -208,7 +208,7 @@ def test_file_change_delta() -> None:
 
 
 # ---------------------------------------------------------------------------
-# agent_message_delta → model.text.delta
+# agent_message_delta → provider.display.delta + model.text.delta
 # ---------------------------------------------------------------------------
 
 def test_agent_message_delta() -> None:
@@ -217,8 +217,16 @@ def test_agent_message_delta() -> None:
         "delta": "Codex analysis:",
         "item": {"id": "item-msg-1", "type": "agentMessage"},
     }))
-    assert len(events) == 1
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_DISPLAY_DELTA,
+        EventType.MODEL_TEXT_DELTA,
+    ]
     e = events[0]
+    assert e.visibility == Visibility.USER
+    assert e.payload["delta"] == "Codex analysis:"
+    assert e.payload["text"] == "Codex analysis:"
+    assert e.payload["itemId"] == "item-msg-1"
+    e = events[1]
     assert e.event_type == EventType.MODEL_TEXT_DELTA
     assert e.visibility == Visibility.USER
     assert e.payload["delta"] == "Codex analysis:"
@@ -230,7 +238,10 @@ def test_agent_message_delta_without_item() -> None:
     events = src.map_event(BackendEvent("agent_message_delta", {
         "delta": "partial text",
     }))
-    assert len(events) == 1
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_DISPLAY_DELTA,
+        EventType.MODEL_TEXT_DELTA,
+    ]
     assert events[0].payload["delta"] == "partial text"
     assert events[0].payload["itemId"] == ""
 

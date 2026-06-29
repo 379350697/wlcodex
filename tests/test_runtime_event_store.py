@@ -402,6 +402,36 @@ def test_payload_string_length_capped(tmp_path: Path) -> None:
     assert len(capped) == MAX_PAYLOAD_STRING_LENGTH + len("...<truncated>")
 
 
+def test_provider_raw_frame_payload_is_preserved_without_runtime_cap(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    long_text = "x" * (MAX_PAYLOAD_STRING_LENGTH + 500)
+
+    raw = store.append_provider_raw_frame(
+        provider="claude",
+        provider_engine="sdk-deepseek",
+        native_session_id="session-1",
+        native_turn_id="turn-1",
+        sequence=1,
+        raw_kind="sdk.message",
+        raw_payload={"output": long_text, "nested": {"delta": '{"bad":'}},
+        occurred_at=now_iso(),
+        conversation_id=1,
+        agent_run_id=42,
+    )
+
+    assert raw.id > 0
+    assert raw.raw_payload["output"] == long_text
+    loaded = store.get_provider_raw_frame(raw.id)
+    assert loaded == raw
+    row = store._conn.execute(
+        "SELECT raw_payload_json FROM provider_raw_frames WHERE id = ?",
+        (raw.id,),
+    ).fetchone()
+    assert long_text in str(row["raw_payload_json"])
+
+
 def test_short_strings_are_not_truncated(tmp_path: Path) -> None:
     store = _store(tmp_path)
     event = _make_event(payload={"output": "short"})

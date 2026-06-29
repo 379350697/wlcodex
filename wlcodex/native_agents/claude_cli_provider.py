@@ -18,6 +18,7 @@ from wlcodex.native_agents.claude_local_sessions import (
 from wlcodex.native_agents.runtime_events import (
     NativeAgentRuntimeEmitter,
     extract_native_agent_text,
+    provider_raw_payload,
 )
 from wlcodex.native_agents.models import (
     NativeAgentCapabilities,
@@ -297,6 +298,13 @@ class ClaudeCliLocalProvider:
             extra["images"] = materialized_images
         request = AgentRequest(prompt=prompt_for_cli, workspace_path=cwd, extra=extra)
         async for event in self._engine.send_streaming(request):
+            if self._runtime_store is not None:
+                self._emitter().raw_frame(
+                    session,
+                    native_turn_id=native_turn_id,
+                    raw_kind=str(getattr(event, "event_type", "") or "cli.event"),
+                    raw_payload=provider_raw_payload(event),
+                )
             event_type = str(getattr(event, "event_type", "") or "")
             event_session_id = str(getattr(event, "session_id", "") or "")
             if event_session_id:

@@ -10,7 +10,13 @@ from wlcodex.codex_backend import BackendEvent
 from wlcodex.codex_native.session_store import NativeCodexSessionStore
 from wlcodex.codex_runtime_source import CodexRuntimeSource
 from wlcodex.runtime_event_store import RuntimeEventStore
-from wlcodex.runtime_events import RuntimeEvent, redact_payload
+from wlcodex.runtime_events import (
+    EventType,
+    RuntimeEvent,
+    now_iso,
+    redact_payload,
+    safe_text_preview,
+)
 
 
 _SOURCE_KIND = "codex_native"
@@ -395,6 +401,66 @@ class NativeCodexEventProjector:
         mapped = source.map_event(BackendEvent(event_type, payload))
         projected: list[RuntimeEvent] = []
         self._load_persisted_seen_event_keys(session_agent_run_id)
+        raw_payload_hash = _payload_hash(payload)
+        raw_dedupe_payload = {
+            "raw_kind": event_type,
+            "raw_payload_hash": raw_payload_hash,
+        }
+        raw_dedupe_key = _dedupe_key(
+            EventType.PROVIDER_RAW_FRAME,
+            native_thread_id,
+            native_turn_id,
+            raw_dedupe_payload,
+        )
+        if raw_dedupe_key not in self._seen_event_keys:
+            self._seen_event_keys.add(raw_dedupe_key)
+            sequence = self._runtime_store.next_provider_raw_frame_sequence(
+                provider="codex",
+                provider_engine="app-server",
+                native_session_id=native_thread_id,
+                native_turn_id=native_turn_id,
+            )
+            occurred_at = now_iso()
+            frame = self._runtime_store.append_provider_raw_frame(
+                provider="codex",
+                provider_engine="app-server",
+                native_session_id=native_thread_id,
+                native_turn_id=native_turn_id,
+                sequence=sequence,
+                raw_kind=event_type,
+                raw_payload=payload,
+                occurred_at=occurred_at,
+                conversation_id=session_conversation_id,
+                agent_run_id=session_agent_run_id,
+            )
+            raw_runtime_event = source._make(
+                EventType.PROVIDER_RAW_FRAME,
+                {
+                    "raw_frame_id": frame.id,
+                    "sequence": sequence,
+                    "raw_kind": event_type,
+                    "raw_payload_hash": raw_payload_hash,
+                    "raw_preview": safe_text_preview(str(payload), max_len=500),
+                    "threadId": native_thread_id,
+                    "turnId": native_turn_id,
+                },
+            )
+            projected.append(
+                self._runtime_store.append(
+                    replace(
+                        raw_runtime_event,
+                        actor=_SOURCE_KIND,
+                        payload={
+                            **raw_runtime_event.payload,
+                            "native_thread_id": native_thread_id,
+                            "native_turn_id": native_turn_id,
+                            "source_kind": _SOURCE_KIND,
+                            "provider": "codex",
+                            "provider_engine": "app-server",
+                        },
+                    )
+                )
+            )
         for event in mapped:
             native_payload = {
                 **event.payload,
@@ -431,6 +497,11 @@ class NativeCodexEventProjector:
             if not native_thread_id:
                 continue
             native_turn_id = str(payload.get("native_turn_id") or "")
+            if event.event_type == EventType.PROVIDER_RAW_FRAME:
+                payload = {
+                    "raw_kind": payload.get("raw_kind", ""),
+                    "raw_payload_hash": payload.get("raw_payload_hash", ""),
+                }
             self._seen_event_keys.add(
                 _dedupe_key(
                     event.event_type,
@@ -518,6 +589,17 @@ def _dedupe_key(
     }
     encoded = json.dumps(
         compact_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _payload_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         default=str,

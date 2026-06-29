@@ -237,10 +237,14 @@ async def test_claude_cli_provider_start_session_runs_in_background_and_streams_
     assert [event.event_type for event in events] == [
         EventType.AGENT_RUN_STARTED,
         EventType.USER_MESSAGE_RECEIVED,
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_DISPLAY_DELTA,
         EventType.MODEL_TEXT_DELTA,
         EventType.AGENT_RUN_COMPLETED,
     ]
-    assert events[2].payload["delta"] == "background hello"
+    assert events[2].payload["raw_frame_id"] > 0
+    assert events[3].payload["delta"] == "background hello"
+    assert events[4].payload["delta"] == "background hello"
 
 
 @pytest.mark.asyncio
@@ -731,9 +735,12 @@ async def test_claude_cli_provider_syncs_jsonl_output_after_continue(
         for event in events
     ] == [
         (EventType.USER_MESSAGE_RECEIVED, "hello"),
+        (EventType.PROVIDER_DISPLAY_COMPLETED, "world"),
         (EventType.MODEL_MESSAGE_COMPLETED, "world"),
         (EventType.AGENT_RUN_STARTED, None),
         (EventType.USER_MESSAGE_RECEIVED, "next question"),
+        (EventType.PROVIDER_RAW_FRAME, None),
+        (EventType.PROVIDER_DISPLAY_COMPLETED, "jsonl answer"),
         (EventType.MODEL_MESSAGE_COMPLETED, "jsonl answer"),
         (EventType.AGENT_RUN_COMPLETED, None),
     ]
@@ -772,7 +779,11 @@ async def test_claude_cli_provider_replaces_streamed_jsonl_with_completed_block_
     ] == [
         (EventType.AGENT_RUN_STARTED, None),
         (EventType.USER_MESSAGE_RECEIVED, "live question"),
+        (EventType.PROVIDER_RAW_FRAME, None),
+        (EventType.PROVIDER_DISPLAY_DELTA, "live answer"),
         (EventType.MODEL_TEXT_DELTA, "live answer"),
+        (EventType.PROVIDER_RAW_FRAME, None),
+        (EventType.PROVIDER_DISPLAY_COMPLETED, "live answer"),
         (EventType.MODEL_MESSAGE_COMPLETED, "live answer"),
         (EventType.AGENT_RUN_COMPLETED, None),
     ]
@@ -824,6 +835,7 @@ async def test_claude_cli_provider_syncs_selected_local_transcript_once(
     events = runtime_store.list_by_agent_run(attached.agent_run_id)
     assert [(event.event_type, event.payload.get("text") or event.payload.get("delta")) for event in events] == [
         (EventType.USER_MESSAGE_RECEIVED, "hello"),
+        (EventType.PROVIDER_DISPLAY_COMPLETED, "world"),
         (EventType.MODEL_MESSAGE_COMPLETED, "world"),
     ]
 

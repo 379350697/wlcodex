@@ -31,6 +31,7 @@ from wlcodex.native_agents.models import (
 from wlcodex.native_agents.runtime_events import (
     NativeAgentRuntimeEmitter,
     extract_native_agent_text,
+    provider_raw_payload,
 )
 from wlcodex.native_agents.session_store import NativeAgentSessionStore
 from wlcodex.runtime_event_store import RuntimeEventStore
@@ -616,6 +617,13 @@ class AntigravityCliLocalProvider:
                 sandbox=sandbox,
                 extra_dirs=_runner_extra_dirs(session, execution_cwd),
             ):
+                if self._runtime_store is not None:
+                    self._emitter().raw_frame(
+                        session,
+                        native_turn_id=native_turn_id,
+                        raw_kind=str(event.get("type") or "cli.event"),
+                        raw_payload=provider_raw_payload(event),
+                    )
                 event_conversation_id = str(event.get("conversation_id") or "")
                 latest_conversation_id = event_conversation_id or latest_conversation_id
                 text = extract_native_agent_text(event)

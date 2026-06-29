@@ -187,10 +187,14 @@ async def test_start_session_returns_before_sdk_runner_finishes_and_streams_even
     assert [event.event_type for event in events] == [
         EventType.AGENT_RUN_STARTED,
         EventType.USER_MESSAGE_RECEIVED,
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_DISPLAY_DELTA,
         EventType.MODEL_TEXT_DELTA,
         EventType.AGENT_RUN_COMPLETED,
     ]
-    assert events[2].payload["delta"] == "background done"
+    assert events[2].payload["raw_frame_id"] > 0
+    assert events[3].payload["delta"] == "background done"
+    assert events[4].payload["delta"] == "background done"
 
 
 @pytest.mark.asyncio

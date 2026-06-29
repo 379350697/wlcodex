@@ -391,12 +391,18 @@ async def test_start_session_returns_before_sdk_runner_finishes_and_streams_even
     assert [event.event_type for event in events] == [
         EventType.AGENT_RUN_STARTED,
         EventType.USER_MESSAGE_RECEIVED,
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_DISPLAY_DELTA,
         EventType.MODEL_TEXT_DELTA,
+        EventType.PROVIDER_DISPLAY_COMPLETED,
         EventType.MODEL_MESSAGE_COMPLETED,
         EventType.AGENT_RUN_COMPLETED,
     ]
-    assert events[2].payload["delta"] == "background done"
-    assert events[3].payload["text"] == "background done"
+    assert events[2].payload["raw_frame_id"] > 0
+    assert events[3].payload["delta"] == "background done"
+    assert events[4].payload["delta"] == "background done"
+    assert events[5].payload["text"] == "background done"
+    assert events[6].payload["text"] == "background done"
 
 
 @pytest.mark.asyncio
@@ -532,16 +538,23 @@ async def test_structured_sdk_messages_emit_text_and_persist_diagnostics(
     assert [event.event_type for event in events] == [
         EventType.AGENT_RUN_STARTED,
         EventType.USER_MESSAGE_RECEIVED,
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_DISPLAY_DELTA,
         EventType.MODEL_TEXT_DELTA,
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_SEMANTIC_TOOL_CALL_STARTED,
         EventType.TOOL_CALL_STARTED,
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_SEMANTIC_USAGE_UPDATED,
         EventType.MODEL_USAGE_UPDATED,
+        EventType.PROVIDER_DISPLAY_COMPLETED,
         EventType.MODEL_MESSAGE_COMPLETED,
         EventType.AGENT_RUN_COMPLETED,
     ]
-    assert events[2].payload["delta"] == "hello "
-    assert events[3].payload["tool_name"] == "Read"
-    assert events[4].payload["usage"] == {"input_tokens": 3, "output_tokens": 5}
-    assert events[5].payload["text"] == "hello "
+    assert events[3].payload["delta"] == "hello "
+    assert events[6].payload["tool_name"] == "Read"
+    assert events[9].payload["usage"] == {"input_tokens": 3, "output_tokens": 5}
+    assert events[11].payload["text"] == "hello "
     session = store.get_by_native_session_id(
         provider="claude",
         provider_engine="sdk-deepseek",
