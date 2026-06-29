@@ -167,7 +167,7 @@ _STATIC_CONTENT_TYPES = {
     ".webp": "image/webp",
     ".svg": "image/svg+xml; charset=utf-8",
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260629-confirmation-card"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260629-confirmation-provenance"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -4347,6 +4347,13 @@ def _marvis_relay_role_status_label(status: str) -> str:
 
 def _marvis_relay_action_label(role: str, payload: dict[str, Any] | None = None) -> str:
     artifact_type = str((payload or {}).get("artifact_type") or "").strip()
+    confirmation_source = str((payload or {}).get("confirmation_source") or "").strip()
+    confirmation_label = _marvis_relay_confirmation_source_label(
+        confirmation_source,
+        str((payload or {}).get("provider") or ""),
+    )
+    if confirmation_label:
+        return confirmation_label
     if role == "director":
         kind = str((payload or {}).get("kind") or "").strip()
         status = str((payload or {}).get("status") or "").strip()
@@ -4365,6 +4372,20 @@ def _marvis_relay_action_label(role: str, payload: dict[str, Any] | None = None)
             else artifact_type.replace("_", " ")
         )
     return "任务"
+
+
+def _marvis_relay_confirmation_source_label(source: str, provider: str = "") -> str:
+    clean_source = str(source or "").strip()
+    provider_name = str(provider or "").strip().lower()
+    if clean_source in {"provider_native_plan", "provider_native_approval"}:
+        if provider_name == "codex":
+            return "Codex 原生确认"
+        if provider_name.startswith("claude"):
+            return "Claude 原生确认"
+        return "Provider 原生确认"
+    if clean_source == "relay_prompt_fallback":
+        return "Relay 澄清确认"
+    return ""
 
 
 def _marvis_relay_topbar(
@@ -5307,6 +5328,10 @@ def _marvis_relay_plan_control_html(detail: Any) -> str:
     if str(getattr(getattr(detail, "task", None), "status", "") or "") != "waiting_user":
         return ""
     round_id = int(getattr(detail, "current_round_id", 1) or 1)
+    round_execution = getattr(detail, "round_execution", {}) or {}
+    confirmation = round_execution.get("confirmation") if isinstance(round_execution, dict) else {}
+    if not isinstance(confirmation, dict):
+        confirmation = {}
     waiting_artifact: dict[str, Any] | None = None
     for artifact in reversed(getattr(detail, "artifacts", []) or []):
         if str(artifact.get("artifact_type") or "") != "architecture_plan":
@@ -5334,6 +5359,38 @@ def _marvis_relay_plan_control_html(detail: Any) -> str:
             "open_questions": [],
             "confirmation_options": [],
         }
+    confirmation_source = str(
+        waiting_artifact.get("confirmation_source")
+        or confirmation.get("source")
+        or ""
+    )
+    confirmation_provider = str(
+        waiting_artifact.get("provider")
+        or confirmation.get("provider")
+        or ""
+    )
+    confirmation_kind = str(
+        waiting_artifact.get("confirmation_kind")
+        or confirmation.get("kind")
+        or ""
+    )
+    waiting_reason = str(
+        waiting_artifact.get("waiting_reason")
+        or round_execution.get("waiting_reason", "")
+        if isinstance(round_execution, dict)
+        else ""
+    )
+    source_label = str(waiting_artifact.get("confirmation_source_label") or "").strip()
+    if not source_label:
+        if confirmation_source in {"provider_native_plan", "provider_native_approval"}:
+            if confirmation_provider == "codex":
+                source_label = "Codex 原生确认"
+            elif confirmation_provider.startswith("claude"):
+                source_label = "Claude 原生确认"
+            else:
+                source_label = "Provider 原生确认"
+        elif confirmation_source == "relay_prompt_fallback" or not confirmation_source:
+            source_label = "Relay 澄清确认"
     artifact_type = str(waiting_artifact.get("artifact_type") or "")
     is_plan = artifact_type == "architecture_plan"
     artifact_id = int(waiting_artifact.get("id") or 0)
@@ -5368,9 +5425,24 @@ def _marvis_relay_plan_control_html(detail: Any) -> str:
     detail_body = summary
     if questions:
         detail_body = f"{summary}\n\n待确认：\n" + "\n".join(f"- {item}" for item in questions)
+    meta_parts = [
+        f"来源：{source_label}",
+        f"请求类型：{confirmation_kind or 'relay_question'}",
+    ]
+    if waiting_reason:
+        meta_parts.append(f"等待原因：{waiting_reason}")
+    provider_request_id = str(
+        waiting_artifact.get("provider_request_id")
+        or confirmation.get("provider_request_id")
+        or ""
+    )
+    if provider_request_id:
+        meta_parts.append(f"请求 ID：{provider_request_id}")
+    meta_text = "\n".join(meta_parts)
     return f"""
     <section class="marvis-relay-confirmation-card" data-marvis-confirmation-card data-marvis-plan-control data-round-id="{round_id}" data-artifact-id="{artifact_id}" aria-label="{escape(title)}">
       <button class="marvis-relay-confirmation-thumb" type="button" data-marvis-confirmation-open aria-label="查看确认详情">
+        <em>{escape(source_label)}</em>
         <span>{escape(title)}</span>
         <strong>{escape(summary)}</strong>
       </button>
@@ -5390,6 +5462,7 @@ def _marvis_relay_plan_control_html(detail: Any) -> str:
           <strong>{escape(title)}</strong>
         </header>
         <main>
+          <small>{escape(meta_text)}</small>
           <h2>{escape(summary)}</h2>
           <p>{escape(detail_body)}</p>
           <ul{" hidden" if not question_html else ""}>{question_html}</ul>
@@ -5693,6 +5766,51 @@ def _marvis_relay_work_log_segments(
             ),
         )
 
+    round_execution = getattr(detail, "round_execution", {}) or {}
+    confirmation = (
+        round_execution.get("confirmation")
+        if isinstance(round_execution, dict)
+        else {}
+    )
+    if not isinstance(confirmation, dict):
+        confirmation = {}
+    confirmation_source = str(confirmation.get("source") or "").strip()
+    if (
+        str(getattr(getattr(detail, "task", None), "status", "") or "") == "waiting_user"
+        and confirmation_source
+    ):
+        role = str(confirmation.get("role") or "").strip()
+        if role not in RELAY_ROLE_IDS:
+            role = next(
+                (
+                    str(getattr(job, "role", "") or "")
+                    for job in getattr(detail, "role_jobs", []) or []
+                    if str(getattr(job, "status", "") or "") == "waiting"
+                ),
+                "director",
+            )
+        label = _marvis_relay_confirmation_source_label(
+            confirmation_source,
+            str(confirmation.get("provider") or ""),
+        ) or "等待确认"
+        kind = str(confirmation.get("kind") or "relay_question")
+        provider_request_id = str(confirmation.get("provider_request_id") or "")
+        waiting_reason = str(round_execution.get("waiting_reason") or "")
+        text_parts = [f"来源：{label}", f"请求类型：{kind}"]
+        if waiting_reason:
+            text_parts.append(f"等待原因：{waiting_reason}")
+        if provider_request_id:
+            text_parts.append(f"请求 ID：{provider_request_id}")
+        append_entry(
+            role,
+            WorkLogEntry(
+                kind="confirmation",
+                key=f"confirmation:{getattr(detail, 'current_round_id', '')}:{role}:{confirmation_source}:{provider_request_id}",
+                text="\n".join(text_parts),
+                chip=label,
+            ),
+        )
+
     _marvis_relay_finalize_work_log_segments(segments)
     existing_roles = {segment.role for segment in segments}
     for job in detail.role_jobs:
@@ -5867,6 +5985,10 @@ def _marvis_relay_summary_payloads_by_role(
                 "route": str(payload.get("route") or ""),
                 "risk": str(payload.get("risk") or ""),
                 "round_id": round_id,
+                "confirmation_source": str(payload.get("confirmation_source") or ""),
+                "confirmation_kind": str(payload.get("confirmation_kind") or ""),
+                "provider": str(payload.get("provider") or ""),
+                "provider_request_id": str(payload.get("provider_request_id") or ""),
             }
             if _relay_payload_status_is_success(normalized_status):
                 success_roles.add(role)
@@ -7378,6 +7500,30 @@ def _relay_task_detail_page(
       const segment = ensureMarvisWorkLogSegment(role || "");
       renderMarvisWorkLogEntry(segment, entry);
     }}
+    function renderMarvisWorkLogConfirmation(payload = {{}}) {{
+      if (!marvisWorkLogBody || !payload) return;
+      const role = payload.role || "director";
+      const source = String(payload.confirmation_source || "");
+      const sourceLabel = confirmationSourceLabel(payload);
+      const kind = String(payload.confirmation_kind || "relay_question");
+      const requestId = String(payload.provider_request_id || "");
+      const waitingReason = String(payload.waiting_reason || "");
+      const summary = String(payload.summary || payload.next_action || "当前接力需要用户确认。").trim();
+      const chip = source === "provider_native_approval"
+        ? `${{sourceLabel}} · ${{kind}}`
+        : `${{sourceLabel}} · 等待用户`;
+      const textParts = [summary];
+      if (requestId) textParts.push(`请求 ID：${{requestId}}`);
+      if (waitingReason) textParts.push(`等待原因：${{waitingReason}}`);
+      const segment = ensureMarvisWorkLogSegment(role);
+      renderMarvisWorkLogEntry(segment, {{
+        kind: "confirmation",
+        key: `confirmation:${{payload.round_id || ""}}:${{role}}:${{source}}:${{requestId || payload.artifact_id || ""}}`,
+        chip,
+        text: textParts.filter(Boolean).join("\\n"),
+        replaceText: true,
+      }});
+    }}
     function relayRiskLabel(risk) {{
       const labels = {{ low: "低", medium: "中", high: "高", critical: "关键" }};
       return labels[risk] || risk || "";
@@ -7902,6 +8048,16 @@ def _relay_task_detail_page(
           <span>${{marvisEscapeText(option.summary || option.instruction)}}</span>
         </button>`).join("");
     }}
+    function confirmationSourceLabel(payload = {{}}) {{
+      const source = String(payload.confirmation_source || "");
+      const provider = String(payload.provider || "").toLowerCase();
+      if (source === "provider_native_plan" || source === "provider_native_approval") {{
+        if (provider === "codex") return "Codex 原生确认";
+        if (provider.startsWith("claude")) return "Claude 原生确认";
+        return "Provider 原生确认";
+      }}
+      return "Relay 澄清确认";
+    }}
     function hidePlanControlSurface() {{
       document.querySelectorAll("[data-marvis-plan-control]").forEach((node) => {{
         if (node instanceof HTMLElement) node.hidden = true;
@@ -7924,6 +8080,16 @@ def _relay_task_detail_page(
       const primaryLabel = isPlanApproval ? "执行计划" : "选择执行";
       const primaryDecision = isPlanApproval ? "approve_plan" : "continue";
       const summary = String(payload.summary || payload.next_action || "当前接力需要你确认下一步。").trim();
+      const sourceLabel = confirmationSourceLabel(payload);
+      const confirmationKind = String(payload.confirmation_kind || "relay_question");
+      const waitingReason = String(payload.waiting_reason || "");
+      const providerRequestId = String(payload.provider_request_id || "");
+      const metaText = [
+        `来源：${{sourceLabel}}`,
+        `请求类型：${{confirmationKind}}`,
+        waitingReason ? `等待原因：${{waitingReason}}` : "",
+        providerRequestId ? `请求 ID：${{providerRequestId}}` : "",
+      ].filter(Boolean).join("\\n");
       const questions = Array.isArray(payload.open_questions) ? payload.open_questions.map((item) => String(item || "").trim()).filter(Boolean) : [];
       const options = confirmationOptionsFromPayload(payload);
       const optionHtml = confirmationOptionsHtml(options);
@@ -7936,6 +8102,7 @@ def _relay_task_detail_page(
       node.setAttribute("data-artifact-id", artifactId);
       node.setAttribute("aria-label", title);
       node.innerHTML = `<button class="marvis-relay-confirmation-thumb" type="button" data-marvis-confirmation-open aria-label="查看确认详情">
+          <em>${{marvisEscapeText(sourceLabel)}}</em>
           <span>${{marvisEscapeText(title)}}</span>
           <strong>${{marvisEscapeText(summary)}}</strong>
         </button>
@@ -7958,6 +8125,7 @@ def _relay_task_detail_page(
             <strong>${{marvisEscapeText(title)}}</strong>
           </header>
           <main>
+            <small>${{marvisEscapeText(metaText)}}</small>
             <h2>${{marvisEscapeText(summary)}}</h2>
             <p>${{marvisEscapeText(summary + (questions.length ? "\\n\\n待确认：\\n" + questions.map((item) => "- " + item).join("\\n") : ""))}}</p>
           </main>
@@ -8183,6 +8351,7 @@ def _relay_task_detail_page(
       if (!isCurrentRoundEvent(payload)) return;
       updateTaskStatus("waiting_user");
       setRoleStatus(payload.role || "director", "waiting", {{ force: true }});
+      renderMarvisWorkLogConfirmation(payload);
       ensurePlanControl(payload);
     }});
     source.addEventListener("task.completed", (event) => {{

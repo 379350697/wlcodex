@@ -316,6 +316,40 @@ def _provider_mode_for_attempt(
     return kwargs, metadata
 
 
+def _relay_confirmation_source_label(source: str, provider: str = "") -> str:
+    clean_source = str(source or "").strip()
+    provider_name = str(provider or "").strip().lower()
+    if clean_source in {"provider_native_plan", "provider_native_approval"}:
+        if provider_name == "codex":
+            return "Codex 原生确认"
+        if provider_name.startswith("claude"):
+            return "Claude 原生确认"
+        return "Provider 原生确认"
+    if clean_source == "relay_prompt_fallback":
+        return "Relay 澄清确认"
+    return ""
+
+
+def _provider_approval_confirmation_kind(kind: str) -> str:
+    clean = str(kind or "").strip().replace("-", "_")
+    if clean in {"file_change", "file"}:
+        return "file_change_approval"
+    if clean in {"permission", "permissions"}:
+        return "permission_approval"
+    if clean == "plan_choice":
+        return "plan_choice"
+    return "command_approval"
+
+
+def _approval_response_for_round_decision(decision: str) -> dict[str, Any]:
+    clean = str(decision or "").strip()
+    if clean in {"continue", "approve_plan"}:
+        return {"action": "approve_once"}
+    if clean == "cancel_plan":
+        return {"action": "cancel"}
+    return {"action": "deny"}
+
+
 class RelayNativeRunWatchdog:
     def __init__(self, service: "RelayService", *, max_idle_seconds: int) -> None:
         self._service = service
@@ -896,6 +930,18 @@ class RelayService:
                 )
                 return result
         round_id = self._store.current_round_id(task_id)
+        current_job = next(
+            (job for job in detail_for_output.role_jobs if job.role == role),
+            None,
+        )
+        confirmation_provider = str(getattr(current_job, "provider", "") or "")
+        confirmation_native_session_id = str(
+            getattr(current_job, "native_session_id", "") or ""
+        )
+        confirmation_agent_run_id = getattr(current_job, "agent_run_id", None)
+        confirmation_turn_id = str(
+            getattr(current_job, "active_turn_id", "") or getattr(current_job, "turn_id", "") or ""
+        )
         envelope_payload = {
             **envelope.to_json_dict(),
             "round_id": round_id,
@@ -936,6 +982,30 @@ class RelayService:
                 if envelope.artifact_type == "architecture_plan"
                 else "user_input"
             )
+            confirmation_payload = {
+                "confirmation_source": "relay_prompt_fallback",
+                "confirmation_source_label": "Relay 澄清确认",
+                "confirmation_kind": "relay_question",
+                "provider_request_id": "",
+                "runtime_event_id": int(runtime_event_id or 0),
+                "native_session_id": confirmation_native_session_id,
+                "agent_run_id": confirmation_agent_run_id,
+                "turn_id": confirmation_turn_id,
+            }
+            saved_payload = {
+                **envelope_payload,
+                **confirmation_payload,
+                "output": output,
+                "open_questions": envelope.open_questions,
+                "relay_role": role,
+                "artifact_type": envelope.artifact_type,
+            }
+            if saved_artifact.payload != saved_payload:
+                self._store._ledger._conn.execute(
+                    "UPDATE team_artifacts SET payload_json = ? WHERE id = ?",
+                    (json.dumps(saved_payload, ensure_ascii=False), saved_artifact.id),
+                )
+                self._store._ledger._conn.commit()
             execution = self._store.lifecycle.round_execution(task_id, round_id)
             self._store.lifecycle.set_round_execution(
                 task_id,
@@ -946,6 +1016,23 @@ class RelayService:
                 if isinstance(execution.get("execution_strategy"), dict)
                 else {},
                 waiting_reason=waiting_reason,
+            )
+            self._store.lifecycle.set_round_confirmation(
+                task_id,
+                round_id,
+                source="relay_prompt_fallback",
+                kind="relay_question",
+                role=role,
+                provider=confirmation_provider,
+                provider_request_id="",
+                runtime_event_id=int(runtime_event_id or 0),
+                native_session_id=confirmation_native_session_id,
+                agent_run_id=(
+                    int(confirmation_agent_run_id)
+                    if confirmation_agent_run_id is not None
+                    else None
+                ),
+                turn_id=confirmation_turn_id,
             )
             self._store.update_task_status(task_id, "waiting_user")
             self._events.emit(
@@ -961,6 +1048,7 @@ class RelayService:
                     "summary": envelope.summary,
                     "open_questions": envelope.open_questions,
                     "confirmation_options": envelope.confirmation_options,
+                    **confirmation_payload,
                 },
             )
             return result
@@ -1245,6 +1333,25 @@ class RelayService:
             return result
 
         round_id = self._store.current_round_id(task_id)
+        current_job = next((job for job in detail.role_jobs if job.role == role), None)
+        confirmation_provider = str(getattr(current_job, "provider", "") or "")
+        confirmation_native_session_id = str(
+            getattr(current_job, "native_session_id", "") or ""
+        )
+        confirmation_agent_run_id = getattr(current_job, "agent_run_id", None)
+        confirmation_turn_id = str(
+            getattr(current_job, "active_turn_id", "") or getattr(current_job, "turn_id", "") or ""
+        )
+        confirmation_payload = {
+            "confirmation_source": "relay_prompt_fallback",
+            "confirmation_source_label": "Relay 澄清确认",
+            "confirmation_kind": "relay_question",
+            "provider_request_id": "",
+            "runtime_event_id": int(runtime_event_id or 0),
+            "native_session_id": confirmation_native_session_id,
+            "agent_run_id": confirmation_agent_run_id,
+            "turn_id": confirmation_turn_id,
+        }
         artifact_payload = {
             **envelope.to_json_dict(),
             **decision,
@@ -1254,6 +1361,8 @@ class RelayService:
         }
         if runtime_event_id > 0:
             artifact_payload["runtime_event_id"] = runtime_event_id
+        if decision["route"] == "waiting_user" or decision["requires_user_approval"]:
+            artifact_payload.update(confirmation_payload)
         saved_artifact = self._store.save_artifact(
             task_id,
             role,
@@ -1298,6 +1407,23 @@ class RelayService:
                 else {},
                 waiting_reason="user_input",
             )
+            self._store.lifecycle.set_round_confirmation(
+                task_id,
+                round_id,
+                source="relay_prompt_fallback",
+                kind="relay_question",
+                role=role,
+                provider=confirmation_provider,
+                provider_request_id="",
+                runtime_event_id=int(runtime_event_id or 0),
+                native_session_id=confirmation_native_session_id,
+                agent_run_id=(
+                    int(confirmation_agent_run_id)
+                    if confirmation_agent_run_id is not None
+                    else None
+                ),
+                turn_id=confirmation_turn_id,
+            )
             self._store.update_task_status(task_id, "waiting_user")
             self._events.emit(
                 task_id,
@@ -1318,6 +1444,7 @@ class RelayService:
                     "summary": envelope.summary,
                     "open_questions": envelope.open_questions,
                     "confirmation_options": envelope.confirmation_options,
+                    **confirmation_payload,
                 },
             )
             return result
@@ -1926,7 +2053,21 @@ class RelayService:
         if decision not in {"approve_plan", "revise_plan", "cancel_plan", "continue"}:
             raise ValueError(f"unsupported relay round control decision: {decision}")
         detail = self._store.get_task_detail(task_id)
+        execution = self._store.lifecycle.round_execution(task_id, round_id)
+        confirmation = execution.get("confirmation")
+        if (
+            isinstance(confirmation, dict)
+            and str(confirmation.get("source") or "") == "provider_native_approval"
+        ):
+            return await self._apply_provider_native_approval_control(
+                task_id,
+                round_id,
+                decision=decision,
+                confirmation=confirmation,
+                comment=comment,
+            )
         if decision == "cancel_plan":
+            self._store.lifecycle.clear_round_confirmation(task_id, round_id)
             self._store.update_task_status(task_id, "interrupted")
             payload = {"decision": decision, "round_id": round_id, "comment": comment}
             self._events.emit(task_id, "round.control", role="user", payload=payload)
@@ -1969,6 +2110,7 @@ class RelayService:
                 else {},
                 waiting_reason="none",
             )
+            self._store.lifecycle.clear_round_confirmation(task_id, round_id)
             self._store.update_task_status(task_id, "running")
             self._store.update_role_status(task_id, waiting_role, "queued")
             payload = {
@@ -2021,6 +2163,7 @@ class RelayService:
             else {},
             waiting_reason="none",
         )
+        self._store.lifecycle.clear_round_confirmation(task_id, round_id)
         refreshed = self._store.get_task_detail(task_id)
         decision_payload = refreshed.routing_decision or {}
         required_roles = _clean_required_roles(decision_payload.get("required_roles"))
@@ -2075,6 +2218,64 @@ class RelayService:
             "round_id": round_id,
             "artifact_id": artifact_id,
             "next_role": next_role or "",
+        }
+        self._events.emit(task_id, "round.control", role="user", payload=payload)
+        return payload
+
+    async def _apply_provider_native_approval_control(
+        self,
+        task_id: int,
+        round_id: int,
+        *,
+        decision: str,
+        confirmation: dict[str, Any],
+        comment: str = "",
+    ) -> dict[str, Any]:
+        role = str(confirmation.get("role") or "") or "director"
+        provider_name = str(confirmation.get("provider") or "").strip()
+        request_id = str(confirmation.get("provider_request_id") or "").strip()
+        if not provider_name:
+            detail = self._store.get_task_detail(task_id)
+            job = next((candidate for candidate in detail.role_jobs if candidate.role == role), None)
+            provider_name = str(getattr(job, "provider", "") or "")
+        if not provider_name:
+            raise ValueError("native approval confirmation is missing provider")
+        if not request_id:
+            raise ValueError("native approval confirmation is missing provider request id")
+        provider = self._registry.get(provider_name)
+        capabilities = provider.capabilities()
+        if not bool(getattr(capabilities, "can_resolve_approval", False)):
+            raise ValueError(f"provider {provider_name} cannot resolve native approvals")
+        response = _approval_response_for_round_decision(decision)
+        await provider.resolve_approval(request_id, response)
+
+        execution = self._store.lifecycle.round_execution(task_id, round_id)
+        self._store.lifecycle.set_round_execution(
+            task_id,
+            round_id,
+            execution_mode=str(execution.get("execution_mode") or "simple"),
+            execution_goal=str(execution.get("execution_goal") or ""),
+            execution_strategy=execution.get("execution_strategy")
+            if isinstance(execution.get("execution_strategy"), dict)
+            else {},
+            waiting_reason="none",
+        )
+        self._store.lifecycle.clear_round_confirmation(task_id, round_id)
+        if decision == "cancel_plan":
+            self._store.update_role_status(task_id, role, "interrupted")
+            self._store.update_task_status(task_id, "interrupted")
+        else:
+            self._store.update_role_status(task_id, role, "streaming")
+            self._store.update_task_status(task_id, "running")
+        payload = {
+            "decision": decision,
+            "round_id": round_id,
+            "comment": comment,
+            "role": role,
+            "confirmation_source": "provider_native_approval",
+            "confirmation_kind": str(confirmation.get("kind") or ""),
+            "provider": provider_name,
+            "provider_request_id": request_id,
         }
         self._events.emit(task_id, "round.control", role="user", payload=payload)
         return payload
@@ -2418,6 +2619,15 @@ class RelayService:
             role,
         ):
             return None
+        if str(getattr(runtime_event, "event_type", "") or "") == "approval.requested":
+            self._handle_provider_approval_requested(
+                task_id,
+                role,
+                runtime_event,
+                agent_run_id=int(agent_run_id),
+                runtime_event_id=event_id,
+            )
+            return None
         if self._project_runtime_delta(runtime_event, task_id=task_id, role=role):
             if _runtime_delta_is_complete_role_envelope(runtime_event):
                 text = _runtime_event_text(runtime_event).strip()
@@ -2458,6 +2668,93 @@ class RelayService:
             completed_event=runtime_event,
         )
         return None
+
+    def _handle_provider_approval_requested(
+        self,
+        task_id: int,
+        role: str,
+        runtime_event: Any,
+        *,
+        agent_run_id: int,
+        runtime_event_id: int,
+    ) -> None:
+        detail = self._store.get_task_detail(task_id)
+        current_round = int(detail.current_round_id or self._store.current_round_id(task_id))
+        if self._store.lifecycle.round_status(task_id, current_round) == "superseded":
+            return
+        job = next((candidate for candidate in detail.role_jobs if candidate.role == role), None)
+        payload = dict(getattr(runtime_event, "payload", {}) or {})
+        raw_source = getattr(runtime_event, "source", "") or ""
+        provider_name = str(getattr(raw_source, "value", "") or raw_source or "")
+        if job is not None and job.provider:
+            provider_name = job.provider
+        request_id = str(
+            payload.get("codexRequestId")
+            or payload.get("request_id")
+            or payload.get("id")
+            or getattr(runtime_event, "aggregate_id", "")
+            or ""
+        ).strip()
+        kind = _provider_approval_confirmation_kind(str(payload.get("kind") or "command"))
+        turn_id = _runtime_event_turn_id(runtime_event) or str(
+            getattr(job, "active_turn_id", "") or getattr(job, "turn_id", "") or ""
+        )
+        native_session_id = str(getattr(job, "native_session_id", "") or "")
+        confirmation_label = _relay_confirmation_source_label(
+            "provider_native_approval",
+            provider_name,
+        )
+        execution = self._store.lifecycle.round_execution(task_id, current_round)
+        self._store.lifecycle.set_round_execution(
+            task_id,
+            current_round,
+            execution_mode=str(execution.get("execution_mode") or "simple"),
+            execution_goal=str(execution.get("execution_goal") or ""),
+            execution_strategy=execution.get("execution_strategy")
+            if isinstance(execution.get("execution_strategy"), dict)
+            else {},
+            waiting_reason="provider_approval",
+        )
+        self._store.lifecycle.set_round_confirmation(
+            task_id,
+            current_round,
+            source="provider_native_approval",
+            kind=kind,
+            role=role,
+            provider=provider_name,
+            provider_request_id=request_id,
+            runtime_event_id=runtime_event_id,
+            native_session_id=native_session_id,
+            agent_run_id=agent_run_id,
+            turn_id=turn_id,
+        )
+        self._store.update_role_status(task_id, role, "waiting")
+        self._store.update_task_status(task_id, "waiting_user")
+        summary = str(payload.get("summary") or payload.get("reason") or "Provider approval required")
+        self._events.emit(
+            task_id,
+            "task.waiting_user",
+            role=role,
+            payload={
+                "role": role,
+                "round_id": current_round,
+                "waiting_reason": "provider_approval",
+                "artifact_type": "",
+                "artifact_id": 0,
+                "summary": summary,
+                "open_questions": [],
+                "confirmation_options": [],
+                "confirmation_source": "provider_native_approval",
+                "confirmation_source_label": confirmation_label,
+                "confirmation_kind": kind,
+                "provider_request_id": request_id,
+                "runtime_event_id": runtime_event_id,
+                "native_session_id": native_session_id,
+                "agent_run_id": agent_run_id,
+                "turn_id": turn_id,
+                "provider": provider_name,
+            },
+        )
 
     def _should_accept_plain_followup_response(self, task_id: int, role: str) -> bool:
         if role != "director":

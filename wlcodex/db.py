@@ -410,6 +410,15 @@ class Ledger:
                 execution_goal TEXT NOT NULL DEFAULT '',
                 execution_strategy_json TEXT NOT NULL DEFAULT '{}',
                 waiting_reason TEXT NOT NULL DEFAULT 'none',
+                confirmation_source TEXT NOT NULL DEFAULT '',
+                confirmation_kind TEXT NOT NULL DEFAULT '',
+                confirmation_role TEXT NOT NULL DEFAULT '',
+                confirmation_provider TEXT NOT NULL DEFAULT '',
+                confirmation_provider_request_id TEXT NOT NULL DEFAULT '',
+                confirmation_runtime_event_id INTEGER NOT NULL DEFAULT 0,
+                confirmation_native_session_id TEXT NOT NULL DEFAULT '',
+                confirmation_agent_run_id INTEGER,
+                confirmation_turn_id TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 closed_at TEXT,
@@ -750,6 +759,42 @@ class Ledger:
         self._add_column_if_missing(
             "relay_rounds", "waiting_reason",
             "waiting_reason TEXT NOT NULL DEFAULT 'none'",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "confirmation_source",
+            "confirmation_source TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "confirmation_kind",
+            "confirmation_kind TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "confirmation_role",
+            "confirmation_role TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "confirmation_provider",
+            "confirmation_provider TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "confirmation_provider_request_id",
+            "confirmation_provider_request_id TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "confirmation_runtime_event_id",
+            "confirmation_runtime_event_id INTEGER NOT NULL DEFAULT 0",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "confirmation_native_session_id",
+            "confirmation_native_session_id TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "confirmation_agent_run_id",
+            "confirmation_agent_run_id INTEGER",
+        )
+        self._add_column_if_missing(
+            "relay_rounds", "confirmation_turn_id",
+            "confirmation_turn_id TEXT NOT NULL DEFAULT ''",
         )
         self._add_column_if_missing(
             "relay_role_attempts", "execution_mode",

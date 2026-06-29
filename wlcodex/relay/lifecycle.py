@@ -47,6 +47,15 @@ def _coerce_round_id(value: Any) -> int:
     return round_id if round_id > 0 else 0
 
 
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _clean_required_roles(value: Any) -> list[str]:
     if not isinstance(value, list | tuple):
         return []
@@ -337,10 +346,83 @@ class RelayLifecycleStore:
         )
         self._conn.commit()
 
+    def set_round_confirmation(
+        self,
+        team_run_id: int,
+        round_id: int,
+        *,
+        source: str,
+        kind: str,
+        role: str,
+        provider: str = "",
+        provider_request_id: str = "",
+        runtime_event_id: int = 0,
+        native_session_id: str = "",
+        agent_run_id: int | None = None,
+        turn_id: str = "",
+    ) -> None:
+        self.ensure_round(team_run_id, round_id=round_id, trigger_kind="backfill")
+        self._conn.execute(
+            """
+            UPDATE relay_rounds
+            SET confirmation_source = ?,
+                confirmation_kind = ?,
+                confirmation_role = ?,
+                confirmation_provider = ?,
+                confirmation_provider_request_id = ?,
+                confirmation_runtime_event_id = ?,
+                confirmation_native_session_id = ?,
+                confirmation_agent_run_id = ?,
+                confirmation_turn_id = ?,
+                updated_at = ?
+            WHERE team_run_id = ? AND round_id = ?
+            """,
+            (
+                str(source or ""),
+                str(kind or ""),
+                str(role or ""),
+                str(provider or ""),
+                str(provider_request_id or ""),
+                int(runtime_event_id or 0),
+                str(native_session_id or ""),
+                int(agent_run_id) if agent_run_id is not None else None,
+                str(turn_id or ""),
+                _now(),
+                team_run_id,
+                round_id,
+            ),
+        )
+        self._conn.commit()
+
+    def clear_round_confirmation(self, team_run_id: int, round_id: int) -> None:
+        self.ensure_round(team_run_id, round_id=round_id, trigger_kind="backfill")
+        self._conn.execute(
+            """
+            UPDATE relay_rounds
+            SET confirmation_source = '',
+                confirmation_kind = '',
+                confirmation_role = '',
+                confirmation_provider = '',
+                confirmation_provider_request_id = '',
+                confirmation_runtime_event_id = 0,
+                confirmation_native_session_id = '',
+                confirmation_agent_run_id = NULL,
+                confirmation_turn_id = '',
+                updated_at = ?
+            WHERE team_run_id = ? AND round_id = ?
+            """,
+            (_now(), team_run_id, round_id),
+        )
+        self._conn.commit()
+
     def round_execution(self, team_run_id: int, round_id: int) -> dict[str, Any]:
         row = self._conn.execute(
             """
-            SELECT execution_mode, execution_goal, execution_strategy_json, waiting_reason
+            SELECT execution_mode, execution_goal, execution_strategy_json, waiting_reason,
+                   confirmation_source, confirmation_kind, confirmation_role,
+                   confirmation_provider, confirmation_provider_request_id,
+                   confirmation_runtime_event_id, confirmation_native_session_id,
+                   confirmation_agent_run_id, confirmation_turn_id
             FROM relay_rounds
             WHERE team_run_id = ? AND round_id = ?
             """,
@@ -352,6 +434,17 @@ class RelayLifecycleStore:
                 "execution_goal": "",
                 "execution_strategy": {},
                 "waiting_reason": "none",
+                "confirmation": {
+                    "source": "",
+                    "kind": "",
+                    "role": "",
+                    "provider": "",
+                    "provider_request_id": "",
+                    "runtime_event_id": 0,
+                    "native_session_id": "",
+                    "agent_run_id": None,
+                    "turn_id": "",
+                },
             }
         try:
             strategy = json.loads(str(row["execution_strategy_json"] or "{}"))
@@ -362,6 +455,21 @@ class RelayLifecycleStore:
             "execution_goal": str(row["execution_goal"] or ""),
             "execution_strategy": strategy if isinstance(strategy, dict) else {},
             "waiting_reason": str(row["waiting_reason"] or "none"),
+            "confirmation": {
+                "source": str(row["confirmation_source"] or ""),
+                "kind": str(row["confirmation_kind"] or ""),
+                "role": str(row["confirmation_role"] or ""),
+                "provider": str(row["confirmation_provider"] or ""),
+                "provider_request_id": str(row["confirmation_provider_request_id"] or ""),
+                "runtime_event_id": int(row["confirmation_runtime_event_id"] or 0),
+                "native_session_id": str(row["confirmation_native_session_id"] or ""),
+                "agent_run_id": (
+                    int(row["confirmation_agent_run_id"])
+                    if row["confirmation_agent_run_id"] is not None
+                    else None
+                ),
+                "turn_id": str(row["confirmation_turn_id"] or ""),
+            },
         }
 
     def ensure_attempt(
@@ -602,6 +710,20 @@ class RelayLifecycleStore:
                 round_id,
                 route=str(payload.get("route") or ""),
                 required_roles=_clean_required_roles(payload.get("required_roles")),
+            )
+        if str(payload.get("status") or "") == "waiting":
+            self.set_round_confirmation(
+                team_run_id,
+                round_id,
+                source=str(payload.get("confirmation_source") or "relay_prompt_fallback"),
+                kind=str(payload.get("confirmation_kind") or "relay_question"),
+                role=role,
+                provider=str(payload.get("provider") or ""),
+                provider_request_id=str(payload.get("provider_request_id") or ""),
+                runtime_event_id=_coerce_optional_int(payload.get("runtime_event_id")) or 0,
+                native_session_id=str(payload.get("native_session_id") or ""),
+                agent_run_id=_coerce_optional_int(payload.get("agent_run_id")),
+                turn_id=str(payload.get("turn_id") or ""),
             )
         if not role:
             return

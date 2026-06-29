@@ -163,6 +163,7 @@ class RelayStore:
             routing_decision=routing_decision,
             current_round_id=current_round_id,
             pending_inputs=self.list_pending_inputs(task_id),
+            round_execution=self.lifecycle.round_execution(task_id, current_round_id),
         )
 
     def save_context_packet(

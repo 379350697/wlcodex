@@ -12,7 +12,11 @@ from wlcodex.native_agents.models import (
 )
 from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.relay.models import HandoffPacket
-from wlcodex.relay.service import RelayService, _plain_followup_visible_text
+from wlcodex.relay.service import (
+    RelayService,
+    _plain_followup_visible_text,
+    _provider_approval_confirmation_kind,
+)
 from wlcodex.relay.store import RelayStore
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import (
@@ -114,9 +118,43 @@ class FakeProvider:
         )
 
 
+def test_provider_approval_confirmation_kind_normalizes_adapter_variants() -> None:
+    assert _provider_approval_confirmation_kind("command") == "command_approval"
+    assert _provider_approval_confirmation_kind("file-change") == "file_change_approval"
+    assert _provider_approval_confirmation_kind("file_change") == "file_change_approval"
+    assert _provider_approval_confirmation_kind("permission") == "permission_approval"
+    assert _provider_approval_confirmation_kind("permissions") == "permission_approval"
+    assert _provider_approval_confirmation_kind("plan_choice") == "plan_choice"
+
+
 class FakeCodexProvider(FakeProvider):
     provider = "codex"
     provider_engine = "app-server"
+
+    def capabilities(self) -> NativeAgentCapabilities:
+        return NativeAgentCapabilities(
+            can_start_session=self.can_start,
+            can_continue_session=True,
+            can_resolve_approval=True,
+        )
+
+    async def start_session(self, cwd: str, prompt: str, **kwargs: Any):
+        self.calls.append(("start_session", cwd, prompt, kwargs))
+        index = len([call for call in self.calls if call[0] == "start_session"])
+        return NativeAgentControlResult(
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            native_session_id=f"native-codex-{index}",
+            agent_run_id=700 + index,
+            turn_id=f"turn-codex-{index}",
+            active_turn_id=f"turn-codex-{index}",
+            turn_running=True,
+            status="started",
+        )
+
+    async def resolve_approval(self, request_id: str, body: dict[str, Any]):
+        self.calls.append(("resolve_approval", request_id, body))
+        return {"request_id": request_id, "status": "resolved"}
 
 
 class FakeAntigravityProvider(FakeProvider):
@@ -1828,6 +1866,8 @@ def test_waiting_envelope_persists_confirmation_options(tmp_path) -> None:
         if artifact.get("artifact_type") == "routing_decision"
     )
     assert detail.task.status == "waiting_user"
+    assert routing["confirmation_source"] == "relay_prompt_fallback"
+    assert routing["confirmation_kind"] == "relay_question"
     assert routing["confirmation_options"] == [
         {
             "id": "minimal",
@@ -1842,6 +1882,134 @@ def test_waiting_envelope_persists_confirmation_options(tmp_path) -> None:
             "instruction": "采用赛博风格，但仍保持可读。",
         },
     ]
+
+
+def test_round_execution_records_fallback_confirmation_provenance(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Fallback waiting",
+        prompt="Need a style decision",
+        workspace="/repo",
+        provider="claude",
+    )
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            json.dumps(
+                {
+                    "status": "waiting",
+                    "reason": "needs user direction",
+                    "role": "director",
+                    "artifact_type": "routing_decision",
+                    "handoff_to": "",
+                    "summary": "Need UI style direction.",
+                    "evidence_refs": [],
+                    "open_questions": ["Which visual style should be used?"],
+                    "confirmation_options": [
+                        {
+                            "id": "minimal",
+                            "label": "简约风格",
+                            "summary": "更接近原生 Codex。",
+                            "instruction": "采用简约、克制、手机原生风格。",
+                        }
+                    ],
+                    "next_action": "wait for user choice",
+                    "complexity": "standard",
+                    "risk": "medium",
+                    "route": "waiting_user",
+                    "required_roles": ["director"],
+                    "acceptance_criteria": ["style confirmed"],
+                    "stop_conditions": [],
+                    "requires_user_approval": True,
+                }
+            ),
+            dispatch_next=False,
+        )
+    )
+
+    execution = service._store.lifecycle.round_execution(task.id, 1)
+    confirmation = execution["confirmation"]
+    assert confirmation["source"] == "relay_prompt_fallback"
+    assert confirmation["kind"] == "relay_question"
+    assert confirmation["provider_request_id"] == ""
+    assert confirmation["runtime_event_id"] == 0
+    assert confirmation["role"] == "director"
+
+
+def test_codex_approval_runtime_event_records_native_confirmation_provenance(
+    tmp_path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "relay.sqlite3")
+    ledger.migrate()
+    provider = FakeCodexProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="codex",
+    )
+    task = service.create_task(
+        title="Native approval",
+        prompt="Run tests",
+        workspace="/repo",
+        provider="codex",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+
+    runtime_store = RuntimeEventStore(ledger._conn)
+    event = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.APPROVAL_REQUESTED,
+            aggregate_type=AggregateType.APPROVAL,
+            aggregate_id="req-1",
+            correlation_id="approval-corr",
+            source=EventSource.CODEX,
+            actor="codex",
+            visibility=Visibility.USER,
+            payload={
+                "codexRequestId": "req-1",
+                "kind": "command",
+                "summary": "Run: pytest",
+                "turnId": "turn-codex-1",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=701,
+            task_id=task.id,
+        )
+    )
+
+    asyncio.run(service.handle_runtime_event(event))
+
+    detail = service.get_task(task.id)
+    execution = service._store.lifecycle.round_execution(task.id, 1)
+    confirmation = execution["confirmation"]
+    assert detail.task.status == "waiting_user"
+    assert {job.role: job.status for job in detail.role_jobs}["director"] == "waiting"
+    assert confirmation["source"] == "provider_native_approval"
+    assert confirmation["kind"] == "command_approval"
+    assert confirmation["provider_request_id"] == "req-1"
+    assert confirmation["runtime_event_id"] == event.id
+    assert confirmation["provider"] == "codex"
+    assert confirmation["native_session_id"] == "native-codex-1"
+
+    result = asyncio.run(
+        service.apply_round_control(
+            task.id,
+            1,
+            decision="continue",
+            dispatch_next=False,
+        )
+    )
+
+    assert result["confirmation_source"] == "provider_native_approval"
+    assert provider.calls[-1] == (
+        "resolve_approval",
+        "req-1",
+        {"action": "approve_once"},
+    )
+    assert not any(call[0] == "continue_session" for call in provider.calls)
 
 
 def test_round_control_continue_records_selected_confirmation_option(tmp_path) -> None:

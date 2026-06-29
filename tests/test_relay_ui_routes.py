@@ -935,6 +935,7 @@ async def test_relay_task_detail_shows_plan_waiting_confirmation_card(
 
     assert 'data-marvis-confirmation-card' in response
     assert 'data-marvis-confirmation-page' in response
+    assert "Relay 澄清确认" in response
     assert "计划等待确认" in response
     assert "Use Plan A." in response
     assert "执行计划" in response
@@ -1014,6 +1015,7 @@ async def test_relay_task_detail_shows_generic_waiting_confirmation_card_with_op
     assert control_match is not None
     control_html = control_match.group("html")
     assert "等待确认" in control_html
+    assert "Relay 澄清确认" in control_html
     assert "计划等待确认" not in control_html
     assert "简约风格" in control_html
     assert "赛博风格" in control_html
@@ -1028,6 +1030,71 @@ async def test_relay_task_detail_shows_generic_waiting_confirmation_card_with_op
     assert 'data-marvis-confirmation-page' in response
     assert 'class="marvis-relay-plan-control"' not in response
     assert "/rounds/${encodeURIComponent(roundId)}/control" in response
+    assert "confirmation_source" in response
+    assert "function renderMarvisWorkLogConfirmation" in response
+    assert "renderMarvisWorkLogConfirmation(payload);" in response
+    assert "Relay 澄清确认" in response
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_shows_native_approval_confirmation_source(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Native approval",
+        prompt="Run tests",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_status(task.id, "director", "waiting")
+    service._store.lifecycle.set_round_execution(
+        task.id,
+        1,
+        execution_mode="plan_first",
+        execution_goal="",
+        execution_strategy={},
+        waiting_reason="provider_approval",
+    )
+    service._store.lifecycle.set_round_confirmation(
+        task.id,
+        1,
+        source="provider_native_approval",
+        kind="command_approval",
+        role="director",
+        provider="codex",
+        provider_request_id="req-native-1",
+        runtime_event_id=44,
+        native_session_id="codex-thread-1",
+        agent_run_id=701,
+        turn_id="turn-codex-1",
+    )
+    service._store.update_task_status(task.id, "waiting_user")
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert '<section class="marvis-relay-confirmation-card"' in response
+    assert "Codex 原生确认" in response
+    assert "请求类型：command_approval" in response
+    assert "等待原因：provider_approval" in response
+    assert "请求 ID：req-native-1" in response
+    assert "Relay 澄清确认" not in response.split(
+        '<section class="marvis-relay-confirmation-card"',
+        1,
+    )[1].split("</section>", 1)[0]
+    work_log_html = _relay_work_log_html(response)
+    assert "Codex 原生确认" in work_log_html
+    assert "请求类型：command_approval" in work_log_html
+    assert "请求 ID：req-native-1" in work_log_html
 
 
 @pytest.mark.asyncio
@@ -1432,7 +1499,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-card">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-provenance">'
         in response
     )
     assert 'class="marvis-relay-bottom-nav"' in response
@@ -1797,7 +1864,7 @@ async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal
     assert 'data-marvis-relay-view="office"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-card">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-provenance">'
         in response
     )
     assert "Marvis办公室" in response
@@ -2353,7 +2420,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-card">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-provenance">'
         in response
     )
     assert 'class="marvis-relay-topbar"' in response
