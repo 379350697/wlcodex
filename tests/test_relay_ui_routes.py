@@ -1452,7 +1452,7 @@ async def test_relay_task_detail_hides_pseudo_envelope_followup_response(
     conversation_html = _relay_view_panel_html(response, "conversation")
     assert "接续验证：请用一句话说明 task28 现在可以继续对话。" in conversation_html
     assert "summary task28 现在可以继续对话" not in conversation_html
-    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" in conversation_html
+    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" not in conversation_html
 
 
 @pytest.mark.asyncio
@@ -1502,8 +1502,275 @@ async def test_relay_task_detail_hides_fused_json_followup_response(
     conversation_html = _relay_view_panel_html(response, "conversation")
     assert "部署后接续验证" in conversation_html
     assert "summary已修复" not in conversation_html
-    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" in conversation_html
+    assert "总工程师的结构化输出已由系统处理，原始协议内容不在主会话展示。" not in conversation_html
     assert "next_actionopen_questionsreason" not in conversation_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_hides_prefixed_spaced_protocol_followup_response(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        prompt="确认接续是否还会泄漏结构化协议",
+        workspace="/tmp/project-a",
+        title="Spaced protocol follow-up display",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "user_followup",
+        {"text": "请继续，只展示自然语言。"},
+        summary="请继续，只展示自然语言。",
+    )
+    leaked_protocol = (
+        '模型先说了一句前缀\n{"artifact_type" : "final_summary", '
+        '"role" : "director", "status" : "passed", "summary" : "不该显示", '
+        '"handoff_to" : "", "evidence_refs" : [], "open_questions" : [], '
+        '"next_action" : "", "reason" : "协议内容"}'
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "followup_response",
+        {
+            "text": leaked_protocol,
+            "target_role": "user",
+        },
+        summary=leaked_protocol,
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "请继续，只展示自然语言。" in conversation_html
+    assert "模型先说了一句前缀" not in conversation_html
+    assert "不该显示" not in conversation_html
+    assert "artifact_type" not in conversation_html
+    assert "handoff_to" not in conversation_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_projects_direct_final_summary_as_plain_closure(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        prompt="请只用两句话确认收到。",
+        workspace="/tmp/project-a",
+        title="Direct final summary",
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_task_status(task.id, "completed")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "artifact_type": "final_summary",
+            "role": "director",
+            "status": "passed",
+            "summary": "我已收到这个交互采样任务。对话区会保持简洁。",
+            "reason": "按要求仅确认收到并保持简洁，无需工具或产出物。",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "",
+        },
+        summary="我已收到这个交互采样任务。对话区会保持简洁。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "我已收到这个交互采样任务。对话区会保持简洁。" in conversation_html
+    assert "结论：" not in conversation_html
+    assert "下一步：" not in conversation_html
+    assert "详情见结构化数据" not in conversation_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_keeps_current_round_direct_final_after_old_role_process(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        prompt="第一轮完成后，第二轮直接收口。",
+        workspace="/tmp/project-a",
+        title="Current round direct final",
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_role_status(task.id, "implementer", "passed")
+    service._store.update_task_status(task.id, "completed")
+    service._store.save_artifact(
+        task.id,
+        "implementer",
+        "implementation_report",
+        {
+            "artifact_type": "implementation_report",
+            "role": "implementer",
+            "round_id": 1,
+            "status": "passed",
+            "summary": "第一轮实现已经完成。",
+            "handoff_to": "director",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "交回总工程师收尾。",
+        },
+        summary="第一轮实现已经完成。",
+    )
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "artifact_type": "final_summary",
+            "role": "director",
+            "round_id": 2,
+            "status": "passed",
+            "summary": "第二轮已直接完成，并保持对话区简洁。",
+            "reason": "第二轮无需继续接力。",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "",
+        },
+        summary="第二轮已直接完成，并保持对话区简洁。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "第二轮已直接完成，并保持对话区简洁。" in conversation_html
+    assert "第一轮实现已经完成。" not in conversation_html
+    assert "结论：" not in conversation_html
+    assert "详情见结构化数据" not in conversation_html
+
+
+def test_relay_projected_rows_prunes_direct_final_summary_by_round() -> None:
+    from wlcodex.live_stream.server import _relay_projected_conversation_rows
+
+    rows = _relay_projected_conversation_rows(
+        [],
+        hub=None,
+        artifacts=[
+            {
+                "id": 1,
+                "artifact_type": "implementation_report",
+                "role": "implementer",
+                "relay_role": "implementer",
+                "round_id": 1,
+                "status": "passed",
+                "reason": "第一轮实现完成。",
+                "summary": "第一轮实现已经完成。",
+                "handoff_to": "director",
+                "evidence_refs": [],
+                "open_questions": [],
+                "next_action": "交回总工程师收尾。",
+            },
+            {
+                "id": 2,
+                "artifact_type": "final_summary",
+                "role": "director",
+                "relay_role": "director",
+                "round_id": 2,
+                "status": "passed",
+                "reason": "第二轮无需继续接力。",
+                "summary": "第二轮已直接完成，并保持对话区简洁。",
+                "handoff_to": "",
+                "evidence_refs": [],
+                "open_questions": [],
+                "next_action": "",
+            },
+        ],
+    )
+
+    assert any(
+        row.get("key") == "final_summary_response:2"
+        and row.get("body") == "第二轮已直接完成，并保持对话区简洁。"
+        for row in rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_keeps_natural_reply_with_json_snippet_in_chat(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        prompt="解释这段 JSON。",
+        workspace="/tmp/project-a",
+        title="Natural JSON reply",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-json-snippet",
+        agent_run_id=611,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=611,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": (
+                '可以，正文里的 JSON 示例是 {"artifact_type":"note","summary":"只是示例"}，'
+                "这里不是接力结构化产物。"
+            ),
+            "native_turn_id": "turn-json-snippet",
+            "itemId": "assistant-json-snippet",
+        },
+        occurred_at="2026-06-14T11:45:01+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "正文里的 JSON 示例" in conversation_html
+    assert "artifact_type" in conversation_html
+    assert "只是示例" in conversation_html
+    assert "这里不是接力结构化产物。" in conversation_html
+    assert 'data-native-kind="role_envelope"' not in conversation_html
 
 
 @pytest.mark.asyncio
@@ -2537,19 +2804,19 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     conversation_html = _relay_view_panel_html(response, "conversation")
     work_log_html = _relay_work_log_html(response)
     assert "让审核工程师确认一下" in conversation_html
-    assert "我会先确认风险。" not in conversation_html
+    assert "我会先确认风险。" in conversation_html
     assert "架构侧继续补齐影响面。" in conversation_html
-    assert "结论：本任务判定无需派发，由总工程师直接完成。" in conversation_html
+    assert "结论：本任务判定无需派发，由总工程师直接完成。" not in conversation_html
     assert 'data-native-role="director"' in response
     assert 'data-native-role="architect"' in response
     assert 'data-view-panel="conversation"' in response
     assert 'data-view-panel="board"' not in response
     assert "任务进度" not in response.split("<script", 1)[0]
     assert "调度决策" not in response.split("<script", 1)[0]
-    assert "总工程师直接完成" in response
-    assert "验收依据" in response
-    assert "给出清晰说明" in response
-    assert "下一步" in response
+    assert "总工程师直接完成" in work_log_html
+    assert "验收依据" in work_log_html
+    assert "给出清晰说明" in work_log_html
+    assert "下一步" in work_log_html
     assert "RelayBoard" not in response
     assert "current goal" not in response
     assert "latest user input" not in response
@@ -3003,10 +3270,11 @@ async def test_relay_task_detail_projects_marvis_chat_and_work_log_drawer(
     assert "手机办公室看不到其他小马" in conversation_html
     assert "Marvis" in conversation_html
     assert "任务分配 已完成" in conversation_html
-    assert "Marvis拍了拍 开发工程师" in conversation_html
+    assert "Marvis 拍了拍 开发工程师 说， 别等了，这就开始" in conversation_html
     assert "开发工程师" in conversation_html
     assert "搞定，有请下一位。" in conversation_html
-    assert "开发工程师 那边反馈 Marvis 本身不在可操作应用范围内" in conversation_html
+    assert "开发工程师 那边反馈 Marvis 本身不在可操作应用范围内" not in conversation_html
+    assert "已完成汇总。" in conversation_html
     for forbidden_role_name in [
         legacy_implementer_name,
         " ".join(("Computer", "Agent")),
@@ -3229,12 +3497,12 @@ async def test_relay_task_detail_projects_saved_handoff_when_native_rows_are_ear
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
-    assert conversation_html.count("Marvis拍了拍 开发工程师，说开干吧") == 1
+    assert conversation_html.count("Marvis 拍了拍 开发工程师 说， 别等了，这就开始") == 1
     assert "开发工程师交给审核工程师复核" in conversation_html
     assert "审核工程师退回开发工程师继续处理" in conversation_html
-    assert "Marvis拍了拍 审核工程师，说开干吧" not in conversation_html
-    assert "Marvis拍了拍 Marvis，说开干吧" not in conversation_html
-    assert conversation_html.index("Marvis拍了拍 开发工程师") < conversation_html.index(
+    assert "Marvis 拍了拍 审核工程师 说， 别等了，这就开始" not in conversation_html
+    assert "Marvis 拍了拍 Marvis 说， 别等了，这就开始" not in conversation_html
+    assert conversation_html.index("Marvis 拍了拍 开发工程师") < conversation_html.index(
         "修复完成，交给审核。"
     )
 
@@ -3378,9 +3646,7 @@ async def test_relay_task_detail_renders_auditor_return_to_director_handoff(
     conversation_html = _relay_view_panel_html(response, "conversation")
     assert "开发工程师交给审核工程师复核" in conversation_html
     assert "审核工程师交回Marvis收尾" in conversation_html
-    assert conversation_html.index("审核工程师交回Marvis收尾") < conversation_html.index(
-        "已修复接力提示丢失问题。"
-    )
+    assert "已修复接力提示丢失问题。" not in conversation_html
 
 
 @pytest.mark.asyncio
@@ -3452,7 +3718,7 @@ async def test_relay_task_detail_does_not_show_stale_round_final_summary_as_assi
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
-    assert "旧轮等待用户验收。" in conversation_html
+    assert "旧轮等待用户验收。" not in conversation_html
     assert "第二轮已经处理完成。" in conversation_html
     assert "任务分配 等待" not in conversation_html
     assert "任务分配 已中断" not in conversation_html
@@ -3480,8 +3746,8 @@ async def test_relay_task_detail_does_not_show_stale_round_final_summary_as_assi
     routing_handler = response.split('source.addEventListener("routing.decision"', 1)[1]
     routing_handler = routing_handler.split('source.addEventListener("role.envelope"', 1)[0]
     assert "if (!isCurrentRoundEvent(payload)) return;" in routing_handler
-    assert "renderRoleEnvelope" in routing_handler
-    assert "artifact_type: payload.artifact_type || \"routing_decision\"" in routing_handler
+    assert "renderRoleEnvelope" not in routing_handler
+    assert "artifact_type: payload.artifact_type || \"routing_decision\"" not in routing_handler
     status_handler = response.split('source.addEventListener("role.status"', 1)[1]
     status_handler = status_handler.split('source.addEventListener("task.completed"', 1)[0]
     assert "if (!isCurrentRoundEvent(payload)) return;" in status_handler
@@ -3694,14 +3960,14 @@ async def test_relay_task_detail_limits_handoff_prompts_to_current_round(
 
     conversation_html = _relay_view_panel_html(response, "conversation")
     assert "历史轮：先修 A。" in conversation_html
-    assert "历史轮已修复 A。" in conversation_html
+    assert "历史轮已修复 A。" not in conversation_html
     assert "当前轮：继续修 B。" in conversation_html
     assert "当前轮已修复 B。" in conversation_html
     assert "| 已中断" not in conversation_html
-    assert conversation_html.count("| 等待") == 1
-    assert conversation_html.count("任务分配 已完成") == 2
+    assert "| 等待" not in conversation_html
+    assert conversation_html.count("任务分配 已完成") == 1
     assert "接力暂停在总工程师" not in conversation_html
-    assert conversation_html.count("Marvis拍了拍 开发工程师，说开干吧") == 1
+    assert conversation_html.count("Marvis 拍了拍 开发工程师 说， 别等了，这就开始") == 1
     assert conversation_html.count("开发工程师交给审核工程师复核") == 1
 
 
@@ -3802,9 +4068,12 @@ async def test_relay_task_detail_treats_terminal_waiting_summary_as_completed(
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
-    assert "已完成接力生命周期统一收口。" in conversation_html
+    assert "已完成接力生命周期统一收口。" not in conversation_html
+    assert "修复了接力状态错误显示。" in conversation_html
+    assert "审核通过，接力状态已经正确收口。" in conversation_html
     assert "| 等待" not in conversation_html
-    assert "| 已完成" in conversation_html
+    assert "执行反馈 已完成" in conversation_html
+    assert "审核反馈 已完成" in conversation_html
     assert "接力暂停在总工程师" not in conversation_html
 
 
@@ -4145,7 +4414,7 @@ def test_relay_role_error_projection_is_resolved_by_later_round_success() -> Non
 
 
 @pytest.mark.asyncio
-async def test_relay_task_detail_replaces_generic_final_summary_with_role_closure(
+async def test_relay_task_detail_keeps_generic_final_summary_out_of_chat(
     tmp_path: Path,
 ) -> None:
     server, service, _runtime_store = _server(tmp_path)
@@ -4233,14 +4502,19 @@ async def test_relay_task_detail_replaces_generic_final_summary_with_role_closur
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
     assert "结论：已完成任务" not in conversation_html
     assert "该角色已返回结构化结果" not in conversation_html
     assert "修复了交互不一致 bug，圆形控件改成椭圆形" in conversation_html
     assert "审核通过，交互展示与预期一致" in conversation_html
+    assert "交给审核工程师复核" not in conversation_html
+    assert "交回总工程师收尾" not in conversation_html
+    assert "修复了交互不一致 bug，圆形控件改成椭圆形" in work_log_html
+    assert "审核通过，交互展示与预期一致" in work_log_html
 
 
 @pytest.mark.asyncio
-async def test_relay_task_detail_keeps_mixed_language_final_summary_as_human_closure(
+async def test_relay_task_detail_keeps_mixed_language_final_summary_out_of_chat(
     tmp_path: Path,
 ) -> None:
     server, service, _runtime_store = _server(tmp_path)
@@ -4295,14 +4569,65 @@ async def test_relay_task_detail_keeps_mixed_language_final_summary_as_human_clo
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
-    assert "头像和问候语整体下移" in conversation_html
-    assert "兼容顶部 安全区" in conversation_html
-    assert "英文角色名" in conversation_html
-    assert "任务分配" in conversation_html
+    work_log_html = _relay_work_log_html(response)
+    assert "头像和问候语整体下移" not in conversation_html
+    assert "兼容顶部 安全区" not in conversation_html
+    assert "英文角色名" not in conversation_html
+    assert "任务分配" not in conversation_html
     assert "该角色已返回结构化结果" not in conversation_html
     assert "safe-area" not in conversation_html
     assert "dispatch task" not in conversation_html
     assert "File/Search/Computer Agent" not in conversation_html
+    assert "头像和问候语整体下移" in work_log_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_keeps_natural_final_summary_with_technical_terms(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Technical final closure task",
+        prompt="解释 safe-area 和 dispatch task。",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_task_status(task.id, "completed")
+    service._store.save_artifact(
+        task.id,
+        "director",
+        "final_summary",
+        {
+            "relay_role": "director",
+            "status": "passed",
+            "reason": "用户询问的是普通技术术语。",
+            "role": "director",
+            "artifact_type": "final_summary",
+            "summary": "safe-area 是移动端为系统状态栏预留的安全区域；dispatch task 是任务分发日志里的动作名。",
+            "handoff_to": "",
+            "evidence_refs": [],
+            "open_questions": [],
+            "next_action": "",
+        },
+        summary="safe-area 是移动端为系统状态栏预留的安全区域；dispatch task 是任务分发日志里的动作名。",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert "安全区 是移动端为系统状态栏预留的安全区域" in conversation_html
+    assert "任务分配 是任务分发日志里的动作名" in conversation_html
+    assert "详情见结构化数据" not in conversation_html
 
 
 @pytest.mark.asyncio
@@ -4699,7 +5024,7 @@ async def test_relay_task_detail_humanizes_malformed_role_envelope(
 
 
 @pytest.mark.asyncio
-async def test_relay_task_detail_humanizes_valid_role_envelope(
+async def test_relay_task_detail_keeps_valid_role_envelope_out_of_marvis_chat(
     tmp_path: Path,
 ) -> None:
     server, service, runtime_store = _server(tmp_path)
@@ -4760,10 +5085,11 @@ async def test_relay_task_detail_humanizes_valid_role_envelope(
     finally:
         await server.stop()
 
-    assert 'data-native-kind="role_envelope"' in response
-    assert "结论：需要先确认具体文件路径。" in response
-    assert "下一步：请用户确认要删除的 md 文件。" in response
-    assert "待确认：是否删除 /repo/测试接力.md？" in response
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert 'data-native-kind="role_envelope"' not in conversation_html
+    assert "结论：需要先确认具体文件路径。" not in conversation_html
+    assert "下一步：请用户确认要删除的 md 文件。" not in conversation_html
+    assert "待确认：是否删除 /repo/测试接力.md？" not in conversation_html
     assert '"artifact_type": "routing_decision"' not in response
     assert '"required_roles": ["director"]' not in response
 
@@ -4851,17 +5177,20 @@ async def test_relay_task_detail_uses_canonical_envelope_when_output_has_bad_pre
         await server.stop()
 
     visible_html = response.split("<script", 1)[0]
-    assert 'data-conversation-role-final="director"' in visible_html
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
+    assert 'data-conversation-role-final="director"' not in conversation_html
     assert 'data-role-canonical-json="director"' not in visible_html
-    assert "结论：完成闭环修复，最终展示只使用权威完成态。" in visible_html
-    assert "下一步：继续观察全新复杂接力任务。" in visible_html
-    assert "验收依据：会话流不显示污染前缀" in visible_html
+    assert "结论：完成闭环修复，最终展示只使用权威完成态。" not in conversation_html
+    assert "下一步：继续观察全新复杂接力任务。" not in conversation_html
+    assert "验收依据：会话流不显示污染前缀" not in conversation_html
+    assert "完成闭环修复，最终展示只使用权威完成态。" in work_log_html
     assert "&quot;artifact_type&quot;: &quot;final_summary&quot;" not in visible_html
     assert "模型先说了一段废话" not in visible_html
 
 
 @pytest.mark.asyncio
-async def test_relay_conversation_role_replies_are_humanized_to_chinese(
+async def test_relay_conversation_keeps_role_artifacts_in_work_log_not_chat(
     tmp_path: Path,
 ) -> None:
     server, service, _runtime_store = _server(tmp_path)
@@ -4950,8 +5279,9 @@ async def test_relay_conversation_role_replies_are_humanized_to_chinese(
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
     message_bodies = _relay_message_bodies_html(conversation_html)
-    assert conversation_html.count('data-conversation-role-final="') == 5
+    assert conversation_html.count('data-conversation-role-final="') == 0
     assert conversation_html.count('data-role-canonical-json="') == 0
     for english_phrase in (
         "Route to full relay",
@@ -4964,9 +5294,10 @@ async def test_relay_conversation_role_replies_are_humanized_to_chinese(
         "All role replies are readable in Chinese",
     ):
         assert english_phrase not in message_bodies
-    assert "该角色已返回结构化结果，详情见结构化数据。" in message_bodies
-    assert "下一步：下一步见结构化数据。" in message_bodies
-    assert "验收依据：验收依据见结构化数据。" in message_bodies
+    assert "该角色已返回结构化结果，详情见结构化数据。" not in message_bodies
+    assert "下一步：下一步见结构化数据。" not in message_bodies
+    assert "验收依据：验收依据见结构化数据。" not in message_bodies
+    assert "结构化结果" in work_log_html
 
 
 @pytest.mark.asyncio
@@ -5084,7 +5415,7 @@ async def test_relay_conversation_hides_blocked_error_details_and_dedupes_user_p
     conversation_html = _relay_view_panel_html(response, "conversation")
     board_html = _relay_view_panel_html(response, "board")
     assert conversation_html.count(prompt) == 1
-    assert "结论：路由到五角色完整接力，下一步交给架构工程师。" in conversation_html
+    assert "结论：路由到五角色完整接力，下一步交给架构工程师。" not in conversation_html
     assert "接力暂停在总工程师，详情见工作日志。" in conversation_html
     assert "输出格式异常" not in conversation_html
     assert "任务已阻塞" not in conversation_html
@@ -5163,10 +5494,12 @@ async def test_relay_conversation_hides_same_round_role_error_after_success(
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
-    assert "结论：先审计证据，再计算接力模式相对单角色模式的 token 增量。" in conversation_html
+    work_log_html = _relay_work_log_html(response)
+    assert "结论：先审计证据，再计算接力模式相对单角色模式的 token 增量。" not in conversation_html
     assert "接力暂停在总工程师" not in conversation_html
     assert "结构化结果不是合法 JSON" not in conversation_html
     assert "invalid json" not in conversation_html
+    assert "先审计证据，再计算接力模式相对单角色模式的 token 增量。" in work_log_html
 
 
 @pytest.mark.asyncio
@@ -5361,7 +5694,7 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     assert "Task #1 created successfully" in work_log_html
     assert "function appendRolePreview" in response
     assert "function relayPreviewDisplayText" in response
-    assert "function renderRoleEnvelope" in response
+    assert "function renderRoleEnvelope" not in response
     assert "已接收 ${value.length} 字" not in response
     assert "正在处理任务，完成后展示结果" in response
     assert "function clearAllRolePreviews" in response
@@ -5382,12 +5715,14 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     assert "roleOutputs[payload.role]" not in delta_handler
     routing_handler = response.split('source.addEventListener("routing.decision"', 1)[1]
     routing_handler = routing_handler.split('source.addEventListener("role.envelope"', 1)[0]
-    assert "renderRoleEnvelope" in routing_handler
+    assert "renderRoleEnvelope" not in routing_handler
+    assert "appendMarvisConversationAssistant" not in routing_handler
     assert "data-routing-" not in routing_handler
     assert "data-board-" not in routing_handler
     envelope_handler = response.split('source.addEventListener("role.envelope"', 1)[1]
     envelope_handler = envelope_handler.split('source.addEventListener("handoff.created"', 1)[0]
-    assert "renderRoleEnvelope" in envelope_handler
+    assert "renderRoleEnvelope" not in envelope_handler
+    assert "appendMarvisConversationAssistant" not in envelope_handler
     assert "payload.display_text" in envelope_handler
     assert "envelope.display_text" in response
     handoff_handler = response.split('source.addEventListener("handoff.created"', 1)[1]
@@ -5459,11 +5794,12 @@ async def test_relay_task_detail_humanizes_internal_route_terms(
         await server.stop()
 
     visible_html = response.split("<script", 1)[0]
-    assert 'data-native-kind="role_envelope"' in visible_html
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    assert 'data-native-kind="role_envelope"' not in conversation_html
     assert 'data-role-canonical-json="director"' not in visible_html
-    assert "结论：由总工程师直接处理：直接查询并汇总今日金价。" in visible_html
-    assert "下一步：由总工程师核验最新行情来源并给出结果" in visible_html
-    assert "验收依据：不展示 总工程师直接处理 给用户" in visible_html
+    assert "结论：由总工程师直接处理：直接查询并汇总今日金价。" not in conversation_html
+    assert "下一步：由总工程师核验最新行情来源并给出结果" not in conversation_html
+    assert "验收依据：不展示 总工程师直接处理 给用户" not in conversation_html
     assert "路由为director_only" not in visible_html
     assert "complete directly after routing by checking current market sources" not in visible_html
 

@@ -59,9 +59,14 @@ from wlcodex.relay.display import (
     routing_risk_label,
     routing_route_label,
     sanitize_protocol_leak_text,
+    text_contains_relay_protocol_payload,
     text_needs_chinese_fallback,
 )
 from wlcodex.relay.envelopes import parse_role_envelope
+from wlcodex.relay.marvis_interaction import (
+    chat_events as marvis_chat_events,
+    project_relay_rows_to_marvis_interactions,
+)
 from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
 from wlcodex.relay.work_log_projection import (
     RawWorkLogEntry,
@@ -4299,7 +4304,7 @@ def _marvis_relay_handoff_role_label(role: str) -> str:
 def _marvis_relay_handoff_text(from_role: str, to_role: str) -> str:
     to_name = _marvis_relay_handoff_role_label(to_role)
     if from_role == "director":
-        return f"Marvis拍了拍 {to_name}，说开干吧"
+        return f"Marvis 拍了拍 {to_name} 说， 别等了，这就开始"
     from_name = _marvis_relay_handoff_role_label(from_role)
     if to_role == "auditor":
         return f"{from_name}交给{to_name}复核"
@@ -4356,15 +4361,22 @@ def _marvis_relay_action_label(role: str, payload: dict[str, Any] | None = None)
         return confirmation_label
     if role == "director":
         kind = str((payload or {}).get("kind") or "").strip()
-        status = str((payload or {}).get("status") or "").strip()
         handoff_to = str((payload or {}).get("handoff_to") or "").strip()
         if (
             artifact_type == "routing_decision"
             or kind in {"text_delta", "waiting"}
-            or (artifact_type == "final_summary" and status == "waiting" and handoff_to)
+            or (artifact_type == "final_summary" and handoff_to)
         ):
             return "任务分配"
         return ""
+    artifact_labels = {
+        "architecture_plan": "架构计划",
+        "implementation_report": "执行反馈",
+        "test_report": "测试反馈",
+        "audit_report": "审核反馈",
+    }
+    if artifact_type in artifact_labels:
+        return artifact_labels[artifact_type]
     if artifact_type:
         return (
             _marvis_relay_role_status_label(artifact_type)
@@ -6863,7 +6875,7 @@ def _relay_task_detail_page(
     }}
     function marvisHandoffText(fromRole, toRole) {{
       const toName = marvisHandoffRoleLabel(toRole);
-      if (fromRole === "director") return `Marvis拍了拍 ${{toName}}，说开干吧`;
+      if (fromRole === "director") return `Marvis 拍了拍 ${{toName}} 说， 别等了，这就开始`;
       const fromName = marvisHandoffRoleLabel(fromRole);
       if (toRole === "auditor") return `${{fromName}}交给${{toName}}复核`;
       if (fromRole === "auditor" && toRole === "director") return `${{fromName}}交回Marvis收尾`;
@@ -6974,8 +6986,22 @@ def _relay_task_detail_page(
         "next_action",
       ].some((marker) => value.includes(marker));
     }}
-    function relayProtocolOutputHiddenText(role) {{
-      return `${{labelForRole(role)}} 的结构化输出已由系统处理，原始协议内容不在主会话展示。`;
+    function marvisConversationTextIsStructuredArtifactPlaceholder(text) {{
+      const value = String(text || "").trim();
+      if (!value) return true;
+      if (value.startsWith("{{") && (relayParseEnvelope(value) || relayTextLooksLikeEnvelope(value))) return true;
+      return [
+        "结构化结果缺少",
+        "结构化结果不是合法",
+        "结构化结果未采用",
+        "结构化产物未采用",
+        "结构化输出已由系统处理",
+        "详情见结构化数据",
+        "原始协议内容不在主会话展示",
+        "输出格式异常",
+        "任务已阻塞",
+        "invalid json",
+      ].some((marker) => value.includes(marker));
     }}
     function relayDictLooksLikeEnvelope(payload) {{
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
@@ -7054,7 +7080,7 @@ def _relay_task_detail_page(
       if (value.includes(sentinel)) return value.split(sentinel, 1)[0] + sentinel;
       const markers = ["artifact_type", "expected_output_envelope", "routing_decisioncomplexity", "required_roles", "handoff_to"];
       if (markers.some((marker) => value.includes(marker)) && value.includes("{{")) {{
-        return relayProtocolOutputHiddenText(role);
+        return "";
       }}
       return value;
     }}
@@ -7899,7 +7925,7 @@ def _relay_task_detail_page(
             return;
           }}
           nativeEnvelopeBuffers.delete(key);
-          renderRoleEnvelope(role, envelope);
+          clearRolePreview(role);
           setRoleStatus(role, "streaming");
           return;
         }}
@@ -7941,35 +7967,6 @@ def _relay_task_detail_page(
     }}
     function clearAllRolePreviews() {{
       Object.keys(roleStatuses).forEach(clearRolePreview);
-    }}
-    function renderRoleEnvelope(role, envelope) {{
-      if (!role || !envelope) return;
-      clearRolePreview(role);
-      const summaryText = envelope.display_text || relayHumanizeEnvelope(envelope);
-      const roundId = String(envelope.round_id || activeRelayRoundId || CURRENT_ROUND_ID || "1");
-      const isDispatchHandoff =
-        role === "director" &&
-        String(envelope.artifact_type || "") === "final_summary" &&
-        String(envelope.status || "") === "waiting" &&
-        Boolean(envelope.handoff_to);
-      if (conversationTimeline) {{
-        const key = `canonical:${{role}}:${{envelope.artifact_type || "role_envelope"}}`;
-        let node = conversationTimeline.querySelector(`[data-conversation-role-final="${{role}}"]`);
-        if (!node) {{
-          node = createNativeMessage(
-            role,
-            "role_envelope",
-            labelForRole(role),
-            isDispatchHandoff ? labelForStatus("passed") : labelForStatus(envelope.status || "passed"),
-            key
-          );
-          if (!node) return;
-          node.dataset.conversationRoleFinal = role;
-        }}
-        node.dataset.nativeKind = "role_envelope";
-        node.dataset.nativeRoundId = roundId;
-        setNativeBodyText(node, summaryText);
-      }}
     }}
     document.querySelectorAll("[data-conversation-role-preview]").forEach((node) => {{
       const role = node.dataset.conversationRolePreview;
@@ -8382,9 +8379,14 @@ def _relay_task_detail_page(
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       const roundId = relayEventRoundId(payload);
+      const displayText = payload.display_text || payload.text || payload.summary || "";
+      if (marvisConversationTextIsStructuredArtifactPlaceholder(displayText)) {{
+        setRoleStatus(payload.role || "director", payload.status || "passed");
+        return;
+      }}
       appendMarvisConversationAssistant(
         payload.role || "director",
-        payload.display_text || payload.text || payload.summary || "",
+        displayText,
         "followup_response",
         payload.artifact_id ? `followup_response:${{payload.artifact_id}}` : "",
         payload.status || "passed",
@@ -8396,12 +8398,7 @@ def _relay_task_detail_page(
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       const role = payload.role || "director";
-      renderRoleEnvelope(role, {{
-        ...payload,
-        role,
-        artifact_type: payload.artifact_type || "routing_decision",
-        status: payload.status || "passed",
-      }});
+      clearRolePreview(role);
       setRoleStatus(role, payload.status || "passed");
     }});
     source.addEventListener("role.envelope", (event) => {{
@@ -8410,7 +8407,7 @@ def _relay_task_detail_page(
       const envelope = {{ ...(payload.envelope || payload) }};
       if (payload.display_text && !envelope.display_text) envelope.display_text = payload.display_text;
       const role = payload.role || envelope.role;
-      renderRoleEnvelope(role, envelope);
+      clearRolePreview(role);
       if (envelope.status) setRoleStatus(role, envelope.status);
     }});
     source.addEventListener("handoff.created", (event) => {{
@@ -8597,7 +8594,6 @@ def _relay_projected_conversation_rows(
     artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> list[dict[str, str]]:
     canonical_payloads = canonical_payloads or {}
-    canonical_payload_sequence = canonical_payload_sequence or list(canonical_payloads.values())
     events = _relay_worker_events_for_roles(role_jobs, hub=hub)
     job_by_role = {str(getattr(job, "role", "") or ""): job for job in role_jobs}
     user_followup_texts = {
@@ -8617,7 +8613,15 @@ def _relay_projected_conversation_rows(
     for _occurred_at, _event_id, role, display_name, worker_event in events:
         kind = str(worker_event.kind or "event")
         text = _relay_native_event_text(worker_event)
-        if kind in {"text_delta", "message_completed"} and role in canonical_payloads:
+        if (
+            kind in {"text_delta", "message_completed"}
+            and role in canonical_payloads
+            and (
+                _relay_text_is_structured_artifact_placeholder(text)
+                or text_contains_relay_protocol_payload(text)
+                or _relay_parse_role_envelope_payload(text) is not None
+            )
+        ):
             continue
         if kind == "text_delta":
             key = _relay_native_message_key(role, worker_event, bucket="assistant")
@@ -8708,34 +8712,7 @@ def _relay_projected_conversation_rows(
                 if key:
                     seen_keys.add(key)
                 projected_rows.append(pending_row)
-    else:
-        for index, payload in enumerate(canonical_payload_sequence):
-            role = str(payload.get("role") or payload.get("relay_role") or "")
-            if not role:
-                continue
-            key = (
-                f"canonical:{role}:{payload.get('artifact_type') or 'role_envelope'}:"
-                f"{payload.get('_relay_artifact_key') or index}"
-            )
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            projected_rows.append(
-                {
-                    "role": role,
-                    "kind": "role_envelope",
-                    "speaker": _relay_role_label(role),
-                    "meta": _relay_conversation_artifact_meta(payload),
-                    "body": _relay_humanize_role_envelope(payload),
-                    "key": key,
-                    "artifact_type": str(payload.get("artifact_type") or ""),
-                    "status": str(payload.get("status") or ""),
-                    "handoff_to": str(payload.get("handoff_to") or ""),
-                    "display_summary": _relay_concrete_payload_summary(payload),
-                    "round_id": str(payload.get("round_id") or ""),
-                }
-            )
-    _relay_enrich_generic_final_summary_rows(projected_rows)
+    _relay_prune_direct_final_summary_rows(projected_rows)
     _relay_normalize_conversation_lifecycle_rows(projected_rows)
     has_pending_followup_waiting = any(
         str(row.get("kind") or "") == "waiting"
@@ -8746,7 +8723,7 @@ def _relay_projected_conversation_rows(
     current_round_id = _relay_current_round_id_from_artifacts(artifacts)
     has_current_round_blocked_role_result = any(
         str(row.get("role") or "") == blocked_role
-        and str(row.get("kind") or "") in {"role_envelope", "followup_response"}
+        and str(row.get("kind") or "") in {"role_envelope", "followup_response", "role_process"}
         and (
             str(row.get("kind") or "") == "followup_response"
             or str(row.get("artifact_type") or "") == "final_summary"
@@ -8770,6 +8747,48 @@ def _relay_projected_conversation_rows(
             }
         )
     return projected_rows
+
+
+def _relay_prune_direct_final_summary_rows(rows: list[dict[str, Any]]) -> None:
+    non_director_round_ids = {
+        str(row.get("round_id") or "").strip()
+        for row in rows
+        if str(row.get("role") or "") != "director"
+        and str(row.get("kind") or "") in {"role_process", "followup_response", "message_completed"}
+    }
+    non_director_round_ids.discard("")
+    has_unscoped_non_director_process = any(
+        str(row.get("role") or "") != "director"
+        and str(row.get("kind") or "") in {"role_process", "followup_response", "message_completed"}
+        and not str(row.get("round_id") or "").strip()
+        for row in rows
+    )
+    if not non_director_round_ids and not has_unscoped_non_director_process:
+        return
+    rows[:] = [
+        row
+        for row in rows
+        if not (
+            str(row.get("key") or "").startswith("final_summary_response:")
+            and _relay_direct_final_summary_should_be_pruned(
+                row,
+                non_director_round_ids=non_director_round_ids,
+                has_unscoped_non_director_process=has_unscoped_non_director_process,
+            )
+        )
+    ]
+
+
+def _relay_direct_final_summary_should_be_pruned(
+    row: dict[str, Any],
+    *,
+    non_director_round_ids: set[str],
+    has_unscoped_non_director_process: bool,
+) -> bool:
+    round_id = str(row.get("round_id") or "").strip()
+    if round_id:
+        return round_id in non_director_round_ids
+    return has_unscoped_non_director_process or bool(non_director_round_ids)
 
 
 def _relay_pending_followup_waiting_row(
@@ -8886,7 +8905,11 @@ def _relay_conversation_artifact_meta(payload: dict[str, Any]) -> str:
 def _relay_normalize_conversation_lifecycle_rows(rows: list[dict[str, str]]) -> None:
     success_roles_by_round: dict[str, set[str]] = {}
     for row in rows:
-        if str(row.get("kind") or "") not in {"role_envelope", "followup_response"}:
+        if str(row.get("kind") or "") not in {
+            "role_envelope",
+            "followup_response",
+            "role_process",
+        }:
             continue
         role = str(row.get("role") or "")
         if not role:
@@ -8979,13 +9002,18 @@ def _relay_conversation_row_from_artifact(
         if not text:
             return None
         role = str(artifact.get("role") or artifact.get("relay_role") or "director")
+        if _relay_text_is_structured_artifact_placeholder(text):
+            return None
+        display_text = _relay_followup_response_display_text(role, text)
+        if _relay_text_is_structured_artifact_placeholder(display_text):
+            return None
         status = _relay_lifecycle_status_for_payload(artifact)
         return {
             "role": role,
             "kind": "followup_response",
             "speaker": _relay_role_label(role),
             "meta": status,
-            "body": _relay_followup_response_display_text(role, text),
+            "body": display_text,
             "key": f"followup_response:{artifact_key}",
             "status": status,
             "round_id": str(artifact.get("round_id") or ""),
@@ -8993,142 +9021,198 @@ def _relay_conversation_row_from_artifact(
     payload = _relay_canonical_payload_from_artifact(artifact)
     if payload is None:
         return None
-    role = str(payload.get("role") or payload.get("relay_role") or "")
-    if not role:
+    direct_final_row = _relay_conversation_direct_final_summary_row(
+        payload,
+        artifact_key=artifact_key,
+        artifact=artifact,
+    )
+    if direct_final_row is not None:
+        return direct_final_row
+    process_row = _relay_conversation_product_process_row(
+        payload,
+        artifact_key=artifact_key,
+        artifact=artifact,
+    )
+    if process_row is not None:
+        return process_row
+    from_role = str(payload.get("role") or payload.get("relay_role") or "")
+    to_role = str(payload.get("handoff_to") or "")
+    if from_role and to_role and from_role != to_role:
+        return {
+            "role": to_role,
+            "kind": "handoff",
+            "speaker": _relay_role_label(from_role),
+            "meta": "",
+            "body": str(payload.get("summary") or artifact.get("summary") or ""),
+            "key": f"handoff:{from_role}:{to_role}:{artifact_key}",
+            "from_role": from_role,
+            "to_role": to_role,
+            "round_id": str(payload.get("round_id") or artifact.get("round_id") or ""),
+        }
+    return None
+
+
+def _relay_conversation_direct_final_summary_row(
+    payload: dict[str, Any],
+    *,
+    artifact_key: str,
+    artifact: dict[str, Any],
+) -> dict[str, str] | None:
+    role = str(payload.get("role") or payload.get("relay_role") or "").strip()
+    artifact_type = str(payload.get("artifact_type") or "").strip()
+    handoff_to = str(payload.get("handoff_to") or "").strip()
+    if role != "director" or artifact_type != "final_summary" or handoff_to:
+        return None
+    if not _relay_payload_status_is_success(str(payload.get("status") or "")):
+        return None
+    body = _relay_direct_final_summary_body(payload, artifact)
+    if not body:
         return None
     return {
         "role": role,
-        "kind": "role_envelope",
+        "kind": "followup_response",
         "speaker": _relay_role_label(role),
-        "meta": _relay_conversation_artifact_meta(payload),
-        "body": _relay_humanize_role_envelope(payload),
-        "key": f"canonical:{role}:{payload.get('artifact_type') or 'role_envelope'}:{artifact_key}",
-        "artifact_type": str(payload.get("artifact_type") or ""),
-        "status": str(payload.get("status") or ""),
-        "handoff_to": str(payload.get("handoff_to") or ""),
-        "display_summary": _relay_concrete_payload_summary(payload),
-        "round_id": str(payload.get("round_id") or ""),
+        "meta": "passed",
+        "body": body,
+        "key": f"final_summary_response:{artifact_key}",
+        "status": "passed",
+        "artifact_type": artifact_type,
+        "round_id": str(payload.get("round_id") or artifact.get("round_id") or ""),
     }
 
 
-def _relay_enrich_generic_final_summary_rows(rows: list[dict[str, str]]) -> None:
-    prior_rows: list[dict[str, str]] = []
-    for row in rows:
-        is_director_final = (
-            str(row.get("kind") or "") == "role_envelope"
-            and str(row.get("role") or "") == "director"
-            and str(row.get("artifact_type") or "") == "final_summary"
-        )
-        if is_director_final and _relay_summary_text_is_generic(str(row.get("body") or "")):
-            replacement = _relay_synthesize_final_summary_from_role_rows(prior_rows)
-            if replacement:
-                row["body"] = replacement
-        prior_rows.append(row)
-
-
-def _relay_synthesize_final_summary_from_role_rows(rows: list[dict[str, str]]) -> str:
-    concrete_by_role: dict[str, str] = {}
-    role_order: list[str] = []
-    for row in rows:
-        if str(row.get("kind") or "") != "role_envelope":
-            continue
-        role = str(row.get("role") or "")
-        if not role or role == "director":
-            continue
-        candidate = str(row.get("display_summary") or "").strip()
-        if not candidate:
-            candidate = _relay_conclusion_from_humanized_body(str(row.get("body") or ""))
-        if _relay_summary_text_is_generic(candidate):
-            continue
-        if role not in role_order:
-            role_order.append(role)
-        concrete_by_role[role] = candidate
-
-    if not concrete_by_role:
-        return "结论：任务已完成，但最终摘要缺少可展示的具体变更；详细过程见工作日志。"
-
-    parts: list[str] = []
-    for role in role_order:
-        candidate = concrete_by_role.get(role, "")
-        if not candidate:
-            continue
-        if role == "auditor" and not candidate.startswith(("审核", "审计")):
-            parts.append(f"审核工程师确认：{candidate}")
-        else:
-            parts.append(candidate)
-    if not parts:
+def _relay_direct_final_summary_body(
+    payload: dict[str, Any],
+    artifact: dict[str, Any],
+) -> str:
+    raw = str(payload.get("summary") or artifact.get("summary") or "").strip()
+    if not raw:
         return ""
-    return "结论：" + "；".join(parts[:3])
+    if _relay_text_is_structured_artifact_placeholder(raw):
+        return ""
+    if _relay_direct_final_summary_has_internal_terms(raw):
+        return ""
+    body = _relay_humanize_display_text(raw).strip()
+    body = _relay_replace_legacy_role_identifiers(body)
+    if not body or _relay_text_is_structured_artifact_placeholder(body):
+        return ""
+    if _relay_text_needs_chinese_fallback(body):
+        return ""
+    if _relay_direct_final_summary_is_generic(body):
+        return ""
+    if _relay_direct_final_summary_has_internal_terms(body):
+        return ""
+    return _relay_sanitize_protocol_leak_text("director", body)
 
 
-def _relay_concrete_payload_summary(payload: dict[str, Any]) -> str:
-    candidates: list[str] = []
-    for field in ("summary", "reason"):
-        value = str(payload.get(field) or "").strip()
-        if value:
-            candidates.append(value)
-    acceptance = _relay_join_text_list(payload.get("acceptance_criteria"))
-    if acceptance:
-        candidates.append(acceptance)
-
-    for candidate in candidates:
-        value = _relay_humanize_display_text(candidate).strip()
-        value = _relay_sanitize_protocol_leak_text(str(payload.get("role") or ""), value)
-        if not _relay_summary_text_is_generic(value):
-            return value
-    return ""
-
-
-def _relay_conclusion_from_humanized_body(body: str) -> str:
-    for line in str(body or "").splitlines():
-        value = line.strip()
-        if not value.startswith("结论："):
-            continue
-        value = value.removeprefix("结论：").strip()
-        if not _relay_summary_text_is_generic(value):
-            return value
-    return ""
-
-
-def _relay_summary_text_is_generic(text: str) -> bool:
-    value = _relay_humanize_display_text(str(text or "")).strip()
-    if not value:
-        return True
-    value = re.sub(r"\s+", "", value).strip("。；;,.，")
-    if not value:
-        return True
-    if _relay_text_needs_chinese_fallback(value):
-        return True
-    exact = {
+def _relay_direct_final_summary_is_generic(text: str) -> bool:
+    value = re.sub(r"\s+", "", str(text or "")).strip("。；;,.，")
+    return value.lower() in {
         "completed",
         "done",
         "passed",
-        "implemented",
         "success",
-        "结论：已完成任务",
-        "结论：任务已完成",
-        "结论：该角色已返回结构化结果，详情见结构化数据",
+        "已完成",
+        "任务已完成",
+        "已完成任务",
+        "搞定，有请下一位",
         "角色已返回结构化结果",
         "该角色已返回结构化结果，详情见结构化数据",
-        "已完成任务",
-        "任务已完成",
-        "已完成",
-        "搞定，有请下一位",
-        "修复完成，交给审核",
-        "交给审核",
-        "交回总工程师收尾",
-        "无需返工；可以进入用户验收或收尾",
-        "下一步见结构化数据",
-        "验收依据见结构化数据",
     }
-    if value.lower() in exact or value in exact:
-        return True
-    generic_fragments = (
-        "详情见结构化数据",
-        "有请下一位",
-        "进入用户验收或收尾",
+
+
+def _relay_direct_final_summary_has_internal_terms(text: str) -> bool:
+    value = str(text or "")
+    markers = (
+        "File/Search/Computer Agent",
+        "Marvis/File/Search/Computer Agent",
+        "expected_output_envelope",
+        "结构化数据",
+        "验收依据",
+        "role_envelope",
+        "routing_decision",
     )
-    return any(fragment in value for fragment in generic_fragments)
+    return any(marker in value for marker in markers)
+
+
+def _relay_conversation_product_process_row(
+    payload: dict[str, Any],
+    *,
+    artifact_key: str,
+    artifact: dict[str, Any],
+) -> dict[str, str] | None:
+    role = str(payload.get("role") or payload.get("relay_role") or "").strip()
+    artifact_type = str(payload.get("artifact_type") or "").strip()
+    handoff_to = str(payload.get("handoff_to") or "").strip()
+    if not role or not artifact_type:
+        return None
+
+    allowed_role_artifacts = {
+        "architecture_plan",
+        "implementation_report",
+        "test_report",
+        "audit_report",
+    }
+    is_director_dispatch = (
+        role == "director"
+        and artifact_type in {"routing_decision", "final_summary"}
+        and bool(handoff_to)
+    )
+    is_role_process = role != "director" and artifact_type in allowed_role_artifacts
+    if not is_director_dispatch and not is_role_process:
+        return None
+
+    body = _relay_product_process_body(payload, artifact)
+    if not body:
+        return None
+    status = "passed" if is_director_dispatch else _relay_lifecycle_status_for_payload(payload)
+    return {
+        "role": role,
+        "kind": "role_process",
+        "speaker": _relay_role_label(role),
+        "meta": status,
+        "body": body,
+        "key": f"process:{role}:{artifact_type}:{artifact_key}",
+        "artifact_type": artifact_type,
+        "status": status,
+        "handoff_to": handoff_to,
+        "display_summary": body,
+        "round_id": str(payload.get("round_id") or artifact.get("round_id") or ""),
+    }
+
+
+def _relay_product_process_body(
+    payload: dict[str, Any],
+    artifact: dict[str, Any],
+) -> str:
+    for key in ("summary", "output", "reason"):
+        value = str(payload.get(key) or artifact.get(key) or "").strip()
+        if not value:
+            continue
+        value = _relay_humanize_display_text(value).strip()
+        value = _relay_replace_legacy_role_identifiers(value)
+        if _relay_text_is_structured_artifact_placeholder(value):
+            continue
+        if _relay_text_needs_chinese_fallback(value):
+            continue
+        return _relay_sanitize_protocol_leak_text(str(payload.get("role") or ""), value)
+    return ""
+
+
+def _marvis_chat_rows_from_relay_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    chat_rows: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for event in marvis_chat_events(project_relay_rows_to_marvis_interactions(rows)):
+        row = event.metadata.get("relay_row")
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("key") or "")
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        chat_rows.append(row)
+    return chat_rows
 
 
 def _marvis_relay_conversation_html(
@@ -9146,6 +9230,7 @@ def _marvis_relay_conversation_html(
         canonical_payload_sequence=canonical_payload_sequence,
         artifacts=artifacts,
     )
+    rows = _marvis_chat_rows_from_relay_rows(rows)
     if not rows:
         if any(
             str(getattr(job, "status", "") or "") in {"queued", "streaming"} for job in role_jobs
@@ -9202,19 +9287,24 @@ def _marvis_relay_conversation_html(
             previous_role = ""
             previous_round_id = row_round_id
         if kind == "handoff":
-            if is_current_round_row(row) and str(row.get("from_role") or "") != "director":
+            if is_current_round_row(row):
                 append_handoff_once(row)
             continue
         if kind == "user_message":
             html_rows.append(_marvis_relay_message_html(row))
             previous_role = ""
             continue
-        if kind == "role_envelope" and previous_role and role and role != previous_role:
+        if kind == "role_process" and not is_current_round_row(row):
+            continue
+        if role:
+            for handoff in handoffs_by_role.get(role, []):
+                append_handoff_once(handoff)
+        if kind in {"role_envelope", "role_process"} and previous_role and role and role != previous_role:
             for handoff in handoffs_by_role.get(role, []):
                 if _marvis_relay_handoff_pair(handoff) == (previous_role, role):
                     append_handoff_once(handoff)
         if (
-            kind == "role_envelope"
+            kind in {"role_envelope", "role_process"}
             and is_current_round_row(row)
             and previous_role == "director"
             and role
@@ -9233,7 +9323,7 @@ def _marvis_relay_conversation_html(
                 }
             )
         html_rows.append(_marvis_relay_message_html(row))
-        if kind == "role_envelope":
+        if kind in {"role_envelope", "role_process"}:
             previous_role = role
     return "\n".join(html_rows)
 
@@ -9357,7 +9447,7 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
         if kind == "text_delta" and preview_event_ids
         else ""
     )
-    show_action = kind in {"role_envelope", "text_delta"} or role == "director"
+    show_action = kind in {"role_envelope", "role_process", "text_delta"} or role == "director"
     if show_action and action:
         action_html = (
             f'<span class="marvis-relay-agent-action">| {escape(action)} '
@@ -9469,6 +9559,8 @@ def _relay_project_native_conversation_row(
     humanized = _relay_humanized_role_output_row(row, body, job=job)
     if humanized is not None and str(humanized.get("kind") or "") == "role_envelope":
         return humanized
+    if kind == "message_completed" and not _relay_text_is_structured_artifact_placeholder(body):
+        return {**row, "body": _relay_sanitize_protocol_leak_text(str(row.get("role") or ""), body)}
     if kind == "text_delta" and _relay_role_job_is_live_preview(job):
         role = str(row.get("role") or "")
         return {
@@ -9549,11 +9641,7 @@ def _relay_humanized_role_output_row(
 ) -> dict[str, str] | None:
     parsed_payload = _relay_parse_role_envelope_payload(body)
     if parsed_payload is not None:
-        return {
-            **row,
-            "kind": "role_envelope",
-            "body": _relay_humanize_role_envelope(parsed_payload),
-        }
+        return None
 
     if not _relay_text_looks_like_role_envelope(body):
         return None
@@ -9562,25 +9650,39 @@ def _relay_humanized_role_output_row(
     except json.JSONDecodeError:
         parsed = None
     if isinstance(parsed, dict) and _relay_dict_looks_like_role_envelope(parsed):
-        return {
-            **row,
-            "kind": "role_envelope",
-            "body": _relay_humanize_role_envelope(parsed),
-        }
+        return None
 
     error = str(getattr(job, "error_message", "") or "").strip() if job else ""
     status = str(getattr(job, "status", "") or "").strip() if job else ""
     if error or status in {"blocked", "failed"}:
-        return {
-            **row,
-            "kind": "role_error",
-            "body": _relay_role_output_error_text(str(row.get("role") or ""), error),
-        }
-    return {
-        **row,
-        "kind": "role_error",
-        "body": _relay_protocol_output_hidden_text(str(row.get("role") or "")),
-    }
+        return None
+    return None
+
+
+def _relay_text_is_structured_artifact_placeholder(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return True
+    if value.startswith("{") and (
+        _relay_parse_role_envelope_payload(value) is not None
+        or _relay_text_looks_like_role_envelope(value)
+    ):
+        return True
+    if text_contains_relay_protocol_payload(value):
+        return True
+    placeholders = (
+        "结构化结果缺少",
+        "结构化结果不是合法",
+        "结构化结果未采用",
+        "结构化产物未采用",
+        "结构化输出已由系统处理",
+        "详情见结构化数据",
+        "原始协议内容不在主会话展示",
+        "输出格式异常",
+        "任务已阻塞",
+        "invalid json",
+    )
+    return any(marker in value for marker in placeholders)
 
 
 def _relay_text_looks_like_role_envelope(text: str) -> bool:

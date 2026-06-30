@@ -25,6 +25,30 @@ _CURRENT_ROLE_SLUGS: dict[str, str] = {
     "tester": "tester",
     "auditor": "auditor",
 }
+_RELAY_ARTIFACT_TYPES = (
+    "routing_decision",
+    "final_summary",
+    "architecture_plan",
+    "implementation_report",
+    "audit_report",
+    "test_report",
+    "role_envelope",
+)
+_RELAY_ARTIFACT_TYPE_RE = re.compile(
+    r'"artifact_type"\s*:\s*"(' + "|".join(map(re.escape, _RELAY_ARTIFACT_TYPES)) + r')"'
+)
+_RELAY_PROTOCOL_FIELD_PATTERNS = {
+    field: re.compile(rf'"{field}"\s*:')
+    for field in (
+        "relay_role",
+        "handoff_to",
+        "required_roles",
+        "next_action",
+        "open_questions",
+        "evidence_refs",
+        "acceptance_criteria",
+    )
+}
 
 
 def relay_role_label(role: str) -> str:
@@ -183,19 +207,44 @@ def role_output_error_text(role: str, error: str) -> str:
     return "\n".join(lines)
 
 
+def text_contains_relay_protocol_payload(text: str) -> bool:
+    value = str(text or "")
+    if "expected_output_envelope" in value:
+        return True
+    if _RELAY_ARTIFACT_TYPE_RE.search(value):
+        return True
+    matched_fields = {
+        field
+        for field, pattern in _RELAY_PROTOCOL_FIELD_PATTERNS.items()
+        if pattern.search(value)
+    }
+    if "relay_role" in matched_fields:
+        return True
+    if {"handoff_to", "next_action"} <= matched_fields:
+        return True
+    if {"required_roles", "open_questions"} <= matched_fields:
+        return True
+    if {"evidence_refs", "next_action"} <= matched_fields:
+        return True
+    fused_markers = (
+        "routing_decisioncomplexity",
+        "next_actionopen_questions",
+        "roledirectorstatus",
+        "rolearchitectstatus",
+        "roleimplementerstatus",
+        "roletesterstatus",
+        "roleauditorstatus",
+    )
+    return any(marker in value for marker in fused_markers)
+
+
 def sanitize_protocol_leak_text(role: str, text: str) -> str:
     value = humanize_display_text(text)
     sentinel = "原始结构化输出不在主会话展示。"
     if sentinel in value:
         return value.split(sentinel, 1)[0] + sentinel
-    markers = (
-        "artifact_type",
-        "expected_output_envelope",
-        "routing_decisioncomplexity",
-        "required_roles",
-        "handoff_to",
-    )
-    if "{" in value and any(marker in value for marker in markers):
+    stripped = value.strip()
+    if text_contains_relay_protocol_payload(stripped):
         return protocol_output_hidden_text(role)
     return value
 
@@ -224,5 +273,5 @@ def followup_response_display_text(role: str, text: str) -> str:
     except json.JSONDecodeError:
         parsed = None
     if isinstance(parsed, dict) and dict_looks_like_role_envelope(parsed):
-        return humanize_role_envelope(parsed)
+        return ""
     return sanitize_protocol_leak_text(role, value)
