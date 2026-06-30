@@ -1,3 +1,5 @@
+DO NOT send optional commentary
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
