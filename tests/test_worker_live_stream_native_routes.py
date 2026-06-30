@@ -4766,6 +4766,8 @@ def test_worker_live_page_dedupes_assistant_mirror_text_by_turn() -> None:
     assert "const seenAssistantCompleted = new Map();" in response
     assert "const completedFingerprint = completedAssistantTextFingerprint(event);" in response
     assert "if (completedFingerprint) seenAssistantCompleted.set(completedFingerprint, result.length);" in response
+    assert 'if (!turnId) return `global:${fingerprint}`;' in response
+    assert 'return `turn:${turnId}:${fingerprint}`;' in response
     assert "const completedAssistantTexts = completedAssistantTextByTurn(sourceEvents);" in response
     assert "if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) continue;" in response
     assert "normalizeTranscriptText(visibleTranscriptText(event))" in response

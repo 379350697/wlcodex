@@ -16406,8 +16406,9 @@ __ICONS_JS__
     function completedAssistantTextFingerprint(event) {
       const turnId = eventFoldTurnId(event);
       const fingerprint = assistantDisplayTextFingerprint(event);
-      if (!turnId || !fingerprint) return "";
-      return `${turnId}:${fingerprint}`;
+      if (!fingerprint) return "";
+      if (!turnId) return `global:${fingerprint}`;
+      return `turn:${turnId}:${fingerprint}`;
     }
     function completedAssistantDedupePriority(event) {
       const payload = (event && event.payload) || {};
