@@ -4029,6 +4029,18 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert "if (isNativePlanEvent(event)) return 35;" in response
 
 
+def test_live_page_assistant_transcript_uses_clean_spacing_without_labels_or_left_rail() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert ".transcript-item.assistant { justify-self: start; max-width: 100%; margin: 4px 0 12px; }" in response
+    assert ".transcript-item.assistant .transcript-meta" not in response
+    assert "if (!assistantRole) row.append(meta);" in response
+    assert "row.append(body);" in response
+    assert ".turn-fold-preview-assistant { justify-self: start; max-width: 100%; color: var(--text-secondary); }" in response
+    assert ".transcript-item.assistant { justify-self: start; max-width: 100%; padding-left: 22px; border-left: 2px solid var(--border-default); }" not in response
+    assert ".turn-fold-preview-assistant { justify-self: start; padding-left: 18px; border-left: 2px solid var(--border-default);" not in response
+
+
 def test_live_page_generated_prompt_cards_support_copy_per_message() -> None:
     response = _live_page(42, native_provider="antigravity")
 

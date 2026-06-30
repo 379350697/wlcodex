@@ -13318,7 +13318,7 @@ __MARVIS_CSS_LINK__  <style>
     .transcript-item.user .transcript-meta { display: none; }
     .transcript-item.user .transcript-body { white-space: pre-wrap; padding: 10px 13px; border: 1px solid #333842; border-radius: 20px 20px 4px 20px; background: var(--bg-user-bubble); line-height: 1.5; }
     .transcript-item.local-pending .transcript-body { opacity: .86; }
-    .transcript-item.assistant { justify-self: start; max-width: 100%; padding-left: 22px; border-left: 2px solid var(--border-default); }
+    .transcript-item.assistant { justify-self: start; max-width: 100%; margin: 4px 0 12px; }
     .transcript-item.assistant .transcript-body { color: #b8bcc7; }
     .transcript-item.prompt-message { justify-self: stretch; max-width: 100%; margin-left: 6px; margin-right: 6px; padding-left: 0; border-left: 0; }
     .transcript-item.prompt-message .transcript-meta { display: none; }
@@ -13395,7 +13395,7 @@ __MARVIS_CSS_LINK__  <style>
     .turn-fold:not(.collapsed) .turn-fold-preview { grid-template-rows: 0fr; opacity: 0; overflow: hidden; padding: 0; }
     .turn-fold-preview-line { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.42; }
     .turn-fold-preview-user { justify-self: end; max-width: min(82%, 520px); padding: 8px 11px; border: 1px solid #333842; border-radius: 15px 15px 4px 15px; background: var(--bg-interact); color: var(--btn-primary-bg); }
-    .turn-fold-preview-assistant { justify-self: start; padding-left: 18px; border-left: 2px solid var(--border-default); color: var(--text-secondary); }
+    .turn-fold-preview-assistant { justify-self: start; max-width: 100%; color: var(--text-secondary); }
     .turn-fold-body { display: grid; grid-template-rows: 0fr; overflow: hidden; opacity: 0; transition: grid-template-rows 200ms ease, opacity 200ms ease 50ms; }
     .turn-fold-body-inner { min-height: 0; overflow: hidden; }
     .turn-fold:not(.collapsed) .turn-fold-body { grid-template-rows: 1fr; opacity: 1; padding: 12px 0 18px; }
@@ -17054,7 +17054,8 @@ __ICONS_JS__
         meta.textContent = label;
         const body = document.createElement("div");
         body.className = "transcript-body";
-        row.append(meta, body);
+        if (!assistantRole) row.append(meta);
+        row.append(body);
         renderTarget.append(row);
         node = {row, body, text: ""};
         transcriptNodes.set(key, node);
