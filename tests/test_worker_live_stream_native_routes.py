@@ -510,38 +510,6 @@ async def _read_response(
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
-async def _read_one_response(reader: asyncio.StreamReader) -> str:
-    headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=1.0)
-    header_text = headers.decode("utf-8", errors="replace")
-    length = 0
-    for line in header_text.split("\r\n"):
-        if line.lower().startswith("content-length:"):
-            length = int(line.split(":", 1)[1].strip())
-            break
-    body = await asyncio.wait_for(reader.readexactly(length), timeout=1.0)
-    return (headers + body).decode("utf-8", errors="replace")
-
-
-async def _read_two_keep_alive_responses(
-    host: str,
-    port: int,
-    first_request: str,
-    second_request: str,
-) -> tuple[str, str]:
-    reader, writer = await asyncio.open_connection(host, port)
-    try:
-        writer.write(first_request.encode("utf-8"))
-        await writer.drain()
-        first = await _read_one_response(reader)
-        writer.write(second_request.encode("utf-8"))
-        await writer.drain()
-        second = await _read_one_response(reader)
-    finally:
-        writer.close()
-        await writer.wait_closed()
-    return first, second
-
-
 async def _read_initial_response(
     host: str,
     port: int,
@@ -834,7 +802,7 @@ async def test_native_css_bundle_combines_static_assets(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_regular_responses_keep_http_connection_alive(tmp_path: Path) -> None:
+async def test_regular_responses_close_http_connection(tmp_path: Path) -> None:
     store = _store(tmp_path)
     server = WorkerLiveStreamServer(
         host="127.0.0.1",
@@ -845,23 +813,18 @@ async def test_regular_responses_keep_http_connection_alive(tmp_path: Path) -> N
     )
     await server.start()
     try:
-        first, second = await _read_two_keep_alive_responses(
+        response = await _read_response(
             server.host,
             server.port,
             "GET /health HTTP/1.1\r\nHost: test\r\n\r\n",
-            "GET /static/native_app_bundle.css HTTP/1.1\r\n"
-            "Host: test\r\n"
-            "Connection: close\r\n\r\n",
         )
     finally:
         await server.stop()
 
-    assert "HTTP/1.1 200 OK" in first
-    assert "Connection: keep-alive" in first
-    assert '"status": "ok"' in first
-    assert "HTTP/1.1 200 OK" in second
-    assert "Connection: close" in second
-    assert "--bg-root" in second
+    assert "HTTP/1.1 200 OK" in response
+    assert "Connection: close" in response
+    assert "Keep-Alive:" not in response
+    assert '"status": "ok"' in response
 
 
 @pytest.mark.asyncio

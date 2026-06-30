@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextvars
 import hmac
 import json
 import re
@@ -187,11 +186,6 @@ _STATIC_CSS_BUNDLES = {
         "components.css",
     ),
 }
-_RESPONSE_KEEP_ALIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "response_keep_alive",
-    default=False,
-)
-_KEEP_ALIVE_RESPONSE_WRITERS: set[int] = set()
 _RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260629-confirmation-provenance"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
@@ -270,15 +264,6 @@ def _token_suffix(access_token: str = "") -> str:
 
 def _relay_task_detail_view(value: str) -> str:
     return "board" if str(value or "").strip().lower() == "board" else "conversation"
-
-
-def _request_keep_alive(version: str, headers: dict[str, str]) -> bool:
-    connection = headers.get("connection", "").lower()
-    if "close" in connection:
-        return False
-    if version.upper() == "HTTP/1.1":
-        return True
-    return "keep-alive" in connection
 
 
 def _static_css_bundle(relative: str) -> bytes:
@@ -384,13 +369,7 @@ class WorkerLiveStreamServer:
         if task is not None:
             self._client_tasks.add(task)
         try:
-            while not writer.is_closing():
-                _KEEP_ALIVE_RESPONSE_WRITERS.discard(id(writer))
-                _RESPONSE_KEEP_ALIVE.set(False)
-                await self._handle_client_request(reader, writer)
-                if id(writer) not in _KEEP_ALIVE_RESPONSE_WRITERS:
-                    break
-                _KEEP_ALIVE_RESPONSE_WRITERS.discard(id(writer))
+            await self._handle_client_request(reader, writer)
         finally:
             if not writer.is_closing():
                 writer.close()
@@ -438,7 +417,6 @@ class WorkerLiveStreamServer:
                     name, value = decoded.split(":", 1)
                     headers[name.lower()] = value.strip()
 
-            _RESPONSE_KEEP_ALIVE.set(_request_keep_alive(version, headers))
             parsed = urlparse(target)
             query = parse_qs(parsed.query)
 
@@ -2717,23 +2695,16 @@ async def _send_response(
     custom_headers = "".join(
         f"{name}: {value}\r\n" for name, value in (extra_headers or {}).items()
     )
-    keep_alive = _RESPONSE_KEEP_ALIVE.get(False)
-    connection_header = "keep-alive" if keep_alive else "close"
-    keep_alive_header = "Keep-Alive: timeout=30, max=100\r\n" if keep_alive else ""
     header = (
         f"HTTP/1.1 {status} {reason}\r\n"
         f"Content-Type: {content_type}\r\n"
         f"Content-Length: {len(body)}\r\n"
         f"{custom_headers}"
-        f"Connection: {connection_header}\r\n"
-        f"{keep_alive_header}"
+        "Connection: close\r\n"
         "\r\n"
     )
     writer.write(header.encode("utf-8") + body)
     await writer.drain()
-    if keep_alive:
-        _KEEP_ALIVE_RESPONSE_WRITERS.add(id(writer))
-        return
     writer.close()
     await writer.wait_closed()
 
