@@ -16380,12 +16380,16 @@ __ICONS_JS__
     }
     function completedAssistantTextByTurn(sourceEvents) {
       const byTurn = new Map();
+      const globalKey = "__global__";
       for (const event of sourceEvents || []) {
         if (!event || isInternalEvent(event)) continue;
         if (event.kind !== "message_completed") continue;
         const turnId = eventFoldTurnId(event);
         const fingerprint = assistantDisplayTextFingerprint(event);
-        if (!turnId || !fingerprint) continue;
+        if (!fingerprint) continue;
+        if (!byTurn.has(globalKey)) byTurn.set(globalKey, new Set());
+        byTurn.get(globalKey).add(fingerprint);
+        if (!turnId) continue;
         if (!byTurn.has(turnId)) byTurn.set(turnId, new Set());
         byTurn.get(turnId).add(fingerprint);
       }
@@ -16398,7 +16402,13 @@ __ICONS_JS__
       if (!isProviderDisplayDeltaEvent(event) && !itemId.startsWith("jsonl-assistant")) return false;
       const turnId = eventFoldTurnId(event);
       const fingerprint = assistantDisplayTextFingerprint(event);
-      return Boolean(turnId && fingerprint && completedAssistantTexts.get(turnId)?.has(fingerprint));
+      return Boolean(
+        fingerprint &&
+        (
+          (turnId && completedAssistantTexts.get(turnId)?.has(fingerprint)) ||
+          completedAssistantTexts.get("__global__")?.has(fingerprint)
+        )
+      );
     }
     function assistantDisplayTextFingerprint(event) {
       return normalizeTranscriptText(visibleTranscriptText(event));

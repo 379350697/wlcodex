@@ -4762,6 +4762,9 @@ def test_worker_live_page_dedupes_assistant_mirror_text_by_turn() -> None:
     assert "function completedAssistantTextByTurn(sourceEvents)" in response
     assert "function assistantDisplayTextFingerprint(event)" in response
     assert "function shouldDropAssistantMirrorEvent(event, completedAssistantTexts)" in response
+    assert 'const globalKey = "__global__";' in response
+    assert "byTurn.get(globalKey).add(fingerprint);" in response
+    assert 'completedAssistantTexts.get("__global__")?.has(fingerprint)' in response
     assert "function completedAssistantDedupePriority(event)" in response
     assert "const seenAssistantCompleted = new Map();" in response
     assert "const completedFingerprint = completedAssistantTextFingerprint(event);" in response
