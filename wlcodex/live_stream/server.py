@@ -13216,17 +13216,17 @@ __MARVIS_CSS_LINK__  <style>
     .circle { width: var(--native-top-control-size); min-height: var(--native-top-control-size); display: grid; place-items: center; padding: 0; border-radius: 50%; border-color: #343434; background: #202022; color: #f5f5f5; font-size: 0; line-height: 1; }
     .circle svg { width: 31px; height: 31px; stroke-width: 2.35; }
     #back { position: fixed; top: var(--native-top-control-y); left: clamp(17px, 4.4vw, 26px); z-index: 6; }
-    .session-float { position: fixed; top: var(--native-top-control-y); left: clamp(92px, 27.5vw, 108px); right: clamp(148px, 51.5vw, 204px); z-index: 5; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; min-height: var(--native-top-control-size); padding: 0 15px; border: 1px solid #343434; border-radius: 26px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
+    .session-float { position: fixed; top: var(--native-top-control-y); left: clamp(92px, 26vw, 112px); right: clamp(116px, 31vw, 130px); z-index: 5; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; min-height: var(--native-top-control-size); padding: 0 15px; border: 1px solid #343434; border-radius: 26px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
     .session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.15; font-weight: var(--weight-black); }
     .session-float-meta { display: flex; gap: 7px; align-items: center; min-width: 0; margin-top: 4px; color: #d0d0d4; font-size: 11px; line-height: 1; overflow: hidden; white-space: nowrap; }
     .session-float-meta .laptop { width: 13px; height: 9px; border: 1.6px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
     .session-float-meta .laptop:after { content: ""; position: absolute; left: -3px; right: -3px; bottom: -5px; height: 2px; background: currentColor; border-radius: 2px; }
-    .header-run-indicator { position: fixed; top: var(--native-top-control-y); right: clamp(17px, 4.4vw, 26px); z-index: 6; display: grid; grid-template-columns: 32px 32px; gap: 12px; align-items: center; justify-content: center; width: 118px; min-height: var(--native-top-control-size); border: 1px solid #343434; border-radius: 26px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
-    .header-run-button { width: 32px; min-height: 32px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; -webkit-tap-highlight-color: transparent; }
+    .header-run-indicator { position: fixed; top: var(--native-top-control-y); right: clamp(17px, 4.4vw, 26px); z-index: 6; display: grid; grid-template-columns: 30px 30px; gap: 10px; align-items: center; justify-content: center; width: 96px; min-height: var(--native-top-control-size); border: 1px solid #343434; border-radius: 26px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
+    .header-run-button { width: 30px; min-height: 30px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; -webkit-tap-highlight-color: transparent; }
     button.header-run-button:not(.secondary):not(.warn):not(:disabled):hover { background: transparent; filter: none; }
-    .header-run-status { display: grid; place-items: center; width: 32px; min-height: 32px; }
+    .header-run-status { display: grid; place-items: center; width: 30px; min-height: 30px; }
     .header-run-spinner { width: 26px; height: 26px; border: 3px solid #5a5b60; border-right-color: transparent; border-radius: 50%; opacity: .72; }
-    .header-run-menu { display: grid; place-items: center; width: 24px; height: 32px; line-height: 1; color: #f4f4f5; font-size: 0; font-weight: var(--weight-extrabold); }
+    .header-run-menu { display: grid; place-items: center; width: 24px; height: 30px; line-height: 1; color: #f4f4f5; font-size: 0; font-weight: var(--weight-extrabold); }
     .header-run-menu svg { width: 24px; height: 24px; }
     .header-run-dot { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--native-remote-red); box-shadow: 0 0 10px rgba(255,59,79,.35); }
     .header-run-indicator.running .header-run-spinner { border-color: transparent; border-top-color: var(--native-remote-blue); border-right-color: var(--native-remote-blue); opacity: 1; animation: nativeRemoteSpin .85s linear infinite; }
@@ -13405,8 +13405,8 @@ __MARVIS_CSS_LINK__  <style>
     .approval-action.muted { background: var(--bg-pill); color: #8e929b; border-color: #34363d; opacity: .62; box-shadow: none; }
     .codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 10px; padding: 12px 26px 20px; background: linear-gradient(to top, rgba(0,0,0,.98) 55%, rgba(0,0,0,.85) 78%, rgba(0,0,0,0)); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-top: 1px solid #272930; }
     .composer-tools { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 0; }
-    .composer-settings { position: relative; flex: 1; display: flex; gap: 10px; min-width: 0; }
-    .setting-pill { flex: 0 0 auto; min-height: 42px; border-radius: 21px; padding: 0 18px; background: var(--bg-pill); color: var(--btn-primary-bg); border: 1px solid transparent; font-size: 14px; font-weight: var(--weight-extrabold); white-space: nowrap; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
+    .composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, .82fr) minmax(0, .95fr); gap: 10px; min-width: 0; max-width: 100%; }
+    .setting-pill { width: 100%; min-width: 0; min-height: 42px; border-radius: 21px; padding: 0 10px; overflow: hidden; background: var(--bg-pill); color: var(--btn-primary-bg); border: 1px solid transparent; font-size: 14px; font-weight: var(--weight-extrabold); text-overflow: ellipsis; white-space: nowrap; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
     .setting-pill.modified { border-color: rgba(147, 197, 253, 0.35); background: var(--bg-pill-modified); }
     .setting-pill:not(:disabled):hover { background: var(--bg-pill-hover); }
     .setting-pill.permissions { flex: 0 0 auto; }

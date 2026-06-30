@@ -2401,8 +2401,8 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert ".session-float { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
     assert ".header-run-indicator { position: fixed; top: var(--native-top-control-y);" in response
-    assert "grid-template-columns: 32px 32px;" in response
-    assert "width: 118px; min-height: var(--native-top-control-size);" in response
+    assert "grid-template-columns: 30px 30px;" in response
+    assert "width: 96px; min-height: var(--native-top-control-size);" in response
     assert ".header-run-spinner { width: 26px; height: 26px; border: 3px solid #5a5b60;" in response
     assert ".header-run-indicator.running .header-run-spinner" in response
     assert "border-right-color: var(--native-remote-blue);" in response
@@ -2424,8 +2424,8 @@ def test_worker_live_page_matches_native_codex_mobile_composer_layout() -> None:
 
     assert ".codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 10px; padding: 12px 26px 20px;" in response
     assert ".composer-tools { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 0;" in response
-    assert ".composer-settings { position: relative; flex: 1; display: flex; gap: 10px; min-width: 0;" in response
-    assert ".setting-pill { flex: 0 0 auto; min-height: 42px; border-radius: 21px; padding: 0 18px;" in response
+    assert ".composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, .82fr) minmax(0, .95fr); gap: 10px; min-width: 0; max-width: 100%;" in response
+    assert ".setting-pill { width: 100%; min-width: 0; min-height: 42px; border-radius: 21px; padding: 0 10px; overflow: hidden;" in response
     assert ".setting-pill.handoff { flex: 0 0 auto;" in response
     assert 'id="handoffButton" type="button">接棒执行</button>' in response
     assert ".dock-row { display: grid; grid-template-columns: 52px minmax(0, 1fr) 52px; gap: 10px;" in response
