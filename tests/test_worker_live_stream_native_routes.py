@@ -2432,11 +2432,13 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert '<meta name="mobile-web-app-capable" content="yes">' in response
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in response
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in response
-    assert ".session-float { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
+    assert "--native-top-control-y: calc(18px + env(safe-area-inset-top));" in response
+    assert "#back { position: fixed; top: var(--native-top-control-y);" in response
+    assert ".session-float { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
-    assert ".header-run-indicator { position: fixed; top: calc(24px + env(safe-area-inset-top));" in response
+    assert ".header-run-indicator { position: fixed; top: var(--native-top-control-y);" in response
     assert "grid-template-columns: 34px 34px;" in response
-    assert "width: 96px; min-height: 58px;" in response
+    assert "width: 112px; min-height: var(--native-top-control-size);" in response
     assert ".header-run-spinner { width: 28px; height: 28px; border: 3px solid #5a5b60;" in response
     assert ".header-run-indicator.running .header-run-spinner" in response
     assert "border-right-color: var(--native-remote-blue);" in response
@@ -2444,7 +2446,7 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert 'tone === "busy" ? "running"' in response
     assert 'tone === "failed" || tone === "done" ? "finished"' in response
     assert "background: var(--native-remote-red);" in response
-    assert ".primary-action { flex: 0 0 52px; width: 52px; min-height: 52px; border-radius: 26px;" in response
+    assert ".primary-action { flex: 0 0 58px; width: 58px; min-height: 58px; border-radius: 50%;" in response
     assert ".primary-action.stop { background: #f4f4f5; color: #050505;" in response
     assert 'id="sessionFloat"' in response
     assert 'id="headerRunIndicator"' in response
@@ -3723,6 +3725,16 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "上传照片" in response
     assert "计划模式" in response
     assert "插件" in response
+    assert "--native-top-control-y" in response
+    assert "#back { position: fixed; top: var(--native-top-control-y);" in response
+    assert ".session-float { position: fixed; top: var(--native-top-control-y);" in response
+    assert ".header-run-indicator { position: fixed; top: var(--native-top-control-y);" in response
+    assert "M21 15l-4.5-4.5" in response
+    assert "M3.5 18l1 1 2-2" in response
+    assert '<span class="composer-menu-icon">▧</span>' not in response
+    assert '<span class="composer-menu-icon">☷</span>' not in response
+    assert 'aria-label="上传照片">＋</button>' not in response
+    assert 'aria-label="发送">↑</button>' not in response
     assert 'id="attachmentStrip"' in response
     assert 'class="interruption-choice" id="interruptionChoice" hidden' in response
     assert "function submitPrompt" in response
