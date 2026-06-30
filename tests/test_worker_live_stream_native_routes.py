@@ -2395,27 +2395,46 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert '<meta name="mobile-web-app-capable" content="yes">' in response
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in response
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in response
-    assert "--native-top-control-y: calc(18px + env(safe-area-inset-top));" in response
+    assert "--native-top-control-y: calc(14px + env(safe-area-inset-top));" in response
+    assert "--native-top-control-size: 52px;" in response
     assert "#back { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
     assert ".header-run-indicator { position: fixed; top: var(--native-top-control-y);" in response
-    assert "grid-template-columns: 34px 34px;" in response
-    assert "width: 112px; min-height: var(--native-top-control-size);" in response
-    assert ".header-run-spinner { width: 28px; height: 28px; border: 3px solid #5a5b60;" in response
+    assert "grid-template-columns: 32px 32px;" in response
+    assert "width: 118px; min-height: var(--native-top-control-size);" in response
+    assert ".header-run-spinner { width: 26px; height: 26px; border: 3px solid #5a5b60;" in response
     assert ".header-run-indicator.running .header-run-spinner" in response
     assert "border-right-color: var(--native-remote-blue);" in response
     assert ".header-run-indicator.finished .header-run-dot" in response
     assert 'tone === "busy" ? "running"' in response
     assert 'tone === "failed" || tone === "done" ? "finished"' in response
     assert "background: var(--native-remote-red);" in response
-    assert ".primary-action { flex: 0 0 58px; width: 58px; min-height: 58px; border-radius: 50%;" in response
+    assert ".primary-action { flex: 0 0 52px; width: 52px; min-height: 52px; border-radius: 50%;" in response
     assert ".primary-action.stop { background: #f4f4f5; color: #050505;" in response
     assert 'id="sessionFloat"' in response
     assert 'id="headerRunIndicator"' in response
     assert "function updateHeaderRunIndicator(tone)" in response
     assert 'headerRunIndicator.className = "header-run-indicator " + visual;' in response
     assert "updateHeaderRunIndicator(tone || \"neutral\");" in response
+
+
+def test_worker_live_page_matches_native_codex_mobile_composer_layout() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert ".codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 10px; padding: 12px 26px 20px;" in response
+    assert ".composer-tools { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 0;" in response
+    assert ".composer-settings { position: relative; flex: 1; display: flex; gap: 10px; min-width: 0;" in response
+    assert ".setting-pill { flex: 0 0 auto; min-height: 42px; border-radius: 21px; padding: 0 18px;" in response
+    assert ".setting-pill.handoff { flex: 0 0 auto;" in response
+    assert 'id="handoffButton" type="button">接棒执行</button>' in response
+    assert ".dock-row { display: grid; grid-template-columns: 52px minmax(0, 1fr) 52px; gap: 10px;" in response
+    assert ".attach-button { width: 52px; min-height: 52px;" in response
+    assert '<div class="dock-row">\n        <button class="attach-button" id="attachmentButton"' in response
+    assert ".composer-action-menu { position: absolute; left: 26px; right: 72px; bottom: 92px;" in response
+    assert ".composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 22px; align-items: center; width: 100%; min-height: 74px;" in response
+    assert ".composer-menu-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; background: var(--bg-pill);" in response
+    assert ".plugin-dot { width: 42px; height: 42px; border-radius: 12px;" in response
 
 
 def test_worker_live_page_exposes_viewport_debug_diagnostics() -> None:
@@ -4469,7 +4488,7 @@ def test_live_page_uses_native_codex_font_scale_for_all_native_providers() -> No
         assert ".transcript-body { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: var(--native-ui-font-size); line-height: 1.55;" in response
         assert ".transcript-item.assistant .transcript-body { color: #b8bcc7; }" in response
         assert ".transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal; padding: 0; border-radius: 0; background: transparent; font-size: var(--native-code-font-size); line-height: 1.5; }" in response
-        assert "input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 0 14px; font-size: 15px; }" in response
+        assert "input { flex: 1; min-width: 0; min-height: 52px; border-radius: 26px; border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 0 18px; font-size: 15px; }" in response
 
 
 def test_native_live_page_exposes_transcript_font_size_controls() -> None:
