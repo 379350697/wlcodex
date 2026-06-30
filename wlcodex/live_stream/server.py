@@ -11311,9 +11311,11 @@ __ICONS_JS__
     let sessionsEventSource = null;
     let projectRoot = "";
     let projectCatalog = [];
-    let renderedHomeDataSignature = "";
+    let renderedSessionsDataSignature = "";
     const SESSION_PREVIEW_LIMIT = 10;
     const LIVE_PREFETCH_LIMIT = 4;
+    const SESSION_REFRESH_PENDING_DELAY_MS = 10000;
+    const SESSION_POLL_INTERVAL_MS = 30000;
     const prefetchedLiveUrls = new Set();
     const devicesEl = document.getElementById("devices");
     const pageTitle = document.getElementById("pageTitle");
@@ -11426,11 +11428,11 @@ __ICONS_JS__
         sessionsRefreshTimer = setTimeout(() => {
           sessionsRefreshTimer = null;
           loadSessions(true);
-        }, 800);
+        }, SESSION_REFRESH_PENDING_DELAY_MS);
       }
       if (selected && !sessions.some(session => session.native_thread_id === selected.native_thread_id)) selected = null;
       if (render) {
-        renderNativePageIfHomeDataChanged();
+        renderSessionsIfDataChanged();
       }
     }
 
@@ -11454,7 +11456,6 @@ __ICONS_JS__
         sessionsEventSource = source;
         source.addEventListener("native_sessions", message => {
           const data = JSON.parse(message.data || "{}");
-          sessions = data.sessions || [];
           applySessionsPayload(data, true);
         });
         source.onerror = () => {
@@ -11479,14 +11480,9 @@ __ICONS_JS__
       }
     }
 
-    function homeDataSignature() {
+    function sessionsDataSignature() {
       return JSON.stringify({
-        projectRoot,
-        projectCatalog: projectCatalog.map(project => ({
-          cwd: String(project.cwd || ""),
-          name: String(project.name || ""),
-        })),
-        sessions: sessions.map(session => ({
+        sessions: stableSignatureSessions().map(session => ({
           native_thread_id: String(session.native_thread_id || ""),
           agent_run_id: session.agent_run_id || 0,
           title: String(session.title || ""),
@@ -11499,23 +11495,33 @@ __ICONS_JS__
       });
     }
 
-    function renderNativePageIfHomeDataChanged() {
-      const signature = homeDataSignature();
-      if (signature === renderedHomeDataSignature) return false;
-      renderedHomeDataSignature = signature;
-      renderNativePage({silentSessions: true});
+    function stableSignatureSessions() {
+      return [...sessions].sort((left, right) => {
+        return sessionDomId(left).localeCompare(sessionDomId(right));
+      });
+    }
+
+    function renderSessionsIfDataChanged() {
+      const signature = sessionsDataSignature();
+      if (signature === renderedSessionsDataSignature) return false;
+      renderedSessionsDataSignature = signature;
+      renderSessions({silent: true});
       return true;
     }
 
     async function loadHomeData() {
       await loadProjects();
       await loadSessions(false);
-      renderNativePageIfHomeDataChanged();
+      renderNativePage();
       if (initialComposeCwd && !initialComposeCwdApplied) {
         initialComposeCwdApplied = true;
         selectComposeProject(initialComposeCwd);
         openCompose(initialComposeCwd);
       }
+    }
+
+    async function refreshSessionsSilently() {
+      await loadSessions(true);
     }
 
     async function loadModelCatalog() {
@@ -12164,6 +12170,7 @@ __ICONS_JS__
       updateNativeChrome();
       renderProjects();
       renderSessions({silent: Boolean(options.silentSessions)});
+      renderedSessionsDataSignature = sessionsDataSignature();
     }
 
     function updateNativeChrome() {
@@ -12274,6 +12281,7 @@ __ICONS_JS__
       closeComposerActionMenu();
       resetComposerPlugins();
       renderNativePage();
+      refreshSessionsSilently();
     }
 
     function openHistory(cwd, label) {
@@ -12645,8 +12653,8 @@ __ICONS_JS__
       }
       await startNewChat(promptEl.value.trim());
     };
-    window.addEventListener("pageshow", () => {
-      renderNativePage();
+    window.addEventListener("pageshow", event => {
+      if (event.persisted) refreshSessionsSilently();
     });
     chatRow.onclick = () => openHistory("", "聊天");
     composeProjectButton.onclick = openProjectPicker;
@@ -12925,7 +12933,7 @@ __ICONS_JS__
     loadModelCatalog();
     loadHomeData();
     startSessionsStream();
-    setInterval(loadHomeData, 15000);
+    setInterval(refreshSessionsSilently, SESSION_POLL_INTERVAL_MS);
   </script>
 __MARVIS_EXTRA_HTML__
 </body>
@@ -13307,6 +13315,7 @@ __MARVIS_CSS_LINK__  <style>
     .transcript-item.user .transcript-body { white-space: pre-wrap; padding: 10px 13px; border: 1px solid #333842; border-radius: 20px 20px 4px 20px; background: var(--bg-user-bubble); line-height: 1.5; }
     .transcript-item.local-pending .transcript-body { opacity: .86; }
     .transcript-item.assistant { justify-self: start; max-width: 100%; padding-left: 22px; border-left: 2px solid var(--border-default); }
+    .transcript-item.assistant .transcript-body { color: #b8bcc7; }
     .transcript-item.prompt-message { justify-self: stretch; max-width: 100%; margin-left: 6px; margin-right: 6px; padding-left: 0; border-left: 0; }
     .transcript-item.prompt-message .transcript-meta { display: none; }
     .transcript-item.prompt-message .transcript-body { display: grid; gap: 14px; }
@@ -13506,14 +13515,6 @@ __MARVIS_CSS_LINK__  <style>
     .attachment-chip img { width: 46px; height: 42px; border-radius: 7px; object-fit: cover; background: var(--bg-canvas); }
     .attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 12px; }
     .attachment-remove { width: 28px; min-height: 28px; padding: 0; border-radius: 50%; background: var(--bg-remove-btn); color: var(--btn-primary-bg); font-size: 16px; }
-    .live-workspace-bar { display: flex; align-items: center; gap: 8px; min-height: 34px; min-width: 0; }
-    .live-workspace-icon { width: 18px; height: 14px; flex: 0 0 auto; border: 2px solid var(--text-dim); border-radius: 3px 3px 0 0; border-bottom: 0; position: relative; }
-    .live-workspace-icon:before { content: ""; position: absolute; top: -5px; left: 50%; width: 8px; height: 5px; border: 2px solid var(--text-dim); border-bottom: 0; border-radius: 3px 3px 0 0; transform: translateX(-50%); }
-    .live-workspace-label { color: var(--text-dim); font-size: 12px; font-weight: var(--weight-extrabold); white-space: nowrap; }
-    .live-workspace-chip { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; min-height: 30px; padding: 0 11px; border: 1px solid var(--border-subtle); border-radius: 15px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 13px; font-weight: var(--weight-extrabold); overflow: hidden; cursor: pointer; }
-    button.live-workspace-chip:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-pill-hover); border-color: var(--border-default); filter: none; }
-    .live-workspace-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .live-workspace-action { color: var(--text-dim); font-size: 12px; flex: 0 0 auto; }
     .interruption-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 2px 0; }
     .interruption-choice[hidden] { display: none; }
     .choice-action { min-height: 42px; border-radius: 12px; background: var(--bg-interact); color: var(--btn-primary-bg); border: 1px solid var(--border-input); }
@@ -13707,14 +13708,6 @@ __MARVIS_CSS_LINK__  <style>
           <span>☷ 计划</span>
           <button class="mode-chip-cancel" id="planModeChipCancel" type="button" aria-label="取消计划模式">×</button>
         </div>
-      </div>
-      <div class="live-workspace-bar" id="liveWorkspaceBar">
-        <span class="live-workspace-icon" aria-hidden="true"></span>
-        <span class="live-workspace-label">工作区</span>
-        <button class="live-workspace-chip" id="liveWorkspaceChip" type="button">
-          <span class="live-workspace-name" id="liveWorkspaceName">同步中</span>
-          <span class="live-workspace-action">切换</span>
-        </button>
       </div>
       <div class="interruption-choice" id="interruptionChoice" hidden>
         <button class="choice-action primary" id="steerChoice" type="button">引导</button>
@@ -13912,8 +13905,6 @@ __ICONS_JS__
     const planModeCheck = document.getElementById("planModeCheck");
     const planModeChip = document.getElementById("planModeChip");
     const planModeChipCancel = document.getElementById("planModeChipCancel");
-    const liveWorkspaceChip = document.getElementById("liveWorkspaceChip");
-    const liveWorkspaceName = document.getElementById("liveWorkspaceName");
     const handoffButton = document.getElementById("handoffButton");
     const handoffPanel = document.getElementById("handoffPanel");
     const handoffTargets = document.getElementById("handoffTargets");
@@ -14113,21 +14104,6 @@ __ICONS_JS__
       writeCompactText(contextFiveHourValue, nativeLimitSummary("fiveHour"));
       writeCompactText(contextSevenDayValue, nativeLimitSummary("sevenDay"));
       writeCompactText(sessionActionTitle, title);
-      renderLiveWorkspaceBar(directory, project);
-    }
-    function renderLiveWorkspaceBar(directory, project) {
-      const workspace = directory || currentWorkspaceCwd() || "";
-      const label = workspace ? lastPathComponent(workspace) : (project || "未指定");
-      writeCompactText(liveWorkspaceName, label);
-      liveWorkspaceChip.title = workspace || label;
-      liveWorkspaceChip.disabled = false;
-    }
-    function openWorkspaceSwitcher() {
-      const cwd = nativeSessionDirectory() || currentWorkspaceCwd();
-      const target = new URL(`/native/${encodeURIComponent(PROVIDER)}`, location.origin);
-      if (token) target.searchParams.set("token", token);
-      if (cwd) target.searchParams.set("cwd", cwd);
-      location.href = target.pathname + "?" + target.searchParams.toString();
     }
     function nativeSessionTitle() {
       const thread = nativeSessionThread();
@@ -15175,7 +15151,6 @@ __ICONS_JS__
       closeComposerActionMenu();
     };
     planModeChipCancel.onclick = () => setSelectedCollaborationMode("default");
-    liveWorkspaceChip.onclick = openWorkspaceSwitcher;
     imageInput.onchange = async () => {
       const files = Array.from(imageInput.files || []);
       imageInput.value = "";
@@ -16014,10 +15989,21 @@ __ICONS_JS__
       return Boolean(
         event && (
           event.type === "model.usage.updated" ||
+          isProviderDisplayCompletedEvent(event) ||
           isNativeExecutionDetail(event) ||
           isNativeReasoningDetail(event) ||
           (isNativeActivityDetail(event) && !isNativePlanEvent(event))
         )
+      );
+    }
+    function isProviderDisplayCompletedEvent(event) {
+      const payload = (event && event.payload) || {};
+      return Boolean(
+        event && (
+          event.type === "provider.display.completed" ||
+          payload.compatibility_projection === "provider.display.completed" ||
+          payload.display_source === "provider"
+        ) && String(payload.text || payload.summary || "").trim()
       );
     }
     function isNativePlanEvent(event) {

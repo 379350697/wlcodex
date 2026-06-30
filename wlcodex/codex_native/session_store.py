@@ -67,14 +67,26 @@ class NativeCodexSessionStore:
     ) -> NativeCodexSession:
         existing = self.get_by_thread_id(native_thread_id)
         if existing is not None:
+            preserve_existing = _should_preserve_existing_source_fields(
+                existing.source_kind,
+                source_kind,
+            )
             return self.update_session(
                 native_thread_id=native_thread_id,
-                title=title or existing.title,
-                cwd=cwd or existing.cwd,
-                source_kind=source_kind or existing.source_kind,
-                status=status or existing.status,
+                title=existing.title if preserve_existing else title or existing.title,
+                cwd=existing.cwd if preserve_existing else cwd or existing.cwd,
+                source_kind=(
+                    existing.source_kind
+                    if preserve_existing
+                    else source_kind or existing.source_kind
+                ),
+                status=existing.status if preserve_existing else status or existing.status,
                 last_turn_id=last_turn_id or existing.last_turn_id,
-                activity_at=activity_at or existing.activity_at,
+                activity_at=(
+                    existing.activity_at
+                    if preserve_existing
+                    else activity_at or existing.activity_at
+                ),
                 metadata=metadata,
             )
 
@@ -214,6 +226,22 @@ def _agent_run_status(status: str) -> str:
     if status in ("failed", "error"):
         return "failed"
     return "queued"
+
+
+def _source_priority(source_kind: str | None) -> int:
+    value = str(source_kind or "").strip().lower()
+    if not value or value == "unknown":
+        return 0
+    if value == "codex_jsonl":
+        return 1
+    return 2
+
+
+def _should_preserve_existing_source_fields(
+    existing_source_kind: str | None,
+    incoming_source_kind: str | None,
+) -> bool:
+    return _source_priority(existing_source_kind) > _source_priority(incoming_source_kind)
 
 
 def _session(row: sqlite3.Row) -> NativeCodexSession:

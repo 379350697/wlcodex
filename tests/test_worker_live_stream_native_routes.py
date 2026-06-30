@@ -3084,11 +3084,11 @@ async def test_native_provider_home_polling_skips_unchanged_list_rerender(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert 'let renderedHomeDataSignature = "";' in response
-    assert "function homeDataSignature()" in response
-    assert "function renderNativePageIfHomeDataChanged()" in response
-    assert "const signature = homeDataSignature();" in response
-    assert "if (signature === renderedHomeDataSignature) return false;" in response
+    assert 'let renderedSessionsDataSignature = "";' in response
+    assert "function sessionsDataSignature()" in response
+    assert "function renderSessionsIfDataChanged()" in response
+    assert "const signature = sessionsDataSignature();" in response
+    assert "if (signature === renderedSessionsDataSignature) return false;" in response
     assert "await loadSessions(false);" in response
     assert "updated_at: String(session.updated_at || \"\")," not in response
     assert "activity_at: String(session.activity_at || \"\")," not in response
@@ -3098,8 +3098,8 @@ def test_native_provider_home_signature_is_stable_for_all_session_pages() -> Non
     for provider_name in ("codex", "claude", "antigravity"):
         response = _native_codex_page(provider_name)
 
-        signature_body = response.split("function homeDataSignature()", 1)[1].split(
-            "async function loadHomeData()", 1
+        signature_body = response.split("function sessionsDataSignature()", 1)[1].split(
+            "function renderSessionsIfDataChanged()", 1
         )[0]
         apply_sessions_body = response.split("function applySessionsPayload", 1)[
             1
@@ -3110,10 +3110,22 @@ def test_native_provider_home_signature_is_stable_for_all_session_pages() -> Non
 
         assert "relativeTime(" not in signature_body
         assert "activity_label:" not in signature_body
-        assert "renderNativePageIfHomeDataChanged();" in apply_sessions_body
+        assert "renderSessionsIfDataChanged();" in apply_sessions_body
         assert "applySessionsPayload(data, render);" in load_sessions_body
-        assert "renderedHomeDataSignature = homeDataSignature();" not in load_sessions_body
+        assert "renderedSessionsDataSignature = sessionsDataSignature();" not in load_sessions_body
         assert "renderNativePage();" not in load_sessions_body
+
+
+def test_native_provider_home_signature_uses_stable_session_order() -> None:
+    response = _native_codex_page("codex")
+    signature_body = response.split("function sessionsDataSignature()", 1)[1].split(
+        "function renderSessionsIfDataChanged()", 1
+    )[0]
+
+    assert "sessions: stableSignatureSessions().map(session => ({" in signature_body
+    assert "function stableSignatureSessions()" in signature_body
+    assert "sessionDomId(left).localeCompare(sessionDomId(right))" in signature_body
+    assert "sessions: sessions.map(session => ({" not in signature_body
 
 
 def test_native_provider_session_polling_uses_silent_incremental_updates() -> None:
@@ -3121,19 +3133,44 @@ def test_native_provider_session_polling_uses_silent_incremental_updates() -> No
         response = _native_codex_page(provider_name)
 
         render_changed_body = response.split(
-            "function renderNativePageIfHomeDataChanged()", 1
+            "function renderSessionsIfDataChanged()", 1
         )[1].split("async function loadHomeData()", 1)[0]
         render_sessions_body = response.split("function renderSessions(", 1)[1].split(
             "function renderSessionList(", 1
         )[0]
 
-        assert "renderNativePage({silentSessions: true});" in render_changed_body
+        assert "renderSessions({silent: true});" in render_changed_body
+        assert "renderProjects();" not in render_changed_body
         assert "function syncSessionList(source, target)" in response
         assert "function createSessionButton(session)" in response
         assert "function updateSessionButton(btn, session)" in response
         assert "const silent = Boolean(options.silent);" in render_sessions_body
         assert "syncSessionList(filtered.slice(0, SESSION_PREVIEW_LIMIT), sessionsEl);" in render_sessions_body
         assert "syncSessionList(filtered.slice(SESSION_PREVIEW_LIMIT), body);" in render_sessions_body
+
+
+def test_native_provider_projects_load_once_and_session_refresh_is_unified() -> None:
+    for provider_name in ("codex", "claude", "antigravity"):
+        response = _native_codex_page(provider_name)
+        load_home_body = response.split("async function loadHomeData()", 1)[1].split(
+            "async function loadModelCatalog()", 1
+        )[0]
+        startup_body = response.split("loadHomeData();", 1)[1].split("</script>", 1)[0]
+        stream_body = response.split("function startSessionsStream()", 1)[1].split(
+            "async function loadProjects()", 1
+        )[0]
+
+        assert "await loadProjects();" in load_home_body
+        assert "renderNativePage();" in load_home_body
+        assert "renderSessionsIfDataChanged();" in response
+        assert "const SESSION_REFRESH_PENDING_DELAY_MS = 10000;" in response
+        assert "const SESSION_POLL_INTERVAL_MS = 30000;" in response
+        assert "setInterval(loadHomeData, 15000)" not in response
+        assert "setInterval(refreshSessionsSilently, SESSION_POLL_INTERVAL_MS)" in response
+        assert "sessions = data.sessions || [];" not in stream_body
+        assert "applySessionsPayload(data, true);" in stream_body
+        assert "loadProjects();" not in startup_body
+        assert "}, SESSION_REFRESH_PENDING_DELAY_MS);" in response
 
 
 def test_native_provider_home_uses_session_stream_with_polling_fallback() -> None:
@@ -3144,11 +3181,11 @@ def test_native_provider_home_uses_session_stream_with_polling_fallback() -> Non
         assert "function sessionsStreamPath()" in response
         assert "new EventSource(sessionsStreamPath())" in response
         assert "source.addEventListener(\"native_sessions\"" in response
-        assert "sessions = data.sessions || [];" in response
-        assert "renderNativePageIfHomeDataChanged();" in response
+        assert "applySessionsPayload(data, true);" in response
+        assert "renderSessionsIfDataChanged();" in response
         assert "function startSessionsStream()" in response
         assert "startSessionsStream();" in response
-        assert "setInterval(loadHomeData, 15000)" in response
+        assert "setInterval(refreshSessionsSilently, SESSION_POLL_INTERVAL_MS)" in response
         assert "setInterval(loadHomeData, 3000)" not in response
 
 
@@ -4017,6 +4054,23 @@ def test_live_page_waits_during_active_turn_when_provider_cannot_steer() -> None
     assert 'mode === "wait" ? "等待当前轮"' in response
 
 
+def test_native_live_page_hides_provider_display_completed_projection() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function isProviderDisplayCompletedEvent(event)" in response
+    assert 'event.type === "provider.display.completed"' in response
+    assert "isProviderDisplayCompletedEvent(event)" in response
+    assert 'event.kind === "message_completed"' in response
+
+
+def test_native_live_page_omits_workspace_selector_from_composer() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "live-workspace-bar" not in response
+    assert "liveWorkspaceChip" not in response
+    assert "openWorkspaceSwitcher" not in response
+
+
 @pytest.mark.asyncio
 async def test_worker_live_page_hides_success_lifecycle_events_from_transcript(
     tmp_path: Path,
@@ -4369,6 +4423,7 @@ def test_live_page_uses_native_codex_font_scale_for_all_native_providers() -> No
         response = _live_page(42, native_provider=provider)
 
         assert ".transcript-body { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: 15px; line-height: 1.55;" in response
+        assert ".transcript-item.assistant .transcript-body { color: #b8bcc7; }" in response
         assert ".transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal; padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }" in response
         assert "input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 0 14px; font-size: 15px; }" in response
 
