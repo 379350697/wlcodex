@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hmac
 import json
 import re
@@ -172,6 +173,25 @@ _STATIC_CONTENT_TYPES = {
     ".webp": "image/webp",
     ".svg": "image/svg+xml; charset=utf-8",
 }
+_STATIC_CSS_BUNDLES = {
+    "native_index_bundle.css": (
+        "base.css",
+        "animations.css",
+        "effects.css",
+        "native_index.css",
+    ),
+    "native_app_bundle.css": (
+        "base.css",
+        "animations.css",
+        "effects.css",
+        "components.css",
+    ),
+}
+_RESPONSE_KEEP_ALIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "response_keep_alive",
+    default=False,
+)
+_KEEP_ALIVE_RESPONSE_WRITERS: set[int] = set()
 _RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260629-confirmation-provenance"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
@@ -246,6 +266,25 @@ def _token_suffix(access_token: str = "") -> str:
 
 def _relay_task_detail_view(value: str) -> str:
     return "board" if str(value or "").strip().lower() == "board" else "conversation"
+
+
+def _request_keep_alive(version: str, headers: dict[str, str]) -> bool:
+    connection = headers.get("connection", "").lower()
+    if "close" in connection:
+        return False
+    if version.upper() == "HTTP/1.1":
+        return True
+    return "keep-alive" in connection
+
+
+def _static_css_bundle(relative: str) -> bytes:
+    names = _STATIC_CSS_BUNDLES[relative]
+    chunks: list[bytes] = []
+    for name in names:
+        chunks.append(f"/* {name} */\n".encode("utf-8"))
+        chunks.append((_STATIC_ASSET_DIR / name).read_bytes())
+        chunks.append(b"\n")
+    return b"\n".join(chunks)
 
 
 class RequestBodyTooLarge(ValueError):
@@ -341,6 +380,27 @@ class WorkerLiveStreamServer:
         if task is not None:
             self._client_tasks.add(task)
         try:
+            while not writer.is_closing():
+                _KEEP_ALIVE_RESPONSE_WRITERS.discard(id(writer))
+                _RESPONSE_KEEP_ALIVE.set(False)
+                await self._handle_client_request(reader, writer)
+                if id(writer) not in _KEEP_ALIVE_RESPONSE_WRITERS:
+                    break
+                _KEEP_ALIVE_RESPONSE_WRITERS.discard(id(writer))
+        finally:
+            if not writer.is_closing():
+                writer.close()
+                await writer.wait_closed()
+            if task is not None:
+                self._client_tasks.discard(task)
+
+    async def _handle_client_request(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        task: asyncio.Task[None] | None = None
+        try:
             request_line = await asyncio.wait_for(
                 reader.readline(),
                 timeout=_REQUEST_TIMEOUT_SECONDS,
@@ -349,7 +409,7 @@ class WorkerLiveStreamServer:
                 writer.close()
                 await writer.wait_closed()
                 return
-            method, target, _version = (
+            method, target, version = (
                 request_line.decode("utf-8", errors="replace").strip().split(" ", 2)
             )
             headers: dict[str, str] = {}
@@ -374,6 +434,7 @@ class WorkerLiveStreamServer:
                     name, value = decoded.split(":", 1)
                     headers[name.lower()] = value.strip()
 
+            _RESPONSE_KEEP_ALIVE.set(_request_keep_alive(version, headers))
             parsed = urlparse(target)
             query = parse_qs(parsed.query)
 
@@ -2527,6 +2588,15 @@ class WorkerLiveStreamServer:
         if not relative:
             await self._send_json(writer, 404, {"error": "not found"})
             return
+        if relative in _STATIC_CSS_BUNDLES:
+            await _send_response(
+                writer,
+                200,
+                "text/css; charset=utf-8",
+                _static_css_bundle(relative),
+                extra_headers={"Cache-Control": "public, max-age=300, stale-while-revalidate=60"},
+            )
+            return
         content_type = _STATIC_CONTENT_TYPES.get(Path(relative).suffix)
         if content_type is None:
             await self._send_json(writer, 404, {"error": "not found"})
@@ -2643,16 +2713,23 @@ async def _send_response(
     custom_headers = "".join(
         f"{name}: {value}\r\n" for name, value in (extra_headers or {}).items()
     )
+    keep_alive = _RESPONSE_KEEP_ALIVE.get(False)
+    connection_header = "keep-alive" if keep_alive else "close"
+    keep_alive_header = "Keep-Alive: timeout=30, max=100\r\n" if keep_alive else ""
     header = (
         f"HTTP/1.1 {status} {reason}\r\n"
         f"Content-Type: {content_type}\r\n"
         f"Content-Length: {len(body)}\r\n"
         f"{custom_headers}"
-        "Connection: close\r\n"
+        f"Connection: {connection_header}\r\n"
+        f"{keep_alive_header}"
         "\r\n"
     )
     writer.write(header.encode("utf-8") + body)
     await writer.drain()
+    if keep_alive:
+        _KEEP_ALIVE_RESPONSE_WRITERS.add(id(writer))
+        return
     writer.close()
     await writer.wait_closed()
 
@@ -3640,10 +3717,7 @@ def _native_provider_index_html(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Native Agents</title>
-  <link rel="stylesheet" href="/static/base.css">
-  <link rel="stylesheet" href="/static/animations.css">
-  <link rel="stylesheet" href="/static/effects.css">
-  <link rel="stylesheet" href="/static/native_index.css">
+  <link rel="stylesheet" href="/static/native_index_bundle.css">
 </head>
 <body class="aurora-bg noise-overlay">
   <main>
@@ -3667,10 +3741,7 @@ def _native_workflows_page(*, access_token: str = "") -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>工作流</title>
-  <link rel="stylesheet" href="/static/base.css">
-  <link rel="stylesheet" href="/static/animations.css">
-  <link rel="stylesheet" href="/static/effects.css">
-  <link rel="stylesheet" href="/static/native_index.css">
+  <link rel="stylesheet" href="/static/native_index_bundle.css">
 </head>
 <body class="aurora-bg noise-overlay">
   <main>
@@ -10807,10 +10878,7 @@ def _native_codex_page(provider_name: str = "codex", *, theme: str = "") -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>__MARVIS_TITLE__</title>
 __NATIVE_APP_HEAD__
-  <link rel="stylesheet" href="/static/base.css">
-  <link rel="stylesheet" href="/static/animations.css">
-  <link rel="stylesheet" href="/static/effects.css">
-  <link rel="stylesheet" href="/static/components.css">
+  <link rel="stylesheet" href="/static/native_app_bundle.css">
 __MARVIS_CSS_LINK__  <style>
     :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; }
     body { background: #000; }
@@ -13149,10 +13217,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex", theme: str 
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>__SAFE_TITLE__</title>
 __NATIVE_APP_HEAD__
-  <link rel="stylesheet" href="/static/base.css">
-  <link rel="stylesheet" href="/static/animations.css">
-  <link rel="stylesheet" href="/static/effects.css">
-  <link rel="stylesheet" href="/static/components.css">
+  <link rel="stylesheet" href="/static/native_app_bundle.css">
 __MARVIS_CSS_LINK__  <style>
     :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; }
     html, body, .native-mobile-shell, .codex-run-shell, .codex-transcript, .transcript-body, .codex-input-dock, input { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }

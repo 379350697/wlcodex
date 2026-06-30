@@ -510,6 +510,38 @@ async def _read_response(
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
+async def _read_one_response(reader: asyncio.StreamReader) -> str:
+    headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=1.0)
+    header_text = headers.decode("utf-8", errors="replace")
+    length = 0
+    for line in header_text.split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":", 1)[1].strip())
+            break
+    body = await asyncio.wait_for(reader.readexactly(length), timeout=1.0)
+    return (headers + body).decode("utf-8", errors="replace")
+
+
+async def _read_two_keep_alive_responses(
+    host: str,
+    port: int,
+    first_request: str,
+    second_request: str,
+) -> tuple[str, str]:
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        writer.write(first_request.encode("utf-8"))
+        await writer.drain()
+        first = await _read_one_response(reader)
+        writer.write(second_request.encode("utf-8"))
+        await writer.drain()
+        second = await _read_one_response(reader)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+    return first, second
+
+
 async def _read_initial_response(
     host: str,
     port: int,
@@ -658,9 +690,44 @@ async def test_native_provider_index_links_static_stylesheet(tmp_path: Path) -> 
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert '<link rel="stylesheet" href="/static/native_index.css">' in response
+    assert '<link rel="stylesheet" href="/static/native_index_bundle.css">' in response
+    assert '<link rel="stylesheet" href="/static/base.css">' not in response
+    assert '<link rel="stylesheet" href="/static/animations.css">' not in response
+    assert '<link rel="stylesheet" href="/static/effects.css">' not in response
+    assert '<link rel="stylesheet" href="/static/native_index.css">' not in response
     assert "Antigravity" in response
     assert '<button class="circle native-back" id="back" aria-label="back" aria-disabled="true" disabled>' in response
+
+
+@pytest.mark.asyncio
+async def test_native_provider_page_links_single_static_stylesheet(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([FakeAntigravityProvider()]),
+        access_token=None,
+        allow_unauthenticated_loopback=True,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/antigravity HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert '<link rel="stylesheet" href="/static/native_app_bundle.css">' in response
+    assert '<link rel="stylesheet" href="/static/base.css">' not in response
+    assert '<link rel="stylesheet" href="/static/animations.css">' not in response
+    assert '<link rel="stylesheet" href="/static/effects.css">' not in response
+    assert '<link rel="stylesheet" href="/static/components.css">' not in response
 
 
 @pytest.mark.asyncio
@@ -734,6 +801,67 @@ async def test_static_assets_are_publicly_cacheable(tmp_path: Path) -> None:
         "Cache-Control: public, max-age=300, stale-while-revalidate=60"
         in office_roles_response
     )
+
+
+@pytest.mark.asyncio
+async def test_native_css_bundle_combines_static_assets(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        access_token=None,
+        allow_unauthenticated_loopback=True,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /static/native_app_bundle.css HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "Content-Type: text/css; charset=utf-8" in response
+    assert "Cache-Control: public, max-age=300, stale-while-revalidate=60" in response
+    assert "--bg-root" in response
+    assert "@keyframes" in response
+    assert ".model-popover" in response
+
+
+@pytest.mark.asyncio
+async def test_regular_responses_keep_http_connection_alive(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        access_token=None,
+        allow_unauthenticated_loopback=True,
+    )
+    await server.start()
+    try:
+        first, second = await _read_two_keep_alive_responses(
+            server.host,
+            server.port,
+            "GET /health HTTP/1.1\r\nHost: test\r\n\r\n",
+            "GET /static/native_app_bundle.css HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in first
+    assert "Connection: keep-alive" in first
+    assert '"status": "ok"' in first
+    assert "HTTP/1.1 200 OK" in second
+    assert "Connection: close" in second
+    assert "--bg-root" in second
 
 
 @pytest.mark.asyncio
