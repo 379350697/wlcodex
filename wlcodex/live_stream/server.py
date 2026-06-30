@@ -16301,12 +16301,30 @@ __ICONS_JS__
       const canonicalUserTurns = canonicalUserTranscriptTurnSet(sourceEvents);
       const seen = new Set();
       const seenUserMessages = new Map();
+      const seenAssistantVisible = new Map();
       const seenAssistantCompleted = new Map();
       const result = [];
       for (const event of sourceEvents) {
         if (isInternalEvent(event)) continue;
         if (isAssistantMessageEvent(event) && !hasVisibleTranscriptText(event)) continue;
         if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) continue;
+        if (isAssistantMessageEvent(event)) {
+          const assistantFingerprint = assistantDisplayTextFingerprint(event);
+          const previousAssistantIndex = assistantFingerprint
+            ? seenAssistantVisible.get(assistantFingerprint)
+            : undefined;
+          if (previousAssistantIndex !== undefined) {
+            const previousAssistant = result[previousAssistantIndex];
+            if (
+              assistantVisibleDedupePriority(event) >
+              assistantVisibleDedupePriority(previousAssistant)
+            ) {
+              result[previousAssistantIndex] = event;
+            }
+            continue;
+          }
+          if (assistantFingerprint) seenAssistantVisible.set(assistantFingerprint, result.length);
+        }
         if (event.kind === "message_completed") {
           const completedFingerprint = completedAssistantTextFingerprint(event);
           const previousCompletedIndex = completedFingerprint
@@ -16427,6 +16445,12 @@ __ICONS_JS__
       if (event.type === "model.message.completed") return 40;
       if (itemId.startsWith("jsonl-assistant-final")) return 30;
       if (event.type === "provider.display.completed") return 20;
+      return 10;
+    }
+    function assistantVisibleDedupePriority(event) {
+      if (event.kind === "message_completed") return completedAssistantDedupePriority(event);
+      if (isOfficialAssistantTranscriptEvent(event)) return 15;
+      if (isProviderDisplayDeltaEvent(event)) return 5;
       return 10;
     }
     function canonicalUserTranscriptTurnSet(sourceEvents) {
