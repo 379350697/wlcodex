@@ -4063,6 +4063,16 @@ def test_native_live_page_hides_provider_display_completed_projection() -> None:
     assert 'event.kind === "message_completed"' in response
 
 
+def test_native_live_page_hides_compatibility_projection_mirrors() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function isCompatibilityMirrorEvent(event)" in response
+    assert 'event.kind === "compatibility_event"' in response
+    assert 'payload.compatibility_projection === "model.text.delta"' in response
+    assert "isCompatibilityMirrorEvent(event)" in response
+    assert 'renderStatusEvent(event, statusText(event, payload), statusTone(event))' in response
+
+
 def test_native_live_page_hides_provider_raw_frame_events() -> None:
     response = _live_page(42, native_provider="codex")
 
@@ -4444,12 +4454,29 @@ def test_native_live_page_exposes_transcript_font_size_controls() -> None:
 
     assert 'id="uiFontSizeInput"' in response
     assert 'id="codeFontSizeInput"' in response
+    assert 'id="uiFontSizeInput" type="number" min="12" max="20" step="1"' in response
+    assert 'id="codeFontSizeInput" type="number" min="12" max="20" step="1"' in response
     assert "UI字号" in response
     assert "代码字号" in response
     assert 'const DISPLAY_SETTINGS_STORAGE_KEY = "wlcodexNativeDisplaySettings";' in response
     assert 'document.documentElement.style.setProperty("--native-ui-font-size"' in response
     assert 'document.documentElement.style.setProperty("--native-code-font-size"' in response
     assert "localStorage.setItem(DISPLAY_SETTINGS_STORAGE_KEY" in response
+
+
+def test_native_live_page_font_size_inputs_allow_draft_editing_before_commit() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function updateDisplayFontSizeDraft(input, key)" in response
+    assert "function commitDisplayFontSizeInput(input, key)" in response
+    assert "function setDisplayFontInputValue(input, value)" in response
+    assert 'if (raw === "") return;' in response
+    assert 'uiFontSizeInput.oninput = () => updateDisplayFontSizeDraft(uiFontSizeInput, "uiFontSize");' in response
+    assert 'codeFontSizeInput.oninput = () => updateDisplayFontSizeDraft(codeFontSizeInput, "codeFontSize");' in response
+    assert 'uiFontSizeInput.onblur = () => commitDisplayFontSizeInput(uiFontSizeInput, "uiFontSize");' in response
+    assert 'codeFontSizeInput.onblur = () => commitDisplayFontSizeInput(codeFontSizeInput, "codeFontSize");' in response
+    assert 'uiFontSizeInput.oninput = () => updateDisplayFontSize("uiFontSize", uiFontSizeInput.value);' not in response
+    assert 'codeFontSizeInput.oninput = () => updateDisplayFontSize("codeFontSize", codeFontSizeInput.value);' not in response
 
 
 def test_live_page_protects_mobile_transcript_layout_from_overlay_and_long_inline_code() -> None:
@@ -4722,6 +4749,28 @@ async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns
     assert "nativeTurnId !== latestTurnId" in response
     assert "completed || nativeTurnId !== latestTurnId" not in response
     assert "group.length > 1" not in response
+
+
+def test_worker_live_page_dedupes_assistant_mirror_text_by_turn() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function completedAssistantTextByTurn(sourceEvents)" in response
+    assert "function assistantDisplayTextFingerprint(event)" in response
+    assert "function shouldDropAssistantMirrorEvent(event, completedAssistantTexts)" in response
+    assert "const completedAssistantTexts = completedAssistantTextByTurn(sourceEvents);" in response
+    assert "if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) continue;" in response
+    assert "normalizeTranscriptText(String(payload.text || payload.delta || payload.summary || payload.message || \"\"))" in response
+
+
+def test_worker_live_page_status_event_avoids_title_detail_duplication() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function statusDisplay(event, fallback)" in response
+    assert "const display = statusDisplay(event, fallback);" in response
+    assert "node.title.textContent = display.title;" in response
+    assert "node.detail.hidden = !display.detail;" in response
+    assert "if (detail === title) detail = \"\";" in response
+    assert "appendText(node.detail, text);" not in response
 
 
 @pytest.mark.asyncio

@@ -13587,11 +13587,11 @@ __MARVIS_CSS_LINK__  <style>
         <div class="session-display-settings-title">显示字号</div>
         <label class="font-size-setting" for="uiFontSizeInput">
           <span>UI字号</span>
-          <input id="uiFontSizeInput" type="number" min="12" max="24" step="1" inputmode="numeric">
+          <input id="uiFontSizeInput" type="number" min="12" max="20" step="1" inputmode="numeric">
         </label>
         <label class="font-size-setting" for="codeFontSizeInput">
           <span>代码字号</span>
-          <input id="codeFontSizeInput" type="number" min="10" max="22" step="1" inputmode="numeric">
+          <input id="codeFontSizeInput" type="number" min="12" max="20" step="1" inputmode="numeric">
         </label>
       </div>
       <button class="session-action-item" id="pinSessionButton" type="button" role="menuitem">
@@ -13953,6 +13953,10 @@ __ICONS_JS__
     const COLLABORATION_MODE_STORAGE_KEY = "wlcodexNativeCollaborationMode";
     const DISPLAY_SETTINGS_STORAGE_KEY = "wlcodexNativeDisplaySettings";
     const DEFAULT_DISPLAY_SETTINGS = Object.freeze({uiFontSize: 15, codeFontSize: 12});
+    const DISPLAY_FONT_SIZE_LIMITS = Object.freeze({
+      uiFontSize: Object.freeze({min: 12, max: 20}),
+      codeFontSize: Object.freeze({min: 12, max: 20})
+    });
     const DEFAULT_PERMISSION_MODE = "auto_review";
     const PERMISSION_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
@@ -14010,11 +14014,16 @@ __ICONS_JS__
       if (!Number.isFinite(parsed)) return fallback;
       return Math.max(min, Math.min(max, parsed));
     }
+    function displayFontSizeLimits(key) {
+      return DISPLAY_FONT_SIZE_LIMITS[key] || DISPLAY_FONT_SIZE_LIMITS.uiFontSize;
+    }
     function normalizeDisplaySettings(settings) {
       const source = settings || {};
+      const uiLimits = displayFontSizeLimits("uiFontSize");
+      const codeLimits = displayFontSizeLimits("codeFontSize");
       return {
-        uiFontSize: clampDisplayFontSize(source.uiFontSize, DEFAULT_DISPLAY_SETTINGS.uiFontSize, 12, 24),
-        codeFontSize: clampDisplayFontSize(source.codeFontSize, DEFAULT_DISPLAY_SETTINGS.codeFontSize, 10, 22)
+        uiFontSize: clampDisplayFontSize(source.uiFontSize, DEFAULT_DISPLAY_SETTINGS.uiFontSize, uiLimits.min, uiLimits.max),
+        codeFontSize: clampDisplayFontSize(source.codeFontSize, DEFAULT_DISPLAY_SETTINGS.codeFontSize, codeLimits.min, codeLimits.max)
       };
     }
     function loadSavedDisplaySettings() {
@@ -14032,8 +14041,35 @@ __ICONS_JS__
     function applyDisplaySettings() {
       document.documentElement.style.setProperty("--native-ui-font-size", `${savedDisplaySettings.uiFontSize}px`);
       document.documentElement.style.setProperty("--native-code-font-size", `${savedDisplaySettings.codeFontSize}px`);
-      if (uiFontSizeInput) uiFontSizeInput.value = String(savedDisplaySettings.uiFontSize);
-      if (codeFontSizeInput) codeFontSizeInput.value = String(savedDisplaySettings.codeFontSize);
+      setDisplayFontInputValue(uiFontSizeInput, savedDisplaySettings.uiFontSize);
+      setDisplayFontInputValue(codeFontSizeInput, savedDisplaySettings.codeFontSize);
+    }
+    function setDisplayFontInputValue(input, value) {
+      if (input) input.value = String(value);
+    }
+    function updateDisplayFontSizeDraft(input, key) {
+      const raw = String((input && input.value) || "");
+      if (raw === "") return;
+      const parsed = Number.parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return;
+      const limits = displayFontSizeLimits(key);
+      const clamped = Math.max(limits.min, Math.min(limits.max, parsed));
+      const cssProperty = key === "codeFontSize" ? "--native-code-font-size" : "--native-ui-font-size";
+      document.documentElement.style.setProperty(cssProperty, `${clamped}px`);
+    }
+    function commitDisplayFontSizeInput(input, key) {
+      const raw = String((input && input.value) || "");
+      if (raw === "") {
+        applyDisplaySettings();
+        return;
+      }
+      updateDisplayFontSize(key, raw);
+    }
+    function commitDisplayFontSizeInputOnEnter(event, input, key) {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      commitDisplayFontSizeInput(input, key);
+      if (input) input.blur();
     }
     function updateDisplayFontSize(key, value) {
       savedDisplaySettings = normalizeDisplaySettings({...savedDisplaySettings, [key]: value});
@@ -15112,8 +15148,14 @@ __ICONS_JS__
     copySessionIdButton.onclick = copyNativeSessionId;
     renameSessionButton.onclick = () => unavailableSessionAction("重命名");
     archiveSessionButton.onclick = () => unavailableSessionAction("归档");
-    uiFontSizeInput.oninput = () => updateDisplayFontSize("uiFontSize", uiFontSizeInput.value);
-    codeFontSizeInput.oninput = () => updateDisplayFontSize("codeFontSize", codeFontSizeInput.value);
+    uiFontSizeInput.oninput = () => updateDisplayFontSizeDraft(uiFontSizeInput, "uiFontSize");
+    codeFontSizeInput.oninput = () => updateDisplayFontSizeDraft(codeFontSizeInput, "codeFontSize");
+    uiFontSizeInput.onchange = () => commitDisplayFontSizeInput(uiFontSizeInput, "uiFontSize");
+    codeFontSizeInput.onchange = () => commitDisplayFontSizeInput(codeFontSizeInput, "codeFontSize");
+    uiFontSizeInput.onblur = () => commitDisplayFontSizeInput(uiFontSizeInput, "uiFontSize");
+    codeFontSizeInput.onblur = () => commitDisplayFontSizeInput(codeFontSizeInput, "codeFontSize");
+    uiFontSizeInput.onkeydown = event => commitDisplayFontSizeInputOnEnter(event, uiFontSizeInput, "uiFontSize");
+    codeFontSizeInput.onkeydown = event => commitDisplayFontSizeInputOnEnter(event, codeFontSizeInput, "codeFontSize");
     continueButton.onclick = () => submitPrompt();
     steerChoice.onclick = () => submitPrompt("steer");
     queueChoice.onclick = () => submitPrompt("continue");
@@ -16049,6 +16091,7 @@ __ICONS_JS__
           event.type === "model.usage.updated" ||
           isProviderRawFrameEvent(event) ||
           isProviderDisplayCompletedEvent(event) ||
+          isCompatibilityMirrorEvent(event) ||
           isNativeExecutionDetail(event) ||
           isNativeReasoningDetail(event) ||
           (isNativeActivityDetail(event) && !isNativePlanEvent(event))
@@ -16066,10 +16109,23 @@ __ICONS_JS__
       return Boolean(
         event && (
           event.type === "provider.display.completed" ||
-          payload.compatibility_projection === "provider.display.completed" ||
-          payload.display_source === "provider"
+          payload.compatibility_projection === "provider.display.completed"
         ) && String(payload.text || payload.summary || "").trim()
       );
+    }
+    function isProviderDisplayDeltaEvent(event) {
+      const payload = (event && event.payload) || {};
+      return Boolean(event && (
+        event.type === "provider.display.delta" ||
+        (event.kind === "text_delta" && payload.display_source === "provider")
+      ));
+    }
+    function isCompatibilityMirrorEvent(event) {
+      const payload = (event && event.payload) || {};
+      return Boolean(event && (
+        event.kind === "compatibility_event" ||
+        payload.compatibility_projection === "model.text.delta"
+      ));
     }
     function isNativePlanEvent(event) {
       const payload = (event && event.payload) || {};
@@ -16255,12 +16311,14 @@ __ICONS_JS__
     }
     function dedupeDisplayEvents(sourceEvents) {
       const officialAssistantTurns = completedAssistantTurnSet(sourceEvents);
+      const completedAssistantTexts = completedAssistantTextByTurn(sourceEvents);
       const canonicalUserTurns = canonicalUserTranscriptTurnSet(sourceEvents);
       const seen = new Set();
       const seenUserMessages = new Map();
       const result = [];
       for (const event of sourceEvents) {
         if (isInternalEvent(event)) continue;
+        if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) continue;
         if (
           event.kind === "user_message" &&
           canonicalUserTurns.has(eventFoldTurnId(event)) &&
@@ -16297,6 +16355,32 @@ __ICONS_JS__
         result.push(event);
       }
       return result;
+    }
+    function completedAssistantTextByTurn(sourceEvents) {
+      const byTurn = new Map();
+      for (const event of sourceEvents || []) {
+        if (!event || isInternalEvent(event)) continue;
+        if (event.kind !== "message_completed") continue;
+        const turnId = eventFoldTurnId(event);
+        const fingerprint = assistantDisplayTextFingerprint(event);
+        if (!turnId || !fingerprint) continue;
+        if (!byTurn.has(turnId)) byTurn.set(turnId, new Set());
+        byTurn.get(turnId).add(fingerprint);
+      }
+      return byTurn;
+    }
+    function shouldDropAssistantMirrorEvent(event, completedAssistantTexts) {
+      if (!event || event.kind !== "text_delta") return false;
+      const payload = event.payload || {};
+      const itemId = String(payload.itemId || payload.item_id || "");
+      if (!isProviderDisplayDeltaEvent(event) && !itemId.startsWith("jsonl-assistant")) return false;
+      const turnId = eventFoldTurnId(event);
+      const fingerprint = assistantDisplayTextFingerprint(event);
+      return Boolean(turnId && fingerprint && completedAssistantTexts.get(turnId)?.has(fingerprint));
+    }
+    function assistantDisplayTextFingerprint(event) {
+      const payload = (event && event.payload) || {};
+      return normalizeTranscriptText(String(payload.text || payload.delta || payload.summary || payload.message || ""));
     }
     function canonicalUserTranscriptTurnSet(sourceEvents) {
       const turns = new Set();
@@ -16358,6 +16442,8 @@ __ICONS_JS__
       return String(payload.native_turn_id || payload.turnId || "");
     }
     function isDuplicateDisplayEvent(event, previousEvents) {
+      const completedAssistantTexts = completedAssistantTextByTurn(previousEvents);
+      if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) return true;
       const key = mirroredDisplayKey(event);
       if (key && previousEvents.some(previous => mirroredDisplayKey(previous) === key)) {
         return true;
@@ -17105,8 +17191,8 @@ __ICONS_JS__
       target.prepend(wrap);
     }
     function renderStatusEvent(event, fallback, tone) {
-      const payload = event.payload || {};
-      const text = payload.delta || payload.text || payload.summary || fallback || "";
+      const display = statusDisplay(event, fallback);
+      if (!display.title && !display.detail) return;
       const key = statusKey(event);
       let node = statusNodes.get(key);
       if (!node) {
@@ -17115,7 +17201,6 @@ __ICONS_JS__
         const body = document.createElement("div");
         const title = document.createElement("span");
         title.className = "status-title";
-        title.textContent = statusTitle(event, fallback);
         const detail = document.createElement("span");
         detail.className = "status-detail";
         body.append(title, detail);
@@ -17125,8 +17210,10 @@ __ICONS_JS__
         statusNodes.set(key, node);
       }
       node.row.className = "status-event " + (tone || "neutral");
-      appendText(node.detail, text);
-      updateRunState(statusTitle(event, fallback), tone || "neutral");
+      node.title.textContent = display.title;
+      node.detail.textContent = display.detail;
+      node.detail.hidden = !display.detail;
+      updateRunState(display.title || display.detail, tone || "neutral");
     }
     function renderToolCall(event) {
       const payload = event.payload || {};
@@ -17516,6 +17603,14 @@ __ICONS_JS__
       if (payload.delta) return payload.delta;
       if (event.type) return event.type;
       return "";
+    }
+    function statusDisplay(event, fallback) {
+      const payload = event.payload || {};
+      const title = statusTitle(event, fallback);
+      let detail = String(payload.delta || payload.text || payload.summary || "").trim();
+      if (!detail && fallback && fallback !== title) detail = String(fallback).trim();
+      if (detail === title) detail = "";
+      return {title, detail};
     }
     function statusTitle(event, fallback) {
       const payload = event.payload || {};
