@@ -2550,10 +2550,15 @@ def test_worker_live_page_exposes_header_context_and_session_actions() -> None:
     assert "上下文:" in response
     assert "5 小时限制:" in response
     assert "7 天限制:" in response
-    assert "置顶" in response
     assert "复制会话 ID" in response
-    assert "重命名" in response
-    assert "归档" in response
+    assert "<span>置顶</span>" not in response
+    assert "<span>重命名</span>" not in response
+    assert "<span>归档</span>" not in response
+    assert "pinSessionButton" not in response
+    assert "renameSessionButton" not in response
+    assert "archiveSessionButton" not in response
+    assert "unavailableSessionAction" not in response
+    assert "暂未接入" not in response
     assert "function toggleContextInfoPopover()" in response
     assert "function nativeContextUsageSummary()" in response
     assert "function nativeLimitSummary(kind)" in response
@@ -3936,7 +3941,7 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert "const generatedPrompt = groupHasGeneratedPrompt(group);" in response
     assert "!generatedPrompt &&" in response
     assert "function groupHasGeneratedPrompt(group)" in response
-    assert "Boolean(splitGeneratedPromptText(payload.text || payload.delta || payload.summary || \"\"))" in response
+    assert "Boolean(splitGeneratedPromptText(visibleTranscriptText(event)))" in response
     assert "你在[\\s\\S]+?工作。" in response
     assert "背景：" in response
     assert "必须阅读" in response
@@ -4429,9 +4434,9 @@ async def test_worker_live_page_renders_assistant_markdown_blocks(
     assert 'paragraph.join("\\n").trim()' in response
     assert 'codeLines.join("\\n")' in response
     assert "\\[([^\\]]+)\\]\\(([^)]+)\\)" in response
-    assert "renderMarkdownLite(node.body, node.text);" in response
-    assert "node.text += String(incomingText);" in response
-    assert "node.text = String(incomingText);" in response
+    assert "renderMarkdownLite(node.body, visibleText);" in response
+    assert "node.text += visibleText;" in response
+    assert "node.text = visibleText;" in response
     assert ".transcript-body p" in response
     assert ".transcript-body ul" in response
     assert ".transcript-body pre" in response
@@ -4525,7 +4530,7 @@ async def test_worker_live_page_replaces_delta_with_completed_assistant_message(
     assert "node.row.dataset.completed = \"true\";" in response
     assert "assistantMessageKey(event)" in response
     assert "completedAssistantMessageKey(event)" in response
-    assert 'if (event.kind === "message_completed" && itemId.startsWith("jsonl-assistant"))' in response
+    assert 'if (event.kind === "message_completed") return completedAssistantMessageKey(event);' in response
     assert 'return `${itemId}:${event.id || transcriptTextFingerprint(event)}`;' in response
     assert "foldTranscriptPreviewText(group, \"message_completed\")" in response
 
@@ -4757,9 +4762,29 @@ def test_worker_live_page_dedupes_assistant_mirror_text_by_turn() -> None:
     assert "function completedAssistantTextByTurn(sourceEvents)" in response
     assert "function assistantDisplayTextFingerprint(event)" in response
     assert "function shouldDropAssistantMirrorEvent(event, completedAssistantTexts)" in response
+    assert "function completedAssistantDedupePriority(event)" in response
+    assert "const seenAssistantCompleted = new Map();" in response
+    assert "const completedFingerprint = completedAssistantTextFingerprint(event);" in response
+    assert "if (completedFingerprint) seenAssistantCompleted.set(completedFingerprint, result.length);" in response
     assert "const completedAssistantTexts = completedAssistantTextByTurn(sourceEvents);" in response
     assert "if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) continue;" in response
-    assert "normalizeTranscriptText(String(payload.text || payload.delta || payload.summary || payload.message || \"\"))" in response
+    assert "normalizeTranscriptText(visibleTranscriptText(event))" in response
+
+
+def test_worker_live_page_strips_app_directives_from_visible_transcript() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function visibleTranscriptText(event)" in response
+    assert "function stripCodexAppDirectives(text)" in response
+    assert "function hasVisibleTranscriptText(event)" in response
+    assert "if (isAssistantMessageEvent(event) && !hasVisibleTranscriptText(event)) continue;" in response
+    assert "renderMarkdownLite(node.body, visibleText);" in response
+    assert "node.text = visibleText;" in response
+    assert "::git-stage" not in strip_codex_directive_test_surface(response)
+
+
+def strip_codex_directive_test_surface(response: str) -> str:
+    return response.split("function stripCodexAppDirectives(text)", 1)[0]
 
 
 def test_worker_live_page_status_event_avoids_title_detail_duplication() -> None:
@@ -4771,6 +4796,16 @@ def test_worker_live_page_status_event_avoids_title_detail_duplication() -> None
     assert "node.detail.hidden = !display.detail;" in response
     assert "if (detail === title) detail = \"\";" in response
     assert "appendText(node.detail, text);" not in response
+
+
+def test_worker_live_page_suppresses_noisy_native_sync_not_found_status() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function isNoisyNativeSyncError(message)" in response
+    assert 'if (isNoisyNativeSyncError(text)) return;' in response
+    assert 'clearStatusNode("native_sync_failed");' in response
+    assert 'if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);' in response
+    assert 'else clearStatusNode("native_sync_failed");' in response
 
 
 @pytest.mark.asyncio

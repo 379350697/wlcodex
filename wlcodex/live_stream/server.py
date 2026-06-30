@@ -13594,17 +13594,8 @@ __MARVIS_CSS_LINK__  <style>
           <input id="codeFontSizeInput" type="number" min="12" max="20" step="1" inputmode="numeric">
         </label>
       </div>
-      <button class="session-action-item" id="pinSessionButton" type="button" role="menuitem">
-        <span class="session-action-icon"></span><span>置顶</span>
-      </button>
       <button class="session-action-item" id="copySessionIdButton" type="button" role="menuitem">
         <span class="session-action-icon"></span><span>复制会话 ID</span>
-      </button>
-      <button class="session-action-item" id="renameSessionButton" type="button" role="menuitem">
-        <span class="session-action-icon"></span><span>重命名</span>
-      </button>
-      <button class="session-action-item danger" id="archiveSessionButton" type="button" role="menuitem">
-        <span class="session-action-icon"></span><span>归档</span>
       </button>
     </section>
     <main>
@@ -13779,10 +13770,7 @@ __MARVIS_CSS_LINK__  <style>
     const contextSevenDayValue = document.getElementById("contextSevenDayValue");
     const contextThreadCopyButton = document.getElementById("contextThreadCopyButton");
     const sessionActionTitle = document.getElementById("sessionActionTitle");
-    const pinSessionButton = document.getElementById("pinSessionButton");
     const copySessionIdButton = document.getElementById("copySessionIdButton");
-    const renameSessionButton = document.getElementById("renameSessionButton");
-    const archiveSessionButton = document.getElementById("archiveSessionButton");
     const uiFontSizeInput = document.getElementById("uiFontSizeInput");
     const codeFontSizeInput = document.getElementById("codeFontSizeInput");
     const sessionFloatTitle = document.getElementById("sessionFloatTitle");
@@ -13992,11 +13980,8 @@ __ICONS_JS__
     handoffCopyButton.innerHTML = ICONS.copy;
     planPageDownload.innerHTML = ICONS.download;
     planPageCopy.innerHTML = ICONS.copy;
-    pinSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.pin;
     contextThreadCopyButton.innerHTML = ICONS.copy;
     copySessionIdButton.querySelector(".session-action-icon").innerHTML = ICONS.copy;
-    renameSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.pencil;
-    archiveSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.archive;
     historyFold.onclick = loadOlderEvents;
     applyDisplaySettings();
     function isValidNativeThreadId(value) {
@@ -14008,6 +13993,10 @@ __ICONS_JS__
         return "会话不存在或已被清理";
       }
       return text;
+    }
+    function isNoisyNativeSyncError(message) {
+      const text = String(message || "").trim().toLowerCase();
+      return text === "not found" || text === "native session not found" || text === "keyerror";
     }
     function clampDisplayFontSize(value, fallback, min, max) {
       const parsed = Number.parseInt(String(value || ""), 10);
@@ -14444,10 +14433,6 @@ __ICONS_JS__
           setSendStatus("复制失败", "error");
         }
       }
-    }
-    function unavailableSessionAction(label) {
-      closeHeaderPopovers();
-      setSendStatus(label + "暂未接入", "error");
     }
     function workflowApi(path, body) {
       return api(path, {
@@ -15144,10 +15129,7 @@ __ICONS_JS__
     headerSessionMenuButton.onclick = toggleSessionActionMenu;
     contextInfoClose.onclick = closeHeaderPopovers;
     contextThreadCopyButton.onclick = copyNativeSessionId;
-    pinSessionButton.onclick = () => unavailableSessionAction("置顶");
     copySessionIdButton.onclick = copyNativeSessionId;
-    renameSessionButton.onclick = () => unavailableSessionAction("重命名");
-    archiveSessionButton.onclick = () => unavailableSessionAction("归档");
     uiFontSizeInput.oninput = () => updateDisplayFontSizeDraft(uiFontSizeInput, "uiFontSize");
     codeFontSizeInput.oninput = () => updateDisplayFontSizeDraft(codeFontSizeInput, "codeFontSize");
     uiFontSizeInput.onchange = () => commitDisplayFontSizeInput(uiFontSizeInput, "uiFontSize");
@@ -16024,7 +16006,7 @@ __ICONS_JS__
     }
     async function loadRecentEvents() {
       let snapshot = await api(eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true}));
-      if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
+      handleNativeSyncSnapshot(snapshot);
       loadedEvents = snapshot.events || [];
       if (
         !loadedEvents.length ||
@@ -16032,12 +16014,12 @@ __ICONS_JS__
         hasUnresolvedApprovalRequests(loadedEvents)
       ) {
         snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));
-        if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
+        handleNativeSyncSnapshot(snapshot);
         loadedEvents = snapshot.events || [];
       }
       if (nativeThreadId && !hasNativePlanEvents(loadedEvents)) {
         snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));
-        if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
+        handleNativeSyncSnapshot(snapshot);
         loadedEvents = mergeDisplayEvents(loadedEvents, snapshot.events || []);
       }
       previousEventCount = snapshot.previous_event_count || 0;
@@ -16047,6 +16029,10 @@ __ICONS_JS__
       updateHistoryFold();
       openStream(latestEventId);
       pollEvents();
+    }
+    function handleNativeSyncSnapshot(snapshot) {
+      if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
+      else clearStatusNode("native_sync_failed");
     }
     function hasLiveDisplayEvents(sourceEvents) {
       return sourceEvents.some(event => {
@@ -16157,7 +16143,7 @@ __ICONS_JS__
       historyFold.disabled = true;
       try {
         const snapshot = await api(eventsPath(`before=${oldestEventId}&limit=${OLDER_EVENT_LIMIT}`));
-        if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
+        handleNativeSyncSnapshot(snapshot);
         const older = snapshot.events || [];
         loadedEvents = older.concat(loadedEvents);
         previousEventCount = snapshot.previous_event_count || 0;
@@ -16217,7 +16203,7 @@ __ICONS_JS__
       pollInFlight = true;
       try {
         const snapshot = await api(eventsPath(`after=${latestEventId}&limit=100`));
-        if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
+        handleNativeSyncSnapshot(snapshot);
         const nextEvents = snapshot.events || [];
         for (const event of nextEvents) renderLiveEvent(event);
         setConnectionState("connected");
@@ -16315,10 +16301,29 @@ __ICONS_JS__
       const canonicalUserTurns = canonicalUserTranscriptTurnSet(sourceEvents);
       const seen = new Set();
       const seenUserMessages = new Map();
+      const seenAssistantCompleted = new Map();
       const result = [];
       for (const event of sourceEvents) {
         if (isInternalEvent(event)) continue;
+        if (isAssistantMessageEvent(event) && !hasVisibleTranscriptText(event)) continue;
         if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) continue;
+        if (event.kind === "message_completed") {
+          const completedFingerprint = completedAssistantTextFingerprint(event);
+          const previousCompletedIndex = completedFingerprint
+            ? seenAssistantCompleted.get(completedFingerprint)
+            : undefined;
+          if (previousCompletedIndex !== undefined) {
+            const previousCompleted = result[previousCompletedIndex];
+            if (
+              completedAssistantDedupePriority(event) >
+              completedAssistantDedupePriority(previousCompleted)
+            ) {
+              result[previousCompletedIndex] = event;
+            }
+            continue;
+          }
+          if (completedFingerprint) seenAssistantCompleted.set(completedFingerprint, result.length);
+        }
         if (
           event.kind === "user_message" &&
           canonicalUserTurns.has(eventFoldTurnId(event)) &&
@@ -16356,6 +16361,23 @@ __ICONS_JS__
       }
       return result;
     }
+    function visibleTranscriptText(event) {
+      return stripCodexAppDirectives(rawTranscriptText(event));
+    }
+    function rawTranscriptText(event) {
+      const payload = (event && event.payload) || {};
+      return String(payload.text || payload.delta || payload.summary || payload.message || "");
+    }
+    function stripCodexAppDirectives(text) {
+      return String(text || "")
+        .replace(/::[a-z][a-z0-9-]*[{][^}\\n]*[}]/gi, "")
+        .replace(/[ \t]+$/gm, "")
+        .replace(/\\n{3,}/g, "\\n\\n")
+        .trim();
+    }
+    function hasVisibleTranscriptText(event) {
+      return Boolean(visibleTranscriptText(event).trim());
+    }
     function completedAssistantTextByTurn(sourceEvents) {
       const byTurn = new Map();
       for (const event of sourceEvents || []) {
@@ -16379,8 +16401,22 @@ __ICONS_JS__
       return Boolean(turnId && fingerprint && completedAssistantTexts.get(turnId)?.has(fingerprint));
     }
     function assistantDisplayTextFingerprint(event) {
+      return normalizeTranscriptText(visibleTranscriptText(event));
+    }
+    function completedAssistantTextFingerprint(event) {
+      const turnId = eventFoldTurnId(event);
+      const fingerprint = assistantDisplayTextFingerprint(event);
+      if (!turnId || !fingerprint) return "";
+      return `${turnId}:${fingerprint}`;
+    }
+    function completedAssistantDedupePriority(event) {
       const payload = (event && event.payload) || {};
-      return normalizeTranscriptText(String(payload.text || payload.delta || payload.summary || payload.message || ""));
+      const itemId = String(payload.itemId || payload.item_id || "");
+      if (event.type === "model.message.completed" && /^item-[0-9]+$/.test(itemId)) return 50;
+      if (event.type === "model.message.completed") return 40;
+      if (itemId.startsWith("jsonl-assistant-final")) return 30;
+      if (event.type === "provider.display.completed") return 20;
+      return 10;
     }
     function canonicalUserTranscriptTurnSet(sourceEvents) {
       const turns = new Set();
@@ -16444,6 +16480,18 @@ __ICONS_JS__
     function isDuplicateDisplayEvent(event, previousEvents) {
       const completedAssistantTexts = completedAssistantTextByTurn(previousEvents);
       if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) return true;
+      if (event.kind === "message_completed") {
+        const completedFingerprint = completedAssistantTextFingerprint(event);
+        if (completedFingerprint) {
+          let previousPriority = 0;
+          for (const previous of previousEvents) {
+            if (previous.kind !== "message_completed") continue;
+            if (completedAssistantTextFingerprint(previous) !== completedFingerprint) continue;
+            previousPriority = Math.max(previousPriority, completedAssistantDedupePriority(previous));
+          }
+          if (previousPriority >= completedAssistantDedupePriority(event)) return true;
+        }
+      }
       const key = mirroredDisplayKey(event);
       if (key && previousEvents.some(previous => mirroredDisplayKey(previous) === key)) {
         return true;
@@ -16568,7 +16616,10 @@ __ICONS_JS__
         const event = group[index];
         if (event.kind !== kind) continue;
         const payload = event.payload || {};
-        const text = String(payload.text || payload.delta || "").trim();
+        const text = (kind === "user_message"
+          ? String(payload.text || payload.delta || "")
+          : visibleTranscriptText(event)
+        ).trim();
         if (!text) continue;
         return trimFoldPreview(text);
       }
@@ -16600,13 +16651,15 @@ __ICONS_JS__
       };
     }
     function groupHasVisibleContent(group) {
-      return group.some(event => !isInternalEvent(event));
+      return group.some(event => (
+        !isInternalEvent(event) &&
+        (!isAssistantMessageEvent(event) || hasVisibleTranscriptText(event))
+      ));
     }
     function groupHasGeneratedPrompt(group) {
       return group.some(event => {
         if (!isAssistantMessageEvent(event)) return false;
-        const payload = event.payload || {};
-        return Boolean(splitGeneratedPromptText(payload.text || payload.delta || payload.summary || ""));
+        return Boolean(splitGeneratedPromptText(visibleTranscriptText(event)));
       });
     }
     function hasPendingApproval(group) {
@@ -16952,6 +17005,9 @@ __ICONS_JS__
     }
     function renderTranscript(event, role, label, opts = {}) {
       const payload = event.payload || {};
+      const assistantRole = role.includes("assistant");
+      let visibleText = assistantRole ? visibleTranscriptText(event) : String(payload.text || payload.delta || payload.summary || "");
+      if (assistantRole && !visibleText.trim()) return;
       const key = transcriptKey(event, role);
       let node = transcriptNodes.get(key);
       if (!node) {
@@ -16968,18 +17024,19 @@ __ICONS_JS__
         node = {row, body, text: ""};
         transcriptNodes.set(key, node);
       }
-      const incomingText = payload.text || payload.delta || payload.summary || "";
-      if (role.includes("assistant")) {
+      const incomingText = visibleText;
+      if (assistantRole) {
         if (event.kind === "message_completed") {
-          node.text = String(incomingText);
+          node.text = visibleText;
           node.row.dataset.completed = "true";
         } else {
-          node.text += String(incomingText);
+          node.text += visibleText;
+          visibleText = node.text;
         }
         const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text, event);
         node.row.classList.toggle("prompt-message", renderedPrompt);
         if (renderedPrompt) return;
-        renderMarkdownLite(node.body, node.text);
+        renderMarkdownLite(node.body, visibleText);
       } else {
         node.text = String(incomingText);
         const renderedPrompt = renderGeneratedPromptTranscript(node.body, incomingText, event);
@@ -17410,11 +17467,21 @@ __ICONS_JS__
       }
     }
     function renderStatus(kind, text) {
+      if (kind === "native_sync_failed") {
+        if (isNoisyNativeSyncError(text)) return;
+      }
       renderStatusEvent(
         {kind, payload: {text: text || ""}},
         text || kind,
         kind === "attach_failed" ? "failed" : "neutral"
       );
+    }
+    function clearStatusNode(kind) {
+      const key = statusKey({kind, payload: {}});
+      const node = statusNodes.get(key);
+      if (!node) return;
+      node.row.remove();
+      statusNodes.delete(key);
     }
     function updateRunState(text, tone) {
       if (!text) return;
@@ -17435,21 +17502,20 @@ __ICONS_JS__
     function assistantMessageKey(event) {
       const payload = (event && event.payload) || {};
       const itemId = String(payload.itemId || payload.item_id || "");
-      if (event.kind === "message_completed" && itemId.startsWith("jsonl-assistant")) {
-        return completedAssistantMessageKey(event);
-      }
+      if (event.kind === "message_completed") return completedAssistantMessageKey(event);
       if (itemId.startsWith("jsonl-assistant")) return itemId;
       return `${payload.native_turn_id || payload.turnId || ""}:assistant`;
     }
     function completedAssistantMessageKey(event) {
       const payload = (event && event.payload) || {};
       const itemId = String(payload.itemId || payload.item_id || "");
+      const fingerprint = completedAssistantTextFingerprint(event);
+      if (fingerprint) return fingerprint;
       if (itemId) return `${itemId}:${event.id || transcriptTextFingerprint(event)}`;
       return `${payload.native_turn_id || payload.turnId || ""}:completed:${event.id || transcriptTextFingerprint(event)}`;
     }
     function transcriptTextFingerprint(event) {
-      const payload = (event && event.payload) || {};
-      return String(payload.text || payload.summary || payload.delta || "").slice(0, 160);
+      return visibleTranscriptText(event).slice(0, 160);
     }
     function statusKey(event) {
       const payload = event.payload || {};
