@@ -4063,6 +4063,15 @@ def test_native_live_page_hides_provider_display_completed_projection() -> None:
     assert 'event.kind === "message_completed"' in response
 
 
+def test_native_live_page_hides_provider_raw_frame_events() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function isProviderRawFrameEvent(event)" in response
+    assert 'event.type === "provider.raw.frame"' in response
+    assert 'event.kind === "provider_raw_frame"' in response
+    assert "isProviderRawFrameEvent(event)" in response
+
+
 def test_native_live_page_omits_workspace_selector_from_composer() -> None:
     response = _live_page(42, native_provider="codex")
 
@@ -4422,10 +4431,25 @@ def test_live_page_uses_native_codex_font_scale_for_all_native_providers() -> No
     for provider in ("codex", "claude", "antigravity"):
         response = _live_page(42, native_provider=provider)
 
-        assert ".transcript-body { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: 15px; line-height: 1.55;" in response
+        assert "--native-ui-font-size: 15px;" in response
+        assert "--native-code-font-size: 12px;" in response
+        assert ".transcript-body { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: var(--native-ui-font-size); line-height: 1.55;" in response
         assert ".transcript-item.assistant .transcript-body { color: #b8bcc7; }" in response
-        assert ".transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal; padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }" in response
+        assert ".transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal; padding: 0; border-radius: 0; background: transparent; font-size: var(--native-code-font-size); line-height: 1.5; }" in response
         assert "input { flex: 1; min-width: 0; min-height: 54px; border-radius: var(--radius-lg); border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 0 14px; font-size: 15px; }" in response
+
+
+def test_native_live_page_exposes_transcript_font_size_controls() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert 'id="uiFontSizeInput"' in response
+    assert 'id="codeFontSizeInput"' in response
+    assert "UI字号" in response
+    assert "代码字号" in response
+    assert 'const DISPLAY_SETTINGS_STORAGE_KEY = "wlcodexNativeDisplaySettings";' in response
+    assert 'document.documentElement.style.setProperty("--native-ui-font-size"' in response
+    assert 'document.documentElement.style.setProperty("--native-code-font-size"' in response
+    assert "localStorage.setItem(DISPLAY_SETTINGS_STORAGE_KEY" in response
 
 
 def test_live_page_protects_mobile_transcript_layout_from_overlay_and_long_inline_code() -> None:

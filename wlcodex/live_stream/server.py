@@ -13227,7 +13227,7 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex", theme: str 
 __NATIVE_APP_HEAD__
   <link rel="stylesheet" href="/static/native_app_bundle.css">
 __MARVIS_CSS_LINK__  <style>
-    :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; }
+    :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; --native-ui-font-size: 15px; --native-code-font-size: 12px; }
     html, body, .native-mobile-shell, .codex-run-shell, .codex-transcript, .transcript-body, .codex-input-dock, input { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     body { background: #000; }
     body { scrollbar-width: none; }
@@ -13279,6 +13279,10 @@ __MARVIS_CSS_LINK__  <style>
     .session-action-item.danger { color: #ff4b55; }
     .session-action-icon { display: grid; place-items: center; width: 36px; height: 36px; }
     .session-action-icon svg { width: 30px; height: 30px; }
+    .session-display-settings { display: grid; gap: 12px; margin: 12px 0 6px; padding: 14px 30px 16px; border-top: 1px solid rgba(255,255,255,.08); border-bottom: 1px solid rgba(255,255,255,.08); }
+    .session-display-settings-title { color: #d7d7dc; font-size: 14px; line-height: 1.2; font-weight: var(--weight-extrabold); }
+    .font-size-setting { display: grid; grid-template-columns: minmax(0, 1fr) 76px; gap: 12px; align-items: center; color: #f4f4f5; font-size: 16px; line-height: 1.25; font-weight: var(--weight-medium); }
+    .font-size-setting input { width: 76px; min-height: 38px; padding: 0 9px; border: 1px solid #3a3a3d; border-radius: 10px; background: #111114; color: #f4f4f5; font-size: 16px; text-align: center; }
     @keyframes nativeRemoteSpin { to { transform: rotate(360deg); } }
     .screen-title { min-width: 0; text-align: center; visibility: hidden; }
     header > button:last-child { visibility: hidden; pointer-events: none; }
@@ -13297,7 +13301,7 @@ __MARVIS_CSS_LINK__  <style>
     .codex-transcript { display: grid; gap: 18px; padding-top: 8px; }
     .transcript-item { display: grid; gap: 7px; min-width: 0; padding: 0; }
     .transcript-meta { color: #9aa0aa; font-size: 12px; }
-    .transcript-body { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: 15px; line-height: 1.55; letter-spacing: 0; }
+    .transcript-body { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: var(--native-ui-font-size); line-height: 1.55; letter-spacing: 0; }
     .transcript-body p { margin: 0 0 13px; overflow-wrap: anywhere; word-break: break-word; }
     .transcript-body p:last-child { margin-bottom: 0; }
     .transcript-body h3 { margin: 18px 0 8px; color: var(--text-heading); font-size: 16px; line-height: 1.35; }
@@ -13307,9 +13311,9 @@ __MARVIS_CSS_LINK__  <style>
     .transcript-body strong { color: var(--text-heading); font-weight: var(--weight-extrabold); }
     .transcript-body a { color: var(--color-link); text-decoration: none; border-bottom: 1px solid rgba(147, 197, 253, .45); transition: border-color 150ms ease; }
     .transcript-body a:hover { border-bottom-color: rgba(147, 197, 253, .7); }
-    .transcript-body code { white-space: normal; overflow-wrap: anywhere; word-break: break-word; padding: 1px 5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06); background: var(--bg-code); color: var(--text-code); font: .88em var(--font-mono); }
+    .transcript-body code { white-space: normal; overflow-wrap: anywhere; word-break: break-word; padding: 1px 5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06); background: var(--bg-code); color: var(--text-code); font: var(--native-code-font-size)/1.45 var(--font-mono); }
     .transcript-body pre { margin: 0 0 13px; overflow: auto; padding: 14px 16px; border: 1px solid var(--border-code); border-radius: 8px; background: linear-gradient(145deg, #0c0e14, #101420); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); white-space: pre; scrollbar-width: thin; scrollbar-color: #383c46 transparent; }
-    .transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal; padding: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; }
+    .transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal; padding: 0; border-radius: 0; background: transparent; font-size: var(--native-code-font-size); line-height: 1.5; }
     .transcript-item.user { justify-self: end; justify-items: end; max-width: min(82%, 520px); }
     .transcript-item.user .transcript-meta { display: none; }
     .transcript-item.user .transcript-body { white-space: pre-wrap; padding: 10px 13px; border: 1px solid #333842; border-radius: 20px 20px 4px 20px; background: var(--bg-user-bubble); line-height: 1.5; }
@@ -13326,7 +13330,7 @@ __MARVIS_CSS_LINK__  <style>
     @keyframes userMessageEnter { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
     .transcript-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
     .transcript-image { width: min(180px, 52vw); max-height: 180px; border-radius: 12px; object-fit: cover; border: 1px solid var(--border-input); background: var(--bg-canvas); }
-    .status-event { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; color: var(--text-placeholder); font-size: 14px; line-height: 1.5; }
+    .status-event { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; color: var(--text-placeholder); font-size: var(--native-ui-font-size); line-height: 1.5; }
     .status-event:before { content: ""; width: 8px; height: 8px; margin-top: 7px; border-radius: 50%; background: #6b7280; }
     .status-event.busy:before { background: var(--color-warning); }
     .status-event.done:before { background: var(--color-success); }
@@ -13400,7 +13404,7 @@ __MARVIS_CSS_LINK__  <style>
     .tool-head, .approval-head { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 11px 12px; border-bottom: 1px solid var(--border-header); }
     .tool-title, .approval-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--btn-primary-bg); font-size: 14px; font-weight: var(--weight-bold); }
     .tool-state { color: var(--text-muted); font-size: 12px; }
-    .tool-output { margin: 0; max-height: 260px; overflow: auto; padding: 11px 12px; color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }
+    .tool-output { margin: 0; max-height: 260px; overflow: auto; padding: 11px 12px; color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font: var(--native-code-font-size) ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }
     .approval-card { border-color: #854d0e; background: #171107; }
     .approval-card::after { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 3px; border-radius: 2px; background: var(--color-warning); }
     .approval-card.resolving { border-color: #a16207; }
@@ -13579,6 +13583,17 @@ __MARVIS_CSS_LINK__  <style>
     </section>
     <section class="native-header-popover session-action-menu" id="sessionActionMenu" role="menu" aria-label="会话操作" hidden>
       <h2 class="session-action-title" id="sessionActionTitle" hidden></h2>
+      <div class="session-display-settings" id="sessionDisplaySettings">
+        <div class="session-display-settings-title">显示字号</div>
+        <label class="font-size-setting" for="uiFontSizeInput">
+          <span>UI字号</span>
+          <input id="uiFontSizeInput" type="number" min="12" max="24" step="1" inputmode="numeric">
+        </label>
+        <label class="font-size-setting" for="codeFontSizeInput">
+          <span>代码字号</span>
+          <input id="codeFontSizeInput" type="number" min="10" max="22" step="1" inputmode="numeric">
+        </label>
+      </div>
       <button class="session-action-item" id="pinSessionButton" type="button" role="menuitem">
         <span class="session-action-icon"></span><span>置顶</span>
       </button>
@@ -13768,6 +13783,8 @@ __MARVIS_CSS_LINK__  <style>
     const copySessionIdButton = document.getElementById("copySessionIdButton");
     const renameSessionButton = document.getElementById("renameSessionButton");
     const archiveSessionButton = document.getElementById("archiveSessionButton");
+    const uiFontSizeInput = document.getElementById("uiFontSizeInput");
+    const codeFontSizeInput = document.getElementById("codeFontSizeInput");
     const sessionFloatTitle = document.getElementById("sessionFloatTitle");
     const sessionFloatMeta = document.getElementById("sessionFloatMeta");
     const historyFold = document.getElementById("historyFold");
@@ -13934,6 +13951,8 @@ __ICONS_JS__
     const MODEL_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
     const COLLABORATION_MODE_STORAGE_KEY = "wlcodexNativeCollaborationMode";
+    const DISPLAY_SETTINGS_STORAGE_KEY = "wlcodexNativeDisplaySettings";
+    const DEFAULT_DISPLAY_SETTINGS = Object.freeze({uiFontSize: 15, codeFontSize: 12});
     const DEFAULT_PERMISSION_MODE = "auto_review";
     const PERMISSION_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
@@ -13955,6 +13974,7 @@ __ICONS_JS__
     let nativeTurnRunning = false;
     let modelCatalog = [];
     let providerCapabilities = {};
+    let savedDisplaySettings = loadSavedDisplaySettings();
     let savedModelSettings = loadSavedModelSettings();
     let savedPermissionSettings = loadSavedPermissionSettings();
     let selectedCollaborationMode = loadSavedCollaborationMode();
@@ -13974,6 +13994,7 @@ __ICONS_JS__
     renameSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.pencil;
     archiveSessionButton.querySelector(".session-action-icon").innerHTML = ICONS.archive;
     historyFold.onclick = loadOlderEvents;
+    applyDisplaySettings();
     function isValidNativeThreadId(value) {
       return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
     }
@@ -13983,6 +14004,41 @@ __ICONS_JS__
         return "会话不存在或已被清理";
       }
       return text;
+    }
+    function clampDisplayFontSize(value, fallback, min, max) {
+      const parsed = Number.parseInt(String(value || ""), 10);
+      if (!Number.isFinite(parsed)) return fallback;
+      return Math.max(min, Math.min(max, parsed));
+    }
+    function normalizeDisplaySettings(settings) {
+      const source = settings || {};
+      return {
+        uiFontSize: clampDisplayFontSize(source.uiFontSize, DEFAULT_DISPLAY_SETTINGS.uiFontSize, 12, 24),
+        codeFontSize: clampDisplayFontSize(source.codeFontSize, DEFAULT_DISPLAY_SETTINGS.codeFontSize, 10, 22)
+      };
+    }
+    function loadSavedDisplaySettings() {
+      try {
+        return normalizeDisplaySettings(JSON.parse(localStorage.getItem(DISPLAY_SETTINGS_STORAGE_KEY) || "{}"));
+      } catch (_error) {
+        return normalizeDisplaySettings({});
+      }
+    }
+    function persistDisplaySettings() {
+      try {
+        localStorage.setItem(DISPLAY_SETTINGS_STORAGE_KEY, JSON.stringify(savedDisplaySettings));
+      } catch (_error) {}
+    }
+    function applyDisplaySettings() {
+      document.documentElement.style.setProperty("--native-ui-font-size", `${savedDisplaySettings.uiFontSize}px`);
+      document.documentElement.style.setProperty("--native-code-font-size", `${savedDisplaySettings.codeFontSize}px`);
+      if (uiFontSizeInput) uiFontSizeInput.value = String(savedDisplaySettings.uiFontSize);
+      if (codeFontSizeInput) codeFontSizeInput.value = String(savedDisplaySettings.codeFontSize);
+    }
+    function updateDisplayFontSize(key, value) {
+      savedDisplaySettings = normalizeDisplaySettings({...savedDisplaySettings, [key]: value});
+      persistDisplaySettings();
+      applyDisplaySettings();
     }
     function isFetchNetworkError(error) {
       const text = String((error && error.message) || error || "");
@@ -15056,6 +15112,8 @@ __ICONS_JS__
     copySessionIdButton.onclick = copyNativeSessionId;
     renameSessionButton.onclick = () => unavailableSessionAction("重命名");
     archiveSessionButton.onclick = () => unavailableSessionAction("归档");
+    uiFontSizeInput.oninput = () => updateDisplayFontSize("uiFontSize", uiFontSizeInput.value);
+    codeFontSizeInput.oninput = () => updateDisplayFontSize("codeFontSize", codeFontSizeInput.value);
     continueButton.onclick = () => submitPrompt();
     steerChoice.onclick = () => submitPrompt("steer");
     queueChoice.onclick = () => submitPrompt("continue");
@@ -15989,12 +16047,19 @@ __ICONS_JS__
       return Boolean(
         event && (
           event.type === "model.usage.updated" ||
+          isProviderRawFrameEvent(event) ||
           isProviderDisplayCompletedEvent(event) ||
           isNativeExecutionDetail(event) ||
           isNativeReasoningDetail(event) ||
           (isNativeActivityDetail(event) && !isNativePlanEvent(event))
         )
       );
+    }
+    function isProviderRawFrameEvent(event) {
+      return Boolean(event && (
+        event.type === "provider.raw.frame" ||
+        event.kind === "provider_raw_frame"
+      ));
     }
     function isProviderDisplayCompletedEvent(event) {
       const payload = (event && event.payload) || {};

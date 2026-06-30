@@ -56,6 +56,23 @@ def test_model_message_completed_maps_to_message_completed_kind() -> None:
     assert stream.payload == {"text": "final answer"}
 
 
+def test_model_message_completed_compatibility_projection_stays_message_completed_kind() -> None:
+    runtime = _event(
+        EventType.MODEL_MESSAGE_COMPLETED,
+        {
+            "text": "final answer",
+            "compatibility_projection": EventType.MODEL_MESSAGE_COMPLETED,
+        },
+        event_id=19,
+    )
+
+    stream = stream_event_from_runtime(runtime)
+
+    assert stream.type == EventType.MODEL_MESSAGE_COMPLETED
+    assert stream.kind == "message_completed"
+    assert stream.payload["text"] == "final answer"
+
+
 def test_compatibility_projection_maps_to_non_display_kind() -> None:
     runtime = _event(
         EventType.MODEL_TEXT_DELTA,

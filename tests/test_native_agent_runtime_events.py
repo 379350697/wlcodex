@@ -69,7 +69,7 @@ def test_emitter_appends_lifecycle_user_text_and_completion_events(
         "text_delta",
         "compatibility_event",
         "message_completed",
-        "compatibility_event",
+        "message_completed",
         "completed",
     ]
     assert events[4].payload["text"] == "final done"

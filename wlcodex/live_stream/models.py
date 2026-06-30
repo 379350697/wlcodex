@@ -67,14 +67,16 @@ class WorkerStreamEvent:
 
 
 def stream_event_from_runtime(event: RuntimeEvent) -> WorkerStreamEvent:
+    kind = _KIND_BY_EVENT_TYPE.get(event.event_type, "event")
+    if (
+        event.payload.get("compatibility_projection")
+        and event.event_type != EventType.MODEL_MESSAGE_COMPLETED
+    ):
+        kind = "compatibility_event"
     return WorkerStreamEvent(
         id=event.id,
         type=event.event_type,
-        kind=(
-            "compatibility_event"
-            if event.payload.get("compatibility_projection")
-            else _KIND_BY_EVENT_TYPE.get(event.event_type, "event")
-        ),
+        kind=kind,
         agent_run_id=event.agent_run_id,
         conversation_id=event.conversation_id,
         occurred_at=event.occurred_at,
