@@ -4379,6 +4379,7 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "CURRENT_TURN_EVENT_LIMIT" in response
     assert "const CURRENT_TURN_EVENT_LIMIT = 80;" in response
     assert "RECENT_EVENT_LIMIT" in response
+    assert "OLDER_VISIBLE_PAGE_ATTEMPTS" in response
     assert 'eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true})' in response
     assert "function syncNativeTranscript" in response
     assert '`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`' in response
@@ -4408,7 +4409,12 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "function hasNativePlanEvents(sourceEvents)" in response
     assert "hasUnresolvedApprovalRequests(loadedEvents)\n        ) && nativeTurnId" not in response
     assert "function loadOlderEvents" in response
-    assert "await syncNativeTranscript();" in response
+    assert "function scheduleOlderTranscriptSync()" in response
+    assert "syncNativeTranscript().then(pollEvents);" in response
+    assert "const visibleBeforeLoad = displayEventCount(loadedEvents);" in response
+    assert "for (let attempt = 0; attempt < OLDER_VISIBLE_PAGE_ATTEMPTS; attempt++)" in response
+    assert "if (displayEventCount(loadedEvents) > visibleBeforeLoad) break;" in response
+    assert "function displayEventCount(sourceEvents)" in response
     assert "function pollEvents" in response
     assert "startNativeTranscriptSyncLoop();" in response
     assert "const nextEvents = normalizeEventList(snapshot.events);" in response
@@ -4427,6 +4433,17 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "previous_event_count" in response
     assert "new EventSource(streamPath)" not in response
     assert "new EventSource(streamPathWithCursor" in response
+
+
+def test_worker_live_page_history_fold_disabled_state_stays_dark() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "appearance: none;" in response
+    assert "-webkit-appearance: none;" in response
+    assert ".history-fold:disabled { background: transparent; color: var(--text-dim); opacity: 1;" in response
+    assert "-webkit-text-fill-color: var(--text-dim);" in response
+    assert "historyFold.setAttribute(\"aria-busy\", \"true\");" in response
+    assert "historyFold.removeAttribute(\"aria-busy\");" in response
 
 
 def test_worker_live_page_filters_invalid_events_before_rendering() -> None:

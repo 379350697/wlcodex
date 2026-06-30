@@ -13388,7 +13388,8 @@ __MARVIS_CSS_LINK__  <style>
     .composer-activity-dot:nth-child(2) { animation-delay: 0.15s; }
     .composer-activity-dot:nth-child(3) { animation-delay: 0.30s; }
     @keyframes typingBounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-6px); opacity: 1; } }
-    .history-fold { width: 100%; min-height: 38px; margin: 2px 0 10px; border: 0; border-bottom: 1px solid var(--border-subtle); border-radius: 0; background: transparent; color: var(--text-dim); text-align: left; font-size: 15px; }
+    .history-fold { width: 100%; min-height: 38px; margin: 2px 0 10px; border: 0; border-bottom: 1px solid var(--border-subtle); border-radius: 0; background: transparent; color: var(--text-dim); text-align: left; font-size: 15px; appearance: none; -webkit-appearance: none; }
+    .history-fold:disabled { background: transparent; color: var(--text-dim); opacity: 1; -webkit-text-fill-color: var(--text-dim); cursor: progress; }
     .history-fold[hidden] { display: none; }
     .turn-fold { border: 0; border-bottom: 1px solid var(--border-subtle); border-radius: 0; background: transparent; overflow: visible; }
     .turn-fold summary { display: grid; gap: 8px; min-height: 42px; padding: 0 0 8px; cursor: pointer; list-style: none; color: var(--text-secondary); }
@@ -13943,6 +13944,7 @@ __ICONS_JS__
     const CURRENT_TURN_EVENT_LIMIT = 80;
     const RECENT_EVENT_LIMIT = 80;
     const OLDER_EVENT_LIMIT = 80;
+    const OLDER_VISIBLE_PAGE_ATTEMPTS = 5;
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
     const MODEL_SETTINGS_STORAGE_VERSION = 2;
     const PERMISSION_SETTINGS_STORAGE_KEY = "wlcodexNativePermissionSettings";
@@ -16140,21 +16142,40 @@ __ICONS_JS__
     function isNativeActivityDetail(event) {
       return isNativeFeedbackMode(event) && event && event.kind === "activity";
     }
+    function scheduleOlderTranscriptSync() {
+      if (!nativeThreadId || invalidNativeThreadId) return;
+      syncNativeTranscript().then(pollEvents);
+    }
+    function displayEventCount(sourceEvents) {
+      return dedupeDisplayEvents(sourceEvents).length;
+    }
     async function loadOlderEvents() {
       if (!oldestEventId || !previousEventCount) return;
       historyFold.disabled = true;
+      historyFold.setAttribute("aria-busy", "true");
+      const visibleBeforeLoad = displayEventCount(loadedEvents);
       try {
-        await syncNativeTranscript();
-        const snapshot = await api(eventsPath(`before=${oldestEventId}&limit=${OLDER_EVENT_LIMIT}`));
-        handleNativeSyncSnapshot(snapshot);
-        const older = normalizeEventList(snapshot.events);
-        loadedEvents = normalizeEventList(older.concat(loadedEvents));
-        previousEventCount = snapshot.previous_event_count || 0;
-        oldestEventId = loadedEvents.length ? loadedEvents[0].id : 0;
+        scheduleOlderTranscriptSync();
+        for (let attempt = 0; attempt < OLDER_VISIBLE_PAGE_ATTEMPTS; attempt++) {
+          if (!oldestEventId || !previousEventCount) break;
+          const snapshot = await api(eventsPath(`before=${oldestEventId}&limit=${OLDER_EVENT_LIMIT}`));
+          handleNativeSyncSnapshot(snapshot);
+          const older = normalizeEventList(snapshot.events);
+          if (!older.length) {
+            previousEventCount = snapshot.previous_event_count || 0;
+            break;
+          }
+          loadedEvents = normalizeEventList(older.concat(loadedEvents));
+          previousEventCount = snapshot.previous_event_count || 0;
+          oldestEventId = loadedEvents.length ? loadedEvents[0].id : 0;
+          if (displayEventCount(loadedEvents) > visibleBeforeLoad) break;
+        }
         rebuildStream();
         updateHistoryFold();
       } finally {
+        historyFold.removeAttribute("aria-busy");
         historyFold.disabled = false;
+        updateHistoryFold();
       }
     }
     function openStream(afterId) {
