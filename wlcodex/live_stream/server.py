@@ -13403,10 +13403,10 @@ __MARVIS_CSS_LINK__  <style>
     .approval-action.danger { background: #7f1d1d; color: #fff1f2; border-color: var(--color-error); }
     .approval-action.selected { opacity: 1; box-shadow: inset 0 0 0 2px rgba(255,255,255,.38); }
     .approval-action.muted { background: var(--bg-pill); color: #8e929b; border-color: #34363d; opacity: .62; box-shadow: none; }
-    .codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 10px; padding: 12px 26px 20px; background: linear-gradient(to top, rgba(0,0,0,.98) 55%, rgba(0,0,0,.85) 78%, rgba(0,0,0,0)); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-top: 1px solid #272930; }
+    .codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 10px; padding: 12px 18px 20px; background: linear-gradient(to top, rgba(0,0,0,.98) 55%, rgba(0,0,0,.85) 78%, rgba(0,0,0,0)); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-top: 1px solid #272930; }
     .composer-tools { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 0; }
-    .composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, .82fr) minmax(0, .95fr); gap: 10px; min-width: 0; max-width: 100%; }
-    .setting-pill { width: 100%; min-width: 0; min-height: 42px; border-radius: 21px; padding: 0 10px; overflow: hidden; background: var(--bg-pill); color: var(--btn-primary-bg); border: 1px solid transparent; font-size: 14px; font-weight: var(--weight-extrabold); text-overflow: ellipsis; white-space: nowrap; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
+    .composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.48fr) minmax(0, .9fr) minmax(0, 1fr); gap: 8px; min-width: 0; max-width: 100%; }
+    .setting-pill { width: 100%; min-width: 0; min-height: 42px; border-radius: 21px; padding: 0 9px; overflow: hidden; background: var(--bg-pill); color: var(--btn-primary-bg); border: 1px solid transparent; font-size: 13px; font-weight: var(--weight-extrabold); text-overflow: ellipsis; white-space: nowrap; transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease; }
     .setting-pill.modified { border-color: rgba(147, 197, 253, 0.35); background: var(--bg-pill-modified); }
     .setting-pill:not(:disabled):hover { background: var(--bg-pill-hover); }
     .setting-pill.permissions { flex: 0 0 auto; }

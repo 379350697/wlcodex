@@ -2422,10 +2422,11 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
 def test_worker_live_page_matches_native_codex_mobile_composer_layout() -> None:
     response = _live_page(42, native_provider="codex")
 
-    assert ".codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 10px; padding: 12px 26px 20px;" in response
+    assert ".codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 10px; padding: 12px 18px 20px;" in response
     assert ".composer-tools { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 0;" in response
-    assert ".composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, .82fr) minmax(0, .95fr); gap: 10px; min-width: 0; max-width: 100%;" in response
-    assert ".setting-pill { width: 100%; min-width: 0; min-height: 42px; border-radius: 21px; padding: 0 10px; overflow: hidden;" in response
+    assert ".composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.48fr) minmax(0, .9fr) minmax(0, 1fr); gap: 8px; min-width: 0; max-width: 100%;" in response
+    assert ".setting-pill { width: 100%; min-width: 0; min-height: 42px; border-radius: 21px; padding: 0 9px; overflow: hidden;" in response
+    assert "font-size: 13px; font-weight: var(--weight-extrabold);" in response
     assert ".setting-pill.handoff { flex: 0 0 auto;" in response
     assert 'id="handoffButton" type="button">接棒执行</button>' in response
     assert ".dock-row { display: grid; grid-template-columns: 52px minmax(0, 1fr) 52px; gap: 10px;" in response
