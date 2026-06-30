@@ -4377,39 +4377,41 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
 
     assert "HTTP/1.1 200 OK" in response
     assert "CURRENT_TURN_EVENT_LIMIT" in response
-    assert "const CURRENT_TURN_EVENT_LIMIT = 5000;" in response
+    assert "const CURRENT_TURN_EVENT_LIMIT = 80;" in response
     assert "RECENT_EVENT_LIMIT" in response
     assert 'eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true})' in response
     assert "function syncNativeTranscript" in response
     assert '`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`' in response
-    assert "let nativeSyncInFlight = false;" in response
+    assert "let nativeSyncInFlight = false;" not in response
     assert "function startNativeTranscriptSyncLoop()" in response
-    assert "setInterval(syncNativeTranscriptAndPoll, 2500)" in response
-    assert "async function syncNativeTranscriptAndPoll()" in response
-    assert "if (document.hidden) return;" in response
-    assert "if (nativeSyncInFlight) return;" in response
-    assert "await syncNativeTranscript();" in response
-    assert "await pollEvents();" in response
+    assert "setInterval(pollEvents, 1000)" in response
+    assert "setInterval(syncNativeTranscriptAndPoll, 2500)" not in response
+    assert "async function syncNativeTranscriptAndPoll()" not in response
     assert 'document.addEventListener("visibilitychange", () => {' in response
-    assert "syncNativeTranscriptAndPoll();" in response
+    assert "if (!document.hidden) pollEvents();" in response
     assert "function refreshNativeControlInBackground()" in response
     assert "refreshNativeControlInBackground();" in response
     assert "loadNativeSessionInfo().catch(() => {});" in response
     assert "loadRecentEvents().catch(error => {" in response
     assert "loadNativeSessionInfo().catch(() => {}).then(loadRecentEvents)" not in response
     assert "attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).then(() => {" not in response
+    assert "attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).catch" not in response
+    assert "attachNative().then(loadNativeSessionInfo).catch" in response
     assert "timeoutMs: 2500" in response
     assert "hasLiveDisplayEvents" in response
     assert "model.usage.updated" in response
+    assert "function normalizeEventList(sourceEvents)" in response
     assert "function loadRecentEvents" in response
     assert "if (nativeThreadId && !hasNativePlanEvents(loadedEvents)) {" in response
     assert 'snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));' in response
+    assert "loadedEvents = normalizeEventList(snapshot.events);" in response
     assert "function hasNativePlanEvents(sourceEvents)" in response
     assert "hasUnresolvedApprovalRequests(loadedEvents)\n        ) && nativeTurnId" not in response
     assert "function loadOlderEvents" in response
+    assert "await syncNativeTranscript();" in response
     assert "function pollEvents" in response
-    assert "setInterval(pollEvents, 1000)" in response
     assert "startNativeTranscriptSyncLoop();" in response
+    assert "const nextEvents = normalizeEventList(snapshot.events);" in response
     assert "function eventsPath(params, options = {})" in response
     assert 'if (nativeThreadId) search.set("native_thread_id", nativeThreadId);' in response
     assert "eventsPath(`after=${latestEventId}&limit=100`)" in response
@@ -4425,6 +4427,18 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "previous_event_count" in response
     assert "new EventSource(streamPath)" not in response
     assert "new EventSource(streamPathWithCursor" in response
+
+
+def test_worker_live_page_filters_invalid_events_before_rendering() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function isValidEventObject(event)" in response
+    assert "function normalizeEventList(sourceEvents)" in response
+    assert "if (!isValidEventObject(event)) return;" in response
+    assert "for (const event of normalizeEventList(sourceEvents))" in response
+    assert "return Boolean(event && (event.kind === \"text_delta\"" in response
+    assert "if (!event) return 60;" in response
+    assert "const payload = (event && event.payload) || {};" in response
 
 
 @pytest.mark.asyncio
@@ -4549,7 +4563,7 @@ async def test_worker_live_page_replaces_delta_with_completed_assistant_message(
     assert '"message_completed"' in response
     assert 'event.kind === "message_completed"' in response
     assert "hasCompletedAssistantMessageForTurn" in response
-    assert "return event.kind === \"text_delta\" || event.kind === \"message_completed\";" in response
+    assert "return Boolean(event && (event.kind === \"text_delta\" || event.kind === \"message_completed\"));" in response
     assert "node.text = String(incomingText);" in response
     assert "node.row.dataset.completed = \"true\";" in response
     assert "assistantMessageKey(event)" in response

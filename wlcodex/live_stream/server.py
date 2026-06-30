@@ -13811,7 +13811,6 @@ __ICONS_JS__
     let previousEventCount = 0;
     let source = null;
     let pollInFlight = false;
-    let nativeSyncInFlight = false;
     let nativeTranscriptSyncTimer = null;
     const terminalTranscriptSyncTurns = new Set();
     const authHeaders = token ? {"Authorization": "Bearer " + token} : {};
@@ -13941,7 +13940,7 @@ __ICONS_JS__
     const planPageExecute = document.getElementById("planPageExecute");
     const streamPathBase = "__STREAM_PATH__";
     const agentRunId = __AGENT_RUN_ID__;
-    const CURRENT_TURN_EVENT_LIMIT = 5000;
+    const CURRENT_TURN_EVENT_LIMIT = 80;
     const RECENT_EVENT_LIMIT = 80;
     const OLDER_EVENT_LIMIT = 80;
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
@@ -15960,22 +15959,10 @@ __ICONS_JS__
     }
     function startNativeTranscriptSyncLoop() {
       if (nativeTranscriptSyncTimer) return;
-      nativeTranscriptSyncTimer = setInterval(syncNativeTranscriptAndPoll, 2500);
+      nativeTranscriptSyncTimer = setInterval(pollEvents, 1000);
       document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) syncNativeTranscriptAndPoll();
+        if (!document.hidden) pollEvents();
       });
-    }
-    async function syncNativeTranscriptAndPoll() {
-      if (document.hidden) return;
-      if (!nativeThreadId || invalidNativeThreadId) return;
-      if (nativeSyncInFlight) return;
-      nativeSyncInFlight = true;
-      try {
-        await syncNativeTranscript();
-        await pollEvents();
-      } finally {
-        nativeSyncInFlight = false;
-      }
     }
     function scheduleTerminalTranscriptSync(event) {
       if (!shouldSyncNativeTranscriptAfterTerminalEvent(event)) return;
@@ -16005,18 +15992,17 @@ __ICONS_JS__
     loadRecentEvents().catch(error => {
       renderStatus("load_recent_failed", error.message || String(error));
     }).then(() => {
-      setInterval(pollEvents, 1000);
       startNativeTranscriptSyncLoop();
     });
     function refreshNativeControlInBackground() {
-      attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).catch(error => {
+      attachNative().then(loadNativeSessionInfo).catch(error => {
         renderStatus("native_sync_failed", error.message || String(error));
       });
     }
     async function loadRecentEvents() {
       let snapshot = await api(eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true}));
       handleNativeSyncSnapshot(snapshot);
-      loadedEvents = snapshot.events || [];
+      loadedEvents = normalizeEventList(snapshot.events);
       if (
         !loadedEvents.length ||
         !hasLiveDisplayEvents(loadedEvents) ||
@@ -16024,12 +16010,12 @@ __ICONS_JS__
       ) {
         snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));
         handleNativeSyncSnapshot(snapshot);
-        loadedEvents = snapshot.events || [];
+        loadedEvents = normalizeEventList(snapshot.events);
       }
       if (nativeThreadId && !hasNativePlanEvents(loadedEvents)) {
         snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));
         handleNativeSyncSnapshot(snapshot);
-        loadedEvents = mergeDisplayEvents(loadedEvents, snapshot.events || []);
+        loadedEvents = mergeDisplayEvents(loadedEvents, normalizeEventList(snapshot.events));
       }
       previousEventCount = snapshot.previous_event_count || 0;
       oldestEventId = loadedEvents.length ? loadedEvents[0].id : 0;
@@ -16043,22 +16029,29 @@ __ICONS_JS__
       if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
       else clearStatusNode("native_sync_failed");
     }
+    function isValidEventObject(event) {
+      return Boolean(event && typeof event === "object" && event.kind);
+    }
+    function normalizeEventList(sourceEvents) {
+      if (!Array.isArray(sourceEvents)) return [];
+      return sourceEvents.filter(isValidEventObject);
+    }
     function hasLiveDisplayEvents(sourceEvents) {
-      return sourceEvents.some(event => {
+      return normalizeEventList(sourceEvents).some(event => {
         if (!event) return false;
         if (isInternalEvent(event)) return false;
         return event.kind !== "event";
       });
     }
     function hasNativePlanEvents(sourceEvents) {
-      return sourceEvents.some(event => isNativePlanEvent(event));
+      return normalizeEventList(sourceEvents).some(event => isNativePlanEvent(event));
     }
     function mergeDisplayEvents(currentEvents, nextEvents) {
       const byId = new Map();
-      for (const event of currentEvents || []) {
+      for (const event of normalizeEventList(currentEvents)) {
         if (event && event.id) byId.set(event.id, event);
       }
-      for (const event of nextEvents || []) {
+      for (const event of normalizeEventList(nextEvents)) {
         if (event && event.id) byId.set(event.id, event);
       }
       return Array.from(byId.values()).sort((left, right) => (left.id || 0) - (right.id || 0));
@@ -16066,7 +16059,7 @@ __ICONS_JS__
     function hasUnresolvedApprovalRequests(sourceEvents) {
       const requested = new Set();
       const resolved = new Set();
-      for (const event of sourceEvents) {
+      for (const event of normalizeEventList(sourceEvents)) {
         if (event.kind === "approval_requested") {
           const key = approvalRequestKey(event);
           if (key) requested.add(key);
@@ -16151,10 +16144,11 @@ __ICONS_JS__
       if (!oldestEventId || !previousEventCount) return;
       historyFold.disabled = true;
       try {
+        await syncNativeTranscript();
         const snapshot = await api(eventsPath(`before=${oldestEventId}&limit=${OLDER_EVENT_LIMIT}`));
         handleNativeSyncSnapshot(snapshot);
-        const older = snapshot.events || [];
-        loadedEvents = older.concat(loadedEvents);
+        const older = normalizeEventList(snapshot.events);
+        loadedEvents = normalizeEventList(older.concat(loadedEvents));
         previousEventCount = snapshot.previous_event_count || 0;
         oldestEventId = loadedEvents.length ? loadedEvents[0].id : 0;
         rebuildStream();
@@ -16213,7 +16207,7 @@ __ICONS_JS__
       try {
         const snapshot = await api(eventsPath(`after=${latestEventId}&limit=100`));
         handleNativeSyncSnapshot(snapshot);
-        const nextEvents = snapshot.events || [];
+        const nextEvents = normalizeEventList(snapshot.events);
         for (const event of nextEvents) renderLiveEvent(event);
         setConnectionState("connected");
       } catch (_error) {
@@ -16236,6 +16230,7 @@ __ICONS_JS__
       });
     }
     function renderLiveEvent(event) {
+      if (!isValidEventObject(event)) return;
       if (event.id && event.id <= latestEventId) return;
       const previousLatestTurnId = latestFoldGroupTurnId(foldGroups(dedupeDisplayEvents(loadedEvents)));
       if (event.id) latestEventId = event.id;
@@ -16294,7 +16289,7 @@ __ICONS_JS__
     function foldGroups(sourceEvents) {
       const groupByKey = new Map();
       let syntheticIndex = 0;
-      for (const event of sourceEvents) {
+      for (const event of normalizeEventList(sourceEvents)) {
         const payload = event.payload || {};
         const key = payload.native_turn_id || payload.turnId || `event:${event.id || syntheticIndex++}`;
         if (!groupByKey.has(key)) groupByKey.set(key, []);
@@ -16313,7 +16308,7 @@ __ICONS_JS__
       const seenAssistantVisible = new Map();
       const seenAssistantCompleted = new Map();
       const result = [];
-      for (const event of sourceEvents) {
+      for (const event of normalizeEventList(sourceEvents)) {
         if (isInternalEvent(event)) continue;
         if (isAssistantMessageEvent(event) && !hasVisibleTranscriptText(event)) continue;
         if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) continue;
@@ -16464,7 +16459,7 @@ __ICONS_JS__
     }
     function canonicalUserTranscriptTurnSet(sourceEvents) {
       const turns = new Set();
-      for (const event of sourceEvents) {
+      for (const event of normalizeEventList(sourceEvents)) {
         if (event.kind !== "user_message") continue;
         if (!isCanonicalTranscriptItem(event)) continue;
         const turnId = eventFoldTurnId(event);
@@ -16489,7 +16484,7 @@ __ICONS_JS__
     }
     function completedAssistantTurnSet(sourceEvents) {
       const turns = new Set();
-      for (const event of sourceEvents) {
+      for (const event of normalizeEventList(sourceEvents)) {
         if (isOfficialAssistantTranscriptEvent(event)) {
           const key = assistantTurnKey(event);
           if (key) turns.add(key);
@@ -16498,10 +16493,10 @@ __ICONS_JS__
       return turns;
     }
     function isAssistantMessageEvent(event) {
-      return event.kind === "text_delta" || event.kind === "message_completed";
+      return Boolean(event && (event.kind === "text_delta" || event.kind === "message_completed"));
     }
     function isTranscriptEvent(event) {
-      return event.kind === "user_message" || isAssistantMessageEvent(event);
+      return Boolean(event && (event.kind === "user_message" || isAssistantMessageEvent(event)));
     }
     function isOfficialAssistantTranscriptEvent(event) {
       if (!isAssistantMessageEvent(event)) return false;
@@ -16522,13 +16517,14 @@ __ICONS_JS__
       return String(payload.native_turn_id || payload.turnId || "");
     }
     function isDuplicateDisplayEvent(event, previousEvents) {
+      if (!isValidEventObject(event)) return true;
       const completedAssistantTexts = completedAssistantTextByTurn(previousEvents);
       if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) return true;
       if (event.kind === "message_completed") {
         const completedFingerprint = completedAssistantTextFingerprint(event);
         if (completedFingerprint) {
           let previousPriority = 0;
-          for (const previous of previousEvents) {
+          for (const previous of normalizeEventList(previousEvents)) {
             if (previous.kind !== "message_completed") continue;
             if (completedAssistantTextFingerprint(previous) !== completedFingerprint) continue;
             previousPriority = Math.max(previousPriority, completedAssistantDedupePriority(previous));
@@ -16537,18 +16533,18 @@ __ICONS_JS__
         }
       }
       const key = mirroredDisplayKey(event);
-      if (key && previousEvents.some(previous => mirroredDisplayKey(previous) === key)) {
+      if (key && normalizeEventList(previousEvents).some(previous => mirroredDisplayKey(previous) === key)) {
         return true;
       }
       if (event.kind === "user_message") {
         const fingerprint = canonicalUserMessageFingerprint(event);
-        if (fingerprint && previousEvents.some(previous => canonicalUserMessageFingerprint(previous) === fingerprint)) {
+        if (fingerprint && normalizeEventList(previousEvents).some(previous => canonicalUserMessageFingerprint(previous) === fingerprint)) {
           return true;
         }
       }
       if (!event.id) return false;
       const eventId = String(event.id);
-      return previousEvents.some(previous => String(previous.id || "") === eventId);
+      return normalizeEventList(previousEvents).some(previous => String(previous.id || "") === eventId);
     }
     function mirroredDisplayKey(event) {
       const payload = (event && event.payload) || {};
@@ -16570,6 +16566,7 @@ __ICONS_JS__
       });
     }
     function displayEventOrder(event) {
+      if (!event) return 60;
       if (event.kind === "user_message") return 10;
       if (event.kind === "reasoning_delta") return 20;
       if (isCommandEvent(event)) return 30;
@@ -16658,6 +16655,7 @@ __ICONS_JS__
     function foldTranscriptPreviewText(group, kind) {
       for (let index = group.length - 1; index >= 0; index--) {
         const event = group[index];
+        if (!event) continue;
         if (event.kind !== kind) continue;
         const payload = event.payload || {};
         const text = (kind === "user_message"
@@ -16768,8 +16766,8 @@ __ICONS_JS__
       return `${event.kind}:${event.id || ""}`;
     }
     function isFailedEvent(event) {
-      const payload = event.payload || {};
-      return event.kind === "failed" || isFailedStatus(payload.status);
+      const payload = (event && event.payload) || {};
+      return Boolean(event && (event.kind === "failed" || isFailedStatus(payload.status)));
     }
     function isFailedStatus(status) {
       return ["failed", "error", "cancelled", "canceled", "interrupted", "aborted"].includes(
