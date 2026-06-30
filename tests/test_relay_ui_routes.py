@@ -5830,10 +5830,8 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
         "renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);"
         in response
     )
-    assert (
-        'appendRoleStreamDelta(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);'
-        in response
-    )
+    assert "payload.runtime_event_id," in response
+    assert "\n        payload\n" in response
     delta_handler = response.split('addRelayEventListener("role.output_delta"', 1)[1]
     delta_handler = delta_handler.split('addRelayEventListener("routing.decision"', 1)[0]
     assert "appendRoleStreamDelta" in delta_handler
@@ -5847,9 +5845,10 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     envelope_handler = response.split('addRelayEventListener("role.envelope"', 1)[1]
     envelope_handler = envelope_handler.split('addRelayEventListener("handoff.created"', 1)[0]
     assert "renderRoleEnvelope" not in envelope_handler
-    assert "appendMarvisConversationAssistant" not in envelope_handler
-    assert "payload.display_text" in envelope_handler
-    assert "envelope.display_text" in response
+    assert 'artifactType === "final_summary"' in envelope_handler
+    assert "appendMarvisConversationAssistant(" in envelope_handler
+    assert "payload.display_text" not in envelope_handler
+    assert "envelope.display_text" not in envelope_handler
     handoff_handler = response.split('addRelayEventListener("handoff.created"', 1)[1]
     handoff_handler = handoff_handler.split('addRelayEventListener("role.status"', 1)[0]
     assert (
@@ -5886,8 +5885,50 @@ async def test_marvis_relay_stream_delta_buffers_and_removes_protocol_fragments(
     assert "const roleStreamBuffers = new Map" in response
     assert "const hiddenProtocolStreamKeys = new Set" in response
     assert "removeRoleStreamNode(role);" in response
-    assert "marvisConversationTextIsProtocolNoise(value)" in response
-    assert "roleStreamBufferKey(role, eventId)" in response
+    assert "marvisConversationTextIsProtocolNoise(buffered)" in response
+    assert "appendMarvisConversationWaiting(activeRelayRoundId);" in response
+    assert "payload.stream_key" in response
+    assert "const directPayload = nativeEvent && typeof nativeEvent === \"object\" ? nativeEvent : {};" in response
+    assert "roleStreamBufferKey(role, stableEventId)" in response
+    assert "function createMarvisRoleStreamMessage" in response
+    assert "function marvisConversationStreamAction" in response
+    assert 'node.className = "marvis-relay-agent-step";' in response
+    assert 'node.dataset.nativeKind = "text_delta";' in response
+    assert 'createNativeMessage(role, "text_delta", labelForRole(role)' not in response
+    delta_handler = response.split('addRelayEventListener("role.output_delta"', 1)[1]
+    delta_handler = delta_handler.split('addRelayEventListener("role.followup_response"', 1)[0]
+    assert "payload.runtime_event_id," in delta_handler
+    assert "\n        payload\n" in delta_handler
+
+
+@pytest.mark.asyncio
+async def test_marvis_relay_live_final_summary_appends_natural_response(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Live direct final summary",
+        prompt="查今天上海天气",
+        workspace="/repo",
+        provider="codex",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    envelope_handler = response.split('addRelayEventListener("role.envelope"', 1)[1]
+    envelope_handler = envelope_handler.split('addRelayEventListener("handoff.created"', 1)[0]
+    assert 'artifactType === "final_summary"' in envelope_handler
+    assert "appendMarvisConversationAssistant(" in envelope_handler
+    assert "payload.display_text" not in envelope_handler
 
 
 @pytest.mark.asyncio

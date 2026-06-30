@@ -3453,6 +3453,7 @@ class RelayService:
             task_id, role = mapping
         round_id = self._runtime_event_round_id(int(task_id), role, agent_run_id)
         delta = _runtime_event_text(runtime_event)
+        stream_fields = _runtime_event_stream_fields(runtime_event)
         self._events.emit(
             int(task_id),
             "role.output_delta",
@@ -3463,6 +3464,7 @@ class RelayService:
                 "runtime_event_id": int(getattr(runtime_event, "id", 0) or 0),
                 "delta": delta,
                 "round_id": round_id,
+                **stream_fields,
             },
         )
         return True
@@ -4077,6 +4079,38 @@ def _runtime_event_text(runtime_event: Any) -> str:
 def _runtime_event_item_id(runtime_event: Any) -> str:
     payload = dict(getattr(runtime_event, "payload", {}) or {})
     return str(payload.get("itemId") or payload.get("item_id") or "").strip()
+
+
+def _runtime_event_stream_fields(runtime_event: Any) -> dict[str, str]:
+    payload = dict(getattr(runtime_event, "payload", {}) or {})
+    fields: dict[str, str] = {}
+    for source_key, target_key in (
+        ("itemId", "itemId"),
+        ("item_id", "item_id"),
+        ("native_message_id", "native_message_id"),
+        ("message_id", "message_id"),
+        ("native_turn_id", "native_turn_id"),
+        ("turnId", "turnId"),
+        ("turn_id", "turn_id"),
+        ("active_turn_id", "active_turn_id"),
+    ):
+        value = str(payload.get(source_key) or "").strip()
+        if value:
+            fields[target_key] = value
+    stream_key = (
+        fields.get("itemId")
+        or fields.get("item_id")
+        or fields.get("native_message_id")
+        or fields.get("message_id")
+        or fields.get("native_turn_id")
+        or fields.get("turnId")
+        or fields.get("turn_id")
+        or fields.get("active_turn_id")
+        or ""
+    )
+    if stream_key:
+        fields["stream_key"] = stream_key
+    return fields
 
 
 def _runtime_event_turn_id(runtime_event: Any) -> str:

@@ -6227,7 +6227,11 @@ def test_runtime_delta_is_projected_to_relay_event_bus(tmp_path) -> None:
             source=EventSource.CLAUDE,
             actor="claude",
             visibility=Visibility.USER,
-            payload={"delta": "hello from director"},
+            payload={
+                "delta": "hello from director",
+                "native_turn_id": "turn-director-1",
+                "itemId": "assistant-message-1",
+            },
             occurred_at=now_iso(),
             agent_run_id=101,
         )
@@ -6237,6 +6241,9 @@ def test_runtime_delta_is_projected_to_relay_event_bus(tmp_path) -> None:
     assert event.event_type == "role.output_delta"
     assert event.role == "director"
     assert event.payload["delta"] == "hello from director"
+    assert event.payload["native_turn_id"] == "turn-director-1"
+    assert event.payload["itemId"] == "assistant-message-1"
+    assert event.payload["stream_key"] == "assistant-message-1"
 
 
 def test_project_runtime_event_marks_role_blocked_when_background_handler_fails(

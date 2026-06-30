@@ -7010,7 +7010,9 @@ def _relay_task_detail_page(
       return value.includes("系统已要求当前角色重新输出合法结构化结果。") || value.includes("expected_output_envelope:") || value.includes("你刚才作为");
     }}
     function nativeEventPayload(nativeEvent) {{
-      return nativeEvent && nativeEvent.payload && typeof nativeEvent.payload === "object" ? nativeEvent.payload : {{}};
+      if (!nativeEvent || typeof nativeEvent !== "object") return {{}};
+      if (nativeEvent.payload && typeof nativeEvent.payload === "object") return nativeEvent.payload;
+      return nativeEvent;
     }}
     function nativeEventText(nativeEvent) {{
       const payload = nativeEventPayload(nativeEvent);
@@ -7098,6 +7100,25 @@ def _relay_task_detail_page(
       const markerSet = new Set(matched);
       if (markerSet.has("evidence_refs") && markerSet.has("handoff_to")) return true;
       if (markerSet.has("final_summary") && markerSet.has("confirmation_options")) return true;
+      if (markerSet.has("acceptance_criteria")) return true;
+      if (markerSet.has("confirmation_options")) return true;
+      if (markerSet.has("required_roles")) return true;
+      if (markerSet.has("handoff_to")) return true;
+      if (markerSet.has("next_action")) return true;
+      return false;
+    }}
+    function marvisConversationTextIsPotentialProtocolPrefix(text) {{
+      const value = String(text || "").trim();
+      if (!value) return false;
+      if (!relayTextHasProtocolFragmentShape(value)) return false;
+      if (value.startsWith("{{")) return true;
+      if (value.startsWith("[") && !/[\\u4e00-\\u9fff]/.test(value)) return true;
+      if (value.startsWith('"')) {{
+        const compact = value.replace(/\\s+/g, "");
+        if (/^"?[A-Za-z_]*$/.test(compact)) return true;
+        if (compact.includes('":') || compact.includes('":["') || compact.includes('",')) return true;
+        if (!/[\\u4e00-\\u9fff]/.test(value) && compact.length < 240) return true;
+      }}
       return false;
     }}
     function marvisConversationTextIsStructuredArtifactPlaceholder(text) {{
@@ -8091,12 +8112,21 @@ def _relay_task_detail_page(
     }}
     function roleStreamStableEventId(eventId, nativeEvent = null) {{
       const payload = nativeEventPayload(nativeEvent);
+      const directPayload = nativeEvent && typeof nativeEvent === "object" ? nativeEvent : {{}};
       return payload.itemId
         || payload.item_id
+        || payload.stream_key
+        || directPayload.stream_key
         || payload.native_message_id
+        || directPayload.native_message_id
         || payload.message_id
+        || directPayload.message_id
         || payload.native_turn_id
+        || directPayload.native_turn_id
         || payload.turnId
+        || directPayload.turnId
+        || payload.turn_id
+        || directPayload.turn_id
         || eventId
         || "current";
     }}
@@ -8110,6 +8140,50 @@ def _relay_task_detail_page(
       hiddenProtocolStreamKeys.add(bufferKey);
       roleStreamBuffers.delete(bufferKey);
       removeRoleStreamNode(role);
+    }}
+    function marvisConversationRoleLabel(role) {{
+      return MARVIS_WORK_LOG_ROLE_LABELS[role] || labelForRole(role) || "Marvis";
+    }}
+    function marvisConversationStreamAction(role, text) {{
+      const count = Array.from(String(text || "")).length;
+      const action = role === "director" ? "任务分配" : "任务处理";
+      return `| ${{action}} 进行中${{count ? `，${{count}}字符` : ""}}`;
+    }}
+    function createMarvisRoleStreamMessage(role, key) {{
+      if (!conversationTimeline) return null;
+      const empty = conversationTimeline.querySelector("[data-native-empty]");
+      if (empty) empty.remove();
+      const node = document.createElement("article");
+      node.className = "marvis-relay-agent-step";
+      node.dataset.nativeRole = role || "director";
+      node.dataset.nativeKind = "text_delta";
+      node.dataset.conversationRoleStream = role || "director";
+      if (key) node.dataset.nativeKey = key;
+      const label = marvisConversationRoleLabel(role);
+      const avatar = document.createElement("span");
+      avatar.className = `marvis-relay-avatar marvis-relay-avatar-${{marvisConversationPersona(role)}}`;
+      avatar.setAttribute("aria-label", label);
+      const content = document.createElement("div");
+      content.className = "marvis-relay-agent-content";
+      const head = document.createElement("div");
+      head.className = "marvis-relay-agent-head";
+      const title = document.createElement("strong");
+      title.textContent = label;
+      const action = document.createElement("span");
+      action.className = "marvis-relay-agent-action";
+      action.dataset.marvisStreamAction = "true";
+      head.append(title, document.createTextNode(" "), action);
+      const body = document.createElement("div");
+      body.className = "marvis-relay-agent-bubble";
+      body.dataset.nativeMessageBody = "";
+      content.append(head, body);
+      node.append(avatar, content);
+      conversationTimeline.appendChild(node);
+      return node;
+    }}
+    function updateMarvisRoleStreamAction(node, role, text) {{
+      const action = node?.querySelector("[data-marvis-stream-action]");
+      if (action) action.textContent = marvisConversationStreamAction(role, text);
     }}
     function appendRoleStreamDelta(role, text, eventId = "", nativeEvent = null) {{
       if (!role || !text) return;
@@ -8127,6 +8201,13 @@ def _relay_task_detail_page(
         || marvisConversationTextIsStructuredArtifactPlaceholder(buffered)
       ) {{
         hideRoleStreamBuffer(role, bufferKey);
+        appendMarvisConversationWaiting(activeRelayRoundId);
+        setRoleStatus(role, "streaming");
+        return;
+      }}
+      if (marvisConversationTextIsPotentialProtocolPrefix(buffered)) {{
+        appendMarvisConversationWaiting(activeRelayRoundId);
+        setRoleStatus(role, "streaming");
         return;
       }}
       if (TERMINAL_ROLE_STATUSES.has(currentRoleStatus(role))) return;
@@ -8134,12 +8215,12 @@ def _relay_task_detail_page(
       if (conversationTimeline.querySelector(`[data-conversation-role-final="${{role}}"]`)) return;
       let node = conversationTimeline.querySelector(`[data-conversation-role-stream="${{role}}"]`);
       if (!node) {{
-        node = createNativeMessage(role, "text_delta", labelForRole(role), "", `stream:${{role}}`);
+        node = createMarvisRoleStreamMessage(role, `stream:${{bufferKey}}`);
         if (!node) return;
-        node.dataset.conversationRoleStream = role;
       }}
       const body = node.querySelector("[data-native-message-body]");
       const current = body ? body.textContent || "" : "";
+      updateMarvisRoleStreamAction(node, role, current + value);
       setNativeBodyText(node, current + value);
     }}
     function clearRolePreview(role) {{
@@ -8594,7 +8675,12 @@ def _relay_task_detail_page(
     addRelayEventListener("role.output_delta", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
-      appendRoleStreamDelta(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);
+      appendRoleStreamDelta(
+        payload.role,
+        payload.delta || payload.text || "",
+        payload.runtime_event_id,
+        payload
+      );
       setRoleStatus(payload.role, "streaming");
     }});
     addRelayEventListener("role.followup_response", (event) => {{
@@ -8627,9 +8713,30 @@ def _relay_task_detail_page(
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       const envelope = {{ ...(payload.envelope || payload) }};
-      if (payload.display_text && !envelope.display_text) envelope.display_text = payload.display_text;
       const role = payload.role || envelope.role;
       clearRolePreview(role);
+      const artifactType = String(envelope.artifact_type || "");
+      const summaryText = String(envelope.summary || "");
+      if (
+        artifactType === "final_summary"
+        && (role || "") === "director"
+        && !String(envelope.handoff_to || "")
+        && String(envelope.status || "") === "passed"
+        && summaryText
+        && !marvisConversationTextIsStructuredArtifactPlaceholder(summaryText)
+      ) {{
+        const finalSummaryKey = payload.artifact_id
+          ? `final_summary_response:${{payload.artifact_id}}`
+          : `final_summary_response:${{relayEventRoundId(envelope) || activeRelayRoundId || "1"}}:${{payload.runtime_event_id || event.lastEventId || summaryText}}`;
+        appendMarvisConversationAssistant(
+          role || "director",
+          summaryText,
+          "followup_response",
+          finalSummaryKey,
+          "passed",
+          relayEventRoundId(envelope)
+        );
+      }}
       if (envelope.status) setRoleStatus(role, envelope.status);
     }});
     addRelayEventListener("handoff.created", (event) => {{
