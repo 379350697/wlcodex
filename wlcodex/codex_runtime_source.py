@@ -186,6 +186,32 @@ def _map_item_completed(
         return []
     item_type = item.get("type", "")
     item_id = item.get("id", "")
+    if item_type == "agentMessage":
+        text = item.get("text", item.get("content", item.get("message", "")))
+        if not text:
+            return []
+        display_payload = {
+            "text": str(text),
+            "summary": str(text),
+            "itemId": item_id,
+            "display_source": "provider",
+        }
+        return [
+            src._make(
+                EventType.PROVIDER_DISPLAY_COMPLETED,
+                display_payload,
+                visibility=Visibility.USER,
+            ),
+            src._make(
+                EventType.MODEL_MESSAGE_COMPLETED,
+                {
+                    "text": str(text),
+                    "itemId": item_id,
+                    "compatibility_projection": EventType.MODEL_MESSAGE_COMPLETED,
+                },
+                visibility=Visibility.USER,
+            ),
+        ]
     if item_type == "commandExecution":
         command = item.get("command", "")
         if isinstance(command, list):

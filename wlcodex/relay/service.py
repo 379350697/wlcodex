@@ -613,6 +613,7 @@ class RelayService:
             events = runtime_store.list_by_agent_run_tail(attempt.agent_run_id, limit=5000)
             if turn_id:
                 events = [event for event in events if _runtime_event_matches_turn(event, turn_id)]
+            events = _runtime_events_in_chronological_order(events)
             completed = _completed_role_envelope_event(events)
             if completed is None:
                 continue
@@ -1708,12 +1709,20 @@ class RelayService:
     ) -> Any:
         round_id = self._store.current_round_id(task_id)
         native_turn_id = _runtime_event_turn_id(completed_event) if completed_event is not None else ""
+        source_event_type = (
+            _runtime_event_type(completed_event) if completed_event is not None else ""
+        )
+        source_item_id = (
+            _runtime_event_item_id(completed_event) if completed_event is not None else ""
+        )
         payload = {
             "error": error,
             "output": output,
             "runtime_event_id": runtime_event_id,
             "agent_run_id": agent_run_id,
             "native_turn_id": native_turn_id,
+            "source_event_type": source_event_type,
+            "source_item_id": source_item_id,
             "round_id": round_id,
             "relay_role": role,
             "artifact_type": "role_artifact_invalid",
@@ -1734,6 +1743,8 @@ class RelayService:
             "runtime_event_id": runtime_event_id,
             "agent_run_id": agent_run_id,
             "native_turn_id": native_turn_id,
+            "source_event_type": source_event_type,
+            "source_item_id": source_item_id,
         }
         RuntimeEventStore(self._store._ledger._conn).append(
             RuntimeEvent(
@@ -3494,9 +3505,13 @@ class RelayService:
         current_turn_id = _runtime_event_turn_id(runtime_event)
         if current_turn_id:
             events = [event for event in events if _runtime_event_turn_id(event) == current_turn_id]
+        events = _runtime_events_in_chronological_order(events)
         completed = _completed_role_envelope_text(events)
         if completed is not None:
             return completed
+        protocol_delta = _complete_protocol_delta_event(events)
+        if protocol_delta is not None:
+            return _runtime_event_text(protocol_delta)
         provider_deltas = [
             event for event in events if _is_runtime_provider_display_delta(event)
         ]
@@ -3575,6 +3590,7 @@ class RelayService:
             ]
             if any(_is_runtime_completion_event(event) for event in current_turn_events):
                 events = current_turn_events
+        events = _runtime_events_in_chronological_order(events)
         if allow_read_session:
             read_session_output = await self._read_native_session_completion_text(
                 provider_name=provider_name,
@@ -3942,11 +3958,24 @@ def _is_runtime_completion_event(runtime_event: Any) -> bool:
     )
 
 
+def _runtime_events_in_chronological_order(events: list[Any]) -> list[Any]:
+    return sorted(events, key=lambda event: int(getattr(event, "id", 0) or 0))
+
+
 def _completed_role_envelope_event(events: list[Any]) -> Any | None:
-    for event in reversed(events):
+    ordered_events = _runtime_events_in_chronological_order(events)
+    for event in reversed(ordered_events):
         if _is_runtime_compatibility_projection(event):
             continue
-        if not (_is_runtime_model_message_completed(event) or _is_runtime_model_text_delta(event)):
+        if not _is_runtime_model_message_completed(event):
+            continue
+        text = _runtime_event_text(event)
+        if text.strip() and parse_role_envelope(text).ok:
+            return event
+    for event in reversed(ordered_events):
+        if _is_runtime_compatibility_projection(event):
+            continue
+        if not _is_runtime_model_text_delta(event):
             continue
         text = _runtime_event_text(event)
         if text.strip() and parse_role_envelope(text).ok:
@@ -3971,7 +4000,9 @@ def _runtime_delta_is_complete_role_envelope(runtime_event: Any) -> bool:
 
 
 def _complete_protocol_delta_event(events: list[Any]) -> Any | None:
-    for event in reversed(events):
+    for event in reversed(_runtime_events_in_chronological_order(events)):
+        if _is_runtime_compatibility_projection(event):
+            continue
         if not _is_runtime_model_text_delta(event):
             continue
         text = _runtime_event_text(event).strip()
@@ -4041,6 +4072,11 @@ def _runtime_event_text(runtime_event: Any) -> str:
         or payload.get("chunk")
         or ""
     )
+
+
+def _runtime_event_item_id(runtime_event: Any) -> str:
+    payload = dict(getattr(runtime_event, "payload", {}) or {})
+    return str(payload.get("itemId") or payload.get("item_id") or "").strip()
 
 
 def _runtime_event_turn_id(runtime_event: Any) -> str:

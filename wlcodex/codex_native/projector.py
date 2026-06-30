@@ -195,9 +195,11 @@ class NativeCodexEventProjector:
             text = _first_string(item, "text", "content", "message")
             if not text:
                 return []
-            return self.project_notification(
-                "item/agentMessage/delta",
-                {**base, "delta": text},
+            return self.project_agent_message(
+                native_thread_id=native_thread_id,
+                native_turn_id=native_turn_id,
+                text=text,
+                item_id=str(item.get("id") or ""),
             )
         if item_type == "plan":
             text = _first_string(item, "text", "plan", "summary", "content")

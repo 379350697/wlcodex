@@ -177,7 +177,7 @@ class CodexSessionTranscriptMirror:
                     status="running",
                     last_turn_id=item.turn_id,
                 )
-                projected_count += len(projected)
+                projected_count += 1
         return projected_count
 
     def index_recent_sessions(self, *, limit: int = 100) -> int:

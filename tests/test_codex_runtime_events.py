@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from wlcodex.codex_backend import BackendEvent
 from wlcodex.codex_runtime_source import CodexRuntimeSource
 from wlcodex.runtime_events import (
@@ -163,6 +161,28 @@ def test_item_completed_command_maps_to_command_completed() -> None:
     assert e.event_type == EventType.COMMAND_COMPLETED
     assert e.payload["itemId"] == "item-cmd-3"
     assert e.payload["command"] == "echo done"
+
+
+def test_item_completed_agent_message_maps_to_completed_display() -> None:
+    src = _source()
+    events = src.map_event(BackendEvent("item_completed", {
+        "item": {
+            "id": "item-msg-1",
+            "type": "agentMessage",
+            "text": '{"status":"passed","summary":"done"}',
+        },
+        "turnId": "turn-1",
+    }))
+
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_DISPLAY_COMPLETED,
+        EventType.MODEL_MESSAGE_COMPLETED,
+    ]
+    assert events[0].payload["text"] == '{"status":"passed","summary":"done"}'
+    assert events[0].payload["itemId"] == "item-msg-1"
+    assert events[0].payload["display_source"] == "provider"
+    assert events[1].payload["text"] == '{"status":"passed","summary":"done"}'
+    assert events[1].payload["itemId"] == "item-msg-1"
 
 
 def test_item_completed_non_command_yields_empty() -> None:

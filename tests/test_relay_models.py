@@ -66,6 +66,7 @@ def test_relay_statuses_and_artifact_types_match_design_spec() -> None:
     )
     assert INTERNAL_RELAY_ARTIFACT_TYPES == (
         "role_error",
+        "role_artifact_invalid",
         "role_resume",
         "user_attachments",
         "user_followup",

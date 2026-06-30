@@ -3828,6 +3828,141 @@ def test_scan_stale_native_role_prefers_late_complete_delta_over_bad_stream(
     assert jobs["implementer"].status == "streaming"
 
 
+def test_scan_stale_native_role_prefers_completed_message_over_malformed_codex_deltas(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="claude",
+        provider_engine="app-server",
+        native_session_id="native-1",
+        agent_run_id=101,
+        turn_id="turn-codex",
+        active_turn_id="turn-codex",
+        turn_running=True,
+        dispatch_verified=True,
+    )
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    now = datetime(2026, 6, 16, 8, 0, 0, tzinfo=timezone.utc)
+    for delta in (
+        '{"',
+        "artifact",
+        '_type":"routing_decision","',
+        "status",
+        "passed",
+        "reason",
+    ):
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.PROVIDER_DISPLAY_DELTA,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id="101",
+                correlation_id="corr-101",
+                source=EventSource.CODEX,
+                actor="codex",
+                visibility=Visibility.USER,
+                payload={
+                    "delta": delta,
+                    "text": delta,
+                    "itemId": "item-24",
+                    "native_turn_id": "turn-codex",
+                },
+                occurred_at=(now - timedelta(seconds=303)).isoformat(),
+                agent_run_id=101,
+            )
+        )
+    completed_json = json.dumps(
+        {
+            "artifact_type": "routing_decision",
+            "status": "passed",
+            "reason": "completed item is authoritative",
+            "role": "director",
+            "handoff_to": "",
+            "summary": "Use completed item text.",
+            "evidence_refs": ["item_completed"],
+            "open_questions": [],
+            "next_action": "finish",
+            "complexity": "medium",
+            "risk": "medium",
+            "route": "core_relay",
+            "required_roles": ["director", "implementer", "auditor"],
+            "acceptance_criteria": ["completed source accepted"],
+            "stop_conditions": [],
+            "requires_user_approval": False,
+        },
+        ensure_ascii=False,
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.PROVIDER_DISPLAY_COMPLETED,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CODEX,
+            actor="codex",
+            visibility=Visibility.USER,
+            payload={
+                "text": completed_json,
+                "itemId": "item-24",
+                "native_turn_id": "turn-codex",
+                "display_source": "provider",
+            },
+            occurred_at=(now - timedelta(seconds=302)).isoformat(),
+            agent_run_id=101,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CODEX,
+            actor="codex",
+            visibility=Visibility.INTERNAL,
+            payload={
+                "action": "turn_completed",
+                "status": "completed",
+                "native_turn_id": "turn-codex",
+            },
+            occurred_at=(now - timedelta(seconds=301)).isoformat(),
+            agent_run_id=101,
+        )
+    )
+
+    changed = asyncio.run(service.scan_stale_native_roles(max_idle_seconds=300, now=now))
+
+    detail = service.get_task(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    invalid_artifacts = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_artifact_invalid"
+    ]
+    routing_artifacts = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "routing_decision"
+    ]
+    assert changed == 1
+    assert jobs["director"].status == "passed"
+    assert jobs["director"].error_message == ""
+    assert invalid_artifacts == []
+    assert routing_artifacts[-1]["summary"] == "Use completed item text."
+
+
 def test_scan_stale_native_role_prefers_synced_completed_message_over_bad_delta(
     tmp_path,
 ) -> None:

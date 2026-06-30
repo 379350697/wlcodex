@@ -182,8 +182,8 @@ def test_projector_history_dedupes_sensitive_redacted_items(tmp_path: Path) -> N
         EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
         EventType.PROVIDER_RAW_FRAME,
-        EventType.PROVIDER_DISPLAY_DELTA,
-        EventType.MODEL_TEXT_DELTA,
+        EventType.PROVIDER_DISPLAY_COMPLETED,
+        EventType.MODEL_MESSAGE_COMPLETED,
         EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
     ]
@@ -321,8 +321,8 @@ def test_projector_reads_official_thread_turns_and_deduplicates_history(
         EventType.PROVIDER_RAW_FRAME,
         EventType.USER_MESSAGE_RECEIVED,
         EventType.PROVIDER_RAW_FRAME,
-        EventType.PROVIDER_DISPLAY_DELTA,
-        EventType.MODEL_TEXT_DELTA,
+        EventType.PROVIDER_DISPLAY_COMPLETED,
+        EventType.MODEL_MESSAGE_COMPLETED,
         EventType.PROVIDER_RAW_FRAME,
         EventType.COMMAND_STARTED,
         EventType.PROVIDER_RAW_FRAME,
@@ -333,7 +333,7 @@ def test_projector_reads_official_thread_turns_and_deduplicates_history(
         EventType.AGENT_RUN_ACTIVITY,
     ]
     assert events[3].payload["text"] == "do the work"
-    assert events[5].payload["delta"] == "done"
+    assert events[5].payload["text"] == "done"
     assert events[10].payload["delta"] == "passed"
 
 

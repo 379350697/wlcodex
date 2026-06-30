@@ -29,6 +29,10 @@ def _write_session_jsonl(root: Path, thread_id: str, rows: list[dict]) -> Path:
     return path
 
 
+def _logical_events(events: list) -> list:
+    return [event for event in events if event.event_type != EventType.PROVIDER_RAW_FRAME]
+
+
 def test_transcript_mirror_indexes_recent_desktop_sessions(tmp_path: Path) -> None:
     session_store, runtime_store = _stores(tmp_path)
     thread_id = "019efc99-e43b-7e83-95a7-88194da07f75"
@@ -234,14 +238,15 @@ def test_transcript_mirror_imports_official_jsonl_tail_without_duplicates(
     assert session is not None
     assert first_count == 2
     assert second_count == 0
-    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+    events = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
     assert [event.event_type for event in events] == [
         EventType.USER_MESSAGE_RECEIVED,
+        EventType.PROVIDER_DISPLAY_DELTA,
         EventType.MODEL_TEXT_DELTA,
     ]
     assert events[0].payload["text"] == "你看下这个会话"
-    assert events[1].payload["delta"] == "我已经看到根因"
-    assert events[0].payload["native_turn_id"] == events[1].payload["native_turn_id"]
+    assert events[2].payload["delta"] == "我已经看到根因"
+    assert events[0].payload["native_turn_id"] == events[2].payload["native_turn_id"]
 
 
 def test_transcript_mirror_imports_task_complete_last_agent_message(
@@ -292,16 +297,17 @@ def test_transcript_mirror_imports_task_complete_last_agent_message(
     projected_count = mirror.sync_thread(thread_id)
     session = session_store.get_by_thread_id(thread_id)
     assert session is not None
-    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+    events = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
 
     assert projected_count == 2
     assert [event.event_type for event in events] == [
         EventType.USER_MESSAGE_RECEIVED,
+        EventType.PROVIDER_DISPLAY_COMPLETED,
         EventType.MODEL_MESSAGE_COMPLETED,
     ]
-    assert events[1].payload["text"].startswith("结论：这份文档")
-    assert events[1].payload["native_turn_id"] == "official-turn-1"
-    assert str(events[1].payload["itemId"]).startswith("jsonl-assistant-final:")
+    assert events[2].payload["text"].startswith("结论：这份文档")
+    assert events[2].payload["native_turn_id"] == "official-turn-1"
+    assert str(events[2].payload["itemId"]).startswith("jsonl-assistant-final:")
 
 
 def test_transcript_mirror_imports_official_plan_response_item_as_plan_activity(
@@ -342,7 +348,7 @@ def test_transcript_mirror_imports_official_plan_response_item_as_plan_activity(
 
     session = session_store.get_by_thread_id(thread_id)
     assert session is not None
-    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+    events = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
     assert first_count == 1
     assert second_count == 0
     assert [event.event_type for event in events] == [EventType.AGENT_RUN_ACTIVITY]
@@ -403,8 +409,9 @@ def test_transcript_mirror_uses_official_turn_context_id(tmp_path: Path) -> None
     session = session_store.get_by_thread_id(thread_id)
     assert session is not None
     assert projected_count == 2
-    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+    events = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
     assert [event.payload["native_turn_id"] for event in events] == [
+        "official-turn-1",
         "official-turn-1",
         "official-turn-1",
     ]
@@ -462,8 +469,8 @@ def test_transcript_mirror_deduplicates_existing_items_after_restart(
 
     session = session_store.get_by_thread_id(thread_id)
     assert session is not None
-    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
-    assert len(events) == 2
+    events = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
+    assert len(events) == 3
 
 
 def test_transcript_mirror_corrects_existing_item_turn_ids(
@@ -501,8 +508,8 @@ def test_transcript_mirror_corrects_existing_item_turn_ids(
 
     session = session_store.get_by_thread_id(thread_id)
     assert session is not None
-    before = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
-    assert len(before) == 2
+    before = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
+    assert len(before) == 3
     assert all(
         str(event.payload["native_turn_id"]).startswith("jsonl-turn:")
         for event in before
@@ -530,13 +537,15 @@ def test_transcript_mirror_corrects_existing_item_turn_ids(
 
     assert restarted_mirror.sync_thread(thread_id) == 0
 
-    after = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
-    assert len(after) == 2
+    after = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
+    assert len(after) == 3
     assert [event.payload["native_turn_id"] for event in after] == [
+        "official-turn-1",
         "official-turn-1",
         "official-turn-1",
     ]
     assert [event.payload["turnId"] for event in after] == [
+        "official-turn-1",
         "official-turn-1",
         "official-turn-1",
     ]
@@ -593,13 +602,14 @@ def test_transcript_mirror_skips_user_message_when_local_echo_exists(
 
     session = session_store.get_by_thread_id(thread_id)
     assert session is not None
-    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+    events = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
 
     assert projected_count == 1
-    assert len(events) == 2
+    assert len(events) == 3
     assert events[0].event_type == EventType.USER_MESSAGE_RECEIVED
     assert str(events[0].payload["itemId"]).startswith("local-user-")
-    assert events[1].event_type == EventType.MODEL_TEXT_DELTA
+    assert events[1].event_type == EventType.PROVIDER_DISPLAY_DELTA
+    assert events[2].event_type == EventType.MODEL_TEXT_DELTA
 
 
 def test_transcript_mirror_skips_user_message_with_jsonl_turn_fallback(
@@ -639,7 +649,7 @@ def test_transcript_mirror_skips_user_message_with_jsonl_turn_fallback(
 
     session = session_store.get_by_thread_id(thread_id)
     assert session is not None
-    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+    events = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
 
     assert projected_count == 0
     assert len(events) == 1
@@ -701,8 +711,9 @@ def test_transcript_mirror_default_tail_handles_tool_heavy_jsonl(
 
     session = session_store.get_by_thread_id(thread_id)
     assert session is not None
-    events = runtime_store.list_by_agent_run(session.agent_run_id, limit=20)
+    events = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
     assert [event.payload["native_turn_id"] for event in events] == [
+        "official-turn-1",
         "official-turn-1",
         "official-turn-1",
     ]

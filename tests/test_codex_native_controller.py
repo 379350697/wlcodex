@@ -470,11 +470,15 @@ async def test_controller_read_session_projects_turn_history(tmp_path: Path) -> 
     assert session is not None
     events = runtime_store.list_by_agent_run(session.agent_run_id)
     assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
-        EventType.MODEL_TEXT_DELTA,
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_DISPLAY_COMPLETED,
+        EventType.MODEL_MESSAGE_COMPLETED,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
     ]
-    assert events[1].payload["delta"] == "historical answer"
+    assert events[3].payload["text"] == "historical answer"
 
 
 @pytest.mark.asyncio
@@ -651,14 +655,17 @@ async def test_controller_sync_session_projects_plan_history(
     assert session is not None
     events = runtime_store.list_by_agent_run(session.agent_run_id)
     assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
+        EventType.PROVIDER_RAW_FRAME,
         EventType.AGENT_RUN_ACTIVITY,
     ]
-    assert events[1].payload["action"] == "plan_updated"
-    assert events[1].payload["plan"].startswith("# Synced Plan")
-    assert events[1].payload["itemId"] == "plan-sync"
-    assert events[1].payload["native_turn_id"] == "turn-sync"
+    assert events[3].payload["action"] == "plan_updated"
+    assert events[3].payload["plan"].startswith("# Synced Plan")
+    assert events[3].payload["itemId"] == "plan-sync"
+    assert events[3].payload["native_turn_id"] == "turn-sync"
 
 
 @pytest.mark.asyncio
@@ -709,10 +716,13 @@ async def test_controller_continue_projects_sent_prompt_as_visible_user_message(
     assert session is not None
     assert result.turn_id == "turn-2"
     events = runtime_store.list_by_agent_run(session.agent_run_id)
-    assert [event.event_type for event in events] == [EventType.USER_MESSAGE_RECEIVED]
-    assert events[0].visibility == "user"
-    assert events[0].payload["text"] == "show this on phone"
-    assert events[0].payload["native_turn_id"] == "turn-2"
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.USER_MESSAGE_RECEIVED,
+    ]
+    assert events[1].visibility == "user"
+    assert events[1].payload["text"] == "show this on phone"
+    assert events[1].payload["native_turn_id"] == "turn-2"
 
 
 @pytest.mark.asyncio
@@ -1544,8 +1554,12 @@ async def test_controller_registers_notification_handlers(tmp_path: Path) -> Non
     session = session_store.get_by_thread_id("thread-handler")
     assert session is not None
     events = runtime_store.list_by_agent_run(session.agent_run_id)
-    assert [event.event_type for event in events] == [EventType.MODEL_TEXT_DELTA]
-    assert events[0].payload["delta"] == "hello"
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.PROVIDER_DISPLAY_DELTA,
+        EventType.MODEL_TEXT_DELTA,
+    ]
+    assert events[2].payload["delta"] == "hello"
 
 
 @pytest.mark.asyncio
@@ -1569,9 +1583,12 @@ async def test_controller_projects_and_resolves_native_approvals(
     session = session_store.get_by_thread_id("thread-approval")
     assert session is not None
     events = runtime_store.list_by_agent_run(session.agent_run_id)
-    assert [event.event_type for event in events] == [EventType.APPROVAL_REQUESTED]
-    assert events[0].payload["codexRequestId"] == "req-approval"
-    assert events[0].payload["native_thread_id"] == "thread-approval"
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.APPROVAL_REQUESTED,
+    ]
+    assert events[1].payload["codexRequestId"] == "req-approval"
+    assert events[1].payload["native_thread_id"] == "thread-approval"
 
     result = await controller.resolve_approval(
         "req-approval",
@@ -1582,7 +1599,11 @@ async def test_controller_projects_and_resolves_native_approvals(
     assert client.resolved_requests == [
         ("req-approval", {"decision": "accept"})
     ]
-    resolved_events = runtime_store.list_by_agent_run(session.agent_run_id)
+    resolved_events = [
+        event
+        for event in runtime_store.list_by_agent_run(session.agent_run_id)
+        if event.event_type != EventType.PROVIDER_RAW_FRAME
+    ]
     assert [event.event_type for event in resolved_events] == [
         EventType.APPROVAL_REQUESTED,
         EventType.APPROVAL_RESOLVED,
