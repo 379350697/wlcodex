@@ -33,6 +33,7 @@ RESULT_ARTIFACT_TYPES = {
     "final_summary",
     "followup_response",
 }
+LEGACY_ROUND_FAILURE_STATUSES = {"blocked", "failed"}
 
 
 def _now() -> str:
@@ -45,6 +46,21 @@ def _coerce_round_id(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return round_id if round_id > 0 else 0
+
+
+def _legacy_projection_status(
+    round_status: str,
+    attempt: RelayLifecycleAttempt | None,
+) -> str:
+    if attempt is None or attempt.status == "superseded":
+        return "idle"
+    status = attempt.status
+    if (
+        round_status in LEGACY_ROUND_FAILURE_STATUSES
+        and status not in ATTEMPT_TERMINAL_STATUSES
+    ):
+        return round_status
+    return status
 
 
 def _coerce_optional_int(value: Any) -> int | None:
@@ -948,16 +964,14 @@ class RelayLifecycleStore:
                 "UPDATE team_runs SET status = ? WHERE id = ? AND status != ?",
                 (round_status, team_run_id, round_status),
             )
-        else:
+        elif (team_run := self._ledger.get_team_run(team_run_id)) is None:
+            return
+        elif team_run.status != round_status:
             self._ledger.update_team_run_status(team_run_id, round_status)
         attempts = self.attempts_for_round(team_run_id, round_id)
         for job in self._ledger.list_team_agent_jobs(team_run_id):
             attempt = attempts.get(job.role)
-            status = (
-                attempt.status
-                if attempt is not None and attempt.status != "superseded"
-                else "idle"
-            )
+            status = _legacy_projection_status(round_status, attempt)
             if preserve_activity:
                 self._conn.execute(
                     """
@@ -967,7 +981,7 @@ class RelayLifecycleStore:
                     """,
                     (status, job.id, status),
                 )
-            else:
+            elif str(job.status or "idle") != status:
                 self._ledger.update_team_agent_job_status(job.id, status)
         if preserve_activity:
             self._conn.commit()

@@ -472,6 +472,25 @@ def test_backfill_repairs_followup_round_dispatch_metadata_and_terminal_error(
     assert director_attempt["retry_count"] == 1
 
 
+def test_terminal_round_projection_does_not_leave_role_streaming(tmp_path: Path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Lifecycle relay",
+        prompt="验证阻塞轮次不会继续显示 streaming",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+
+    service._store.update_task_status(task.id, "blocked")
+
+    refreshed = service.get_task(task.id)
+    director = next(job for job in refreshed.role_jobs if job.role == "director")
+
+    assert refreshed.task.status == "blocked"
+    assert director.status == "blocked"
+
+
 def test_reconcile_recovers_late_valid_delta_for_current_round(tmp_path: Path) -> None:
     service, provider = _service(tmp_path)
     task = service.create_task(
