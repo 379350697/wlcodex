@@ -2774,20 +2774,59 @@ async def _send_relay_sse(
                 )
     if live and relay_service is not None and task_id:
         queue = relay_event_queue or relay_service.subscribe_events(task_id)
-        worker_subscriptions: list[tuple[Any, asyncio.Queue[WorkerStreamEvent]]] = []
+        worker_subscriptions: dict[int, tuple[Any, asyncio.Queue[WorkerStreamEvent]]] = {}
         pending: dict[asyncio.Task[Any], tuple[str, Any, Any]] = {
             asyncio.create_task(queue.get()): ("relay", None, queue)
         }
-        if hub is not None:
-            for job in role_jobs:
-                agent_run_id = int(job.agent_run_id)
+
+        async def sync_worker_subscriptions(current_detail: Any | None = None) -> None:
+            if hub is None:
+                return
+            refreshed = current_detail
+            if refreshed is None:
+                try:
+                    refreshed = relay_service.get_task(task_id)
+                except Exception:
+                    refreshed = None
+            for refreshed_job in getattr(refreshed, "role_jobs", []) or []:
+                agent_run_id_value = getattr(refreshed_job, "agent_run_id", None)
+                if agent_run_id_value is None:
+                    continue
+                agent_run_id = int(agent_run_id_value)
+                latest_by_agent.setdefault(agent_run_id, 0)
+                for worker_event in hub.snapshot(
+                    agent_run_id=agent_run_id,
+                    after_id=latest_by_agent.get(agent_run_id, 0),
+                ):
+                    latest_by_agent[agent_run_id] = max(
+                        latest_by_agent.get(agent_run_id, 0),
+                        int(worker_event.id),
+                    )
+                    worker_key = (
+                        str(getattr(refreshed_job, "role", "") or ""),
+                        int(worker_event.id),
+                        "role.native_event",
+                    )
+                    if worker_key in seen_worker_events:
+                        continue
+                    seen_worker_events.add(worker_key)
+                    await _write_relay_worker_event(
+                        writer,
+                        task_id=task_id,
+                        role=str(getattr(refreshed_job, "role", "") or ""),
+                        worker_event=worker_event,
+                    )
+                if agent_run_id in worker_subscriptions:
+                    continue
                 worker_queue = hub.subscribe(agent_run_id=agent_run_id)
-                worker_subscriptions.append((job, worker_queue))
+                worker_subscriptions[agent_run_id] = (refreshed_job, worker_queue)
                 pending[asyncio.create_task(worker_queue.get())] = (
                     "worker",
-                    job,
+                    refreshed_job,
                     worker_queue,
                 )
+
+        await sync_worker_subscriptions(detail)
         try:
             while not writer.is_closing():
                 done, _pending = await asyncio.wait(
@@ -2796,6 +2835,7 @@ async def _send_relay_sse(
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if not done:
+                    await sync_worker_subscriptions()
                     writer.write(b": keepalive\n\n")
                     await writer.drain()
                     continue
@@ -2829,6 +2869,7 @@ async def _send_relay_sse(
                                 event_type=event_type,
                                 payload=payload,
                             )
+                            await sync_worker_subscriptions()
                         pending[asyncio.create_task(source_queue.get())] = (
                             "relay",
                             None,
@@ -2858,8 +2899,8 @@ async def _send_relay_sse(
         finally:
             for task in pending:
                 task.cancel()
-            for job, worker_queue in worker_subscriptions:
-                hub.unsubscribe(agent_run_id=int(job.agent_run_id), queue=worker_queue)
+            for agent_run_id, (_job, worker_queue) in worker_subscriptions.items():
+                hub.unsubscribe(agent_run_id=agent_run_id, queue=worker_queue)
             relay_service.unsubscribe_events(task_id, queue)
     elif live and hub is not None and role_jobs:
         subscriptions: list[tuple[Any, asyncio.Queue[WorkerStreamEvent]]] = []
@@ -6164,6 +6205,35 @@ def _marvis_relay_work_log_event_item(worker_event: WorkerStreamEvent) -> str:
     return _marvis_relay_work_log_entry_html(entry) if entry is not None else ""
 
 
+def _marvis_relay_protocol_archive_text(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return "结构化片段已归档"
+    if "artifact_type" in value:
+        return "结构化产物已归档"
+    cleaned = _marvis_relay_clean_artifact_summary(value)
+    if cleaned:
+        return cleaned
+    markers = [
+        marker
+        for marker in (
+            "final_summary",
+            "routing_decision",
+            "role_envelope",
+            "confirmation_options",
+            "evidence_refs",
+            "handoff_to",
+            "required_roles",
+            "next_action",
+            "status",
+        )
+        if marker in value
+    ]
+    if markers:
+        return "结构化片段已归档：" + "、".join(markers[:4])
+    return "结构化片段已归档"
+
+
 def _marvis_relay_work_log_entry_from_event(
     role: str,
     worker_event: WorkerStreamEvent,
@@ -6177,8 +6247,15 @@ def _marvis_relay_work_log_entry_from_event(
         return None
     if kind == "text_delta":
         text = _relay_native_event_text(worker_event)
-        if not text or _marvis_relay_work_log_text_is_protocol_noise(text):
+        if not text:
             return None
+        if _marvis_relay_work_log_text_is_protocol_noise(text):
+            return WorkLogEntry(
+                kind="message",
+                key=_relay_native_message_key(role, worker_event, bucket="assistant"),
+                text=_marvis_relay_protocol_archive_text(text),
+                chip="结构化片段 已归档",
+            )
         compact_text, output, chip = _marvis_relay_compact_work_log_text(text)
         return WorkLogEntry(
             kind="message",
@@ -6189,8 +6266,16 @@ def _marvis_relay_work_log_entry_from_event(
         )
     if kind == "message_completed":
         text = _relay_native_event_text(worker_event).strip()
-        if not text or _marvis_relay_work_log_text_is_protocol_noise(text):
+        if not text:
             return None
+        if _marvis_relay_work_log_text_is_protocol_noise(text):
+            return WorkLogEntry(
+                kind="message",
+                key=_relay_native_message_key(role, worker_event, bucket="assistant"),
+                text=_marvis_relay_protocol_archive_text(text),
+                chip="结构化片段 已归档",
+                replace_text=True,
+            )
         compact_text, output, chip = _marvis_relay_compact_work_log_text(text)
         return WorkLogEntry(
             kind="message",
@@ -6318,23 +6403,7 @@ def _marvis_relay_work_log_text_is_protocol_noise(text: str) -> bool:
         return True
     if _relay_text_looks_like_role_envelope(value):
         return True
-    markers = (
-        "artifact_type",
-        "relay_role",
-        "final_summary",
-        "routing_decision",
-        "acceptance_criteria",
-        "evidence_refs",
-        "handoff_to",
-        "required_roles",
-    )
-    if any(marker in value for marker in markers) and (
-        "{" in value
-        or "}" in value
-        or '",' in value
-        or '":' in value
-        or value.startswith(('"', "["))
-    ):
+    if text_contains_relay_protocol_payload(value):
         return True
     return False
 
@@ -6920,13 +6989,16 @@ def _relay_task_detail_page(
       return normalized;
     }}
     function parseRelayEvent(event) {{
+      updateRelayEventsCursor(event);
       return normalizeRelayPayload(JSON.parse(event.data || "{{}}"));
     }}
     const conversationTimeline = document.querySelector("[data-native-conversation-timeline]");
     const nativeTranscriptNodes = new Map();
     const nativeEnvelopeBuffers = new Map();
     const conversationUserBodies = new Set();
-    const seenPreviewEventKeys = new Set();
+    const seenStreamEventKeys = new Set();
+    const roleStreamBuffers = new Map();
+    const hiddenProtocolStreamKeys = new Set();
     function scrollNativeConversationToEnd() {{
       if (conversationTimeline) conversationTimeline.scrollTop = conversationTimeline.scrollHeight;
     }}
@@ -6975,8 +7047,8 @@ def _relay_task_detail_page(
     function relayTextLooksLikeEnvelope(text) {{
       const value = String(text || "").trim();
       if (!value.startsWith("{{")) return false;
+      if (/"artifact_type"\\s*:\\s*"(?:routing_decision|role_envelope|final_summary|architecture_plan|implementation_report|audit_report|test_report|followup_response)"/.test(value)) return true;
       return [
-        "artifact_type",
         "relay_role",
         "routing_decision",
         "acceptance_criteria",
@@ -6986,9 +7058,52 @@ def _relay_task_detail_page(
         "next_action",
       ].some((marker) => value.includes(marker));
     }}
+    function relayTextHasProtocolFragmentShape(text) {{
+      const value = String(text || "").trim();
+      return value.includes("{{")
+        || value.includes("}}")
+        || value.includes('",')
+        || value.includes('":')
+        || value.includes('\\\\\"')
+        || value.includes("],")
+        || value.startsWith('"')
+        || value.startsWith("[");
+    }}
+    function marvisConversationTextIsProtocolNoise(text) {{
+      const value = String(text || "").trim();
+      if (!value) return true;
+      if (relayTextLooksLikeEnvelope(value)) return true;
+      const artifactTypePattern = /"artifact_type"\\s*:\\s*"(?:routing_decision|role_envelope|final_summary|architecture_plan|implementation_report|audit_report|followup_response)"/;
+      if (artifactTypePattern.test(value)) return true;
+      if (!relayTextHasProtocolFragmentShape(value)) return false;
+      const markers = [
+        "relay_role",
+        "routing_decision",
+        "role_envelope",
+        "final_summary",
+        "confirmation_options",
+        "evidence_refs",
+        "handoff_to",
+        "required_roles",
+        "next_action",
+        "open_questions",
+        "acceptance_criteria",
+        "status",
+        "summary",
+        "reason",
+        "role",
+      ];
+      const matched = markers.filter((marker) => value.includes(marker));
+      if (matched.length >= 2) return true;
+      const markerSet = new Set(matched);
+      if (markerSet.has("evidence_refs") && markerSet.has("handoff_to")) return true;
+      if (markerSet.has("final_summary") && markerSet.has("confirmation_options")) return true;
+      return false;
+    }}
     function marvisConversationTextIsStructuredArtifactPlaceholder(text) {{
       const value = String(text || "").trim();
       if (!value) return true;
+      if (marvisConversationTextIsProtocolNoise(value)) return true;
       if (value.startsWith("{{") && (relayParseEnvelope(value) || relayTextLooksLikeEnvelope(value))) return true;
       return [
         "结构化结果缺少",
@@ -7005,14 +7120,25 @@ def _relay_task_detail_page(
     }}
     function relayDictLooksLikeEnvelope(payload) {{
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+      const artifactType = String(payload.artifact_type || "");
+      if ([
+        "routing_decision",
+        "role_envelope",
+        "final_summary",
+        "architecture_plan",
+        "implementation_report",
+        "audit_report",
+        "test_report",
+        "followup_response",
+      ].includes(artifactType)) return true;
       return [
-        "artifact_type",
         "relay_role",
-        "summary",
         "next_action",
         "open_questions",
         "required_roles",
         "acceptance_criteria",
+        "handoff_to",
+        "status",
       ].some((key) => Object.prototype.hasOwnProperty.call(payload, key));
     }}
     function relayParseEnvelope(text) {{
@@ -7220,12 +7346,7 @@ def _relay_task_detail_page(
     function marvisWorkLogTextIsProtocolNoise(text) {{
       const value = String(text || "").trim();
       if (!value) return true;
-      if (relayTextLooksLikeEnvelope(value)) return true;
-      const markers = ["artifact_type", "relay_role", "final_summary", "routing_decision", "acceptance_criteria", "evidence_refs", "handoff_to", "required_roles"];
-      if (markers.some((marker) => value.includes(marker)) && (value.includes("{{") || value.includes("}}") || value.includes('",') || value.includes('":') || value.startsWith('"') || value.startsWith("["))) {{
-        return true;
-      }}
-      return false;
+      return marvisConversationTextIsProtocolNoise(value);
     }}
     function marvisWorkLogCleanProtocolSummary(text) {{
       const value = String(text || "").trim();
@@ -7244,6 +7365,26 @@ def _relay_task_detail_page(
       }} catch (_error) {{}}
       cleaned = String(cleaned || "").trim();
       return cleaned && !marvisWorkLogTextIsProtocolNoise(cleaned) ? cleaned : "";
+    }}
+    function marvisWorkLogProtocolArchiveText(text) {{
+      const value = String(text || "").trim();
+      if (!value) return "结构化片段已归档";
+      if (value.includes("artifact_type")) return "结构化产物已归档";
+      const cleaned = marvisWorkLogCleanProtocolSummary(value);
+      if (cleaned) return cleaned;
+      const markers = [
+        "final_summary",
+        "routing_decision",
+        "role_envelope",
+        "confirmation_options",
+        "evidence_refs",
+        "handoff_to",
+        "required_roles",
+        "next_action",
+        "status",
+      ].filter((marker) => value.includes(marker));
+      if (markers.length) return `结构化片段已归档：${{markers.slice(0, 4).join("、")}}`;
+      return "结构化片段已归档";
     }}
     function marvisWorkLogShouldFoldText(text) {{
       const value = String(text || "");
@@ -7301,8 +7442,13 @@ def _relay_task_detail_page(
         const text = nativeEventText(nativeEvent);
         const key = marvisWorkLogStableKey(`message:${{role || ""}}`, nativeEvent, "assistant");
         if (marvisWorkLogTextIsProtocolNoise(text)) {{
-          if (kind === "message_completed") return {{ removeKey: key }};
-          return null;
+          return {{
+            kind: "message",
+            key,
+            text: marvisWorkLogProtocolArchiveText(text),
+            chip: "结构化片段 已归档",
+            replaceText: kind === "message_completed",
+          }};
         }}
         const compact = marvisWorkLogCompactText(text);
         return {{
@@ -7907,7 +8053,7 @@ def _relay_task_detail_page(
         return;
       }}
       if (kind === "text_delta") {{
-        appendRolePreview(role, text, runtimeEventId || nativeEvent?.id);
+        appendRoleStreamDelta(role, text, runtimeEventId || nativeEvent?.id, nativeEvent);
         setRoleStatus(role, "streaming");
         return;
       }}
@@ -7939,40 +8085,75 @@ def _relay_task_detail_page(
       const normalizedBody = relayNormalizeConversationText(node.textContent || "");
       if (normalizedBody) conversationUserBodies.add(normalizedBody);
     }});
-    function previewEventKey(role, eventId) {{
+    function streamEventKey(role, eventId) {{
       const value = String(eventId || "").trim();
       return value ? `${{role || ""}}:${{value}}` : "";
     }}
-    function relayPreviewDisplayText(role, text) {{
-      return `${{labelForRole(role)}}正在处理任务，完成后展示结果。`;
+    function roleStreamStableEventId(eventId, nativeEvent = null) {{
+      const payload = nativeEventPayload(nativeEvent);
+      return payload.itemId
+        || payload.item_id
+        || payload.native_message_id
+        || payload.message_id
+        || payload.native_turn_id
+        || payload.turnId
+        || eventId
+        || "current";
     }}
-    function appendRolePreview(role, text, eventId = "") {{
+    function roleStreamBufferKey(role, eventId) {{
+      return `${{role || ""}}:${{eventId || "current"}}`;
+    }}
+    function removeRoleStreamNode(role) {{
+      conversationTimeline?.querySelector(`[data-conversation-role-stream="${{role}}"]`)?.remove();
+    }}
+    function hideRoleStreamBuffer(role, bufferKey) {{
+      hiddenProtocolStreamKeys.add(bufferKey);
+      roleStreamBuffers.delete(bufferKey);
+      removeRoleStreamNode(role);
+    }}
+    function appendRoleStreamDelta(role, text, eventId = "", nativeEvent = null) {{
       if (!role || !text) return;
+      const stableEventId = roleStreamStableEventId(eventId, nativeEvent);
+      const bufferKey = roleStreamBufferKey(role, stableEventId);
+      if (hiddenProtocolStreamKeys.has(bufferKey)) return;
+      const eventKey = streamEventKey(role, eventId);
+      if (eventKey && seenStreamEventKeys.has(eventKey)) return;
+      if (eventKey) seenStreamEventKeys.add(eventKey);
+      const value = String(text || "");
+      const buffered = `${{roleStreamBuffers.get(bufferKey) || ""}}${{value}}`;
+      roleStreamBuffers.set(bufferKey, buffered);
+      if (
+        marvisConversationTextIsProtocolNoise(buffered)
+        || marvisConversationTextIsStructuredArtifactPlaceholder(buffered)
+      ) {{
+        hideRoleStreamBuffer(role, bufferKey);
+        return;
+      }}
       if (TERMINAL_ROLE_STATUSES.has(currentRoleStatus(role))) return;
-      const eventKey = previewEventKey(role, eventId);
-      if (eventKey && seenPreviewEventKeys.has(eventKey)) return;
-      if (eventKey) seenPreviewEventKeys.add(eventKey);
       if (!conversationTimeline) return;
       if (conversationTimeline.querySelector(`[data-conversation-role-final="${{role}}"]`)) return;
-      let node = conversationTimeline.querySelector(`[data-conversation-role-preview="${{role}}"]`);
+      let node = conversationTimeline.querySelector(`[data-conversation-role-stream="${{role}}"]`);
       if (!node) {{
-        node = createNativeMessage(role, "text_delta", labelForRole(role), "实时预览", `preview:${{role}}`);
+        node = createNativeMessage(role, "text_delta", labelForRole(role), "", `stream:${{role}}`);
         if (!node) return;
-        node.dataset.conversationRolePreview = role;
+        node.dataset.conversationRoleStream = role;
       }}
-      setNativeBodyText(node, relayPreviewDisplayText(role, text));
+      const body = node.querySelector("[data-native-message-body]");
+      const current = body ? body.textContent || "" : "";
+      setNativeBodyText(node, current + value);
     }}
     function clearRolePreview(role) {{
       conversationTimeline?.querySelector(`[data-conversation-role-preview="${{role}}"]`)?.remove();
+      removeRoleStreamNode(role);
     }}
     function clearAllRolePreviews() {{
       Object.keys(roleStatuses).forEach(clearRolePreview);
     }}
-    document.querySelectorAll("[data-conversation-role-preview]").forEach((node) => {{
-      const role = node.dataset.conversationRolePreview;
-      (node.dataset.previewEventIds || "").split(",").filter(Boolean).forEach((eventId) => {{
-        const eventKey = previewEventKey(role, eventId);
-        if (eventKey) seenPreviewEventKeys.add(eventKey);
+    document.querySelectorAll("[data-conversation-role-stream]").forEach((node) => {{
+      const role = node.dataset.conversationRoleStream;
+      (node.dataset.streamEventIds || "").split(",").filter(Boolean).forEach((eventId) => {{
+        const eventKey = streamEventKey(role, eventId);
+        if (eventKey) seenStreamEventKeys.add(eventKey);
       }});
     }});
     const TERMINAL_ROLE_STATUSES = new Set(["passed", "completed", "blocked", "failed", "interrupted"]);
@@ -8292,8 +8473,49 @@ def _relay_task_detail_page(
         }}
       }}
     }});
-    const source = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{EVENTS_SUFFIX}}`);
-    source.addEventListener("role.queued", (event) => {{
+    let relayEventsAfter = Number(new URLSearchParams(String(EVENTS_SUFFIX || "").replace(/^\\?/, "")).get("after") || "0") || 0;
+    let relayEventsSource = null;
+    let relayEventsReconnectTimer = null;
+    let relayEventsReconnectDelay = 500;
+    const relayEventBindings = [];
+    function updateRelayEventsCursor(event) {{
+      const value = Number(event?.lastEventId || "0") || 0;
+      if (value > relayEventsAfter) relayEventsAfter = value;
+    }}
+    function relayEventsSuffix() {{
+      const params = new URLSearchParams(String(TOKEN_SUFFIX || "").replace(/^\\?/, ""));
+      if (relayEventsAfter > 0) params.set("after", String(relayEventsAfter));
+      const value = params.toString();
+      return value ? `?${{value}}` : "";
+    }}
+    function addRelayEventListener(name, handler) {{
+      relayEventBindings.push([name, handler]);
+      if (relayEventsSource) relayEventsSource.addEventListener(name, handler);
+    }}
+    function scheduleRelayEventsReconnect() {{
+      if (relayEventsReconnectTimer) return;
+      relayEventsReconnectTimer = window.setTimeout(() => {{
+        relayEventsReconnectTimer = null;
+        connectRelayEventSource();
+        relayEventsReconnectDelay = Math.min(relayEventsReconnectDelay * 2, 5000);
+      }}, relayEventsReconnectDelay);
+    }}
+    function connectRelayEventSource() {{
+      if (relayEventsSource) relayEventsSource.close();
+      relayEventsSource = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{relayEventsSuffix()}}`);
+      relayEventBindings.forEach(([name, handler]) => relayEventsSource.addEventListener(name, handler));
+      relayEventsSource.onopen = () => {{
+        relayEventsReconnectDelay = 500;
+      }};
+      relayEventsSource.onerror = () => {{
+        scheduleRelayEventsReconnect();
+      }};
+    }}
+    document.addEventListener("visibilitychange", () => {{
+      if (document.visibilityState === "visible") connectRelayEventSource();
+    }});
+    window.addEventListener("pageshow", () => connectRelayEventSource());
+    addRelayEventListener("role.queued", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       hidePlanControlSurface();
@@ -8302,21 +8524,21 @@ def _relay_task_detail_page(
       if (force) clearMarvisConversationPausedRows();
       setRoleStatus(payload.role, "queued", {{ force }});
     }});
-    source.addEventListener("role.streaming", (event) => {{
+    addRelayEventListener("role.streaming", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       hidePlanControlSurface();
       updateTaskStatus("running");
       setRoleStatus(payload.role, "streaming");
     }});
-    source.addEventListener("dispatch.verified", (event) => {{
+    addRelayEventListener("dispatch.verified", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       hidePlanControlSurface();
       updateTaskStatus("running");
       setRoleStatus(payload.role, "streaming");
     }});
-    source.addEventListener("round.control", (event) => {{
+    addRelayEventListener("round.control", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       hidePlanControlSurface();
@@ -8329,12 +8551,12 @@ def _relay_task_detail_page(
       }}
       waitingControlInput = "";
     }});
-    source.addEventListener("dispatch.fallback", (event) => {{
+    addRelayEventListener("dispatch.fallback", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       setRoleStatus(payload.role, "queued", {{ force: true }});
     }});
-    source.addEventListener("user.followup", (event) => {{
+    addRelayEventListener("user.followup", (event) => {{
       const payload = parseRelayEvent(event);
       const roundId = activateRelayRound(payload);
       const key = payload.artifact_id ? `user_followup:${{payload.artifact_id}}` : `user_followup:${{payload.context_packet_id || Date.now()}}`;
@@ -8347,35 +8569,35 @@ def _relay_task_detail_page(
       updateTaskStatus("running");
       setRoleStatus("director", "queued", {{ force: true }});
     }});
-    source.addEventListener("user.input_queued", (event) => {{
+    addRelayEventListener("user.input_queued", (event) => {{
       upsertPendingInput(parseRelayEvent(event));
     }});
-    source.addEventListener("user.input_steered", (event) => {{
+    addRelayEventListener("user.input_steered", (event) => {{
       const payload = parseRelayEvent(event);
       upsertPendingInput(payload);
       appendMarvisConversationGuidance(payload);
     }});
-    source.addEventListener("user.input_cancelled", (event) => {{
+    addRelayEventListener("user.input_cancelled", (event) => {{
       const payload = parseRelayEvent(event);
       removePendingInput(payload.id || payload.pending_input_id);
     }});
-    source.addEventListener("user.input_consumed", (event) => {{
+    addRelayEventListener("user.input_consumed", (event) => {{
       const payload = parseRelayEvent(event);
       removePendingInput(payload.id || payload.pending_input_id);
     }});
-    source.addEventListener("role.native_event", (event) => {{
+    addRelayEventListener("role.native_event", (event) => {{
       const payload = parseRelayEvent(event);
       renderMarvisWorkLogNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);
       if (!isCurrentRoundEvent(payload)) return;
       renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);
     }});
-    source.addEventListener("role.output_delta", (event) => {{
+    addRelayEventListener("role.output_delta", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
-      appendRolePreview(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);
+      appendRoleStreamDelta(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);
       setRoleStatus(payload.role, "streaming");
     }});
-    source.addEventListener("role.followup_response", (event) => {{
+    addRelayEventListener("role.followup_response", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       const roundId = relayEventRoundId(payload);
@@ -8394,14 +8616,14 @@ def _relay_task_detail_page(
       );
       setRoleStatus(payload.role || "director", payload.status || "passed");
     }});
-    source.addEventListener("routing.decision", (event) => {{
+    addRelayEventListener("routing.decision", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       const role = payload.role || "director";
       clearRolePreview(role);
       setRoleStatus(role, payload.status || "passed");
     }});
-    source.addEventListener("role.envelope", (event) => {{
+    addRelayEventListener("role.envelope", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       const envelope = {{ ...(payload.envelope || payload) }};
@@ -8410,7 +8632,7 @@ def _relay_task_detail_page(
       clearRolePreview(role);
       if (envelope.status) setRoleStatus(role, envelope.status);
     }});
-    source.addEventListener("handoff.created", (event) => {{
+    addRelayEventListener("handoff.created", (event) => {{
       const payload = parseRelayEvent(event);
       const toRole = payload.to_role || payload.handoff_to;
       const fromRole = payload.from_role || "";
@@ -8420,7 +8642,7 @@ def _relay_task_detail_page(
       const handoffKey = `handoff:${{roundId}}:${{fromRole}}:${{toRole || ""}}:${{payload.artifact_id || payload.summary || event.lastEventId || ""}}`;
       appendMarvisConversationHandoff(toRole, handoffKey, fromRole, roundId);
     }});
-    source.addEventListener("role.status", (event) => {{
+    addRelayEventListener("role.status", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       const reason = payload.reason || payload.payload?.reason || "";
@@ -8432,7 +8654,7 @@ def _relay_task_detail_page(
         clearRolePreview(payload.role);
       }}
     }});
-    source.addEventListener("task.waiting_user", (event) => {{
+    addRelayEventListener("task.waiting_user", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       updateTaskStatus("waiting_user");
@@ -8440,20 +8662,21 @@ def _relay_task_detail_page(
       renderMarvisWorkLogConfirmation(payload);
       ensurePlanControl(payload);
     }});
-    source.addEventListener("task.completed", (event) => {{
+    addRelayEventListener("task.completed", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       hidePlanControlSurface();
       updateTaskStatus("completed");
       clearAllRolePreviews();
     }});
-    source.addEventListener("task.interrupted", (event) => {{
+    addRelayEventListener("task.interrupted", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       hidePlanControlSurface();
       updateTaskStatus("interrupted");
       clearAllRolePreviews();
     }});
+    connectRelayEventSource();
     followupTextInput?.addEventListener("input", updateRelayComposerAction);
     document.addEventListener("marvis-relay-attachments-changed", updateRelayComposerAction);
     updateRelayComposerAction();
@@ -8615,7 +8838,6 @@ def _relay_projected_conversation_rows(
         text = _relay_native_event_text(worker_event)
         if (
             kind in {"text_delta", "message_completed"}
-            and role in canonical_payloads
             and (
                 _relay_text_is_structured_artifact_placeholder(text)
                 or text_contains_relay_protocol_payload(text)
@@ -8660,8 +8882,14 @@ def _relay_projected_conversation_rows(
         if projected is None and str(row.get("kind") or "") == "message_completed":
             role = str(row.get("role") or "")
             body = _relay_sanitize_protocol_leak_text(role, str(row.get("body") or ""))
-            if body and not _relay_conversation_row_is_task_status_noise(
-                {"kind": "message_completed", "body": body}
+            if (
+                body
+                and not _relay_text_is_structured_artifact_placeholder(body)
+                and not text_contains_relay_protocol_payload(body)
+                and _relay_parse_role_envelope_payload(body) is None
+                and not _relay_conversation_row_is_task_status_noise(
+                    {"kind": "message_completed", "body": body}
+                )
             ):
                 projected = {**row, "body": body}
         if projected is None:
@@ -9437,14 +9665,13 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
     role_final_attr = (
         f' data-conversation-role-final="{escape(role)}"' if kind == "role_envelope" else ""
     )
-    role_preview_attr = (
-        f' data-conversation-role-preview="{escape(role)}"' if kind == "text_delta" else ""
+    role_stream_attr = (
+        f' data-conversation-role-stream="{escape(role)}"' if kind == "text_delta" else ""
     )
-    raw_preview_attr = ""
-    preview_event_ids = str(row.get("preview_event_ids") or "")
-    preview_event_ids_attr = (
-        f' data-preview-event-ids="{escape(preview_event_ids)}"'
-        if kind == "text_delta" and preview_event_ids
+    stream_event_ids = str(row.get("preview_event_ids") or "")
+    stream_event_ids_attr = (
+        f' data-stream-event-ids="{escape(stream_event_ids)}"'
+        if kind == "text_delta" and stream_event_ids
         else ""
     )
     show_action = kind in {"role_envelope", "role_process", "text_delta"} or role == "director"
@@ -9458,7 +9685,7 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
     else:
         action_html = ""
     return f"""
-      <article class="marvis-relay-agent-step" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(key)}"{role_final_attr}{role_preview_attr}{raw_preview_attr}{preview_event_ids_attr}>
+      <article class="marvis-relay-agent-step" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(key)}"{role_final_attr}{role_stream_attr}{stream_event_ids_attr}>
         {_marvis_relay_avatar_html(persona, label=display_name)}
         <div class="marvis-relay-agent-content">
           <div class="marvis-relay-agent-head"><strong>{escape(display_name)}</strong> {action_html}</div>
@@ -9561,14 +9788,17 @@ def _relay_project_native_conversation_row(
         return humanized
     if kind == "message_completed" and not _relay_text_is_structured_artifact_placeholder(body):
         return {**row, "body": _relay_sanitize_protocol_leak_text(str(row.get("role") or ""), body)}
-    if kind == "text_delta" and _relay_role_job_is_live_preview(job):
+    if (
+        kind == "text_delta"
+        and _relay_role_job_is_live_preview(job)
+        and not _relay_text_is_structured_artifact_placeholder(body)
+    ):
         role = str(row.get("role") or "")
         return {
             **row,
             "kind": "text_delta",
-            "meta": "实时预览",
-            "body": _relay_preview_display_text(role, body),
-            "raw_preview": body,
+            "meta": str(row.get("meta") or ""),
+            "body": _relay_sanitize_protocol_leak_text(role, body),
         }
     return None
 
@@ -9580,10 +9810,6 @@ def _relay_role_job_is_live_preview(job: Any | None) -> bool:
     if status in {"blocked", "failed", "interrupted", "passed", "completed"}:
         return False
     return status == "streaming" or bool(getattr(job, "turn_running", False))
-
-
-def _relay_preview_display_text(role: str, text: str) -> str:
-    return f"{_relay_role_label(role)}正在处理任务，完成后展示结果。"
 
 
 def _relay_conversation_row_is_task_status_noise(row: dict[str, str]) -> bool:
@@ -9689,8 +9915,9 @@ def _relay_text_looks_like_role_envelope(text: str) -> bool:
     stripped = text.strip()
     if not stripped.startswith("{"):
         return False
+    if text_contains_relay_protocol_payload(stripped):
+        return True
     markers = (
-        "artifact_type",
         "relay_role",
         "routing_decision",
         "acceptance_criteria",
@@ -9781,21 +10008,17 @@ def _relay_native_message_html(row: dict[str, str]) -> str:
     role_final_attr = (
         f' data-conversation-role-final="{escape(role)}"' if kind == "role_envelope" else ""
     )
-    role_preview_attr = (
-        f' data-conversation-role-preview="{escape(role)}"' if kind == "text_delta" else ""
+    role_stream_attr = (
+        f' data-conversation-role-stream="{escape(role)}"' if kind == "text_delta" else ""
     )
-    raw_preview = str(row.get("raw_preview") or "")
-    raw_preview_attr = (
-        f' data-raw-preview="{escape(raw_preview)}"' if kind == "text_delta" and raw_preview else ""
-    )
-    preview_event_ids = str(row.get("preview_event_ids") or "")
-    preview_event_ids_attr = (
-        f' data-preview-event-ids="{escape(preview_event_ids)}"'
-        if kind == "text_delta" and preview_event_ids
+    stream_event_ids = str(row.get("preview_event_ids") or "")
+    stream_event_ids_attr = (
+        f' data-stream-event-ids="{escape(stream_event_ids)}"'
+        if kind == "text_delta" and stream_event_ids
         else ""
     )
     return f"""
-      <article class="relay-message" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(row.get("key", "") or "")}"{role_final_attr}{role_preview_attr}{raw_preview_attr}{preview_event_ids_attr}>
+      <article class="relay-message" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(row.get("key", "") or "")}"{role_final_attr}{role_stream_attr}{stream_event_ids_attr}>
         {_marvis_relay_avatar_html(role, label=str(row.get("speaker", "") or "系统"))}
         <div class="relay-message-head">
           <strong>{escape(row.get("speaker", "") or "系统")}</strong>

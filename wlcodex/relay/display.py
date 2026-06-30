@@ -47,8 +47,27 @@ _RELAY_PROTOCOL_FIELD_PATTERNS = {
         "open_questions",
         "evidence_refs",
         "acceptance_criteria",
+        "confirmation_options",
+        "status",
+        "summary",
+        "reason",
+        "role",
     )
 }
+_RELAY_PROTOCOL_FRAGMENT_MARKERS = (
+    *_RELAY_ARTIFACT_TYPES,
+    "relay_role",
+    "handoff_to",
+    "required_roles",
+    "next_action",
+    "open_questions",
+    "evidence_refs",
+    "acceptance_criteria",
+    "confirmation_options",
+    "summary",
+    "reason",
+    "role",
+)
 
 
 def relay_role_label(role: str) -> str:
@@ -218,6 +237,29 @@ def text_contains_relay_protocol_payload(text: str) -> bool:
         for field, pattern in _RELAY_PROTOCOL_FIELD_PATTERNS.items()
         if pattern.search(value)
     }
+    has_fragment_shape = any(
+        marker in value
+        for marker in (
+            "{",
+            "}",
+            '",',
+            '":',
+            '\\"',
+            "],",
+        )
+    ) or value.strip().startswith(('"', "["))
+    if has_fragment_shape:
+        marker_hits = {
+            marker for marker in _RELAY_PROTOCOL_FRAGMENT_MARKERS if marker in value
+        }
+        if len(matched_fields) >= 2:
+            return True
+        if len(marker_hits | matched_fields) >= 2:
+            return True
+        if {"evidence_refs", "handoff_to"} <= marker_hits | matched_fields:
+            return True
+        if {"final_summary", "confirmation_options"} <= marker_hits | matched_fields:
+            return True
     if "relay_role" in matched_fields:
         return True
     if {"handoff_to", "next_action"} <= matched_fields:
@@ -250,16 +292,19 @@ def sanitize_protocol_leak_text(role: str, text: str) -> str:
 
 
 def dict_looks_like_role_envelope(payload: dict[str, Any]) -> bool:
+    artifact_type = str(payload.get("artifact_type") or "")
+    if artifact_type in _RELAY_ARTIFACT_TYPES:
+        return True
     return any(
         key in payload
         for key in (
-            "artifact_type",
             "relay_role",
-            "summary",
             "next_action",
             "open_questions",
             "required_roles",
             "acceptance_criteria",
+            "handoff_to",
+            "status",
         )
     )
 

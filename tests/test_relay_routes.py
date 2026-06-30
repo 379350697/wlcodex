@@ -1130,6 +1130,80 @@ async def test_relay_live_events_do_not_drop_event_emitted_during_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_relay_live_events_subscribe_to_agent_run_created_after_connect(
+    tmp_path: Path,
+) -> None:
+    service = _relay_service(tmp_path)
+    task = service.create_task(
+        title="Events task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    hub = WorkerLiveStreamHub(runtime_store)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=hub,
+        native_registry=service._registry,
+        relay_service=service,
+    )
+    await server.start()
+
+    async def dispatch_and_publish() -> None:
+        await asyncio.sleep(0.05)
+        await service.dispatch_role(task.id, "director")
+        detail = service.get_task(task.id)
+        director_job = next(job for job in detail.role_jobs if job.role == "director")
+        agent_run_id = int(director_job.agent_run_id or 0)
+        deadline = asyncio.get_running_loop().time() + 0.5
+        while (
+            agent_run_id
+            and hub.subscriber_count(agent_run_id=agent_run_id) == 0
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.01)
+        saved_event = runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.MODEL_TEXT_DELTA,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id=str(agent_run_id),
+                correlation_id=f"corr-{agent_run_id}",
+                source=EventSource.CLAUDE,
+                actor="claude",
+                visibility=Visibility.USER,
+                payload={"delta": "late worker delta after connect"},
+                occurred_at=now_iso(),
+                agent_run_id=agent_run_id,
+            )
+        )
+        hub.publish(saved_event)
+
+    publisher = asyncio.create_task(dispatch_and_publish())
+    try:
+        response = await _read_until(
+            server.host,
+            server.port,
+            f"GET /api/relay/tasks/{task.id}/events HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Accept: text/event-stream\r\n"
+            "Connection: close\r\n\r\n",
+            "late worker delta after connect",
+            timeout=1.5,
+        )
+    finally:
+        publisher.cancel()
+        await asyncio.gather(publisher, return_exceptions=True)
+        await server.stop()
+
+    assert "event: role.native_event" in response
+    assert '"role": "director"' in response
+    assert '"delta": "late worker delta after connect"' in response
+
+
+@pytest.mark.asyncio
 async def test_relay_message_routes_to_director_and_interrupt_role(tmp_path: Path) -> None:
     service = _relay_service(tmp_path)
     task = service.create_task(

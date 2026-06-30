@@ -815,8 +815,8 @@ async def test_relay_task_detail_projects_followup_turns_into_marvis_chat(
     assert 'data-native-kind="followup_response"' in conversation_html
     assert "继续解释为什么没有显示" not in work_log_html
     assert "function appendMarvisConversationUser" in response
-    assert 'source.addEventListener("user.followup"' in response
-    assert 'source.addEventListener("role.followup_response"' in response
+    assert 'addRelayEventListener("user.followup"' in response
+    assert 'addRelayEventListener("role.followup_response"' in response
 
 
 @pytest.mark.asyncio
@@ -1225,13 +1225,13 @@ async def test_relay_task_detail_clears_waiting_confirmation_when_control_advanc
         "const response = await fetch"
     )
 
-    assert 'source.addEventListener("round.control"' in response
-    round_control_segment = response.split('source.addEventListener("round.control"', 1)[
+    assert 'addRelayEventListener("round.control"' in response
+    round_control_segment = response.split('addRelayEventListener("round.control"', 1)[
         1
     ].split("});", 1)[0]
     assert "hidePlanControlSurface();" in round_control_segment
 
-    queued_segment = response.split('source.addEventListener("role.queued"', 1)[1].split(
+    queued_segment = response.split('addRelayEventListener("role.queued"', 1)[1].split(
         "});",
         1,
     )[0]
@@ -2847,8 +2847,8 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'const actions = isSteered ? ""' in response
     assert "appendMarvisConversationGuidance(payload);" in response
     assert 'const responseDisposition = String(payload.disposition || "pending");' in response
-    assert 'source.addEventListener("user.input_queued"' in response
-    assert 'source.addEventListener("user.input_consumed"' in response
+    assert 'addRelayEventListener("user.input_queued"' in response
+    assert 'addRelayEventListener("user.input_consumed"' in response
     assert "data-marvis-followup-composer" in response
     assert 'followupComposer?.addEventListener("submit"' in response
     assert 'document.querySelector(".relay-composer")?.addEventListener("submit"' not in response
@@ -2867,10 +2867,13 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'reason === "new_followup_turn"' in response
     assert "function relayTaskIsRunning()" in response
     assert "!relayTaskIsRunning()) return;" in response
-    assert 'source.addEventListener("role.native_event"' in response
+    assert 'addRelayEventListener("role.native_event"' in response
     assert 'document.querySelectorAll("[data-native-key]")' in response
     assert "nativeTranscriptNodes.set(node.dataset.nativeKey" in response
-    assert "events${EVENTS_SUFFIX}" in response
+    assert "events${relayEventsSuffix()}" in response
+    assert "function connectRelayEventSource()" in response
+    assert "function scheduleRelayEventsReconnect()" in response
+    assert "updateRelayEventsCursor(event);" in response
     assert "appendConversationDelta(" not in response
     assert "activeConversationRole" not in response
     assert "appendConversationUser(" not in response
@@ -3727,32 +3730,32 @@ async def test_relay_task_detail_does_not_show_stale_round_final_summary_as_assi
     assert "function isCurrentRoundEvent(payload)" in response
     assert "function activateRelayRound(payload)" in response
     assert "if (!isCurrentRoundEvent(payload)) return;" in response
-    native_handler = response.split('source.addEventListener("role.native_event"', 1)[1]
-    native_handler = native_handler.split('source.addEventListener("role.output_delta"', 1)[0]
+    native_handler = response.split('addRelayEventListener("role.native_event"', 1)[1]
+    native_handler = native_handler.split('addRelayEventListener("role.output_delta"', 1)[0]
     assert "renderMarvisWorkLogNativeEvent" in native_handler
     assert "if (!isCurrentRoundEvent(payload)) return;" in native_handler
     assert native_handler.index("renderMarvisWorkLogNativeEvent") < native_handler.index(
         "if (!isCurrentRoundEvent(payload)) return;"
     )
     followup_handler = response.split(
-        'source.addEventListener("role.followup_response"',
+        'addRelayEventListener("role.followup_response"',
         1,
     )[1]
     followup_handler = followup_handler.split(
-        'source.addEventListener("routing.decision"',
+        'addRelayEventListener("routing.decision"',
         1,
     )[0]
     assert "if (!isCurrentRoundEvent(payload)) return;" in followup_handler
-    routing_handler = response.split('source.addEventListener("routing.decision"', 1)[1]
-    routing_handler = routing_handler.split('source.addEventListener("role.envelope"', 1)[0]
+    routing_handler = response.split('addRelayEventListener("routing.decision"', 1)[1]
+    routing_handler = routing_handler.split('addRelayEventListener("role.envelope"', 1)[0]
     assert "if (!isCurrentRoundEvent(payload)) return;" in routing_handler
     assert "renderRoleEnvelope" not in routing_handler
     assert "artifact_type: payload.artifact_type || \"routing_decision\"" not in routing_handler
-    status_handler = response.split('source.addEventListener("role.status"', 1)[1]
-    status_handler = status_handler.split('source.addEventListener("task.completed"', 1)[0]
+    status_handler = response.split('addRelayEventListener("role.status"', 1)[1]
+    status_handler = status_handler.split('addRelayEventListener("task.completed"', 1)[0]
     assert "if (!isCurrentRoundEvent(payload)) return;" in status_handler
-    completed_handler = response.split('source.addEventListener("task.completed"', 1)[1]
-    completed_handler = completed_handler.split('source.addEventListener("task.interrupted"', 1)[0]
+    completed_handler = response.split('addRelayEventListener("task.completed"', 1)[1]
+    completed_handler = completed_handler.split('addRelayEventListener("task.interrupted"', 1)[0]
     assert "if (!isCurrentRoundEvent(payload)) return;" in completed_handler
 
 
@@ -5547,13 +5550,13 @@ async def test_relay_task_detail_projects_running_delta_as_initial_preview(
         await server.stop()
 
     conversation_html = _relay_view_panel_html(response, "conversation")
-    assert 'data-conversation-role-preview="director"' in conversation_html
+    assert 'data-conversation-role-stream="director"' in conversation_html
     assert 'data-conversation-role-final="director"' not in conversation_html
     assert "data-raw-preview" not in conversation_html
-    assert 'data-preview-event-ids="1"' in conversation_html
+    assert 'data-stream-event-ids="1"' in conversation_html
     bodies_html = _relay_message_bodies_html(conversation_html)
-    assert "总工程师正在处理任务，完成后展示结果。" in bodies_html
-    assert "总工程师正在拆解任务，先确认影响面。" not in bodies_html
+    assert "总工程师正在处理任务，完成后展示结果。" not in bodies_html
+    assert "总工程师正在拆解任务，先确认影响面。" in bodies_html
 
 
 @pytest.mark.asyncio
@@ -5603,10 +5606,131 @@ async def test_relay_task_detail_projects_structured_running_delta_as_counted_pr
 
     conversation_html = _relay_view_panel_html(response, "conversation")
     bodies_html = _relay_message_bodies_html(conversation_html)
-    assert 'data-conversation-role-preview="director"' in conversation_html
-    assert "总工程师正在处理任务，完成后展示结果。" in bodies_html
+    assert 'data-conversation-role-stream="director"' not in conversation_html
+    assert "总工程师正在处理任务，完成后展示结果。" not in bodies_html
+    assert delta not in bodies_html
     assert "正在接收结构化输出" not in bodies_html
     assert f"已接收 {len(delta)} 字" not in bodies_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_hides_fragmented_structured_running_delta(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Fragmented structured live preview task",
+        prompt="查询今日铜价",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-fragment-preview",
+        agent_run_id=503,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "streaming")
+    delta = (
+        'final_summary","confirmation_options":[],"evidence_refs":'
+        '["https://www.marketwatch.com/investing/future/hg00",'
+        '"https://www.lme.com/en/metals/non-ferrous/lme-copper"],'
+        '"handoff_to":""'
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=503,
+        event_type=EventType.MODEL_TEXT_DELTA,
+        payload={
+            "delta": delta,
+            "native_turn_id": "turn-fragment-preview",
+            "itemId": "assistant-fragment-preview",
+        },
+        occurred_at="2026-06-14T14:00:01+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
+    assert 'data-conversation-role-stream="director"' not in conversation_html
+    assert "final_summary" not in conversation_html
+    assert "confirmation_options" not in conversation_html
+    assert "evidence_refs" not in conversation_html
+    assert "handoff_to" not in conversation_html
+    assert "final_summary" in work_log_html
+    assert "evidence_refs" in work_log_html
+
+
+@pytest.mark.asyncio
+async def test_relay_task_detail_hides_fragmented_structured_completed_message(
+    tmp_path: Path,
+) -> None:
+    server, service, runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Fragmented structured completed task",
+        prompt="查询今日铜价",
+        workspace="/repo",
+        provider="codex",
+    )
+    service._store.update_role_metadata(
+        task.id,
+        "director",
+        provider="codex",
+        model="gpt-5",
+        native_session_id="native-director-fragment-completed",
+        agent_run_id=504,
+        dispatch_verified=True,
+    )
+    service._store.update_role_status(task.id, "director", "passed")
+    completed = (
+        'final_summary","confirmation_options":[],"evidence_refs":'
+        '["https://www.marketwatch.com/investing/future/hg00",'
+        '"https://hq.smm.cn/copper"],"handoff_to":"","status":"passed"'
+    )
+    _append_runtime_event(
+        runtime_store,
+        agent_run_id=504,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        payload={
+            "text": completed,
+            "native_turn_id": "turn-fragment-completed",
+            "itemId": "assistant-fragment-completed",
+        },
+        occurred_at="2026-06-14T14:00:01+00:00",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    conversation_html = _relay_view_panel_html(response, "conversation")
+    work_log_html = _relay_work_log_html(response)
+    assert "final_summary" not in conversation_html
+    assert "confirmation_options" not in conversation_html
+    assert "evidence_refs" not in conversation_html
+    assert "handoff_to" not in conversation_html
+    assert "final_summary" in work_log_html
+    assert "evidence_refs" in work_log_html
 
 
 @pytest.mark.asyncio
@@ -5690,49 +5814,80 @@ async def test_marvis_relay_conversation_hides_native_task_delta_preview(
     assert "Task #1 created successfully" not in conversation_html
     assert "tool_use_error" not in conversation_html
     assert "total 144" not in conversation_html
-    assert "开发工程师正在处理任务，完成后展示结果。" in conversation_html
+    assert "开发工程师正在处理任务，完成后展示结果。" not in conversation_html
     assert "Task #1 created successfully" in work_log_html
-    assert "function appendRolePreview" in response
-    assert "function relayPreviewDisplayText" in response
+    assert "function appendRolePreview" not in response
+    assert "function relayPreviewDisplayText" not in response
+    assert "function appendRoleStreamDelta" in response
     assert "function renderRoleEnvelope" not in response
     assert "已接收 ${value.length} 字" not in response
-    assert "正在处理任务，完成后展示结果" in response
+    assert "正在处理任务，完成后展示结果" not in response
     assert "function clearAllRolePreviews" in response
     assert "function appendMarvisConversationHandoff" in response
-    assert "const seenPreviewEventKeys = new Set" in response
-    assert "function previewEventKey" in response
+    assert "const seenStreamEventKeys = new Set" in response
+    assert "function streamEventKey" in response
     assert (
         "renderRelayNativeEvent(payload.role, payload.native_event || payload, payload.runtime_event_id);"
         in response
     )
     assert (
-        'appendRolePreview(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);'
+        'appendRoleStreamDelta(payload.role, payload.delta || payload.text || "", payload.runtime_event_id);'
         in response
     )
-    delta_handler = response.split('source.addEventListener("role.output_delta"', 1)[1]
-    delta_handler = delta_handler.split('source.addEventListener("routing.decision"', 1)[0]
-    assert "appendRolePreview" in delta_handler
+    delta_handler = response.split('addRelayEventListener("role.output_delta"', 1)[1]
+    delta_handler = delta_handler.split('addRelayEventListener("routing.decision"', 1)[0]
+    assert "appendRoleStreamDelta" in delta_handler
     assert "roleOutputs[payload.role]" not in delta_handler
-    routing_handler = response.split('source.addEventListener("routing.decision"', 1)[1]
-    routing_handler = routing_handler.split('source.addEventListener("role.envelope"', 1)[0]
+    routing_handler = response.split('addRelayEventListener("routing.decision"', 1)[1]
+    routing_handler = routing_handler.split('addRelayEventListener("role.envelope"', 1)[0]
     assert "renderRoleEnvelope" not in routing_handler
     assert "appendMarvisConversationAssistant" not in routing_handler
     assert "data-routing-" not in routing_handler
     assert "data-board-" not in routing_handler
-    envelope_handler = response.split('source.addEventListener("role.envelope"', 1)[1]
-    envelope_handler = envelope_handler.split('source.addEventListener("handoff.created"', 1)[0]
+    envelope_handler = response.split('addRelayEventListener("role.envelope"', 1)[1]
+    envelope_handler = envelope_handler.split('addRelayEventListener("handoff.created"', 1)[0]
     assert "renderRoleEnvelope" not in envelope_handler
     assert "appendMarvisConversationAssistant" not in envelope_handler
     assert "payload.display_text" in envelope_handler
     assert "envelope.display_text" in response
-    handoff_handler = response.split('source.addEventListener("handoff.created"', 1)[1]
-    handoff_handler = handoff_handler.split('source.addEventListener("role.status"', 1)[0]
+    handoff_handler = response.split('addRelayEventListener("handoff.created"', 1)[1]
+    handoff_handler = handoff_handler.split('addRelayEventListener("role.status"', 1)[0]
     assert (
         "appendMarvisConversationHandoff(toRole, handoffKey, fromRole, roundId);" in handoff_handler
     )
     assert "data-native-from-role" in response
     assert "data-native-to-role" in response
     assert "clearRolePreview(role);" in response
+
+
+@pytest.mark.asyncio
+async def test_marvis_relay_stream_delta_buffers_and_removes_protocol_fragments(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Live protocol fragment cleanup",
+        prompt="查询今日铜价",
+        workspace="/repo",
+        provider="codex",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "const roleStreamBuffers = new Map" in response
+    assert "const hiddenProtocolStreamKeys = new Set" in response
+    assert "removeRoleStreamNode(role);" in response
+    assert "marvisConversationTextIsProtocolNoise(value)" in response
+    assert "roleStreamBufferKey(role, eventId)" in response
 
 
 @pytest.mark.asyncio
