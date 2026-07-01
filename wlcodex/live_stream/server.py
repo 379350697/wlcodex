@@ -45,6 +45,7 @@ from wlcodex.live_stream.collapse import (
 )
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
+from wlcodex.native_timeline import NativeTimelineEvent, NativeTimelineStore
 from wlcodex.jsonrpc import JsonRpcError, JsonRpcTimeout
 from wlcodex.relay.display import (
     dict_looks_like_role_envelope as relay_dict_looks_like_role_envelope,
@@ -317,6 +318,7 @@ class WorkerLiveStreamServer:
         turn_summary_config: LiveTurnSummaryConfig | None = None,
         turn_summary_client: DigestClient | None = None,
         native_transcript_mirror: Any = None,
+        native_timeline: NativeTimelineStore | None = None,
         workflow_service: Any = None,
         relay_service: Any = None,
         native_sync_timeout_seconds: float = 3.0,
@@ -334,6 +336,7 @@ class WorkerLiveStreamServer:
         self._turn_summary_config = turn_summary_config or LiveTurnSummaryConfig.from_env()
         self._turn_summary_client = turn_summary_client
         self._native_transcript_mirror = native_transcript_mirror
+        self._native_timeline = native_timeline
         self._workflow_service = workflow_service
         self._relay_service = relay_service
         self._native_sync_timeout_seconds = max(0.1, float(native_sync_timeout_seconds))
@@ -613,6 +616,47 @@ class WorkerLiveStreamServer:
                     parsed.path,
                     headers,
                     query,
+                )
+                return
+
+            native_timeline_route = _native_timeline_route_from_path(parsed.path)
+            if native_timeline_route is not None:
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                if not self._is_authorized(writer, headers, query):
+                    await self._send_json(writer, 401, {"error": "unauthorized"})
+                    return
+                provider, native_thread_id, stream = native_timeline_route
+                if stream:
+                    after = _safe_int(
+                        query.get("after", [headers.get("last-event-id", "0")])[0],
+                        default=0,
+                    )
+                    await self._send_native_timeline_sse(
+                        writer,
+                        provider,
+                        native_thread_id,
+                        after,
+                    )
+                    return
+                has_after = "after" in query
+                after = _safe_int(query.get("after", ["0"])[0], default=0)
+                before_value = query.get("before", [""])[0]
+                before = (
+                    _safe_int(before_value, default=0)
+                    if str(before_value).strip()
+                    else None
+                )
+                limit = _safe_int(query.get("limit", ["100"])[0], default=100)
+                await self._send_native_timeline_json(
+                    writer,
+                    provider,
+                    native_thread_id,
+                    after=after,
+                    before=before,
+                    limit=limit,
+                    item_snapshot=not has_after,
                 )
                 return
 
@@ -1977,6 +2021,7 @@ class WorkerLiveStreamServer:
             continue_kwargs: dict[str, Any] = {}
             if force_new_turn:
                 continue_kwargs["force_new_turn"] = True
+            images = _safe_image_attachments(body.get("images"))
             try:
                 result = await target.continue_session(
                     thread_id,
@@ -1986,7 +2031,7 @@ class WorkerLiveStreamServer:
                     service_tier=_optional_nonempty_string(
                         body.get("service_tier") or body.get("serviceTier")
                     ),
-                    images=_safe_image_attachments(body.get("images")),
+                    images=images,
                     **permission_kwargs,
                     **collaboration_kwargs,
                     **continue_kwargs,
@@ -1994,6 +2039,13 @@ class WorkerLiveStreamServer:
             except KeyError:
                 await self._send_json(writer, 404, {"error": "native session not found"})
                 return
+            if self._native_timeline is not None:
+                self._native_timeline.record_local_user_message(
+                    provider=provider_name,
+                    native_thread_id=thread_id,
+                    text=str(body.get("prompt", "")),
+                    images=images,
+                )
             await self._send_json(writer, 200, _json_object(result))
             return
         if method == "POST" and action == "steer" and len(parts) == 2:
@@ -2570,6 +2622,117 @@ class WorkerLiveStreamServer:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         await _send_response(writer, status, "application/json; charset=utf-8", body)
 
+    async def _send_native_timeline_json(
+        self,
+        writer: asyncio.StreamWriter,
+        provider: str,
+        native_thread_id: str,
+        *,
+        after: int = 0,
+        before: int | None = None,
+        limit: int = 100,
+        item_snapshot: bool = False,
+    ) -> None:
+        if self._native_timeline is None:
+            await self._send_json(
+                writer,
+                200,
+                {"provider": provider, "native_thread_id": native_thread_id, "events": []},
+            )
+            return
+        if item_snapshot:
+            events = self._native_timeline.list_item_events(
+                provider,
+                native_thread_id,
+                before=before,
+                limit=limit,
+            )
+        else:
+            events = self._native_timeline.list_events(
+                provider,
+                native_thread_id,
+                after=after,
+                before=before,
+                limit=limit,
+            )
+        first_sequence = events[0].sequence if events else int(before or after or 0)
+        previous_event_count = (
+            (
+                self._native_timeline.count_item_events_before(
+                    provider,
+                    native_thread_id,
+                    before=first_sequence,
+                )
+                if item_snapshot
+                else self._native_timeline.count_events_before(
+                    provider,
+                    native_thread_id,
+                    before=first_sequence,
+                )
+            )
+            if first_sequence
+            else 0
+        )
+        await self._send_json(
+            writer,
+            200,
+            {
+                "provider": provider,
+                "native_thread_id": native_thread_id,
+                "events": [event.to_json_dict() for event in events],
+                "previous_event_count": previous_event_count,
+            },
+        )
+
+    async def _send_native_timeline_sse(
+        self,
+        writer: asyncio.StreamWriter,
+        provider: str,
+        native_thread_id: str,
+        after_id: int,
+    ) -> None:
+        header = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream; charset=utf-8\r\n"
+            "Cache-Control: no-cache\r\n"
+            "X-Accel-Buffering: no\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+        writer.write(header.encode("utf-8"))
+        writer.write(b": connected\n\n")
+        await writer.drain()
+        if self._native_timeline is None:
+            return
+        latest = after_id
+        queue = self._native_timeline.subscribe(
+            provider=provider,
+            native_thread_id=native_thread_id,
+        )
+        try:
+            for event in self._native_timeline.list_events(
+                provider,
+                native_thread_id,
+                after=after_id,
+                limit=500,
+            ):
+                if event.sequence <= latest:
+                    continue
+                latest = event.sequence
+                await _write_native_timeline_sse(writer, event)
+            while not writer.is_closing():
+                event = await queue.get()
+                if event.sequence <= latest:
+                    continue
+                latest = event.sequence
+                await _write_native_timeline_sse(writer, event)
+        finally:
+            self._native_timeline.unsubscribe(
+                provider=provider,
+                native_thread_id=native_thread_id,
+                queue=queue,
+            )
+
     async def _send_html(
         self,
         writer: asyncio.StreamWriter,
@@ -2738,6 +2901,14 @@ async def _send_response(
 
 async def _write_sse(writer: asyncio.StreamWriter, event: WorkerStreamEvent) -> None:
     writer.write(format_sse_event(event))
+    await writer.drain()
+
+
+async def _write_native_timeline_sse(
+    writer: asyncio.StreamWriter,
+    event: NativeTimelineEvent,
+) -> None:
+    writer.write(format_native_timeline_sse_event(event))
     await writer.drain()
 
 
@@ -3280,6 +3451,13 @@ def format_sse_event(event: WorkerStreamEvent) -> bytes:
     return f"id: {event.id}\nevent: {event.kind}\ndata: {payload}\n\n".encode("utf-8")
 
 
+def format_native_timeline_sse_event(event: NativeTimelineEvent) -> bytes:
+    payload = json.dumps(event.to_json_dict(), ensure_ascii=False)
+    return (
+        f"id: {event.sequence}\nevent: {event.kind}\ndata: {payload}\n\n"
+    ).encode("utf-8")
+
+
 def _agent_id_from_path(path: str, *, prefix: str, suffix: str) -> int | None:
     if not path.startswith(prefix) or not path.endswith(suffix):
         return None
@@ -3287,6 +3465,23 @@ def _agent_id_from_path(path: str, *, prefix: str, suffix: str) -> int | None:
     if not raw.isdigit():
         return None
     return int(raw)
+
+
+def _native_timeline_route_from_path(path: str) -> tuple[str, str, bool] | None:
+    prefix = "/api/native/"
+    if not path.startswith(prefix):
+        return None
+    parts = [unquote(part) for part in path[len(prefix) :].split("/") if part]
+    if len(parts) == 4 and parts[1] == "sessions" and parts[3] == "timeline":
+        return parts[0], parts[2], False
+    if (
+        len(parts) == 5
+        and parts[1] == "sessions"
+        and parts[3] == "timeline"
+        and parts[4] == "stream"
+    ):
+        return parts[0], parts[2], True
+    return None
 
 
 def _relay_task_id_from_ui_path(path: str) -> int | None:
@@ -14160,8 +14355,7 @@ __ICONS_JS__
     const planPageExecute = document.getElementById("planPageExecute");
     const streamPathBase = "__STREAM_PATH__";
     const agentRunId = __AGENT_RUN_ID__;
-    const CURRENT_TURN_EVENT_LIMIT = 80;
-    const RECENT_EVENT_LIMIT = 80;
+    const NATIVE_TIMELINE_RECENT_LIMIT = 80;
     const OLDER_EVENT_LIMIT = 80;
     const OLDER_VISIBLE_PAGE_ATTEMPTS = 5;
     const MODEL_SETTINGS_STORAGE_KEY = "wlcodexNativeModelSettings";
@@ -16183,6 +16377,9 @@ __ICONS_JS__
     }
     function startNativeTranscriptSyncLoop() {
       if (nativeTranscriptSyncTimer) return;
+      if (nativeThreadId && !invalidNativeThreadId) {
+        syncNativeTranscript().then(pollEvents);
+      }
       nativeTranscriptSyncTimer = setInterval(pollEvents, 1000);
       document.addEventListener("visibilitychange", () => {
         if (!document.hidden) pollEvents();
@@ -16230,22 +16427,24 @@ __ICONS_JS__
       });
     }
     async function loadRecentEvents() {
-      let snapshot = await api(eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true}));
-      handleNativeSyncSnapshot(snapshot);
-      loadedEvents = normalizeEventList(snapshot.events);
-      if (
-        !loadedEvents.length ||
-        !hasLiveDisplayEvents(loadedEvents) ||
-        hasUnresolvedApprovalRequests(loadedEvents)
-      ) {
-        snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));
+      let snapshot;
+      if (nativeThreadId) {
+        snapshot = await api(nativeTimelinePath("limit=" + NATIVE_TIMELINE_RECENT_LIMIT));
         handleNativeSyncSnapshot(snapshot);
         loadedEvents = normalizeEventList(snapshot.events);
-      }
-      if (nativeThreadId && !hasNativePlanEvents(loadedEvents)) {
-        snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));
+      } else {
+        snapshot = await api(eventsPath("tail=" + NATIVE_TIMELINE_RECENT_LIMIT));
         handleNativeSyncSnapshot(snapshot);
-        loadedEvents = mergeDisplayEvents(loadedEvents, normalizeEventList(snapshot.events));
+        loadedEvents = normalizeEventList(snapshot.events);
+        if (
+          !loadedEvents.length ||
+          !hasLiveDisplayEvents(loadedEvents) ||
+          hasUnresolvedApprovalRequests(loadedEvents)
+        ) {
+          snapshot = await api(eventsPath("tail=" + NATIVE_TIMELINE_RECENT_LIMIT));
+          handleNativeSyncSnapshot(snapshot);
+          loadedEvents = normalizeEventList(snapshot.events);
+        }
       }
       previousEventCount = snapshot.previous_event_count || 0;
       oldestEventId = loadedEvents.length ? loadedEvents[0].id : 0;
@@ -16386,7 +16585,9 @@ __ICONS_JS__
         scheduleOlderTranscriptSync();
         for (let attempt = 0; attempt < OLDER_VISIBLE_PAGE_ATTEMPTS; attempt++) {
           if (!oldestEventId || !previousEventCount) break;
-          const snapshot = await api(eventsPath(`before=${oldestEventId}&limit=${OLDER_EVENT_LIMIT}`));
+          const snapshot = nativeThreadId
+            ? await loadNativeTimelineEvents(`before=${oldestEventId}&limit=${OLDER_EVENT_LIMIT}`)
+            : await api(eventsPath(`before=${oldestEventId}&limit=${OLDER_EVENT_LIMIT}`));
           handleNativeSyncSnapshot(snapshot);
           const older = normalizeEventList(snapshot.events);
           if (!older.length) {
@@ -16464,6 +16665,9 @@ __ICONS_JS__
       });
     }
     function streamPathWithCursor(afterId) {
+      if (nativeThreadId) {
+        return nativeTimelineStreamPath(afterId);
+      }
       const params = new URLSearchParams();
       if (token) params.set("token", token);
       if (afterId) params.set("after", String(afterId));
@@ -16471,6 +16675,22 @@ __ICONS_JS__
       if (PROVIDER) params.set("native_provider", PROVIDER);
       const suffix = params.toString();
       return suffix ? streamPathBase + "?" + suffix : streamPathBase;
+    }
+    function nativeTimelineStreamPath(afterId) {
+      const params = new URLSearchParams();
+      if (token) params.set("token", token);
+      if (afterId) params.set("after", String(afterId));
+      const suffix = params.toString();
+      const base = `${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/timeline/stream`;
+      return suffix ? base + "?" + suffix : base;
+    }
+    function nativeTimelinePath(params) {
+      const search = new URLSearchParams(params);
+      if (token) search.set("token", token);
+      return `${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/timeline?${search.toString()}`;
+    }
+    function loadNativeTimelineEvents(params) {
+      return api(nativeTimelinePath(params));
     }
     function eventsPath(params, options = {}) {
       const search = new URLSearchParams(params);
@@ -16483,7 +16703,9 @@ __ICONS_JS__
       if (pollInFlight) return;
       pollInFlight = true;
       try {
-        const snapshot = await api(eventsPath(`after=${latestEventId}&limit=100`));
+        const snapshot = nativeThreadId
+          ? await api(nativeTimelinePath(`after=${latestEventId}&limit=100`))
+          : await api(eventsPath("after=" + latestEventId + "&limit=100"));
         handleNativeSyncSnapshot(snapshot);
         const nextEvents = normalizeEventList(snapshot.events);
         for (const event of nextEvents) renderLiveEvent(event);

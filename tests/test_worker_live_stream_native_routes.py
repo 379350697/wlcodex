@@ -22,6 +22,7 @@ from wlcodex.live_stream.server import (
     _plugin_icon_data_url,
 )
 from wlcodex.native_agents.provider import NativeAgentRegistry
+from wlcodex.native_timeline import NativeTimelineStore
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import RuntimeEvent
 
@@ -1625,6 +1626,7 @@ async def test_native_continue_posts_json_body_and_returns_control_result(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(store._conn)
     controller = FakeNativeController()
     body = json.dumps({"prompt": "keep going"})
     server = WorkerLiveStreamServer(
@@ -1632,6 +1634,7 @@ async def test_native_continue_posts_json_body_and_returns_control_result(
         port=0,
         hub=WorkerLiveStreamHub(store),
         native_controller=controller,
+        native_timeline=timeline_store,
         access_token="secret",
     )
     await server.start()
@@ -1658,6 +1661,10 @@ async def test_native_continue_posts_json_body_and_returns_control_result(
         "status": "ok",
     }
     assert controller.calls == [("continue_session", "thread-1", "keep going")]
+    items = timeline_store.list_items("codex", "thread-1")
+    assert [(item.role, item.status, item.text) for item in items] == [
+        ("user", "pending", "keep going")
+    ]
 
 
 @pytest.mark.asyncio
@@ -3627,6 +3634,371 @@ async def test_worker_events_poll_does_not_sync_native_thread(
 
 
 @pytest.mark.asyncio
+async def test_native_timeline_endpoint_replays_visible_messages_not_raw_tail(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    for index in range(120):
+        _append_worker_event(
+            runtime_store,
+            agent_run_id=42,
+            event_type="provider.raw.frame",
+            native_thread_id="thread-1",
+            native_turn_id="turn-1",
+            delta=f"raw-{index}",
+        )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="user.message.received",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "用户真实消息",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="provider.display.completed",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "agent-1",
+                "text": "助手真实回复",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1/timeline?after=0&limit=20 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [event["kind"] for event in body["events"]] == [
+        "user_message",
+        "message_completed",
+    ]
+    assert body["events"][0]["payload"]["text"] == "用户真实消息"
+    assert body["events"][1]["payload"]["text"] == "助手真实回复"
+    assert all(event["type"] != "provider.raw.frame" for event in body["events"])
+
+
+@pytest.mark.asyncio
+async def test_native_timeline_endpoint_initial_snapshot_compacts_delta_burst(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="user.message.received",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "用户真实消息",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    for index in range(120):
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type="provider.display.delta",
+                aggregate_type="agent_run",
+                aggregate_id="42",
+                correlation_id="agent:42",
+                source="codex",
+                actor="codex_native",
+                visibility="user",
+                payload={
+                    "native_thread_id": "thread-1",
+                    "native_turn_id": "turn-1",
+                    "itemId": "agent-1",
+                    "delta": f"片段{index:03d}",
+                    "provider": "codex",
+                },
+                occurred_at="2026-05-30T00:00:00+00:00",
+                agent_run_id=42,
+            )
+        )
+    full_text = "最终回复" + ("内容" * 80)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="provider.display.completed",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "agent-1",
+                "text": full_text,
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1/timeline?limit=20 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [event["kind"] for event in body["events"]] == [
+        "user_message",
+        "message_completed",
+    ]
+    assert body["events"][1]["id"] == 122
+    assert body["events"][1]["payload"]["text"] == full_text
+
+
+@pytest.mark.asyncio
+async def test_native_timeline_stream_uses_sequence_cursor_and_live_events(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="user.message.received",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "第一条",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    reader = writer = None
+    try:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        writer.write(
+            b"GET /api/native/codex/sessions/thread-1/timeline/stream?after=0 HTTP/1.1\r\n"
+            b"Host: test\r\nAuthorization: Bearer secret\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        await writer.drain()
+        await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        initial = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        assert b"id: 1\n" in initial
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type="provider.display.delta",
+                aggregate_type="agent_run",
+                aggregate_id="42",
+                correlation_id="agent:42",
+                source="codex",
+                actor="codex_native",
+                visibility="user",
+                payload={
+                    "native_thread_id": "thread-1",
+                    "native_turn_id": "turn-1",
+                    "itemId": "agent-1",
+                    "delta": "第二条",
+                    "provider": "codex",
+                },
+                occurred_at="2026-05-30T00:00:01+00:00",
+                agent_run_id=42,
+            )
+        )
+        rest = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await server.stop()
+
+    assert b"id: 2\n" in rest
+    assert b"event: text_delta\n" in rest
+    assert "第二条" in rest.decode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_native_timeline_stream_does_not_drop_event_between_replay_and_subscribe(
+    tmp_path: Path,
+) -> None:
+    class GapTimelineStore(NativeTimelineStore):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.inject_gap_event = True
+
+        def list_events(self, *args: Any, **kwargs: Any) -> list[Any]:
+            events = super().list_events(*args, **kwargs)
+            if self.inject_gap_event:
+                self.inject_gap_event = False
+                self.project_runtime_event(
+                    RuntimeEvent(
+                        schema_version=1,
+                        event_type="provider.display.delta",
+                        aggregate_type="agent_run",
+                        aggregate_id="42",
+                        correlation_id="agent:42",
+                        source="codex",
+                        actor="codex_native",
+                        visibility="user",
+                        payload={
+                            "native_thread_id": "thread-1",
+                            "native_turn_id": "turn-1",
+                            "itemId": "agent-1",
+                            "delta": "不会丢的片段",
+                            "provider": "codex",
+                        },
+                        occurred_at="2026-05-30T00:00:01+00:00",
+                        agent_run_id=42,
+                    )
+                )
+            return events
+
+    runtime_store = _store(tmp_path)
+    timeline_store = GapTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="user.message.received",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "第一条",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    reader = writer = None
+    try:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        writer.write(
+            b"GET /api/native/codex/sessions/thread-1/timeline/stream?after=0 HTTP/1.1\r\n"
+            b"Host: test\r\nAuthorization: Bearer secret\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        await writer.drain()
+        await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        first = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        second = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await server.stop()
+
+    assert b"id: 1\n" in first
+    assert b"id: 2\n" in second
+    assert "不会丢的片段" in second.decode("utf-8")
+
+
+@pytest.mark.asyncio
 async def test_worker_events_tail_filters_to_current_native_turn(
     tmp_path: Path,
 ) -> None:
@@ -4446,7 +4818,7 @@ async def test_worker_live_page_shows_approval_resolution_state(
 
 
 @pytest.mark.asyncio
-async def test_worker_live_page_loads_recent_tail_and_folds_history(
+async def test_worker_live_page_loads_native_timeline_and_folds_history(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -4469,13 +4841,13 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert "CURRENT_TURN_EVENT_LIMIT" in response
-    assert "const CURRENT_TURN_EVENT_LIMIT = 80;" in response
-    assert "RECENT_EVENT_LIMIT" in response
+    assert "NATIVE_TIMELINE_RECENT_LIMIT" in response
     assert "OLDER_VISIBLE_PAGE_ATTEMPTS" in response
-    assert 'eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true})' in response
+    assert 'nativeTimelinePath("limit=" + NATIVE_TIMELINE_RECENT_LIMIT)' in response
+    assert 'eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true})' not in response
     assert "function syncNativeTranscript" in response
     assert '`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`' in response
+    assert "syncNativeTranscript().then(pollEvents);" in response
     assert "let nativeSyncInFlight = false;" not in response
     assert "function startNativeTranscriptSyncLoop()" in response
     assert "setInterval(pollEvents, 1000)" in response
@@ -4496,8 +4868,8 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "model.usage.updated" in response
     assert "function normalizeEventList(sourceEvents)" in response
     assert "function loadRecentEvents" in response
-    assert "if (nativeThreadId && !hasNativePlanEvents(loadedEvents)) {" in response
-    assert 'snapshot = await api(eventsPath("tail=" + RECENT_EVENT_LIMIT));' in response
+    assert "if (nativeThreadId) {" in response
+    assert "loadNativeTimelineEvents" in response
     assert "loadedEvents = normalizeEventList(snapshot.events);" in response
     assert "function hasNativePlanEvents(sourceEvents)" in response
     assert "hasUnresolvedApprovalRequests(loadedEvents)\n        ) && nativeTurnId" not in response
@@ -4511,11 +4883,13 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "function pollEvents" in response
     assert "startNativeTranscriptSyncLoop();" in response
     assert "const nextEvents = normalizeEventList(snapshot.events);" in response
+    assert "function nativeTimelinePath(params)" in response
+    assert "eventsPath(`after=${latestEventId}&limit=100`)" not in response
+    assert "nativeTimelinePath(`after=${latestEventId}&limit=100`)" in response
     assert "function eventsPath(params, options = {})" in response
     assert 'if (nativeThreadId) search.set("native_thread_id", nativeThreadId);' in response
-    assert "eventsPath(`after=${latestEventId}&limit=100`)" in response
     assert "function streamPathWithCursor(afterId)" in response
-    assert 'if (nativeThreadId) params.set("native_thread_id", nativeThreadId);' in response
+    assert 'return nativeTimelineStreamPath(afterId);' in response
     assert 'if (PROVIDER) params.set("native_provider", PROVIDER);' in response
     assert "let streamReconnectTimer = null;" in response
     assert "function closeLiveEventSource()" in response

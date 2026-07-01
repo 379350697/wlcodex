@@ -219,9 +219,12 @@ def _create_live_stream_components(
         return None
 
     from wlcodex.live_stream import WorkerLiveStreamHub, WorkerLiveStreamServer
+    from wlcodex.native_timeline import NativeTimelineStore
 
     hub = WorkerLiveStreamHub(runtime_store)
     runtime_store.add_projector(hub.publish)
+    native_timeline = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(native_timeline.project_runtime_event)
     native_client = None
     native_controller = None
     native_registry = None
@@ -464,6 +467,7 @@ def _create_live_stream_components(
             config.live_stream.allow_unauthenticated_loopback
         ),
         native_transcript_mirror=native_transcript_mirror,
+        native_timeline=native_timeline,
         workflow_service=workflow_service,
         relay_service=relay_service,
     )
