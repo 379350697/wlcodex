@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import suppress
 import hmac
 import json
 import re
@@ -276,6 +277,15 @@ def _static_css_bundle(relative: str) -> bytes:
     return b"\n".join(chunks)
 
 
+async def _close_stream_writer(writer: Any, *, timeout: float = 0.5) -> None:
+    with suppress(ConnectionError, RuntimeError, OSError):
+        writer.close()
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout=timeout)
+    except (asyncio.TimeoutError, ConnectionError, RuntimeError, OSError):
+        pass
+
+
 class RequestBodyTooLarge(ValueError):
     pass
 
@@ -371,9 +381,7 @@ class WorkerLiveStreamServer:
         try:
             await self._handle_client_request(reader, writer)
         finally:
-            if not writer.is_closing():
-                writer.close()
-                await writer.wait_closed()
+            await _close_stream_writer(writer)
             if task is not None:
                 self._client_tasks.discard(task)
 
@@ -389,8 +397,7 @@ class WorkerLiveStreamServer:
                 timeout=_REQUEST_TIMEOUT_SECONDS,
             )
             if not request_line:
-                writer.close()
-                await writer.wait_closed()
+                await _close_stream_writer(writer)
                 return
             method, target, version = (
                 request_line.decode("utf-8", errors="replace").strip().split(" ", 2)
@@ -2703,10 +2710,11 @@ async def _send_response(
         "Connection: close\r\n"
         "\r\n"
     )
-    writer.write(header.encode("utf-8") + body)
-    await writer.drain()
-    writer.close()
-    await writer.wait_closed()
+    try:
+        writer.write(header.encode("utf-8") + body)
+        await writer.drain()
+    finally:
+        await _close_stream_writer(writer)
 
 
 async def _write_sse(writer: asyncio.StreamWriter, event: WorkerStreamEvent) -> None:
@@ -2996,11 +3004,7 @@ async def _send_relay_sse(
         await writer.drain()
     except (ConnectionError, RuntimeError):
         pass
-    writer.close()
-    try:
-        await asyncio.wait_for(writer.wait_closed(), timeout=0.5)
-    except (asyncio.TimeoutError, ConnectionError, RuntimeError):
-        pass
+    await _close_stream_writer(writer)
 
 
 async def _write_relay_sse_payload(

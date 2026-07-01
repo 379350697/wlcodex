@@ -14,6 +14,7 @@ from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.server import (
     WorkerLiveStreamServer,
     _MAX_BODY_BYTES,
+    _close_stream_writer,
     _live_page,
     _native_app_manifest,
     _native_codex_page,
@@ -29,6 +30,31 @@ _FAKE_SESSION_METADATA = {
     "effort": "high",
     "service_tier": "fast",
 }
+
+
+class AlreadyClosingWriter:
+    def __init__(self) -> None:
+        self.close_calls = 0
+        self.wait_closed_calls = 0
+
+    def is_closing(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+    async def wait_closed(self) -> None:
+        self.wait_closed_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_close_stream_writer_waits_for_already_closing_writer() -> None:
+    writer = AlreadyClosingWriter()
+
+    await _close_stream_writer(writer)  # type: ignore[arg-type]
+
+    assert writer.close_calls == 1
+    assert writer.wait_closed_calls == 1
 
 
 def test_plugin_icon_data_url_resolves_paths_from_plugin_root(tmp_path: Path) -> None:
