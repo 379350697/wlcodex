@@ -2458,6 +2458,7 @@ def test_worker_live_page_matches_native_codex_mobile_composer_layout() -> None:
     response = _live_page(42, native_provider="codex")
 
     assert ".codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 6px; padding: 12px 18px 20px;" in response
+    assert "border-top: 0;" in response
     assert '<div class="attachment-strip" id="attachmentStrip" hidden></div>\n      <div class="composer-tools">' in response
     assert ".composer-tools { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 0;" in response
     assert ".composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(128px, 1.2fr) minmax(96px, 1fr) minmax(96px, 1fr); gap: 8px; min-width: 0; max-width: 100%;" in response
