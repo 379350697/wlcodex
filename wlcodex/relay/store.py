@@ -281,8 +281,25 @@ class RelayStore:
         if event_type == "role.native_event":
             stream_event = stream_event_from_runtime(runtime_event)
             hydrated.setdefault("kind", stream_event.kind)
-            hydrated["native_event"] = stream_event.to_json_dict()
-            hydrated["payload"] = stream_event.payload
+            text = _runtime_payload_text(runtime_payload)
+            if text:
+                if stream_event.kind in {"text_delta", "reasoning_delta", "command_output"}:
+                    hydrated.setdefault("delta", text)
+                else:
+                    hydrated.setdefault("text", text)
+            for key in (
+                "status",
+                "title",
+                "command",
+                "exit_code",
+                "approval_id",
+                "request_id",
+                "codexRequestId",
+                "provider",
+            ):
+                value = runtime_payload.get(key)
+                if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+                    hydrated.setdefault(key, value)
             return hydrated
         return hydrated
 

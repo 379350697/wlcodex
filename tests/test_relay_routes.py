@@ -184,6 +184,33 @@ async def _read_until(
             pass
 
 
+async def _read_for(host: str, port: int, request: str, *, duration: float = 0.2) -> str:
+    reader, writer = await asyncio.open_connection(host, port)
+    writer.write(request.encode("utf-8"))
+    await writer.drain()
+    chunks: list[bytes] = []
+    deadline = asyncio.get_running_loop().time() + duration
+    try:
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                chunk = await asyncio.wait_for(reader.read(65536), timeout=remaining)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+    finally:
+        writer.close()
+        try:
+            await asyncio.wait_for(writer.wait_closed(), timeout=0.1)
+        except TimeoutError:
+            pass
+
+
 def _json_body(response: str) -> dict[str, Any]:
     return json.loads(response.split("\r\n\r\n", 1)[1])
 
@@ -931,6 +958,52 @@ async def test_relay_events_stream_rehydrates_persisted_runtime_delta_after_rest
 
 
 @pytest.mark.asyncio
+async def test_relay_events_stream_caps_initial_replay_for_large_history(
+    tmp_path: Path,
+) -> None:
+    service = _relay_service(tmp_path)
+    task = service.create_task(
+        title="Large history task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    for index in range(125):
+        service._events.emit(
+            task.id,
+            "role.status",
+            role="director",
+            payload={"status": "streaming", "index": index},
+        )
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_registry=service._registry,
+        relay_service=service,
+    )
+    await server.start()
+    try:
+        response = await _read_for(
+            server.host,
+            server.port,
+            f"GET /api/relay/tasks/{task.id}/events HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Accept: text/event-stream\r\n"
+            "Connection: close\r\n\r\n",
+            duration=0.2,
+        )
+    finally:
+        await server.stop()
+
+    assert response.count("\nevent: ") == 101
+    assert response.count("event: role.status") <= 100
+    assert "event: timeline.truncated" in response
+    assert '"remaining": 28' in response
+
+
+@pytest.mark.asyncio
 async def test_relay_events_stream_maps_native_runtime_delta_to_native_role_event(
     tmp_path: Path,
 ) -> None:
@@ -1052,14 +1125,18 @@ async def test_relay_sse_snapshot_accepts_durable_valid_role_completion(
         dispatch_next=False,
     )
     await service.dispatch_role(task.id, "implementer")
+    implementer_job = next(
+        job for job in service.get_task(task.id).role_jobs if job.role == "implementer"
+    )
+    agent_run_id = int(implementer_job.agent_run_id or 0)
     runtime_store = RuntimeEventStore(service._store._ledger._conn)
     runtime_store.append(
         RuntimeEvent(
             schema_version=1,
             event_type=EventType.MODEL_MESSAGE_COMPLETED,
             aggregate_type=AggregateType.AGENT_RUN,
-            aggregate_id="101",
-            correlation_id="corr-101",
+            aggregate_id=str(agent_run_id),
+            correlation_id=f"corr-{agent_run_id}",
             source=EventSource.CLAUDE,
             actor="claude",
             visibility=Visibility.USER,
@@ -1079,7 +1156,7 @@ async def test_relay_sse_snapshot_accepts_durable_valid_role_completion(
                 """
             },
             occurred_at=now_iso(),
-            agent_run_id=101,
+            agent_run_id=agent_run_id,
         )
     )
 
@@ -1309,6 +1386,66 @@ async def test_relay_live_events_subscribe_to_agent_run_created_after_connect(
     assert "id: native-" not in response
     assert '"role": "director"' in response
     assert '"delta": "late worker delta after connect"' in response
+
+
+@pytest.mark.asyncio
+async def test_relay_events_stream_does_not_worker_snapshot_terminal_task(
+    tmp_path: Path,
+) -> None:
+    service = _relay_service(tmp_path)
+    task = service.create_task(
+        title="Terminal task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    detail = service.get_task(task.id)
+    director_job = next(job for job in detail.role_jobs if job.role == "director")
+    agent_run_id = int(director_job.agent_run_id or 0)
+    service._store.update_role_status(task.id, "director", "passed")
+    service._store.update_task_status(task.id, "completed")
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id=str(agent_run_id),
+            correlation_id=f"corr-{agent_run_id}",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"delta": "old terminal worker delta"},
+            occurred_at=now_iso(),
+            agent_run_id=agent_run_id,
+        )
+    )
+    hub = WorkerLiveStreamHub(runtime_store)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=hub,
+        native_registry=service._registry,
+        relay_service=service,
+    )
+    await server.start()
+    try:
+        response = await _read_for(
+            server.host,
+            server.port,
+            f"GET /api/relay/tasks/{task.id}/events HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Accept: text/event-stream\r\n"
+            "Connection: close\r\n\r\n",
+            duration=0.2,
+        )
+    finally:
+        await server.stop()
+
+    assert "old terminal worker delta" not in response
+    assert "event: role.native_event" not in response
+    assert hub.subscriber_count(agent_run_id=agent_run_id) == 0
 
 
 @pytest.mark.asyncio

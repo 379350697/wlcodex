@@ -617,6 +617,7 @@ class RelayService:
             completed = _completed_role_envelope_event(events)
             if completed is None:
                 continue
+            self._project_native_event(completed, task_id=task_id, role=role)
             applied = await self._apply_native_completion_output(
                 task_id,
                 role,
@@ -2793,6 +2794,7 @@ class RelayService:
             return None
         if _is_runtime_compatibility_projection(runtime_event):
             return None
+        self._project_native_event(runtime_event, task_id=task_id, role=role)
         if str(getattr(runtime_event, "event_type", "") or "") == "approval.requested":
             self._handle_provider_approval_requested(
                 task_id,
@@ -3246,10 +3248,16 @@ class RelayService:
     def _active_native_task_details(self) -> list[Any]:
         details: list[Any] = []
         seen: set[int] = set()
-        for summary in self._store.list_tasks(status="running"):
+        for summary in self._store.list_tasks():
             try:
                 detail = self._store.get_task_detail(summary.task_id)
             except KeyError:
+                continue
+            has_active_native_role = any(
+                job.status == "streaming" and job.agent_run_id
+                for job in detail.role_jobs
+            )
+            if not has_active_native_role:
                 continue
             seen.add(int(detail.task.id))
             details.append(detail)

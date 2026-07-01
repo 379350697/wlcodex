@@ -78,6 +78,7 @@ from wlcodex.relay.work_log_projection import (
 _REQUEST_TIMEOUT_SECONDS = 30.0
 _MAX_HEADER_BYTES = 16 * 1024
 _MAX_BODY_BYTES = 24 * 1024 * 1024
+_RELAY_SSE_INITIAL_EVENT_LIMIT = 100
 _MAX_NATIVE_IMAGE_ATTACHMENTS = 8
 _MAX_RELAY_TEXT_ATTACHMENTS = 5
 _MAX_RELAY_TEXT_ATTACHMENT_CHARS = 80_000
@@ -2770,6 +2771,20 @@ def _offer_json_queue(
         pass
 
 
+def _relay_active_worker_jobs(detail: Any | None) -> list[Any]:
+    if detail is None:
+        return []
+    active_statuses = {"queued", "streaming", "waiting"}
+    jobs: list[Any] = []
+    for job in getattr(detail, "role_jobs", []) or []:
+        if getattr(job, "agent_run_id", None) is None:
+            continue
+        status = str(getattr(job, "status", "") or "").strip().lower()
+        if status in active_statuses or bool(getattr(job, "turn_running", False)):
+            jobs.append(job)
+    return jobs
+
+
 async def _send_relay_sse(
     writer: asyncio.StreamWriter,
     events: list[Any],
@@ -2792,7 +2807,9 @@ async def _send_relay_sse(
     writer.write(b": connected\n\n")
     seen_relay_sequences: set[int] = set()
     seen_worker_events: set[tuple[str, int, str]] = set()
-    for event in events:
+    initial_events = list(events[:_RELAY_SSE_INITIAL_EVENT_LIMIT])
+    remaining_event_count = max(0, len(events) - len(initial_events))
+    for event in initial_events:
         payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
         sequence = int(payload.get("sequence") or 0)
         if sequence:
@@ -2814,20 +2831,41 @@ async def _send_relay_sse(
             event_type=event_type,
             payload=payload,
         )
-    role_jobs = [
-        job
-        for job in getattr(detail, "role_jobs", [])
-        if getattr(job, "agent_run_id", None) is not None
-    ]
+    if remaining_event_count:
+        await _write_relay_sse_payload(
+            writer,
+            event_id=str(max(seen_relay_sequences) if seen_relay_sequences else ""),
+            event_type="timeline.truncated",
+            payload={
+                "event_type": "timeline.truncated",
+                "remaining": remaining_event_count,
+                "limit": _RELAY_SSE_INITIAL_EVENT_LIMIT,
+            },
+        )
+    role_jobs = _relay_active_worker_jobs(detail)
     task_id = int(getattr(getattr(detail, "task", None), "id", 0) or 0)
     latest_by_agent: dict[int, int] = {}
+    for event in initial_events:
+        payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+        event_payload = dict(payload.get("payload") or {})
+        agent_run_id = int(event_payload.get("agent_run_id") or 0)
+        runtime_event_id = int(event_payload.get("runtime_event_id") or 0)
+        if agent_run_id and runtime_event_id:
+            latest_by_agent[agent_run_id] = max(
+                latest_by_agent.get(agent_run_id, 0),
+                runtime_event_id,
+            )
     if hub is not None:
         for job in role_jobs:
             agent_run_id = int(job.agent_run_id)
-            latest_by_agent[agent_run_id] = 0
-            for worker_event in hub.snapshot(agent_run_id=agent_run_id, after_id=0):
+            after_id = latest_by_agent.get(agent_run_id, 0)
+            for worker_event in hub.snapshot(
+                agent_run_id=agent_run_id,
+                after_id=after_id,
+                limit=_RELAY_SSE_INITIAL_EVENT_LIMIT,
+            ):
                 latest_by_agent[agent_run_id] = max(
-                    latest_by_agent[agent_run_id],
+                    latest_by_agent.get(agent_run_id, 0),
                     int(worker_event.id),
                 )
                 relay_event = _relay_worker_payload(
@@ -2837,13 +2875,15 @@ async def _send_relay_sse(
                 )
                 if relay_event is None:
                     continue
-                event_type, payload = relay_event
-                if (
+                worker_event_type, _payload = relay_event
+                worker_key = (
                     str(job.role),
                     int(worker_event.id),
-                    event_type,
-                ) in seen_worker_events:
+                    worker_event_type,
+                )
+                if worker_key in seen_worker_events:
                     continue
+                seen_worker_events.add(worker_key)
                 relay_sequence = await _write_relay_worker_event(
                     writer,
                     task_id=int(detail.task.id),
@@ -2869,7 +2909,7 @@ async def _send_relay_sse(
                     refreshed = relay_service.get_task(task_id)
                 except Exception:
                     refreshed = None
-            for refreshed_job in getattr(refreshed, "role_jobs", []) or []:
+            for refreshed_job in _relay_active_worker_jobs(refreshed):
                 agent_run_id_value = getattr(refreshed_job, "agent_run_id", None)
                 if agent_run_id_value is None:
                     continue
@@ -2878,6 +2918,7 @@ async def _send_relay_sse(
                 for worker_event in hub.snapshot(
                     agent_run_id=agent_run_id,
                     after_id=latest_by_agent.get(agent_run_id, 0),
+                    limit=_RELAY_SSE_INITIAL_EVENT_LIMIT,
                 ):
                     latest_by_agent[agent_run_id] = max(
                         latest_by_agent.get(agent_run_id, 0),
@@ -3042,10 +3083,89 @@ async def _write_relay_sse_payload(
     event_type: str,
     payload: dict[str, Any],
 ) -> None:
+    payload = _compact_relay_sse_payload(event_type, payload)
     writer.write(f"id: {event_id}\n".encode("utf-8"))
     writer.write(f"event: {event_type}\n".encode("utf-8"))
     writer.write(("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8"))
     await writer.drain()
+
+
+def _compact_relay_sse_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if event_type != "role.native_event":
+        return payload
+    compacted = dict(payload)
+    nested = compacted.get("payload")
+    if isinstance(nested, dict) and (
+        "native_event" in nested or "payload" in nested or "runtime_event_id" in nested
+    ):
+        compacted["payload"] = _compact_relay_native_event_payload(nested)
+        return compacted
+    return _compact_relay_native_event_payload(compacted)
+
+
+def _compact_relay_native_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    compacted: dict[str, Any] = {}
+    native_event = payload.get("native_event")
+    native_payload = native_event.get("payload") if isinstance(native_event, dict) else None
+    raw_payload = payload.get("payload")
+    source_payload = raw_payload if isinstance(raw_payload, dict) else {}
+    if isinstance(native_payload, dict):
+        source_payload = {**native_payload, **source_payload}
+    for key in (
+        "role",
+        "agent_run_id",
+        "runtime_event_id",
+        "round_id",
+        "kind",
+        "itemId",
+        "item_id",
+        "stream_key",
+        "native_message_id",
+        "message_id",
+        "native_turn_id",
+        "turnId",
+        "turn_id",
+        "active_turn_id",
+    ):
+        value = payload.get(key)
+        if value in (None, "") and isinstance(native_event, dict):
+            if key == "runtime_event_id":
+                value = native_event.get("id")
+            else:
+                value = native_event.get(key)
+        if value in (None, ""):
+            value = source_payload.get(key)
+        if value not in (None, ""):
+            compacted[key] = value
+    kind = str(compacted.get("kind") or "").strip()
+    text = _relay_native_display_text(source_payload)
+    if text:
+        if kind in {"text_delta", "reasoning_delta", "command_output"}:
+            compacted["delta"] = text
+        else:
+            compacted["text"] = text
+    for key in (
+        "status",
+        "title",
+        "command",
+        "exit_code",
+        "approval_id",
+        "request_id",
+        "codexRequestId",
+        "provider",
+    ):
+        value = source_payload.get(key)
+        if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+            compacted.setdefault(key, value)
+    return compacted
+
+
+def _relay_native_display_text(payload: dict[str, Any]) -> str:
+    for key in ("delta", "text", "summary", "content", "message", "output", "chunk", "body"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 async def _write_relay_worker_event(

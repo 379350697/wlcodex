@@ -144,6 +144,75 @@ def test_relay_runtime_delta_stream_event_persists_reference_not_delta_text(
     }
 
 
+def test_relay_native_stream_event_replay_keeps_runtime_payload_out_of_main_stream(
+    tmp_path: Path,
+) -> None:
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import (
+        AggregateType,
+        EventSource,
+        EventType,
+        RuntimeEvent,
+        Visibility,
+        now_iso,
+    )
+
+    ledger = _ledger(tmp_path)
+    store = RelayStore(ledger)
+    task = store.create_task(
+        title="Relay stream",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    runtime_event = RuntimeEventStore(ledger._conn).append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CODEX,
+            actor="codex",
+            visibility=Visibility.USER,
+            payload={
+                "delta": "visible transcript text",
+                "debug_blob": "large runtime debug payload should stay behind details API",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+    bus = RelayEventBus(store)
+
+    bus.emit(
+        task.id,
+        "role.native_event",
+        role="director",
+        payload={
+            "runtime_event_id": runtime_event.id,
+            "agent_run_id": 101,
+            "kind": "text_delta",
+            "payload": {
+                "delta": "visible transcript text",
+                "debug_blob": "large runtime debug payload should stay behind details API",
+            },
+            "native_event": {"id": runtime_event.id, "payload": runtime_event.payload},
+        },
+    )
+
+    replayed = RelayEventBus(RelayStore(ledger)).list_events(task.id)
+
+    assert replayed[0].payload["runtime_event_id"] == runtime_event.id
+    assert replayed[0].payload["kind"] == "text_delta"
+    assert replayed[0].payload["delta"] == "visible transcript text"
+    assert "native_event" not in replayed[0].payload
+    assert "payload" not in replayed[0].payload
+    assert "large runtime debug payload should stay behind details API" not in str(
+        replayed[0].payload
+    )
+
+
 def test_backfill_does_not_refresh_task_activity_order(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path)
     store = RelayStore(ledger)
