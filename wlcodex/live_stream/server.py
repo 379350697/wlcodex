@@ -11091,18 +11091,17 @@ __MARVIS_CSS_LINK__  <style>
     .attach-button:before, .attach-button:after { content: ""; position: absolute; left: 50%; top: 50%; width: 24px; height: 2.6px; border-radius: 999px; background: currentColor; transform: translate(-50%, -50%); }
     .attach-button:after { width: 2.6px; height: 24px; }
     button.attach-button:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
-    .composer-action-menu { position: fixed; left: 26px; right: 72px; bottom: calc(110px + env(safe-area-inset-bottom)); max-height: min(58vh, 690px); overflow-y: auto; border: 1px solid #343434; border-radius: 26px; background: #202022; box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 24px 38px 28px; z-index: 20; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.35) transparent; }
+    .composer-action-menu { position: fixed; left: 26px; right: 72px; bottom: calc(110px + env(safe-area-inset-bottom)); max-height: min(58vh, 690px); overflow-y: auto; border: 1px solid #343434; border-radius: 26px; background: #202022; box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 26px 38px 28px; z-index: 20; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.35) transparent; }
     .composer-action-menu::-webkit-scrollbar { width: 3px; }
     .composer-action-menu::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(255,255,255,.35); }
     .composer-action-menu.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
     .composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 22px; align-items: center; width: 100%; min-height: 74px; padding: 8px 0; border: 0; border-radius: 14px; background: transparent; color: var(--btn-primary-bg); text-align: left; }
     button.composer-menu-item:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
-    .composer-menu-action { min-height: 82px; }
-    .composer-menu-action .composer-menu-desc { display: none; }
+    .composer-menu-action { min-height: 86px; }
     .composer-menu-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 0; background: transparent; color: var(--btn-primary-bg); font-size: 0; font-weight: var(--weight-black); }
-    .composer-menu-icon svg { width: 34px; height: 34px; stroke-width: 2.15; }
-    .composer-menu-title { display: block; min-width: 0; color: var(--btn-primary-bg); font-size: 20px; line-height: 1.18; font-weight: var(--weight-black); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .composer-menu-desc { display: block; margin-top: 8px; min-width: 0; color: var(--text-dim); font-size: 15px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-icon svg { width: 36px; height: 36px; stroke-width: 2.05; }
+    .composer-menu-title { display: block; min-width: 0; color: var(--btn-primary-bg); font-size: 22px; line-height: 1.14; font-weight: var(--weight-black); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-desc { display: block; margin-top: 7px; min-width: 0; color: var(--text-dim); font-size: 17px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .composer-menu-check { color: var(--btn-primary-bg); font-size: 18px; font-weight: var(--weight-black); }
     .composer-menu-section { margin: 8px 0 12px; padding-top: 20px; border-top: 1px solid #3a3a3d; color: var(--text-dim); font-size: 16px; line-height: 1.2; font-weight: var(--weight-medium); }
     .plugin-list { display: grid; gap: 2px; }
@@ -13533,19 +13532,18 @@ __MARVIS_CSS_LINK__  <style>
     .setting-option-check { color: var(--btn-primary-bg); font-weight: var(--weight-black); }
     .attach-button { width: 44px; min-height: 44px; display: grid; place-items: center; padding: 0; border-radius: 50%; background: #242426; color: var(--btn-primary-bg); border: 1px solid #343434; font-size: 0; line-height: 1; }
     .attach-button svg { width: 29px; height: 29px; stroke-width: 2.15; }
-    .composer-action-menu { position: fixed; left: 26px; right: 72px; bottom: calc(110px + env(safe-area-inset-bottom)); max-height: min(58vh, 690px); overflow-y: auto; border: 1px solid #343434; border-radius: 26px; background: #202022; box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 24px 38px 28px; z-index: 20; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.35) transparent; }
+    .composer-action-menu { position: fixed; left: 26px; right: 72px; bottom: calc(110px + env(safe-area-inset-bottom)); max-height: min(58vh, 690px); overflow-y: auto; border: 1px solid #343434; border-radius: 26px; background: #202022; box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 26px 38px 28px; z-index: 20; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.35) transparent; }
     .composer-action-menu::-webkit-scrollbar { width: 3px; }
     .composer-action-menu::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(255,255,255,.35); }
     .composer-action-menu.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
     .composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 22px; align-items: center; width: 100%; min-height: 74px; padding: 8px 0; border: 0; border-radius: 14px; background: transparent; color: var(--btn-primary-bg); text-align: left; }
     button.composer-menu-item:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
     .composer-menu-item:disabled { opacity: .82; }
-    .composer-menu-action { min-height: 82px; }
-    .composer-menu-action .composer-menu-desc { display: none; }
+    .composer-menu-action { min-height: 86px; }
     .composer-menu-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 0; background: transparent; color: var(--btn-primary-bg); font-size: 0; font-weight: var(--weight-black); }
-    .composer-menu-icon svg { width: 34px; height: 34px; stroke-width: 2.15; }
-    .composer-menu-title { display: block; min-width: 0; color: var(--btn-primary-bg); font-size: 20px; line-height: 1.18; font-weight: var(--weight-black); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .composer-menu-desc { display: block; margin-top: 8px; min-width: 0; color: var(--text-dim); font-size: 15px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-icon svg { width: 36px; height: 36px; stroke-width: 2.05; }
+    .composer-menu-title { display: block; min-width: 0; color: var(--btn-primary-bg); font-size: 22px; line-height: 1.14; font-weight: var(--weight-black); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-desc { display: block; margin-top: 7px; min-width: 0; color: var(--text-dim); font-size: 17px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .composer-menu-check { color: var(--btn-primary-bg); font-size: 18px; font-weight: var(--weight-black); }
     .composer-menu-section { margin: 8px 0 12px; padding-top: 20px; border-top: 1px solid #3a3a3d; color: var(--text-dim); font-size: 16px; line-height: 1.2; font-weight: var(--weight-medium); }
     .plugin-list { display: grid; gap: 2px; }

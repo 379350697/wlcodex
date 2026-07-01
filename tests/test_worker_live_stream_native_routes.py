@@ -2528,11 +2528,12 @@ def test_worker_live_page_matches_native_codex_mobile_composer_layout() -> None:
     assert 'promptInput.style.height = `${Math.min(Math.max(promptInput.scrollHeight, 44), 132)}px`;' in response
     assert '<div class="dock-row">\n        <button class="attach-button" id="attachmentButton"' in response
     assert ".composer-action-menu { position: fixed; left: 26px; right: 72px; bottom: calc(110px + env(safe-area-inset-bottom));" in response
-    assert "padding: 24px 38px 28px;" in response
+    assert "padding: 26px 38px 28px;" in response
     assert ".composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 22px; align-items: center; width: 100%; min-height: 74px;" in response
-    assert ".composer-menu-action { min-height: 82px; }" in response
-    assert ".composer-menu-action .composer-menu-desc { display: none; }" in response
+    assert ".composer-menu-action { min-height: 86px; }" in response
     assert ".composer-menu-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 0; background: transparent;" in response
+    assert ".composer-menu-title { display: block; min-width: 0; color: var(--btn-primary-bg); font-size: 22px;" in response
+    assert ".composer-menu-desc { display: block; margin-top: 7px; min-width: 0; color: var(--text-dim); font-size: 17px;" in response
     assert ".plugin-dot { width: 42px; height: 42px; border-radius: 10px; background: transparent;" in response
     assert 'class="composer-menu-item composer-menu-action" id="menuUploadPhoto"' in response
     assert 'class="composer-menu-item composer-menu-action" id="menuPlanMode"' in response
