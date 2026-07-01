@@ -2423,6 +2423,7 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in response
     assert "--native-top-control-y: calc(14px + env(safe-area-inset-top));" in response
     assert "--native-top-control-size: 46px;" in response
+    assert ".circle { width: var(--native-top-control-size); height: var(--native-top-control-size);" in response
     assert "#back { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
@@ -2431,7 +2432,7 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert ".header-run-indicator { position: fixed; top: var(--native-top-control-y);" in response
     assert "left: clamp(70px, 18.5vw, 74px); right: clamp(112px, 29vw, 118px);" in response
     assert "grid-template-columns: 27px 27px;" in response
-    assert "width: 94px; min-height: var(--native-top-control-size);" in response
+    assert "width: 94px; height: var(--native-top-control-size); min-height: var(--native-top-control-size);" in response
     assert ".header-run-spinner { width: 23px; height: 23px; border: 3px solid #5a5b60;" in response
     assert ".header-run-indicator.running .header-run-spinner" in response
     assert "border-right-color: var(--native-remote-blue);" in response
