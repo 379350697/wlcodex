@@ -2396,21 +2396,22 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in response
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in response
     assert "--native-top-control-y: calc(14px + env(safe-area-inset-top));" in response
-    assert "--native-top-control-size: 52px;" in response
+    assert "--native-top-control-size: 48px;" in response
     assert "#back { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
     assert ".header-run-indicator { position: fixed; top: var(--native-top-control-y);" in response
-    assert "grid-template-columns: 30px 30px;" in response
-    assert "width: 96px; min-height: var(--native-top-control-size);" in response
-    assert ".header-run-spinner { width: 26px; height: 26px; border: 3px solid #5a5b60;" in response
+    assert "left: clamp(70px, 18.5vw, 74px); right: clamp(122px, 32vw, 128px);" in response
+    assert "grid-template-columns: 28px 28px;" in response
+    assert "width: 104px; min-height: var(--native-top-control-size);" in response
+    assert ".header-run-spinner { width: 24px; height: 24px; border: 3px solid #5a5b60;" in response
     assert ".header-run-indicator.running .header-run-spinner" in response
     assert "border-right-color: var(--native-remote-blue);" in response
     assert ".header-run-indicator.finished .header-run-dot" in response
     assert 'tone === "busy" ? "running"' in response
     assert 'tone === "failed" || tone === "done" ? "finished"' in response
     assert "background: var(--native-remote-red);" in response
-    assert ".primary-action { flex: 0 0 52px; width: 52px; min-height: 52px; border-radius: 50%;" in response
+    assert ".primary-action { flex: 0 0 48px; width: 48px; min-height: 48px; border-radius: 50%;" in response
     assert ".primary-action.stop { background: #f4f4f5; color: #050505;" in response
     assert 'id="sessionFloat"' in response
     assert 'id="headerRunIndicator"' in response
@@ -2424,13 +2425,13 @@ def test_worker_live_page_matches_native_codex_mobile_composer_layout() -> None:
 
     assert ".codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 10px; padding: 12px 18px 20px;" in response
     assert ".composer-tools { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 0;" in response
-    assert ".composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.48fr) minmax(0, .9fr) minmax(0, 1fr); gap: 8px; min-width: 0; max-width: 100%;" in response
-    assert ".setting-pill { width: 100%; min-width: 0; min-height: 42px; border-radius: 21px; padding: 0 9px; overflow: hidden;" in response
+    assert ".composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, .92fr) minmax(0, .92fr); gap: 8px; min-width: 0; max-width: 100%;" in response
+    assert ".setting-pill { width: 100%; min-width: 0; min-height: 36px; border-radius: 18px; padding: 0 8px; overflow: hidden;" in response
     assert "font-size: 13px; font-weight: var(--weight-extrabold);" in response
     assert ".setting-pill.handoff { flex: 0 0 auto;" in response
     assert 'id="handoffButton" type="button">接棒执行</button>' in response
-    assert ".dock-row { display: grid; grid-template-columns: 52px minmax(0, 1fr) 52px; gap: 10px;" in response
-    assert ".attach-button { width: 52px; min-height: 52px;" in response
+    assert ".dock-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) 48px; gap: 10px;" in response
+    assert ".attach-button { width: 48px; min-height: 48px;" in response
     assert '<div class="dock-row">\n        <button class="attach-button" id="attachmentButton"' in response
     assert ".composer-action-menu { position: absolute; left: 26px; right: 72px; bottom: 92px;" in response
     assert ".composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 22px; align-items: center; width: 100%; min-height: 74px;" in response
