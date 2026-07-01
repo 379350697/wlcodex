@@ -2426,7 +2426,7 @@ def test_worker_live_page_matches_native_codex_mobile_composer_layout() -> None:
     assert ".codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 6px; padding: 12px 18px 20px;" in response
     assert '<div class="attachment-strip" id="attachmentStrip" hidden></div>\n      <div class="composer-tools">' in response
     assert ".composer-tools { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 0;" in response
-    assert ".composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, .92fr) minmax(0, .92fr); gap: 8px; min-width: 0; max-width: 100%;" in response
+    assert ".composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr); gap: 8px; min-width: 0; max-width: 100%;" in response
     assert ".setting-pill { width: 100%; min-width: 0; min-height: 36px; border-radius: 18px; padding: 0 8px; overflow: hidden;" in response
     assert "font-size: 13px; font-weight: var(--weight-extrabold);" in response
     assert 'modelSettingsButton.textContent = [modelText, effortText].filter(Boolean).join(" ");' in response
