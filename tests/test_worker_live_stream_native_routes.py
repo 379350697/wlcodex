@@ -3206,13 +3206,17 @@ def test_native_provider_home_uses_session_stream_with_polling_fallback() -> Non
         response = _native_codex_page(provider_name)
 
         assert "let sessionsEventSource = null;" in response
+        assert "let sessionsReconnectTimer = null;" in response
         assert "function sessionsStreamPath()" in response
+        assert "function closeSessionsStream()" in response
         assert "new EventSource(sessionsStreamPath())" in response
         assert "source.addEventListener(\"native_sessions\"" in response
         assert "applySessionsPayload(data, true);" in response
         assert "renderSessionsIfDataChanged();" in response
         assert "function startSessionsStream()" in response
         assert "startSessionsStream();" in response
+        assert 'window.addEventListener("pagehide", closeSessionsStream);' in response
+        assert 'window.addEventListener("pageshow", () => startSessionsStream());' in response
         assert "setInterval(refreshSessionsSilently, SESSION_POLL_INTERVAL_MS)" in response
         assert "setInterval(loadHomeData, 3000)" not in response
 
@@ -4445,7 +4449,12 @@ async def test_worker_live_page_loads_recent_tail_and_folds_history(
     assert "function streamPathWithCursor(afterId)" in response
     assert 'if (nativeThreadId) params.set("native_thread_id", nativeThreadId);' in response
     assert 'if (PROVIDER) params.set("native_provider", PROVIDER);' in response
-    assert 'source.onerror = () => { setConnectionState("reconnecting"); pollEvents(); };' in response
+    assert "let streamReconnectTimer = null;" in response
+    assert "function closeLiveEventSource()" in response
+    assert "function scheduleStreamReconnect()" in response
+    assert "scheduleStreamReconnect();" in response
+    assert 'window.addEventListener("pagehide", closeLiveEventSource);' in response
+    assert 'window.addEventListener("pageshow", () => {' in response
     assert "function isInternalEvent(event)" in response
     assert "if (isInternalEvent(event)) return;" in response
     assert 'historyFold.textContent = previousEventCount > 0 ? "加载更早的消息" : "更早的消息";' in response

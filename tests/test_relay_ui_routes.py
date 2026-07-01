@@ -2872,7 +2872,9 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "nativeTranscriptNodes.set(node.dataset.nativeKey" in response
     assert "events${relayEventsSuffix()}" in response
     assert "function connectRelayEventSource()" in response
+    assert "function closeRelayEventSource()" in response
     assert "function scheduleRelayEventsReconnect()" in response
+    assert 'window.addEventListener("pagehide", closeRelayEventSource);' in response
     assert "updateRelayEventsCursor(event);" in response
     assert "appendConversationDelta(" not in response
     assert "activeConversationRole" not in response

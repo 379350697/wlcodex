@@ -8625,14 +8625,28 @@ def _relay_task_detail_page(
     }}
     function scheduleRelayEventsReconnect() {{
       if (relayEventsReconnectTimer) return;
+      if (relayEventsSource) {{
+        relayEventsSource.close();
+        relayEventsSource = null;
+      }}
       relayEventsReconnectTimer = window.setTimeout(() => {{
         relayEventsReconnectTimer = null;
         connectRelayEventSource();
         relayEventsReconnectDelay = Math.min(relayEventsReconnectDelay * 2, 5000);
       }}, relayEventsReconnectDelay);
     }}
+    function closeRelayEventSource() {{
+      if (relayEventsReconnectTimer) {{
+        clearTimeout(relayEventsReconnectTimer);
+        relayEventsReconnectTimer = null;
+      }}
+      if (relayEventsSource) {{
+        relayEventsSource.close();
+        relayEventsSource = null;
+      }}
+    }}
     function connectRelayEventSource() {{
-      if (relayEventsSource) relayEventsSource.close();
+      closeRelayEventSource();
       relayEventsSource = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{relayEventsSuffix()}}`);
       relayEventBindings.forEach(([name, handler]) => relayEventsSource.addEventListener(name, handler));
       relayEventsSource.onopen = () => {{
@@ -8646,6 +8660,8 @@ def _relay_task_detail_page(
       if (document.visibilityState === "visible") connectRelayEventSource();
     }});
     window.addEventListener("pageshow", () => connectRelayEventSource());
+    window.addEventListener("pagehide", closeRelayEventSource);
+    window.addEventListener("beforeunload", closeRelayEventSource);
     addRelayEventListener("role.queued", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
@@ -11288,6 +11304,7 @@ __ICONS_JS__
     let sessions = [];
     let sessionsRefreshTimer = null;
     let sessionsEventSource = null;
+    let sessionsReconnectTimer = null;
     let projectRoot = "";
     let projectCatalog = [];
     let renderedSessionsDataSignature = "";
@@ -11428,6 +11445,17 @@ __ICONS_JS__
       return tokenizedPath(`${API_BASE}/sessions/stream`);
     }
 
+    function closeSessionsStream() {
+      if (sessionsReconnectTimer) {
+        clearTimeout(sessionsReconnectTimer);
+        sessionsReconnectTimer = null;
+      }
+      if (sessionsEventSource) {
+        sessionsEventSource.close();
+        sessionsEventSource = null;
+      }
+    }
+
     function startSessionsStream() {
       if (sessionsEventSource) return;
       try {
@@ -11441,7 +11469,12 @@ __ICONS_JS__
           if (sessionsEventSource !== source) return;
           source.close();
           sessionsEventSource = null;
-          window.setTimeout(startSessionsStream, 3000);
+          if (!sessionsReconnectTimer) {
+            sessionsReconnectTimer = window.setTimeout(() => {
+              sessionsReconnectTimer = null;
+              startSessionsStream();
+            }, 3000);
+          }
         };
       } catch (_error) {
         sessionsEventSource = null;
@@ -12909,6 +12942,9 @@ __ICONS_JS__
     loadModelCatalog();
     loadHomeData();
     startSessionsStream();
+    window.addEventListener("pagehide", closeSessionsStream);
+    window.addEventListener("beforeunload", closeSessionsStream);
+    window.addEventListener("pageshow", () => startSessionsStream());
     setInterval(refreshSessionsSilently, SESSION_POLL_INTERVAL_MS);
   </script>
 __MARVIS_EXTRA_HTML__
@@ -13783,6 +13819,8 @@ __ICONS_JS__
     let latestEventId = 0;
     let previousEventCount = 0;
     let source = null;
+    let streamReconnectTimer = null;
+    let streamReconnectDelay = 500;
     let pollInFlight = false;
     let nativeTranscriptSyncTimer = null;
     const terminalTranscriptSyncTurns = new Set();
@@ -15975,6 +16013,12 @@ __ICONS_JS__
     }).then(() => {
       startNativeTranscriptSyncLoop();
     });
+    window.addEventListener("pagehide", closeLiveEventSource);
+    window.addEventListener("beforeunload", closeLiveEventSource);
+    window.addEventListener("pageshow", () => {
+      if (!source && latestEventId) openStream(latestEventId);
+      pollEvents();
+    });
     function refreshNativeControlInBackground() {
       attachNative().then(loadNativeSessionInfo).catch(error => {
         renderStatus("native_sync_failed", error.message || String(error));
@@ -16157,11 +16201,40 @@ __ICONS_JS__
         updateHistoryFold();
       }
     }
+    function closeLiveEventSource() {
+      if (streamReconnectTimer) {
+        clearTimeout(streamReconnectTimer);
+        streamReconnectTimer = null;
+      }
+      if (source) {
+        source.close();
+        source = null;
+      }
+    }
+    function scheduleStreamReconnect() {
+      if (streamReconnectTimer) return;
+      if (source) {
+        source.close();
+        source = null;
+      }
+      streamReconnectTimer = window.setTimeout(() => {
+        streamReconnectTimer = null;
+        openStream(latestEventId);
+        streamReconnectDelay = Math.min(streamReconnectDelay * 2, 5000);
+      }, streamReconnectDelay);
+    }
     function openStream(afterId) {
-      if (source) source.close();
+      closeLiveEventSource();
       source = new EventSource(streamPathWithCursor(afterId));
-      source.onopen = () => setConnectionState("connected");
-      source.onerror = () => { setConnectionState("reconnecting"); pollEvents(); };
+      source.onopen = () => {
+        streamReconnectDelay = 500;
+        setConnectionState("connected");
+      };
+      source.onerror = () => {
+        setConnectionState("reconnecting");
+        pollEvents();
+        scheduleStreamReconnect();
+      };
       source.onmessage = (message) => renderLiveEvent(JSON.parse(message.data));
       [
         "lifecycle",
