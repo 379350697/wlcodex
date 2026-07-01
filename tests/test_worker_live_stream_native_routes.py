@@ -18,6 +18,7 @@ from wlcodex.live_stream.server import (
     _live_page,
     _native_app_manifest,
     _native_codex_page,
+    _codex_plugin_menu_items,
     _plugin_icon_data_url,
 )
 from wlcodex.native_agents.provider import NativeAgentRegistry
@@ -68,6 +69,53 @@ def test_plugin_icon_data_url_resolves_paths_from_plugin_root(tmp_path: Path) ->
     result = _plugin_icon_data_url(manifest, "./assets/composer-icon.png")
 
     assert result == "data:image/png;base64,ZmFrZS1wbmc="
+
+
+def test_codex_plugin_menu_items_prefers_native_plugin_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_root = tmp_path / ".codex" / "plugins" / "cache"
+
+    def write_plugin(source: str, slug: str, name: str, *, icon: str = "") -> None:
+        plugin_root = cache_root / source / slug / "1.0.0"
+        manifest = plugin_root / ".codex-plugin" / "plugin.json"
+        manifest.parent.mkdir(parents=True)
+        if icon:
+            icon_path = plugin_root / icon
+            icon_path.parent.mkdir(parents=True)
+            icon_path.write_bytes(b"icon")
+        manifest.write_text(
+            json.dumps(
+                {
+                    "name": slug,
+                    "interface": {
+                        "displayName": name,
+                        "shortDescription": f"{name} description",
+                        "composerIcon": icon,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_plugin("codex-dev-flow", "codex-dev-flow", "Codex Dev Flow")
+    write_plugin("openai-bundled", "browser", "Browser", icon="assets/browser.png")
+    write_plugin("openai-primary-runtime", "pdf", "PDF", icon="assets/pdf.png")
+    write_plugin("openai-primary-runtime", "documents", "Documents", icon="assets/documents.png")
+    write_plugin("openai-primary-runtime", "spreadsheets", "Spreadsheets")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    items = _codex_plugin_menu_items()
+
+    assert [item["name"] for item in items[:5]] == [
+        "Documents",
+        "PDF",
+        "Spreadsheets",
+        "Browser",
+        "Codex Dev Flow",
+    ]
+    assert items[0]["icon"] == "data:image/png;base64,aWNvbg=="
 
 
 @dataclass(frozen=True)
@@ -2479,10 +2527,15 @@ def test_worker_live_page_matches_native_codex_mobile_composer_layout() -> None:
     assert 'promptInput.style.height = "auto";' in response
     assert 'promptInput.style.height = `${Math.min(Math.max(promptInput.scrollHeight, 44), 132)}px`;' in response
     assert '<div class="dock-row">\n        <button class="attach-button" id="attachmentButton"' in response
-    assert ".composer-action-menu { position: absolute; left: 26px; right: 72px; bottom: 92px;" in response
+    assert ".composer-action-menu { position: fixed; left: 26px; right: 72px; bottom: calc(110px + env(safe-area-inset-bottom));" in response
+    assert "padding: 24px 38px 28px;" in response
     assert ".composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 22px; align-items: center; width: 100%; min-height: 74px;" in response
-    assert ".composer-menu-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; background: var(--bg-pill);" in response
-    assert ".plugin-dot { width: 42px; height: 42px; border-radius: 12px;" in response
+    assert ".composer-menu-action { min-height: 82px; }" in response
+    assert ".composer-menu-action .composer-menu-desc { display: none; }" in response
+    assert ".composer-menu-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 0; background: transparent;" in response
+    assert ".plugin-dot { width: 42px; height: 42px; border-radius: 10px; background: transparent;" in response
+    assert 'class="composer-menu-item composer-menu-action" id="menuUploadPhoto"' in response
+    assert 'class="composer-menu-item composer-menu-action" id="menuPlanMode"' in response
 
 
 def test_worker_live_page_exposes_viewport_debug_diagnostics() -> None:
@@ -3768,8 +3821,8 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "#back { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float { position: fixed; top: var(--native-top-control-y);" in response
     assert ".header-run-indicator { position: fixed; top: var(--native-top-control-y);" in response
-    assert "M21 15l-4.5-4.5" in response
-    assert "M3.5 18l1 1 2-2" in response
+    assert "m22 13-1.3-1.3" in response
+    assert "m3 17 2 2 4-4" in response
     assert '<span class="composer-menu-icon">▧</span>' not in response
     assert '<span class="composer-menu-icon">☷</span>' not in response
     assert 'aria-label="上传照片">＋</button>' not in response

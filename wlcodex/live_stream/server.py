@@ -206,8 +206,8 @@ _ICON_SVG = {
     # Actions
     "menu": '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>',
     "attach": f'<svg {_ICON_ATTRS}><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
-    "image": f'<svg {_ICON_ATTRS}><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 15l-4.5-4.5a2 2 0 0 0-2.8 0L6 18"/></svg>',
-    "checklist": f'<svg {_ICON_ATTRS}><path d="M9 6h12"/><path d="M9 12h12"/><path d="M9 18h12"/><path d="M3.5 6l1 1 2-2"/><path d="M3.5 12l1 1 2-2"/><path d="M3.5 18l1 1 2-2"/></svg>',
+    "image": f'<svg {_ICON_ATTRS}><path d="M18 22H4a2 2 0 0 1-2-2V6"/><path d="m22 13-1.3-1.3a2.4 2.4 0 0 0-3.4 0L11 18"/><circle cx="12" cy="8" r="2"/><rect x="6" y="2" width="16" height="16" rx="2"/></svg>',
+    "checklist": f'<svg {_ICON_ATTRS}><path d="m3 7 2 2 4-4"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>',
     "remove": f'<svg {_ICON_ATTRS}><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>',
     "send": f'<svg {_ICON_ATTRS}><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
     "stop": '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
@@ -3324,11 +3324,37 @@ def _native_app_icon_svg() -> str:
 </svg>"""
 
 
+def _codex_plugin_sort_key(name: str, manifest: Path) -> tuple[int, str, str]:
+    preferred_order = {
+        "documents": 0,
+        "pdf": 1,
+        "spreadsheets": 2,
+        "presentations": 3,
+        "template creator": 4,
+        "browser": 5,
+        "chrome": 6,
+        "computer use": 7,
+    }
+    key = name.strip().lower()
+    if key in preferred_order:
+        return (preferred_order[key], key, str(manifest))
+    path_parts = set(manifest.parts)
+    if "openai-primary-runtime" in path_parts:
+        source_rank = 20
+    elif "openai-bundled" in path_parts:
+        source_rank = 40
+    elif "openai-curated" in path_parts or "openai-curated-remote" in path_parts:
+        source_rank = 60
+    else:
+        source_rank = 80
+    return (source_rank, key, str(manifest))
+
+
 def _codex_plugin_menu_items() -> list[dict[str, str]]:
     cache_root = Path.home() / ".codex" / "plugins" / "cache"
     if not cache_root.exists():
         return []
-    items: list[dict[str, str]] = []
+    items: list[tuple[tuple[int, str, str], dict[str, str]]] = []
     seen: set[str] = set()
     for manifest in sorted(cache_root.glob("*/*/*/.codex-plugin/plugin.json")):
         try:
@@ -3351,15 +3377,14 @@ def _codex_plugin_menu_items() -> list[dict[str, str]]:
             manifest,
             interface.get("composerIcon") or interface.get("logo") or interface.get("icon"),
         )
-        items.append(
-            {
-                "name": name.strip(),
-                "description": str(description).strip(),
-                "brand_color": str(brand_color).strip(),
-                "icon": icon,
-            }
-        )
-    return items[:12]
+        item = {
+            "name": name.strip(),
+            "description": str(description).strip(),
+            "brand_color": str(brand_color).strip(),
+            "icon": icon,
+        }
+        items.append((_codex_plugin_sort_key(name, manifest), item))
+    return [item for _, item in sorted(items, key=lambda pair: pair[0])[:12]]
 
 
 def _filter_events_for_native_turn(
@@ -11066,18 +11091,23 @@ __MARVIS_CSS_LINK__  <style>
     .attach-button:before, .attach-button:after { content: ""; position: absolute; left: 50%; top: 50%; width: 24px; height: 2.6px; border-radius: 999px; background: currentColor; transform: translate(-50%, -50%); }
     .attach-button:after { width: 2.6px; height: 24px; }
     button.attach-button:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
-    .composer-action-menu { position: absolute; left: 26px; right: 26px; bottom: 92px; max-height: min(58vh, 520px); overflow-y: auto; border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 14px; z-index: 8; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
+    .composer-action-menu { position: fixed; left: 26px; right: 72px; bottom: calc(110px + env(safe-area-inset-bottom)); max-height: min(58vh, 690px); overflow-y: auto; border: 1px solid #343434; border-radius: 26px; background: #202022; box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 24px 38px 28px; z-index: 20; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.35) transparent; }
+    .composer-action-menu::-webkit-scrollbar { width: 3px; }
+    .composer-action-menu::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(255,255,255,.35); }
     .composer-action-menu.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
-    .composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 12px; align-items: center; width: 100%; min-height: 58px; padding: 8px 10px; border: 0; border-radius: 14px; background: transparent; color: var(--btn-primary-bg); text-align: left; }
+    .composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 22px; align-items: center; width: 100%; min-height: 74px; padding: 8px 0; border: 0; border-radius: 14px; background: transparent; color: var(--btn-primary-bg); text-align: left; }
     button.composer-menu-item:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
-    .composer-menu-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 20px; font-weight: var(--weight-black); }
-    .composer-menu-title { min-width: 0; color: var(--btn-primary-bg); font-size: 17px; font-weight: var(--weight-extrabold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .composer-menu-desc { margin-top: 3px; min-width: 0; color: var(--text-dim); font-size: 13px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-action { min-height: 82px; }
+    .composer-menu-action .composer-menu-desc { display: none; }
+    .composer-menu-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 0; background: transparent; color: var(--btn-primary-bg); font-size: 0; font-weight: var(--weight-black); }
+    .composer-menu-icon svg { width: 34px; height: 34px; stroke-width: 2.15; }
+    .composer-menu-title { display: block; min-width: 0; color: var(--btn-primary-bg); font-size: 20px; line-height: 1.18; font-weight: var(--weight-black); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-desc { display: block; margin-top: 8px; min-width: 0; color: var(--text-dim); font-size: 15px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .composer-menu-check { color: var(--btn-primary-bg); font-size: 18px; font-weight: var(--weight-black); }
-    .composer-menu-section { margin: 12px 2px 8px; padding-top: 12px; border-top: 1px solid var(--border-section); color: var(--text-dim); font-size: 14px; font-weight: var(--weight-medium); }
-    .plugin-list { display: grid; gap: 4px; }
-    .plugin-dot { width: 30px; height: 30px; border-radius: 9px; background: var(--bg-pill); color: var(--btn-primary-bg); display: grid; place-items: center; font-size: 13px; font-weight: var(--weight-black); overflow: hidden; }
-    .plugin-dot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .composer-menu-section { margin: 8px 0 12px; padding-top: 20px; border-top: 1px solid #3a3a3d; color: var(--text-dim); font-size: 16px; line-height: 1.2; font-weight: var(--weight-medium); }
+    .plugin-list { display: grid; gap: 2px; }
+    .plugin-dot { width: 42px; height: 42px; border-radius: 10px; background: transparent; color: var(--btn-primary-bg); display: grid; place-items: center; font-size: 15px; font-weight: var(--weight-black); overflow: hidden; }
+    .plugin-dot img { width: 100%; height: 100%; object-fit: contain; display: block; }
     .selected-plugin-strip { display: flex; gap: 8px; min-height: 38px; align-items: center; overflow-x: auto; }
     .selected-plugin-strip[hidden] { display: none; }
     .selected-plugin-chip { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; max-width: 180px; padding: 0 12px; border: 0; border-radius: 19px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 14px; font-weight: var(--weight-extrabold); }
@@ -11238,7 +11268,7 @@ __MARVIS_CSS_LINK__  <style>
       </div>
     </div>
     <div class="composer-action-menu closed" id="composerActionMenu" role="menu" aria-label="输入操作">
-      <button class="composer-menu-item" id="menuUploadPhoto" type="button" role="menuitem">
+      <button class="composer-menu-item composer-menu-action" id="menuUploadPhoto" type="button" role="menuitem">
         <span class="composer-menu-icon">▧</span>
         <span>
           <span class="composer-menu-title">上传照片</span>
@@ -11246,7 +11276,7 @@ __MARVIS_CSS_LINK__  <style>
         </span>
         <span></span>
       </button>
-      <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem"__PLAN_MODE_ACTION_HIDDEN__ aria-pressed="false">
+      <button class="composer-menu-item composer-menu-action" id="menuPlanMode" type="button" role="menuitem"__PLAN_MODE_ACTION_HIDDEN__ aria-pressed="false">
         <span class="composer-menu-icon">☷</span>
         <span>
           <span class="composer-menu-title">计划模式</span>
@@ -13503,20 +13533,24 @@ __MARVIS_CSS_LINK__  <style>
     .setting-option-check { color: var(--btn-primary-bg); font-weight: var(--weight-black); }
     .attach-button { width: 44px; min-height: 44px; display: grid; place-items: center; padding: 0; border-radius: 50%; background: #242426; color: var(--btn-primary-bg); border: 1px solid #343434; font-size: 0; line-height: 1; }
     .attach-button svg { width: 29px; height: 29px; stroke-width: 2.15; }
-    .composer-action-menu { position: absolute; left: 26px; right: 72px; bottom: 92px; max-height: min(58vh, 520px); overflow-y: auto; border: 1px solid var(--border-popover); border-radius: 26px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 20px 26px; z-index: 8; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
+    .composer-action-menu { position: fixed; left: 26px; right: 72px; bottom: calc(110px + env(safe-area-inset-bottom)); max-height: min(58vh, 690px); overflow-y: auto; border: 1px solid #343434; border-radius: 26px; background: #202022; box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 24px 38px 28px; z-index: 20; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.35) transparent; }
+    .composer-action-menu::-webkit-scrollbar { width: 3px; }
+    .composer-action-menu::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(255,255,255,.35); }
     .composer-action-menu.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
     .composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 22px; align-items: center; width: 100%; min-height: 74px; padding: 8px 0; border: 0; border-radius: 14px; background: transparent; color: var(--btn-primary-bg); text-align: left; }
     button.composer-menu-item:not(.secondary):not(.warn):not(:disabled):hover { background: var(--bg-option-hover); filter: none; }
     .composer-menu-item:disabled { opacity: .82; }
-    .composer-menu-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 0; font-weight: var(--weight-black); }
-    .composer-menu-icon svg { width: 32px; height: 32px; stroke-width: 2.1; }
+    .composer-menu-action { min-height: 82px; }
+    .composer-menu-action .composer-menu-desc { display: none; }
+    .composer-menu-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 0; background: transparent; color: var(--btn-primary-bg); font-size: 0; font-weight: var(--weight-black); }
+    .composer-menu-icon svg { width: 34px; height: 34px; stroke-width: 2.15; }
     .composer-menu-title { display: block; min-width: 0; color: var(--btn-primary-bg); font-size: 20px; line-height: 1.18; font-weight: var(--weight-black); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .composer-menu-desc { display: block; margin-top: 6px; min-width: 0; color: var(--text-dim); font-size: 15px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .composer-menu-desc { display: block; margin-top: 8px; min-width: 0; color: var(--text-dim); font-size: 15px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .composer-menu-check { color: var(--btn-primary-bg); font-size: 18px; font-weight: var(--weight-black); }
-    .composer-menu-section { margin: 14px 0 10px; padding-top: 18px; border-top: 1px solid var(--border-section); color: var(--text-dim); font-size: 16px; line-height: 1.2; font-weight: var(--weight-medium); }
+    .composer-menu-section { margin: 8px 0 12px; padding-top: 20px; border-top: 1px solid #3a3a3d; color: var(--text-dim); font-size: 16px; line-height: 1.2; font-weight: var(--weight-medium); }
     .plugin-list { display: grid; gap: 2px; }
-    .plugin-dot { width: 42px; height: 42px; border-radius: 12px; background: var(--bg-pill); color: var(--btn-primary-bg); display: grid; place-items: center; font-size: 15px; font-weight: var(--weight-black); overflow: hidden; }
-    .plugin-dot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .plugin-dot { width: 42px; height: 42px; border-radius: 10px; background: transparent; color: var(--btn-primary-bg); display: grid; place-items: center; font-size: 15px; font-weight: var(--weight-black); overflow: hidden; }
+    .plugin-dot img { width: 100%; height: 100%; object-fit: contain; display: block; }
     .selected-plugin-strip { display: flex; gap: 8px; min-height: 38px; align-items: center; overflow-x: auto; }
     .selected-plugin-strip[hidden] { display: none; }
     .selected-plugin-chip { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; max-width: 180px; padding: 0 12px; border: 0; border-radius: 19px; background: var(--bg-pill); color: var(--btn-primary-bg); font-size: 14px; font-weight: var(--weight-extrabold); }
@@ -13704,7 +13738,7 @@ __MARVIS_CSS_LINK__  <style>
           </div>
         </div>
         <div class="composer-action-menu closed" id="composerActionMenu" role="menu" aria-label="输入操作">
-          <button class="composer-menu-item" id="menuUploadPhoto" type="button" role="menuitem">
+          <button class="composer-menu-item composer-menu-action" id="menuUploadPhoto" type="button" role="menuitem">
             <span class="composer-menu-icon">▧</span>
             <span>
               <span class="composer-menu-title">上传照片</span>
@@ -13712,7 +13746,7 @@ __MARVIS_CSS_LINK__  <style>
             </span>
             <span></span>
           </button>
-          <button class="composer-menu-item" id="menuPlanMode" type="button" role="menuitem"__PLAN_MODE_ACTION_HIDDEN__ aria-pressed="false">
+          <button class="composer-menu-item composer-menu-action" id="menuPlanMode" type="button" role="menuitem"__PLAN_MODE_ACTION_HIDDEN__ aria-pressed="false">
             <span class="composer-menu-icon">☷</span>
             <span>
               <span class="composer-menu-title">计划模式</span>
