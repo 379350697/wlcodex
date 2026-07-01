@@ -2426,6 +2426,8 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert "#back { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float { position: fixed; top: var(--native-top-control-y);" in response
     assert ".session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;" in response
+    assert ".session-float-state { flex: 0 0 auto; color: #d0d0d4;" in response
+    assert ".session-float-run-id { flex: 0 0 auto; margin-left: auto;" in response
     assert ".header-run-indicator { position: fixed; top: var(--native-top-control-y);" in response
     assert "left: clamp(70px, 18.5vw, 74px); right: clamp(112px, 29vw, 118px);" in response
     assert "grid-template-columns: 27px 27px;" in response
@@ -2440,6 +2442,11 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert ".primary-action { position: absolute; right: 4px; bottom: 4px; width: 36px; min-height: 36px; border-radius: 50%;" in response
     assert ".primary-action.stop { background: #f4f4f5; color: #050505;" in response
     assert 'id="sessionFloat"' in response
+    assert 'id="sessionFloatState">连接会话</span>' in response
+    assert '<span class="session-float-run-id">#42</span>' in response
+    assert 'id="runStatus"' not in response
+    assert 'id="runStateLabel"' not in response
+    assert "codex-status-flow" not in response
     assert 'id="headerRunIndicator"' in response
     assert "function updateHeaderRunIndicator(tone)" in response
     assert 'headerRunIndicator.className = "header-run-indicator " + visual;' in response
@@ -3729,7 +3736,9 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
 
     assert "HTTP/1.1 200 OK" in response
     assert "codex-transcript" in response
-    assert "codex-status-flow" in response
+    assert "codex-status-flow" not in response
+    assert 'id="sessionFloatState">连接会话</span>' in response
+    assert '<span class="session-float-run-id">#42</span>' in response
     assert "codex-tool-call" in response
     assert "codex-input-dock" in response
     assert "function renderTranscript" in response

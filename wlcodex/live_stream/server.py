@@ -13256,6 +13256,12 @@ __MARVIS_CSS_LINK__  <style>
     .session-float { position: fixed; top: var(--native-top-control-y); left: clamp(70px, 18.5vw, 74px); right: clamp(112px, 29vw, 118px); z-index: 5; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; min-height: var(--native-top-control-size); padding: 0 15px; border: 1px solid #343434; border-radius: 23px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
     .session-float-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.15; font-weight: var(--weight-black); }
     .session-float-meta { display: flex; gap: 7px; align-items: center; min-width: 0; margin-top: 4px; color: #d0d0d4; font-size: 11px; line-height: 1; overflow: hidden; white-space: nowrap; }
+    #sessionFloatMeta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .session-float-state { flex: 0 0 auto; color: #d0d0d4; }
+    .session-float-run-id { flex: 0 0 auto; margin-left: auto; color: #8f929a; font-variant-numeric: tabular-nums; }
+    .session-float.busy .session-float-state { color: var(--color-warning); }
+    .session-float.failed .session-float-state { color: var(--color-error); }
+    .session-float.done .session-float-state { color: var(--color-success); }
     .session-float-meta .laptop { width: 13px; height: 9px; border: 1.6px solid currentColor; border-radius: 2px; position: relative; display: inline-block; }
     .session-float-meta .laptop:after { content: ""; position: absolute; left: -3px; right: -3px; bottom: -5px; height: 2px; background: currentColor; border-radius: 2px; }
     .header-run-indicator { position: fixed; top: var(--native-top-control-y); right: clamp(17px, 4.4vw, 26px); z-index: 6; display: grid; grid-template-columns: 27px 27px; gap: 10px; align-items: center; justify-content: center; width: 94px; min-height: var(--native-top-control-size); border: 1px solid #343434; border-radius: 23px; background: #242426; color: #f4f4f5; box-shadow: 0 12px 30px rgba(0,0,0,.38); }
@@ -13306,11 +13312,6 @@ __MARVIS_CSS_LINK__  <style>
     .connected .status-dot { background: var(--color-success); animation: breathe 2s ease-in-out infinite; }
     .reconnecting .status-dot { background: var(--color-error); animation: breathe 1s ease-in-out infinite; }
     main { padding: 12px 20px calc(var(--codex-dock-height, 150px) + 32px + env(safe-area-inset-bottom)); }
-    .codex-status-flow { position: sticky; top: 78px; z-index: 2; display: grid; grid-template-columns: 12px 1fr auto; gap: 10px; align-items: center; min-height: 42px; margin: 0 -20px 8px; padding: 10px 20px; background: rgba(0,0,0,.94); border-bottom: 1px solid #17181c; color: var(--text-dim); font-size: 14px; }
-    .run-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--color-success); box-shadow: 0 0 16px rgba(34,197,94,.7); transition: background 300ms ease, box-shadow 300ms ease; }
-    .run-state.busy .run-pulse { background: var(--color-warning); box-shadow: 0 0 16px rgba(245,158,11,.7); animation: statusPulse 2s ease-in-out infinite; }
-    .run-state.failed .run-pulse { background: var(--color-error); box-shadow: 0 0 16px rgba(239,68,68,.7); }
-    @keyframes statusPulse { 0%, 100% { box-shadow: 0 0 8px rgba(245,158,11,.3); } 50% { box-shadow: 0 0 20px rgba(245,158,11,.7); } }
     .event-cursor { color: #777b86; font-size: 12px; }
     .codex-transcript { display: grid; gap: 18px; padding-top: 8px; }
     .transcript-item { display: grid; gap: 7px; min-width: 0; padding: 0; }
@@ -13569,7 +13570,12 @@ __MARVIS_CSS_LINK__  <style>
     </header>
     <div class="session-float" id="sessionFloat" aria-label="当前会话">
       <span class="session-float-title" id="sessionFloatTitle"></span>
-      <span class="session-float-meta"><span class="laptop"></span><span id="sessionFloatMeta">wlcodex</span></span>
+      <span class="session-float-meta">
+        <span class="laptop"></span>
+        <span id="sessionFloatMeta">wlcodex</span>
+        <span class="session-float-state" id="sessionFloatState">连接会话</span>
+        <span class="session-float-run-id">#__RUN_ID__</span>
+      </span>
     </div>
     <div class="header-run-indicator neutral" id="headerRunIndicator">
       <button class="header-run-button header-context-button" id="headerContextButton" type="button" aria-label="状态">
@@ -13617,11 +13623,7 @@ __MARVIS_CSS_LINK__  <style>
       </button>
     </section>
     <main>
-      <section class="codex-status-flow run-state" id="runStatus">
-        <span class="run-pulse"></span>
-        <span id="runStateLabel">连接会话</span>
-        <span class="event-cursor" id="cursor"></span>
-      </section>
+      <span class="event-cursor" id="cursor" hidden></span>
       <button class="history-fold" id="historyFold" hidden>更早的消息</button>
       <section class="codex-transcript" id="events"><div class="empty" id="empty">输入消息开始新会话</div></section>
       <div class="composer-activity" id="composerActivity" aria-hidden="true">
@@ -13773,8 +13775,6 @@ __MARVIS_CSS_LINK__  <style>
     const events = document.getElementById("events");
     const header = document.getElementById("header");
     const empty = document.getElementById("empty");
-    const runStatus = document.getElementById("runStatus");
-    const runStateLabel = document.getElementById("runStateLabel");
     const headerRunIndicator = document.getElementById("headerRunIndicator");
     const headerContextButton = document.getElementById("headerContextButton");
     const headerSessionMenuButton = document.getElementById("headerSessionMenuButton");
@@ -13791,8 +13791,10 @@ __MARVIS_CSS_LINK__  <style>
     const copySessionIdButton = document.getElementById("copySessionIdButton");
     const uiFontSizeInput = document.getElementById("uiFontSizeInput");
     const codeFontSizeInput = document.getElementById("codeFontSizeInput");
+    const sessionFloat = document.getElementById("sessionFloat");
     const sessionFloatTitle = document.getElementById("sessionFloatTitle");
     const sessionFloatMeta = document.getElementById("sessionFloatMeta");
+    const sessionFloatState = document.getElementById("sessionFloatState");
     const historyFold = document.getElementById("historyFold");
     const composerActivity = document.getElementById("composerActivity");
     const inputDock = document.querySelector(".codex-input-dock");
@@ -17601,8 +17603,8 @@ __ICONS_JS__
     }
     function updateRunState(text, tone) {
       if (!text) return;
-      runStateLabel.textContent = text;
-      runStatus.className = "codex-status-flow run-state " + (tone || "neutral");
+      writeCompactText(sessionFloatState, text);
+      sessionFloat.className = "session-float " + (tone || "neutral");
       updateHeaderRunIndicator(tone || "neutral");
       updateNativeHeaderContext();
     }
@@ -17816,6 +17818,7 @@ __MARVIS_EXTRA_HTML__
         .replace("__PROVIDER_LABEL_TEXT__", safe_title)
         .replace("__STREAM_PATH__", stream_path)
         .replace("__AGENT_RUN_ID__", str(agent_run_id))
+        .replace("__RUN_ID__", str(agent_run_id))
         .replace("__PROVIDER_JSON__", json.dumps(native_provider, ensure_ascii=False))
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
