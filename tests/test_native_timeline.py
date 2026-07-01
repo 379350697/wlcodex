@@ -141,10 +141,16 @@ def test_native_timeline_item_snapshot_before_uses_item_latest_sequence() -> Non
 
     recent = store.list_item_events("codex", "thread-1", limit=1)
     older = store.list_item_events("codex", "thread-1", before=recent[0].sequence, limit=20)
+    live_events = store.list_events("codex", "thread-1", after=1, limit=20)
 
     assert [(event.sequence, event.kind, event.payload["text"]) for event in recent] == [
         (3, "text_delta", "片段一片段二")
     ]
+    assert [(event.sequence, event.kind, event.payload.get("delta")) for event in live_events] == [
+        (2, "text_delta", "片段一"),
+        (3, "text_delta", "片段二"),
+    ]
+    assert all("text" not in event.payload for event in live_events)
     assert [(event.sequence, event.kind, event.payload["text"]) for event in older] == [
         (1, "user_message", "更早消息")
     ]
