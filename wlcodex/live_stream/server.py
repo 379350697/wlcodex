@@ -13503,8 +13503,8 @@ __MARVIS_CSS_LINK__  <style>
     .dock-row { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 10px; min-width: 0; align-items: end; }
     .dock-actions { display: flex; gap: 10px; min-width: 0; }
     .dock-actions[hidden] { display: none; }
-    #prompt { flex: 1; min-width: 0; min-height: 58px; max-height: 138px; border-radius: 29px; border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 13px 58px 13px 18px; font-size: 18px; line-height: 1.35; resize: none; overflow-y: auto; }
-    .primary-action { position: absolute; right: 9px; bottom: 11px; width: 36px; min-height: 36px; border-radius: 50%; padding: 0; display: grid; place-items: center; background: #f4f4f5; color: #050505; font-size: 0; line-height: 1; }
+    #prompt { flex: 1; min-width: 0; min-height: 44px; max-height: 132px; border-radius: 22px; border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 9px 48px 9px 18px; font-size: 18px; line-height: 24px; resize: none; overflow-y: auto; }
+    .primary-action { position: absolute; right: 4px; bottom: 4px; width: 36px; min-height: 36px; border-radius: 50%; padding: 0; display: grid; place-items: center; background: #f4f4f5; color: #050505; font-size: 0; line-height: 1; }
     .primary-action svg { width: 25px; height: 25px; stroke-width: 2.5; }
     .primary-action:disabled { background: #f4f4f5; color: #050505; opacity: .48; }
     .primary-action.stop { background: #f4f4f5; color: #050505; font-size: 24px; }
@@ -13807,7 +13807,7 @@ __ICONS_JS__
     const serviceTierOptions = document.getElementById("serviceTierOptions");
     function resizePromptInput() {
       promptInput.style.height = "auto";
-      promptInput.style.height = `${Math.min(promptInput.scrollHeight, 138)}px`;
+      promptInput.style.height = `${Math.min(Math.max(promptInput.scrollHeight, 44), 132)}px`;
     }
     const attachmentButton = document.getElementById("attachmentButton");
     const imageInput = document.getElementById("imageInput");

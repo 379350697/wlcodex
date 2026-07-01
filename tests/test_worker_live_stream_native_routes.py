@@ -2411,7 +2411,7 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
     assert 'tone === "busy" ? "running"' in response
     assert 'tone === "failed" || tone === "done" ? "finished"' in response
     assert "background: var(--native-remote-red);" in response
-    assert ".primary-action { position: absolute; right: 9px; bottom: 11px; width: 36px; min-height: 36px; border-radius: 50%;" in response
+    assert ".primary-action { position: absolute; right: 4px; bottom: 4px; width: 36px; min-height: 36px; border-radius: 50%;" in response
     assert ".primary-action.stop { background: #f4f4f5; color: #050505;" in response
     assert 'id="sessionFloat"' in response
     assert 'id="headerRunIndicator"' in response
@@ -2435,14 +2435,14 @@ def test_worker_live_page_matches_native_codex_mobile_composer_layout() -> None:
     assert 'id="handoffButton" type="button">接棒执行</button>' in response
     assert ".dock-row { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 10px;" in response
     assert ".attach-button { width: 44px; min-height: 44px;" in response
-    assert "#prompt { flex: 1; min-width: 0; min-height: 58px; max-height: 138px; border-radius: 29px;" in response
-    assert "padding: 13px 58px 13px 18px; font-size: 18px; line-height: 1.35;" in response
-    assert ".primary-action { position: absolute; right: 9px; bottom: 11px; width: 36px; min-height: 36px;" in response
+    assert "#prompt { flex: 1; min-width: 0; min-height: 44px; max-height: 132px; border-radius: 22px;" in response
+    assert "padding: 9px 48px 9px 18px; font-size: 18px; line-height: 24px;" in response
+    assert ".primary-action { position: absolute; right: 4px; bottom: 4px; width: 36px; min-height: 36px;" in response
     assert ".primary-action svg { width: 25px; height: 25px; stroke-width: 2.5;" in response
     assert '<textarea id="prompt" rows="1" placeholder="继续 Codex 会话"></textarea>' in response
     assert "function resizePromptInput()" in response
     assert 'promptInput.style.height = "auto";' in response
-    assert 'promptInput.style.height = `${Math.min(promptInput.scrollHeight, 138)}px`;' in response
+    assert 'promptInput.style.height = `${Math.min(Math.max(promptInput.scrollHeight, 44), 132)}px`;' in response
     assert '<div class="dock-row">\n        <button class="attach-button" id="attachmentButton"' in response
     assert ".composer-action-menu { position: absolute; left: 26px; right: 72px; bottom: 92px;" in response
     assert ".composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 22px; align-items: center; width: 100%; min-height: 74px;" in response
@@ -4501,7 +4501,7 @@ def test_live_page_uses_native_codex_font_scale_for_all_native_providers() -> No
         assert ".transcript-body { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; color: var(--btn-primary-bg); font-size: var(--native-ui-font-size); line-height: 1.55;" in response
         assert ".transcript-item.assistant .transcript-body { color: #b8bcc7; }" in response
         assert ".transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal; padding: 0; border-radius: 0; background: transparent; font-size: var(--native-code-font-size); line-height: 1.5; }" in response
-        assert "#prompt { flex: 1; min-width: 0; min-height: 58px; max-height: 138px; border-radius: 29px; border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 13px 58px 13px 18px; font-size: 18px; line-height: 1.35; resize: none; overflow-y: auto; }" in response
+        assert "#prompt { flex: 1; min-width: 0; min-height: 44px; max-height: 132px; border-radius: 22px; border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 9px 48px 9px 18px; font-size: 18px; line-height: 24px; resize: none; overflow-y: auto; }" in response
 
 
 def test_native_live_page_exposes_transcript_font_size_controls() -> None:
