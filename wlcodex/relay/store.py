@@ -20,6 +20,8 @@ from wlcodex.relay.models import (
     RelayTaskSummary,
     RoleContextPacket,
 )
+from wlcodex.live_stream.models import stream_event_from_runtime
+from wlcodex.runtime_events import RuntimeEvent
 
 
 RELAY_ASSIGNMENT_PREFIX = "relay.assignment."
@@ -127,6 +129,162 @@ class RelayStore:
         if not hasattr(self._ledger, "set_runtime_setting"):
             raise RuntimeError("relay runtime settings are unavailable")
         self._ledger.set_runtime_setting(key, value)
+
+    def append_stream_event(
+        self,
+        task_id: int,
+        event_type: str,
+        *,
+        role: str = "",
+        job_id: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ):
+        from wlcodex.relay.events import RelayEvent
+
+        payload = dict(payload or {})
+        runtime_event_id = _runtime_event_id_from_payload(payload)
+        stored_payload = _relay_stream_payload_for_storage(event_type, payload)
+        now = _now_text()
+        if runtime_event_id is not None:
+            existing = self._ledger._conn.execute(
+                """
+                SELECT *
+                FROM relay_stream_events
+                WHERE task_id = ?
+                  AND event_type = ?
+                  AND role = ?
+                  AND runtime_event_id = ?
+                ORDER BY sequence ASC
+                LIMIT 1
+                """,
+                (task_id, event_type, role, runtime_event_id),
+            ).fetchone()
+            if existing is not None:
+                return RelayEvent(
+                    task_id=int(existing["task_id"]),
+                    event_type=str(existing["event_type"]),
+                    sequence=int(existing["sequence"]),
+                    role=str(existing["role"] or ""),
+                    job_id=existing["job_id"],
+                    payload=payload,
+                    created_at=str(existing["created_at"]),
+                )
+        row = self._ledger._conn.execute(
+            """
+            SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
+            FROM relay_stream_events
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        sequence = int(row["sequence"] if row is not None else 1)
+        self._ledger._conn.execute(
+            """
+            INSERT INTO relay_stream_events (
+                task_id, sequence, event_type, role, job_id, runtime_event_id,
+                payload_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                sequence,
+                event_type,
+                role,
+                job_id,
+                runtime_event_id,
+                json.dumps(stored_payload, ensure_ascii=False, sort_keys=True),
+                now,
+            ),
+        )
+        self._ledger._conn.commit()
+        return RelayEvent(
+            task_id=task_id,
+            event_type=event_type,
+            sequence=sequence,
+            role=role,
+            job_id=job_id,
+            payload=payload,
+            created_at=now,
+        )
+
+    def list_stream_events(self, task_id: int, *, after: int = 0):
+        from wlcodex.relay.events import RelayEvent
+
+        rows = self._ledger._conn.execute(
+            """
+            SELECT * FROM relay_stream_events
+            WHERE task_id = ? AND sequence > ?
+            ORDER BY sequence ASC
+            """,
+            (task_id, after),
+        ).fetchall()
+        events = []
+        for row in rows:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+            runtime_event_id = row["runtime_event_id"]
+            if runtime_event_id is not None:
+                payload.setdefault("runtime_event_id", int(runtime_event_id))
+                payload = self._hydrate_stream_event_payload(
+                    str(row["event_type"]),
+                    payload,
+                    int(runtime_event_id),
+                )
+            events.append(
+                RelayEvent(
+                    task_id=int(row["task_id"]),
+                    event_type=str(row["event_type"]),
+                    sequence=int(row["sequence"]),
+                    role=str(row["role"] or ""),
+                    job_id=row["job_id"],
+                    payload=payload,
+                    created_at=str(row["created_at"]),
+                )
+            )
+        return events
+
+    def _hydrate_stream_event_payload(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        runtime_event_id: int,
+    ) -> dict[str, Any]:
+        row = self._ledger._conn.execute(
+            "SELECT * FROM runtime_events WHERE id = ?",
+            (runtime_event_id,),
+        ).fetchone()
+        if row is None:
+            return payload
+        runtime_event = _runtime_event_from_row(row)
+        runtime_payload = dict(runtime_event.payload)
+        hydrated = dict(payload)
+        hydrated.setdefault("agent_run_id", runtime_event.agent_run_id)
+        hydrated.setdefault("runtime_event_id", runtime_event.id)
+        for key in (
+            "itemId",
+            "item_id",
+            "stream_key",
+            "native_message_id",
+            "message_id",
+            "native_turn_id",
+            "turnId",
+            "turn_id",
+            "display_source",
+        ):
+            if key in runtime_payload:
+                hydrated.setdefault(key, runtime_payload[key])
+        if event_type == "role.output_delta":
+            text = _runtime_payload_text(runtime_payload)
+            if text:
+                hydrated.setdefault("delta", text)
+            return hydrated
+        if event_type == "role.native_event":
+            stream_event = stream_event_from_runtime(runtime_event)
+            hydrated.setdefault("kind", stream_event.kind)
+            hydrated["native_event"] = stream_event.to_json_dict()
+            hydrated["payload"] = stream_event.payload
+            return hydrated
+        return hydrated
 
     def today_token_stats(self) -> dict[str, Any]:
         return self._relay_token_stats()
@@ -923,6 +1081,97 @@ def _normalize_role_providers(
         role: str(source.get(role) or fallback_provider).strip() or fallback_provider
         for role in RELAY_ROLE_IDS
     }
+
+
+def _runtime_event_id_from_payload(payload: dict[str, Any]) -> int | None:
+    value = payload.get("runtime_event_id")
+    if value in (None, ""):
+        native_event = payload.get("native_event")
+        if isinstance(native_event, dict):
+            value = native_event.get("id")
+    try:
+        event_id = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return event_id or None
+
+
+def _relay_stream_payload_for_storage(
+    event_type: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if event_type not in {"role.output_delta", "role.native_event"}:
+        return dict(payload)
+    runtime_event_id = _runtime_event_id_from_payload(payload)
+    if runtime_event_id is None:
+        return dict(payload)
+    keep = {
+        "role",
+        "agent_run_id",
+        "runtime_event_id",
+        "round_id",
+        "kind",
+        "itemId",
+        "item_id",
+        "stream_key",
+        "native_message_id",
+        "message_id",
+        "native_turn_id",
+        "turnId",
+        "turn_id",
+    }
+    stored = {key: payload[key] for key in keep if key in payload}
+    native_event = payload.get("native_event")
+    if isinstance(native_event, dict):
+        stored.setdefault("kind", native_event.get("kind"))
+        stored.setdefault("agent_run_id", native_event.get("agent_run_id"))
+        stored.setdefault("runtime_event_id", native_event.get("id"))
+        native_payload = native_event.get("payload")
+        if isinstance(native_payload, dict):
+            for key in (
+                "itemId",
+                "item_id",
+                "stream_key",
+                "native_message_id",
+                "message_id",
+                "native_turn_id",
+                "turnId",
+                "turn_id",
+                "display_source",
+            ):
+                if key in native_payload:
+                    stored.setdefault(key, native_payload[key])
+    stored["runtime_event_id"] = runtime_event_id
+    return {key: value for key, value in stored.items() if value not in (None, "")}
+
+
+def _runtime_event_from_row(row: Any) -> RuntimeEvent:
+    return RuntimeEvent(
+        id=int(row["id"]),
+        schema_version=int(row["schema_version"]),
+        event_type=str(row["event_type"]),
+        aggregate_type=str(row["aggregate_type"]),
+        aggregate_id=str(row["aggregate_id"]),
+        conversation_id=row["conversation_id"],
+        orchestration_run_id=row["orchestration_run_id"],
+        agent_run_id=row["agent_run_id"],
+        task_id=row["task_id"],
+        correlation_id=str(row["correlation_id"]),
+        causation_id=row["causation_id"],
+        source=str(row["source"]),
+        actor=str(row["actor"]),
+        visibility=str(row["visibility"]),
+        payload=json.loads(str(row["payload_json"] or "{}")),
+        occurred_at=str(row["occurred_at"]),
+    )
+
+
+def _runtime_payload_text(payload: dict[str, Any]) -> str:
+    for key in ("delta", "text", "summary", "body"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _coerce_round_id(value: Any) -> int:

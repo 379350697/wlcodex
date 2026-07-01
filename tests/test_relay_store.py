@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from wlcodex.db import Ledger
+from wlcodex.relay.events import RelayEventBus
 from wlcodex.relay.models import HandoffPacket
 from wlcodex.relay.store import RelayStore
 
@@ -59,6 +60,88 @@ def test_list_tasks_excludes_non_relay_team_runs(tmp_path: Path) -> None:
     summaries = store.list_tasks()
 
     assert [summary.task_id for summary in summaries] == [relay_task.id]
+
+
+def test_relay_stream_events_are_persisted_with_task_sequence(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    store = RelayStore(ledger)
+    task = store.create_task(
+        title="Relay stream",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    bus = RelayEventBus(store)
+
+    first = bus.emit(task.id, "task.created", role="director")
+    second = bus.emit(task.id, "role.status", role="director", payload={"status": "streaming"})
+    third = bus.emit(
+        task.id,
+        "routing.decision",
+        role="director",
+        payload={"route": "director_only"},
+    )
+
+    assert [first.sequence, second.sequence, third.sequence] == [1, 2, 3]
+
+    restarted_bus = RelayEventBus(RelayStore(ledger))
+    replayed = restarted_bus.list_events(task.id, after=1)
+
+    assert [event.sequence for event in replayed] == [2, 3]
+    assert [event.event_type for event in replayed] == ["role.status", "routing.decision"]
+    assert replayed[0].payload == {"status": "streaming"}
+
+    fourth = restarted_bus.emit(
+        task.id,
+        "role.status",
+        role="director",
+        payload={"status": "completed"},
+    )
+    replayed_all = restarted_bus.list_events(task.id)
+
+    assert fourth.sequence == 4
+    assert [event.sequence for event in replayed_all] == [1, 2, 3, 4]
+
+
+def test_relay_runtime_delta_stream_event_persists_reference_not_delta_text(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    store = RelayStore(ledger)
+    task = store.create_task(
+        title="Relay stream",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="codex",
+    )
+    bus = RelayEventBus(store)
+
+    event = bus.emit(
+        task.id,
+        "role.output_delta",
+        role="director",
+        payload={
+            "runtime_event_id": 42,
+            "agent_run_id": 101,
+            "round_id": 1,
+            "delta": "visible text should stay in runtime_events",
+        },
+    )
+
+    row = ledger._conn.execute(
+        "SELECT runtime_event_id, payload_json FROM relay_stream_events WHERE task_id = ?",
+        (task.id,),
+    ).fetchone()
+    replayed = RelayEventBus(RelayStore(ledger)).list_events(task.id)
+
+    assert event.sequence == 1
+    assert row["runtime_event_id"] == 42
+    assert "visible text should stay in runtime_events" not in row["payload_json"]
+    assert replayed[0].payload == {
+        "runtime_event_id": 42,
+        "agent_run_id": 101,
+        "round_id": 1,
+    }
 
 
 def test_backfill_does_not_refresh_task_activity_order(tmp_path: Path) -> None:

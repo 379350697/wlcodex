@@ -429,6 +429,25 @@ class Ledger:
             CREATE INDEX IF NOT EXISTS idx_relay_rounds_task_status
                 ON relay_rounds(team_run_id, status, round_id);
 
+            CREATE TABLE IF NOT EXISTS relay_stream_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                sequence INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT '',
+                job_id INTEGER,
+                runtime_event_id INTEGER,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE(task_id, sequence),
+                FOREIGN KEY(task_id) REFERENCES team_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_stream_events_task_sequence
+                ON relay_stream_events(task_id, sequence);
+            CREATE INDEX IF NOT EXISTS idx_relay_stream_events_runtime_event
+                ON relay_stream_events(runtime_event_id);
+
             CREATE TABLE IF NOT EXISTS relay_role_attempts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 team_run_id INTEGER NOT NULL,

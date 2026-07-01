@@ -188,6 +188,7 @@ _STATIC_CSS_BUNDLES = {
     ),
 }
 _RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260629-confirmation-provenance"
+_RELAY_MOBILE_JS_HREF = "/static/relay_mobile.js?v=20260701-mobile-web"
 _RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
@@ -196,6 +197,17 @@ _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest"
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="WLCodex">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">"""
+
+
+def _relay_mobile_web_head(title: str) -> str:
+    return f"""  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="color-scheme" content="light only">
+  <meta name="theme-color" content="#FAF8F5">
+  <title>{escape(title)}</title>
+  <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
+  <script src="{_RELAY_MOBILE_JS_HREF}" defer></script>"""
 
 # Inline SVG icons — 24×24 viewBox, currentColor, Lucide-style (stroke-width 2)
 _ICON_ATTRS = 'width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
@@ -1533,6 +1545,12 @@ class WorkerLiveStreamServer:
                 relay_event_queue = self._relay_service.subscribe_events(task_id) if live else None
                 try:
                     await self._relay_service.ensure_task_lifecycle_current(task_id)
+                    runtime_store = getattr(self._hub, "_store", None)
+                    if runtime_store is not None and hasattr(
+                        self._relay_service,
+                        "scan_active_native_runtime_events",
+                    ):
+                        await self._relay_service.scan_active_native_runtime_events(runtime_store)
                     events = self._relay_service.events_for_task(task_id, after=after)
                     detail = self._relay_service.get_task(task_id)
                 except Exception:
@@ -2826,12 +2844,15 @@ async def _send_relay_sse(
                     event_type,
                 ) in seen_worker_events:
                     continue
-                await _write_relay_sse_payload(
+                relay_sequence = await _write_relay_worker_event(
                     writer,
-                    event_id=f"native-{worker_event.id}",
-                    event_type=event_type,
-                    payload=payload,
+                    task_id=int(detail.task.id),
+                    role=str(job.role),
+                    worker_event=worker_event,
+                    relay_service=relay_service,
                 )
+                if relay_sequence:
+                    seen_relay_sequences.add(relay_sequence)
     if live and relay_service is not None and task_id:
         queue = relay_event_queue or relay_service.subscribe_events(task_id)
         worker_subscriptions: dict[int, tuple[Any, asyncio.Queue[WorkerStreamEvent]]] = {}
@@ -2870,12 +2891,15 @@ async def _send_relay_sse(
                     if worker_key in seen_worker_events:
                         continue
                     seen_worker_events.add(worker_key)
-                    await _write_relay_worker_event(
+                    relay_sequence = await _write_relay_worker_event(
                         writer,
                         task_id=task_id,
                         role=str(getattr(refreshed_job, "role", "") or ""),
                         worker_event=worker_event,
+                        relay_service=relay_service,
                     )
+                    if relay_sequence:
+                        seen_relay_sequences.add(relay_sequence)
                 if agent_run_id in worker_subscriptions:
                     continue
                 worker_queue = hub.subscribe(agent_run_id=agent_run_id)
@@ -2945,12 +2969,15 @@ async def _send_relay_sse(
                     ):
                         latest_by_agent[agent_run_id] = int(worker_event.id)
                         seen_worker_events.add(worker_key)
-                        await _write_relay_worker_event(
+                        relay_sequence = await _write_relay_worker_event(
                             writer,
                             task_id=int(detail.task.id),
                             role=str(job.role),
                             worker_event=worker_event,
+                            relay_service=relay_service,
                         )
+                        if relay_sequence:
+                            seen_relay_sequences.add(relay_sequence)
                     pending[asyncio.create_task(source_queue.get())] = (
                         "worker",
                         job,
@@ -2993,6 +3020,7 @@ async def _send_relay_sse(
                             task_id=int(detail.task.id),
                             role=str(job.role),
                             worker_event=worker_event,
+                            relay_service=relay_service,
                         )
                     pending[asyncio.create_task(queue.get())] = (job, queue)
         finally:
@@ -3026,17 +3054,35 @@ async def _write_relay_worker_event(
     task_id: int,
     role: str,
     worker_event: WorkerStreamEvent,
-) -> None:
+    relay_service: Any | None = None,
+) -> int:
     relay_event = _relay_worker_payload(task_id, role, worker_event)
     if relay_event is None:
-        return
+        return 0
     event_type, payload = relay_event
+    if relay_service is not None and hasattr(relay_service, "_events"):
+        event = relay_service._events.emit(
+            task_id,
+            event_type,
+            role=role,
+            payload=payload,
+        )
+        relay_payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+        sequence = int(relay_payload.get("sequence") or 0)
+        await _write_relay_sse_payload(
+            writer,
+            event_id=str(sequence),
+            event_type=event_type,
+            payload=relay_payload,
+        )
+        return sequence
     await _write_relay_sse_payload(
         writer,
-        event_id=f"native-{worker_event.id}",
+        event_id="",
         event_type=event_type,
         payload=payload,
     )
+    return 0
 
 
 def _relay_worker_payload(
@@ -3855,12 +3901,7 @@ def _relay_task_list_page(
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light only">
-  <title>流式接力</title>
-  <link rel="stylesheet" href="/static/base.css">
-  <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
+{_relay_mobile_web_head("流式接力")}
   <style>
     html {{ background: var(--bg-canvas); }}
     body {{ margin: 0; color: var(--text-primary); background: transparent; }}
@@ -4001,12 +4042,7 @@ def _relay_chat_home_page(
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light only">
-  <title>Marvis 对话</title>
-  <link rel="stylesheet" href="/static/base.css">
-  <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
+{_relay_mobile_web_head("Marvis 对话")}
 </head>
 <body data-marvis-relay-view="chat">
   <div class="marvis-relay-phone">
@@ -4084,12 +4120,7 @@ def _relay_construction_page(
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light only">
-  <title>正在建设中</title>
-  <link rel="stylesheet" href="/static/base.css">
-  <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
+{_relay_mobile_web_head("正在建设中")}
 </head>
 <body data-marvis-relay-view="construction">
   <div class="marvis-relay-phone">
@@ -5137,12 +5168,7 @@ def _marvis_relay_office_page(
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light only">
-  <title>Marvis办公室</title>
-  <link rel="stylesheet" href="/static/base.css">
-  <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
+{_relay_mobile_web_head("Marvis办公室")}
 </head>
 <body data-marvis-relay-view="office">
   <div class="marvis-relay-phone marvis-office-shell">
@@ -6864,12 +6890,7 @@ def _relay_task_detail_page(
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light only">
-  <title>{escape(task.title)} · Relay</title>
-  <link rel="stylesheet" href="/static/base.css">
-  <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
+{_relay_mobile_web_head(f"{task.title} · Relay")}
   <style>
     html {{ background: #f6f6f6; }}
     body {{ margin: 0; color: #111; background: #f6f6f6; }}
@@ -8148,14 +8169,13 @@ def _relay_task_detail_page(
         setNativeBodyText(node, body);
         return;
       }}
-      if (kind === "text_delta") {{
-        appendRoleStreamDelta(role, text, runtimeEventId || nativeEvent?.id, nativeEvent);
-        setRoleStatus(role, "streaming");
-        return;
-      }}
       if (kind === "text_delta" || kind === "message_completed") {{
         const key = nativeMessageKey(role, nativeEvent, "assistant");
         const bufferedEnvelope = nativeEnvelopeBuffers.get(key) || "";
+        if (kind === "text_delta") {{
+          appendRoleStreamDelta(role, text, runtimeEventId || nativeEvent?.id, nativeEvent);
+          setRoleStatus(role, "streaming");
+        }}
         if (bufferedEnvelope || relayTextLooksLikeEnvelope(text)) {{
           const candidate = kind === "text_delta" ? bufferedEnvelope + text : text || bufferedEnvelope;
           if (kind === "text_delta") nativeEnvelopeBuffers.set(key, candidate);
@@ -8170,6 +8190,9 @@ def _relay_task_detail_page(
           clearRolePreview(role);
           setRoleStatus(role, "streaming");
           return;
+        }}
+        if (kind === "message_completed") {{
+          replaceRoleStreamWithCompleted(role, text, runtimeEventId || nativeEvent?.id, nativeEvent);
         }}
         return;
       }}
@@ -8297,6 +8320,34 @@ def _relay_task_detail_page(
       const current = body ? body.textContent || "" : "";
       updateMarvisRoleStreamAction(node, role, current + value);
       setNativeBodyText(node, current + value);
+    }}
+    function replaceRoleStreamWithCompleted(role, text, eventId = "", nativeEvent = null) {{
+      if (!role || !text || !conversationTimeline) return;
+      const stableEventId = roleStreamStableEventId(eventId, nativeEvent);
+      const bufferKey = roleStreamBufferKey(role, stableEventId);
+      const value = String(text || "");
+      if (
+        marvisConversationTextIsProtocolNoise(value)
+        || marvisConversationTextIsStructuredArtifactPlaceholder(value)
+        || relayTextLooksLikeEnvelope(value)
+      ) {{
+        hideRoleStreamBuffer(role, bufferKey);
+        appendMarvisConversationWaiting(activeRelayRoundId);
+        return;
+      }}
+      roleStreamBuffers.delete(bufferKey);
+      hiddenProtocolStreamKeys.delete(bufferKey);
+      removeRoleStreamNode(role);
+      const key = nativeMessageKey(role, nativeEvent, "assistant");
+      appendMarvisConversationAssistant(
+        role,
+        value,
+        "message_completed",
+        key,
+        currentRoleStatus(role) || "completed",
+        activeRelayRoundId
+      );
+      scrollNativeConversationToEnd();
     }}
     function clearRolePreview(role) {{
       conversationTimeline?.querySelector(`[data-conversation-role-preview="${{role}}"]`)?.remove();

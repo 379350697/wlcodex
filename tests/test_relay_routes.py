@@ -828,6 +828,109 @@ async def test_relay_events_stream_includes_lane_metadata(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_relay_events_stream_replays_persisted_events_after_service_restart(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "wlcodex.sqlite3"
+    ledger = Ledger.open(db_path)
+    ledger.migrate()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([FakeProvider()]),
+        default_provider="claude",
+    )
+    task = service.create_task(
+        title="Replay task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._events.emit(
+        task.id,
+        "routing.decision",
+        role="director",
+        payload={"route": "director_only"},
+    )
+
+    restarted_ledger = Ledger.open(db_path)
+    restarted_ledger.migrate()
+    restarted_service = RelayService(
+        store=RelayStore(restarted_ledger),
+        registry=NativeAgentRegistry([FakeProvider()]),
+        default_provider="claude",
+    )
+    response = await _request_relay(
+        tmp_path,
+        f"GET /api/relay/tasks/{task.id}/events?after=1 HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        relay_service=restarted_service,
+    )
+
+    assert "Content-Type: text/event-stream; charset=utf-8" in response
+    assert "event: role.queued" in response
+    assert "event: routing.decision" in response
+    assert "event: task.created" not in response
+    assert '"sequence": 3' in response
+    assert '"route": "director_only"' in response
+
+
+@pytest.mark.asyncio
+async def test_relay_events_stream_rehydrates_persisted_runtime_delta_after_restart(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "wlcodex.sqlite3"
+    ledger = Ledger.open(db_path)
+    ledger.migrate()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([FakeProvider()]),
+        default_provider="claude",
+    )
+    task = service.create_task(
+        title="Runtime replay task",
+        prompt="Prompt",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    runtime_store = RuntimeEventStore(ledger._conn)
+    saved_event = runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_TEXT_DELTA,
+            aggregate_type=AggregateType.AGENT_RUN,
+            aggregate_id="101",
+            correlation_id="corr-101",
+            source=EventSource.CLAUDE,
+            actor="claude",
+            visibility=Visibility.USER,
+            payload={"delta": "durable delta"},
+            occurred_at=now_iso(),
+            agent_run_id=101,
+        )
+    )
+    service.project_runtime_event(saved_event)
+
+    restarted_ledger = Ledger.open(db_path)
+    restarted_ledger.migrate()
+    restarted_service = RelayService(
+        store=RelayStore(restarted_ledger),
+        registry=NativeAgentRegistry([FakeProvider()]),
+        default_provider="claude",
+    )
+    response = await _request_relay(
+        tmp_path,
+        f"GET /api/relay/tasks/{task.id}/events HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        relay_service=restarted_service,
+    )
+
+    output_delta = response.split("event: role.output_delta", 1)[1].split("\n\n", 1)[0]
+    assert '"runtime_event_id": 1' in output_delta
+    assert '"delta": "durable delta"' in output_delta
+
+
+@pytest.mark.asyncio
 async def test_relay_events_stream_maps_native_runtime_delta_to_native_role_event(
     tmp_path: Path,
 ) -> None:
@@ -864,6 +967,7 @@ async def test_relay_events_stream_maps_native_runtime_delta_to_native_role_even
     )
 
     assert "event: role.native_event" in response
+    assert "id: native-" not in response
     assert '"role": "director"' in response
     assert '"kind": "text_delta"' in response
     assert '"delta": "director says hi"' in response
@@ -1047,20 +1151,23 @@ async def test_relay_events_include_dynamic_next_role_lane_after_handoff(
         }
         """,
     )
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
     service.project_runtime_event(
-        RuntimeEvent(
-            id=88,
-            schema_version=1,
-            event_type=EventType.MODEL_TEXT_DELTA,
-            aggregate_type=AggregateType.AGENT_RUN,
-            aggregate_id="102",
-            correlation_id="corr-102",
-            source=EventSource.CLAUDE,
-            actor="claude",
-            visibility=Visibility.USER,
-            payload={"delta": "tester is verifying"},
-            occurred_at=now_iso(),
-            agent_run_id=102,
+        runtime_store.append(
+            RuntimeEvent(
+                id=88,
+                schema_version=1,
+                event_type=EventType.MODEL_TEXT_DELTA,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id="102",
+                correlation_id="corr-102",
+                source=EventSource.CLAUDE,
+                actor="claude",
+                visibility=Visibility.USER,
+                payload={"delta": "tester is verifying"},
+                occurred_at=now_iso(),
+                agent_run_id=102,
+            )
         )
     )
 
@@ -1199,6 +1306,7 @@ async def test_relay_live_events_subscribe_to_agent_run_created_after_connect(
         await server.stop()
 
     assert "event: role.native_event" in response
+    assert "id: native-" not in response
     assert '"role": "director"' in response
     assert '"delta": "late worker delta after connect"' in response
 

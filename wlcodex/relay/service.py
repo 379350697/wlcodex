@@ -416,7 +416,7 @@ class RelayService:
         self._store = store
         self._registry = registry
         self._default_provider = default_provider
-        self._events = events or RelayEventBus()
+        self._events = events or RelayEventBus(store)
         self._handled_runtime_completion_ids: set[int] = set()
         self._runtime_projection_cursors: dict[int, int] = {}
         self._runtime_tasks: set[asyncio.Task[Any]] = set()

@@ -1999,6 +1999,104 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_relay_surfaces_use_mobile_web_head_without_pwa_shell(tmp_path: Path) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Mobile relay task",
+        prompt="Prompt",
+        workspace="/Users/wl/projects/wlcodex",
+        provider="claude",
+    )
+    await server.start()
+    try:
+        list_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/workflows/relay?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+        chat_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/workflows/relay/chat?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+        detail_response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+        office_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/workflows/relay/office?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+        construction_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/workflows/relay/skills?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    for response in (
+        list_response,
+        chat_response,
+        detail_response,
+        office_response,
+        construction_response,
+    ):
+        assert "HTTP/1.1 200 OK" in response
+        assert (
+            '<meta name="viewport" content="width=device-width, initial-scale=1, '
+            'maximum-scale=1, user-scalable=no, viewport-fit=cover">'
+            in response
+        )
+        assert '<meta name="theme-color" content="#FAF8F5">' in response
+        assert '<script src="/static/relay_mobile.js?v=20260701-mobile-web" defer></script>' in response
+        assert "/manifest.webmanifest" not in response
+        assert "serviceWorker.register" not in response
+
+
+@pytest.mark.asyncio
+async def test_relay_mobile_static_asset_is_scoped_to_relay_pages(tmp_path: Path) -> None:
+    response, _service = await _request(
+        tmp_path,
+        "GET /static/relay_mobile.js HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "Content-Type: application/javascript; charset=utf-8" in response
+    assert 'document.body?.hasAttribute("data-marvis-relay-view")' in response
+    assert 'document.body.style.setProperty("--marvis-visual-viewport-height"' in response
+    assert 'document.body.style.setProperty("--marvis-keyboard-offset"' in response
+    assert "window.visualViewport" in response
+    assert "--marvis-visual-viewport-height" in response
+    assert "--marvis-keyboard-offset" in response
+    assert "serviceWorker" not in response
+
+
+def test_relay_mobile_css_uses_safe_area_and_visual_viewport_variables() -> None:
+    css = Path("wlcodex/live_stream/static/relay_marvis.css").read_text()
+
+    assert "--marvis-visual-viewport-height: 100dvh;" in css
+    assert "--marvis-keyboard-offset: 0px;" in css
+    assert "--marvis-safe-bottom: env(safe-area-inset-bottom, 0px);" in css
+    assert "min-height: var(--marvis-visual-viewport-height);" in css
+    assert (
+        "bottom: calc(var(--marvis-s25-composer-bottom) + var(--marvis-safe-bottom) "
+        "+ var(--marvis-keyboard-offset));"
+        in css
+    )
+    assert "padding-bottom: var(--marvis-safe-bottom);" in css
+    assert "min-height: 44px;" in css
+    assert "font-size: max(16px, var(--marvis-s25-composer-input-size));" in css
+
+
+@pytest.mark.asyncio
 async def test_relay_task_list_paginates_ten_tasks_per_page(tmp_path: Path) -> None:
     server, service, _runtime_store = _server(tmp_path)
     workspace = "/Users/wl/projects/wlcodex"
@@ -5901,6 +5999,42 @@ async def test_marvis_relay_stream_delta_buffers_and_removes_protocol_fragments(
     delta_handler = delta_handler.split('addRelayEventListener("role.followup_response"', 1)[0]
     assert "payload.runtime_event_id," in delta_handler
     assert "\n        payload\n" in delta_handler
+
+
+@pytest.mark.asyncio
+async def test_marvis_relay_native_event_renderer_uses_shared_delta_completion_path(
+    tmp_path: Path,
+) -> None:
+    server, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Shared native renderer",
+        prompt="查询今日铜价",
+        workspace="/repo",
+        provider="codex",
+    )
+
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /native/workflows/relay/tasks/{task.id}?token=secret HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    renderer = response.split("function renderRelayNativeEvent", 1)[1]
+    renderer = renderer.split('document.querySelectorAll("[data-native-key]")', 1)[0]
+    shared_branch_index = renderer.index('if (kind === "text_delta" || kind === "message_completed")')
+    text_delta_branch_index = renderer.find('if (kind === "text_delta") {')
+    assert text_delta_branch_index == -1 or text_delta_branch_index > shared_branch_index
+    assert "appendRoleStreamDelta(role, text, runtimeEventId || nativeEvent?.id, nativeEvent);" in renderer
+    assert (
+        "replaceRoleStreamWithCompleted(role, text, runtimeEventId || nativeEvent?.id, nativeEvent);"
+        in renderer
+    )
+    assert "function replaceRoleStreamWithCompleted" in response
 
 
 @pytest.mark.asyncio

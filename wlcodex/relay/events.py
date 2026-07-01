@@ -25,7 +25,8 @@ class RelayEvent:
 
 
 class RelayEventBus:
-    def __init__(self) -> None:
+    def __init__(self, store: Any | None = None) -> None:
+        self._store = store
         self._events_by_task: dict[int, list[RelayEvent]] = {}
         self._subscribers: dict[int, set[asyncio.Queue[RelayEvent]]] = {}
         self._projectors: list[Callable[[RelayEvent], None]] = []
@@ -39,15 +40,43 @@ class RelayEventBus:
         job_id: int | None = None,
         payload: dict[str, Any] | None = None,
     ) -> RelayEvent:
+        payload = dict(payload or {})
+        persisted_event: RelayEvent | None = None
+        if self._store is not None and hasattr(self._store, "append_stream_event"):
+            persisted_event = self._store.append_stream_event(
+                task_id,
+                event_type,
+                role=role,
+                job_id=job_id,
+                payload=payload,
+            )
         events = self._events_by_task.setdefault(task_id, [])
-        event = RelayEvent(
-            task_id=task_id,
-            event_type=event_type,
-            sequence=len(events) + 1,
-            role=role,
-            job_id=job_id,
-            payload=dict(payload or {}),
-        )
+        if persisted_event is not None:
+            for existing_event in events:
+                if (
+                    existing_event.sequence == persisted_event.sequence
+                    and existing_event.event_type == persisted_event.event_type
+                ):
+                    return existing_event
+        if persisted_event is None:
+            event = RelayEvent(
+                task_id=task_id,
+                event_type=event_type,
+                sequence=len(events) + 1,
+                role=role,
+                job_id=job_id,
+                payload=payload,
+            )
+        else:
+            event = RelayEvent(
+                task_id=task_id,
+                event_type=event_type,
+                sequence=persisted_event.sequence,
+                role=role,
+                job_id=job_id,
+                payload=payload,
+                created_at=persisted_event.created_at,
+            )
         events.append(event)
         for projector in list(self._projectors):
             try:
@@ -59,6 +88,8 @@ class RelayEventBus:
         return event
 
     def list_events(self, task_id: int, *, after: int = 0) -> list[RelayEvent]:
+        if self._store is not None and hasattr(self._store, "list_stream_events"):
+            return self._store.list_stream_events(task_id, after=after)
         return [
             event
             for event in self._events_by_task.get(task_id, [])

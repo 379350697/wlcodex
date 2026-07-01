@@ -6216,24 +6216,27 @@ def test_runtime_delta_is_projected_to_relay_event_bus(tmp_path) -> None:
     )
     asyncio.run(service.dispatch_role(task.id, "director"))
 
+    runtime_store = RuntimeEventStore(service._store._ledger._conn)
     service.project_runtime_event(
-        RuntimeEvent(
-            id=56,
-            schema_version=1,
-            event_type=EventType.MODEL_TEXT_DELTA,
-            aggregate_type=AggregateType.AGENT_RUN,
-            aggregate_id="101",
-            correlation_id="corr-101",
-            source=EventSource.CLAUDE,
-            actor="claude",
-            visibility=Visibility.USER,
-            payload={
-                "delta": "hello from director",
-                "native_turn_id": "turn-director-1",
-                "itemId": "assistant-message-1",
-            },
-            occurred_at=now_iso(),
-            agent_run_id=101,
+        runtime_store.append(
+            RuntimeEvent(
+                id=56,
+                schema_version=1,
+                event_type=EventType.MODEL_TEXT_DELTA,
+                aggregate_type=AggregateType.AGENT_RUN,
+                aggregate_id="101",
+                correlation_id="corr-101",
+                source=EventSource.CLAUDE,
+                actor="claude",
+                visibility=Visibility.USER,
+                payload={
+                    "delta": "hello from director",
+                    "native_turn_id": "turn-director-1",
+                    "itemId": "assistant-message-1",
+                },
+                occurred_at=now_iso(),
+                agent_run_id=101,
+            )
         )
     )
 
