@@ -2423,11 +2423,14 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
 def test_worker_live_page_matches_native_codex_mobile_composer_layout() -> None:
     response = _live_page(42, native_provider="codex")
 
-    assert ".codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 10px; padding: 12px 18px 20px;" in response
+    assert ".codex-input-dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; display: grid; gap: 6px; padding: 12px 18px 20px;" in response
+    assert '<div class="attachment-strip" id="attachmentStrip" hidden></div>\n      <div class="composer-tools">' in response
     assert ".composer-tools { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 0;" in response
     assert ".composer-settings { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, .92fr) minmax(0, .92fr); gap: 8px; min-width: 0; max-width: 100%;" in response
     assert ".setting-pill { width: 100%; min-width: 0; min-height: 36px; border-radius: 18px; padding: 0 8px; overflow: hidden;" in response
     assert "font-size: 13px; font-weight: var(--weight-extrabold);" in response
+    assert 'modelSettingsButton.textContent = [modelText, effortText].filter(Boolean).join(" ");' in response
+    assert 'modelSettingsButton.textContent = summaryParts.join(" ");' not in response
     assert ".setting-pill.handoff { flex: 0 0 auto;" in response
     assert 'id="handoffButton" type="button">接棒执行</button>' in response
     assert ".dock-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) 48px; gap: 10px;" in response
@@ -4209,9 +4212,9 @@ async def test_worker_live_page_uses_official_model_catalog_settings(
     assert "reasoningSelector.disabled = sendingPrompt || nativeTurnRunning" in response
     assert "serviceTierSelector.disabled = sendingPrompt || nativeTurnRunning" in response
     assert 'service_tier: serviceTierSettingRow.hidden ? "" : serviceTierSelector.value,' in response
-    assert 'if (!reasoningSettingRow.hidden) summaryParts.push(effortText);' in response
-    assert 'if (!serviceTierSettingRow.hidden) summaryParts.push(tierText);' in response
-    assert 'modelSettingsButton.textContent = summaryParts.join(" ");' in response
+    assert 'modelSettingsButton.textContent = [modelText, effortText].filter(Boolean).join(" ");' in response
+    assert 'if (!serviceTierSettingRow.hidden) summaryParts.push(tierText);' not in response
+    assert 'modelSettingsButton.textContent = summaryParts.join(" ");' not in response
 
 
 @pytest.mark.asyncio
