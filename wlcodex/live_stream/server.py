@@ -13200,7 +13200,7 @@ __NATIVE_APP_HEAD__
   <link rel="stylesheet" href="/static/native_app_bundle.css">
 __MARVIS_CSS_LINK__  <style>
     :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; --native-ui-font-size: 15px; --native-code-font-size: 12px; --native-top-control-y: calc(14px + env(safe-area-inset-top)); --native-top-control-size: 48px; }
-    html, body, .native-mobile-shell, .codex-run-shell, .codex-transcript, .transcript-body, .codex-input-dock, input { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+    html, body, .native-mobile-shell, .codex-run-shell, .codex-transcript, .transcript-body, .codex-input-dock, input, textarea { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     body { background: #000; }
     body { scrollbar-width: none; }
     body::-webkit-scrollbar { display: none; }
@@ -13460,8 +13460,8 @@ __MARVIS_CSS_LINK__  <style>
     .setting-option-desc { color: var(--text-dim); font-size: 13px; line-height: 1.35; }
     .setting-option.selected { background: var(--bg-option-selected); color: #fff; }
     .setting-option-check { color: var(--btn-primary-bg); font-weight: var(--weight-black); }
-    .attach-button { width: 48px; min-height: 48px; display: grid; place-items: center; padding: 0; border-radius: 50%; background: #242426; color: var(--btn-primary-bg); border: 1px solid #343434; font-size: 0; line-height: 1; }
-    .attach-button svg { width: 29px; height: 29px; stroke-width: 2.15; }
+    .attach-button { width: 58px; min-height: 58px; display: grid; place-items: center; padding: 0; border-radius: 50%; background: #242426; color: var(--btn-primary-bg); border: 1px solid #343434; font-size: 0; line-height: 1; }
+    .attach-button svg { width: 34px; height: 34px; stroke-width: 2.15; }
     .composer-action-menu { position: absolute; left: 26px; right: 72px; bottom: 92px; max-height: min(58vh, 520px); overflow-y: auto; border: 1px solid var(--border-popover); border-radius: 26px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); padding: 20px 26px; z-index: 8; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
     .composer-action-menu.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
     .composer-menu-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 22px; align-items: center; width: 100%; min-height: 74px; padding: 8px 0; border: 0; border-radius: 14px; background: transparent; color: var(--btn-primary-bg); text-align: left; }
@@ -13500,12 +13500,12 @@ __MARVIS_CSS_LINK__  <style>
     .interruption-choice[hidden] { display: none; }
     .choice-action { min-height: 42px; border-radius: 12px; background: var(--bg-interact); color: var(--btn-primary-bg); border: 1px solid var(--border-input); }
     .choice-action.primary { background: var(--btn-primary-bg); color: var(--btn-primary-color); border: 0; }
-    .dock-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) 48px; gap: 10px; min-width: 0; align-items: center; }
+    .dock-row { position: relative; display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 10px; min-width: 0; align-items: end; }
     .dock-actions { display: flex; gap: 10px; min-width: 0; }
     .dock-actions[hidden] { display: none; }
-    input { flex: 1; min-width: 0; min-height: 52px; border-radius: 26px; border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 0 18px; font-size: 15px; }
-    .primary-action { flex: 0 0 48px; width: 48px; min-height: 48px; border-radius: 50%; padding: 0; display: grid; place-items: center; background: #f4f4f5; color: #050505; font-size: 0; line-height: 1; }
-    .primary-action svg { width: 29px; height: 29px; stroke-width: 2.35; }
+    #prompt { flex: 1; min-width: 0; min-height: 58px; max-height: 138px; border-radius: 29px; border: 1px solid var(--border-input); background: var(--bg-input); color: var(--btn-primary-bg); padding: 13px 58px 13px 18px; font-size: 18px; line-height: 1.35; resize: none; overflow-y: auto; }
+    .primary-action { position: absolute; right: 8px; bottom: 7px; width: 44px; min-height: 44px; border-radius: 50%; padding: 0; display: grid; place-items: center; background: #f4f4f5; color: #050505; font-size: 0; line-height: 1; }
+    .primary-action svg { width: 27px; height: 27px; stroke-width: 2.5; }
     .primary-action:disabled { background: #f4f4f5; color: #050505; opacity: .48; }
     .primary-action.stop { background: #f4f4f5; color: #050505; font-size: 24px; }
     @media (min-width: 820px) {
@@ -13698,7 +13698,7 @@ __MARVIS_CSS_LINK__  <style>
       </div>
       <div class="dock-row">
         <button class="attach-button" id="attachmentButton" type="button" aria-label="上传照片">＋</button>
-        <input id="prompt" placeholder="继续 __PROVIDER_LABEL_TEXT__ 会话">
+        <textarea id="prompt" rows="1" placeholder="继续 __PROVIDER_LABEL_TEXT__ 会话"></textarea>
         <button class="primary-action" id="continue" aria-label="发送">↑</button>
       </div>
       <div class="dock-actions" hidden>
@@ -13805,6 +13805,10 @@ __ICONS_JS__
     const permissionOptions = document.getElementById("permissionOptions");
     const reasoningOptions = document.getElementById("reasoningOptions");
     const serviceTierOptions = document.getElementById("serviceTierOptions");
+    function resizePromptInput() {
+      promptInput.style.height = "auto";
+      promptInput.style.height = `${Math.min(promptInput.scrollHeight, 138)}px`;
+    }
     const attachmentButton = document.getElementById("attachmentButton");
     const imageInput = document.getElementById("imageInput");
     const attachmentStrip = document.getElementById("attachmentStrip");
@@ -14074,6 +14078,7 @@ __ICONS_JS__
     }
     function clearComposerDraft() {
       promptInput.value = "";
+      resizePromptInput();
       imageAttachments = [];
       renderAttachments();
       resetComposerPlugins();
@@ -14084,6 +14089,7 @@ __ICONS_JS__
         return;
       }
       promptInput.value = String(snapshot.prompt || "");
+      resizePromptInput();
       imageAttachments = (snapshot.imageAttachments || []).map(image => ({...image}));
       renderAttachments();
       resetComposerPlugins();
@@ -14917,6 +14923,7 @@ __ICONS_JS__
         const nextCursor = start + prefix.length + mention.length + 1;
         promptInput.value = value.slice(0, start) + prefix + mention + " " + value.slice(cursor);
         promptInput.setSelectionRange(nextCursor, nextCursor);
+        resizePromptInput();
         return;
       }
       if (promptHasPluginMention(value, mention)) return;
@@ -14924,6 +14931,7 @@ __ICONS_JS__
       promptInput.value = value + separator + mention + " ";
       const nextCursor = promptInput.value.length;
       promptInput.setSelectionRange(nextCursor, nextCursor);
+      resizePromptInput();
     }
     function selectComposerPlugin(item) {
       if (!item || !pluginKey(item)) return;
@@ -15231,9 +15239,11 @@ __ICONS_JS__
       }
     });
     promptInput.addEventListener("input", () => {
+      resizePromptInput();
       updatePluginAutocomplete();
       updateComposerDisabled();
     });
+    resizePromptInput();
     document.addEventListener("click", event => {
       const target = event.target;
       if (!(target instanceof Element)) return;
