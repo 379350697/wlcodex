@@ -2571,6 +2571,9 @@ def test_worker_live_page_exposes_header_context_and_session_actions() -> None:
     assert 'id="headerSessionMenuButton"' in response
     assert 'id="contextInfoPopover"' in response
     assert 'class="context-info-sheet"' in response
+    assert ".context-info-sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: grid; max-height: min(54vh, 420px);" in response
+    assert ".context-info-row { display: grid; grid-template-columns: 158px minmax(0, 1fr); gap: 10px;" in response
+    assert ".context-info-value { min-width: 0; color: #f4f4f5; font: 700 13px/1.45 var(--font-mono);" in response
     assert 'id="contextInfoClose"' in response
     assert 'id="contextThreadCopyButton"' in response
     assert 'id="sessionActionMenu"' in response
