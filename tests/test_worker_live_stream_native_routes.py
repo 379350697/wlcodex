@@ -5285,6 +5285,16 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "new EventSource(streamPathWithCursor" in response
 
 
+def test_worker_live_page_native_soft_timeout_does_not_block_followup_poll() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "async function withNativeSoftTimeout(promise, message, delayMs = 12000)" in response
+    assert "Promise.race([promise, timeoutPromise])" in response
+    assert "promise.catch(() => {})" in response
+    assert "return await promise;" not in response
+    assert "syncNativeTranscript().then(pollEvents);" in response
+
+
 def test_worker_live_page_history_fold_disabled_state_stays_dark() -> None:
     response = _live_page(42, native_provider="codex")
 

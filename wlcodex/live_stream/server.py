@@ -14769,14 +14769,31 @@ __ICONS_JS__
     }
     async function withNativeSoftTimeout(promise, message, delayMs = 12000) {
       let settled = false;
-      const timer = window.setTimeout(() => {
-        if (!settled) updateRunState(message, "busy");
-      }, delayMs);
+      let timedOut = false;
+      let timer = null;
+      const timeoutPromise = new Promise(resolve => {
+        timer = window.setTimeout(() => {
+          if (!settled) {
+            timedOut = true;
+            updateRunState(message, "busy");
+          }
+          resolve({});
+        }, delayMs);
+      });
+      promise.catch(() => {});
       try {
-        return await promise;
+        const result = await Promise.race([promise, timeoutPromise]);
+        if (!timedOut) return result;
+        promise.finally(() => {
+          settled = true;
+          if (timer) window.clearTimeout(timer);
+        }).catch(() => {});
+        return {};
       } finally {
-        settled = true;
-        window.clearTimeout(timer);
+        if (!timedOut) {
+          settled = true;
+          if (timer) window.clearTimeout(timer);
+        }
       }
     }
     async function loadProviderCapabilities() {
