@@ -17501,7 +17501,7 @@ __ICONS_JS__
         return (
           displayEventOrder(left) - displayEventOrder(right) ||
           transcriptItemOrder(left) - transcriptItemOrder(right) ||
-          Number(left.id || 0) - Number(right.id || 0)
+          Number((left && left.id) || 0) - Number((right && right.id) || 0)
         );
       });
     }
@@ -17523,7 +17523,7 @@ __ICONS_JS__
       return Number(match[1]);
     }
     function eventGroupLastId(group) {
-      return group.reduce((latest, event) => Math.max(latest, Number(event.id || 0)), 0);
+      return group.reduce((latest, event) => Math.max(latest, Number((event && event.id) || 0)), 0);
     }
     function latestFoldGroupTurnId(groups) {
       for (let index = groups.length - 1; index >= 0; index--) {
@@ -17537,7 +17537,10 @@ __ICONS_JS__
       const target = options.target || events;
       const summary = buildFoldSummary(group, options.latestTurnId || "");
       if (!summary.shouldCollapse) {
-        for (const event of group) render(event, {scroll: false, historical: true, target});
+        for (const event of group) {
+          if (!isValidEventObject(event)) continue;
+          render(event, {scroll: false, historical: true, target});
+        }
         return;
       }
       const details = document.createElement("details");
@@ -17569,7 +17572,10 @@ __ICONS_JS__
       const previousTarget = renderTarget;
       renderTarget = inner;
       try {
-        for (const event of group) render(event, {scroll: false, historical: true});
+        for (const event of group) {
+          if (!isValidEventObject(event)) continue;
+          render(event, {scroll: false, historical: true});
+        }
       } finally {
         renderTarget = previousTarget;
       }
@@ -17614,7 +17620,8 @@ __ICONS_JS__
       return compact.slice(0, 217).trimEnd() + "...";
     }
     function buildFoldSummary(group, latestTurnId) {
-      const nativeTurnId = String((group[0].payload || {}).native_turn_id || "");
+      const firstEvent = group.find(isValidEventObject) || {};
+      const nativeTurnId = String((firstEvent.payload || {}).native_turn_id || "");
       const failed = group.some(event => isFailedEvent(event));
       const pendingApproval = hasPendingApproval(group);
       const generatedPrompt = groupHasGeneratedPrompt(group);
@@ -17648,7 +17655,7 @@ __ICONS_JS__
     function hasPendingApproval(group) {
       const requested = new Set();
       for (const event of group) {
-        if (event.kind !== "approval_requested") continue;
+        if (!event || event.kind !== "approval_requested") continue;
         const key = approvalRequestKey(event);
         if (!key) return true;
         requested.add(key);
@@ -17656,7 +17663,7 @@ __ICONS_JS__
       if (!requested.size) return false;
       const resolved = new Set();
       for (const event of loadedEvents) {
-        if (event.kind !== "approval_resolved") continue;
+        if (!event || event.kind !== "approval_resolved") continue;
         const key = approvalRequestKey(event);
         if (key) resolved.add(key);
       }
@@ -17686,6 +17693,7 @@ __ICONS_JS__
       return Math.max(keys.size, group.length ? 1 : 0);
     }
     function foldMessageKey(event) {
+      if (!event) return "";
       const payload = (event && event.payload) || {};
       const turnId = payload.native_turn_id || payload.turnId || "";
       const itemId = payload.itemId || payload.item_id || payload.codexRequestId || "";

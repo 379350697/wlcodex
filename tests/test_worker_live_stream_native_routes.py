@@ -5369,6 +5369,17 @@ def test_worker_live_page_rebuilds_native_stream_transactionally() -> None:
     assert "renderStatus(\"render_recovered\"" in response
 
 
+def test_worker_live_page_fold_helpers_skip_invalid_events() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "if (!isValidEventObject(event)) continue;" in response
+    assert "const firstEvent = group.find(isValidEventObject) || {};" in response
+    assert "if (!event || event.kind !== \"approval_requested\") continue;" in response
+    assert "if (!event || event.kind !== \"approval_resolved\") continue;" in response
+    assert "if (!event) return \"\";" in response
+    assert "Number((left && left.id) || 0)" in response
+
+
 def test_worker_live_page_history_fold_disabled_state_stays_dark() -> None:
     response = _live_page(42, native_provider="codex")
 
