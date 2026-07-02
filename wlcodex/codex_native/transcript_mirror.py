@@ -67,13 +67,14 @@ class CodexSessionTranscriptMirror:
         self._path_cache: dict[str, Path] = {}
         self._seen_item_ids: set[str] = set()
 
-    def sync_thread(self, native_thread_id: str) -> int:
+    def sync_thread(self, native_thread_id: str, *, tail_lines: int | None = None) -> int:
         native_thread_id = native_thread_id.strip()
         if not native_thread_id:
             return 0
         path = self._find_session_file(native_thread_id)
         if path is None:
             return 0
+        safe_tail_lines = max(1, int(tail_lines or self._tail_lines))
 
         session = self._session_store.get_or_create_session(
             native_thread_id=native_thread_id,
@@ -90,7 +91,7 @@ class CodexSessionTranscriptMirror:
         )
         projected_count = 0
         for item in _parse_transcript_items(
-            _read_tail_lines(path, limit=self._tail_lines, max_bytes=self._max_bytes),
+            _read_tail_lines(path, limit=safe_tail_lines, max_bytes=self._max_bytes),
             native_thread_id=native_thread_id,
             fallback_turn_id=fallback_turn_id,
         ):
@@ -179,6 +180,21 @@ class CodexSessionTranscriptMirror:
                 )
                 projected_count += 1
         return projected_count
+
+    def recent_turn_thread_ids(self, *, limit: int = 2) -> list[str]:
+        if not self._root.exists():
+            return []
+        safe_limit = max(1, int(limit or 2))
+        thread_ids: list[str] = []
+        for path in _recent_session_files(self._root, limit=max(safe_limit * 5, safe_limit)):
+            entry = _parse_session_index_entry(path)
+            if entry is None:
+                continue
+            self._path_cache[entry.native_thread_id] = entry.path
+            thread_ids.append(entry.native_thread_id)
+            if len(thread_ids) >= safe_limit:
+                break
+        return thread_ids
 
     def index_recent_sessions(self, *, limit: int = 100) -> int:
         if not self._root.exists():

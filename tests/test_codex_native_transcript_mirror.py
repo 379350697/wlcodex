@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from wlcodex.codex_native.projector import NativeCodexEventProjector
@@ -89,6 +90,54 @@ def test_transcript_mirror_indexes_recent_desktop_sessions(tmp_path: Path) -> No
     assert session.metadata["originator"] == "Codex Desktop"
     assert session.metadata["thread_source"] == "user"
     assert session.metadata["rollout_path"].endswith(f"{thread_id}.jsonl")
+
+
+def test_transcript_mirror_selects_latest_turn_threads_by_file_activity(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    root = tmp_path / "sessions"
+    thread_ids = [
+        "019efc99-e43b-7e83-95a7-88194da07f750",
+        "019efc99-e43b-7e83-95a7-88194da07f751",
+        "019efc99-e43b-7e83-95a7-88194da07f752",
+        "019efc99-e43b-7e83-95a7-88194da07f753",
+    ]
+    paths = []
+    for index, thread_id in enumerate(thread_ids):
+        path = _write_session_jsonl(
+            root,
+            thread_id,
+            [
+                {
+                    "timestamp": "2026-06-25T02:26:44.423Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": thread_id,
+                        "cwd": "/Users/wl/projects/wlcodex",
+                        "thread_source": "user",
+                    },
+                },
+                {
+                    "timestamp": "2026-06-25T02:26:45.000Z",
+                    "type": "turn_context",
+                    "payload": {"turn_id": f"turn-{index}"},
+                },
+            ],
+        )
+        os.utime(path, (1_700_000_000 + index, 1_700_000_000 + index))
+        paths.append(path)
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+    )
+
+    assert mirror.recent_turn_thread_ids(limit=2) == [thread_ids[3], thread_ids[2]]
+    assert mirror._path_cache == {
+        thread_ids[3]: paths[3],
+        thread_ids[2]: paths[2],
+    }
 
 
 def test_transcript_mirror_signatures_change_when_jsonl_changes(

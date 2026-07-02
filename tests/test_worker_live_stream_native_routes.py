@@ -553,9 +553,22 @@ class FakeTranscriptMirror:
         self.calls.append(("thread_file_signature", native_thread_id))
         return self.thread_signatures.get(native_thread_id, "")
 
-    def sync_thread(self, native_thread_id: str) -> int:
-        self.calls.append(("sync_thread", native_thread_id))
+    def sync_thread(self, native_thread_id: str, *, tail_lines: int | None = None) -> int:
+        if tail_lines is None:
+            self.calls.append(("sync_thread", native_thread_id))
+        else:
+            self.calls.append(("sync_thread", native_thread_id, tail_lines))
         return 1
+
+
+class WarmupTranscriptMirror(FakeTranscriptMirror):
+    def __init__(self, recent_thread_ids: list[str]) -> None:
+        super().__init__()
+        self.recent_thread_ids = list(recent_thread_ids)
+
+    def recent_turn_thread_ids(self, *, limit: int = 2) -> list[str]:
+        self.calls.append(("recent_turn_thread_ids", limit))
+        return self.recent_thread_ids[:limit]
 
 
 def _store(tmp_path: Path) -> RuntimeEventStore:
@@ -1137,6 +1150,61 @@ async def test_native_codex_sessions_background_refresh_indexes_jsonl_sessions(
     assert "HTTP/1.1 200 OK" in response
     assert provider.calls == [("list_cached_sessions", 50), ("list_sessions", 50)]
     assert mirror.calls == [("index_recent_sessions", 100)]
+
+
+@pytest.mark.asyncio
+async def test_startup_warmup_syncs_only_two_latest_turn_threads(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    mirror = WarmupTranscriptMirror(["thread-newest", "thread-second", "thread-old"])
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_transcript_mirror=mirror,
+    )
+    await server.start()
+    try:
+        for _index in range(20):
+            if ("sync_thread", "thread-second", 500) in mirror.calls:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        await server.stop()
+
+    assert ("recent_turn_thread_ids", 2) in mirror.calls
+    assert ("sync_thread", "thread-newest", 500) in mirror.calls
+    assert ("sync_thread", "thread-second", 500) in mirror.calls
+    assert ("sync_thread", "thread-old", 500) not in mirror.calls
+
+
+@pytest.mark.asyncio
+async def test_startup_warmup_skips_thread_with_existing_foreground_sync(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    mirror = WarmupTranscriptMirror(["thread-active", "thread-next"])
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_transcript_mirror=mirror,
+    )
+    server._native_background_tasks[("native_transcript", "codex", "thread-active")] = (
+        asyncio.create_task(asyncio.sleep(1.0))
+    )
+    await server.start()
+    try:
+        for _index in range(20):
+            if ("sync_thread", "thread-next", 500) in mirror.calls:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        await server.stop()
+
+    assert ("sync_thread", "thread-active", 500) not in mirror.calls
+    assert ("sync_thread", "thread-next", 500) in mirror.calls
 
 
 @pytest.mark.asyncio

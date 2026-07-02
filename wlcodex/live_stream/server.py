@@ -86,6 +86,8 @@ _MAX_RELAY_TEXT_ATTACHMENT_CHARS = 80_000
 _MAX_RELAY_TOTAL_TEXT_ATTACHMENT_CHARS = 180_000
 _MAX_PLUGIN_ICON_BYTES = 128 * 1024
 _NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS = 0.05
+_NATIVE_STARTUP_WARMUP_LIMIT = 2
+_NATIVE_STARTUP_WARMUP_TAIL_LINES = 500
 _NATIVE_SESSION_WATCH_INTERVAL_SECONDS = 1.0
 _NATIVE_TRANSCRIPT_WATCH_INTERVAL_SECONDS = 0.5
 _CODEX_PERMISSION_PRESETS: dict[str, dict[str, object]] = {
@@ -366,6 +368,7 @@ class WorkerLiveStreamServer:
         )
         socket = self._server.sockets[0]
         self.port = int(socket.getsockname()[1])
+        self._schedule_native_startup_warmup()
 
     async def stop(self) -> None:
         if self._server is None:
@@ -895,17 +898,25 @@ class WorkerLiveStreamServer:
         native_thread_id: str,
         *,
         native_provider: str = "codex",
+        tail_lines: int | None = None,
+        include_provider: bool = True,
     ) -> str:
         if not native_thread_id:
             return ""
         errors: list[str] = []
         if self._native_transcript_mirror is not None:
             try:
-                self._native_transcript_mirror.sync_thread(native_thread_id)
+                if tail_lines is None:
+                    self._native_transcript_mirror.sync_thread(native_thread_id)
+                else:
+                    self._native_transcript_mirror.sync_thread(
+                        native_thread_id,
+                        tail_lines=tail_lines,
+                    )
             except Exception as exc:
                 errors.append(str(exc) or type(exc).__name__)
         provider_name = native_provider.strip().lower() or "codex"
-        if provider_name == "codex":
+        if include_provider and provider_name == "codex":
             provider = self._native_provider("codex")
             if provider is not None:
                 try:
@@ -913,6 +924,71 @@ class WorkerLiveStreamServer:
                 except Exception as exc:
                     errors.append(str(exc) or type(exc).__name__)
         return "; ".join(error for error in errors if error)
+
+    def _schedule_native_startup_warmup(self) -> bool:
+        if self._native_transcript_mirror is None:
+            return False
+        recent_threads = getattr(
+            self._native_transcript_mirror,
+            "recent_turn_thread_ids",
+            None,
+        )
+        if recent_threads is None:
+            return False
+        provider_name = "codex"
+        key = ("native_transcript_warmup", provider_name)
+        existing = self._native_background_tasks.get(key)
+        if existing is not None and not existing.done():
+            return True
+
+        async def warmup() -> None:
+            try:
+                await asyncio.sleep(_NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS)
+                thread_ids = recent_threads(limit=_NATIVE_STARTUP_WARMUP_LIMIT)
+                if asyncio.iscoroutine(thread_ids):
+                    thread_ids = await thread_ids
+                for native_thread_id in list(thread_ids or [])[:_NATIVE_STARTUP_WARMUP_LIMIT]:
+                    thread_id = str(native_thread_id or "").strip()
+                    if not thread_id:
+                        continue
+                    if self._native_transcript_task_running(provider_name, thread_id):
+                        continue
+                    sync_error = await self._sync_native_transcript(
+                        thread_id,
+                        native_provider=provider_name,
+                        tail_lines=_NATIVE_STARTUP_WARMUP_TAIL_LINES,
+                        include_provider=False,
+                    )
+                    error_key = ("native_transcript", provider_name, thread_id)
+                    if sync_error:
+                        self._native_background_errors[error_key] = sync_error
+                    else:
+                        self._native_background_errors.pop(error_key, None)
+                self._native_background_errors.pop(key, None)
+            except Exception as exc:
+                self._native_background_errors[key] = str(exc) or "native warmup failed"
+            finally:
+                if self._native_background_tasks.get(key) is task:
+                    self._native_background_tasks.pop(key, None)
+
+        task = asyncio.create_task(warmup())
+        self._native_background_tasks[key] = task
+        return True
+
+    def _native_transcript_task_running(
+        self,
+        provider_name: str,
+        native_thread_id: str,
+    ) -> bool:
+        for key, task in self._native_background_tasks.items():
+            if task.done() or len(key) < 3:
+                continue
+            if not str(key[0]).startswith("native_transcript"):
+                continue
+            if key[1] != provider_name or key[2] != native_thread_id:
+                continue
+            return True
+        return False
 
     async def _read_json_body(
         self,
