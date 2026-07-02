@@ -21,10 +21,11 @@ from wlcodex.live_stream.server import (
     _codex_plugin_menu_items,
     _plugin_icon_data_url,
 )
+from wlcodex.live_stream.native_templates.registry import render_native_template
 from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.native_timeline import NativeTimelineStore
 from wlcodex.runtime_event_store import RuntimeEventStore
-from wlcodex.runtime_events import RuntimeEvent
+from wlcodex.runtime_events import EventType, RuntimeEvent
 
 
 _FAKE_SESSION_METADATA = {
@@ -2473,6 +2474,142 @@ def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
     assert 'status === "idle" && hasReviewableTurn(session)' in response
     assert "function hasReviewableTurn(session)" in response
     assert 'statusEl.className = `recent-status ${sessionVisualStateClass(session)}`;' in response
+
+
+def test_native_template_registry_renders_stable_and_timeline_v2_variants() -> None:
+    stable = render_native_template(
+        "codex",
+        "stable",
+        {
+            "stable_renderer": lambda provider, theme="": f"stable:{provider}:{theme}",
+            "theme": "marvis",
+        },
+    )
+    v2 = render_native_template("codex", "timeline_v2", {"initial_events": []})
+
+    assert stable == "stable:codex:marvis"
+    assert 'data-native-template="timeline-v2"' in v2
+    assert 'const API_BASE = "/api/native/codex";' in v2
+    assert "function renderLocalUserEcho" not in v2
+    assert "wlcodexNativeTimelineV2State" in v2
+    assert "nativeTimelinePath(`after=${latestEventId}&limit=100`)" in v2
+
+
+def test_native_codex_stable_template_does_not_include_timeline_v2_state() -> None:
+    response = _native_codex_page("codex")
+
+    assert 'data-native-template="timeline-v2"' not in response
+    assert "wlcodexNativeTimelineV2State" not in response
+    assert 'const API_BASE = "/api/native/codex";' in response
+    assert "scheduleLivePrefetch(filtered.slice(0, LIVE_PREFETCH_LIMIT));" in response
+
+
+@pytest.mark.asyncio
+async def test_native_codex_v2_route_is_isolated_from_stable_local_echo(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        native_timeline=NativeTimelineStore(store._conn),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex-v2 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "<title>Codex Timeline V2</title>" in response
+    assert 'data-native-template="timeline-v2"' in response
+    assert "function renderLocalUserEcho" not in response
+    assert "renderLocalUserEcho(" not in response
+    assert "等待 timeline 确认" in response
+
+
+@pytest.mark.asyncio
+async def test_native_codex_v2_initial_render_uses_native_timeline_items(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "timeline 用户消息",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_MESSAGE_COMPLETED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "agent-1",
+                "text": "timeline 助手回复",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native/codex-v2?native_thread_id=thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert "timeline 用户消息" in response
+    assert "timeline 助手回复" in response
+    assert "provider.raw.frame" not in response
 
 
 def test_native_provider_home_does_not_expose_marvis_theme_entry() -> None:

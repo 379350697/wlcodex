@@ -45,6 +45,7 @@ from wlcodex.live_stream.collapse import (
 )
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
+from wlcodex.live_stream.native_templates.registry import render_native_template
 from wlcodex.native_timeline import NativeTimelineEvent, NativeTimelineStore
 from wlcodex.jsonrpc import JsonRpcError, JsonRpcTimeout
 from wlcodex.relay.display import (
@@ -572,6 +573,21 @@ class WorkerLiveStreamServer:
                     await self._send_html(writer, 401, _native_token_entry_page())
                     return
                 await self._send_native_page(writer, "codex", headers, query)
+                return
+
+            if parsed.path == "/native/codex-v2":
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                if not self._is_authorized(
+                    writer,
+                    headers,
+                    query,
+                    require_token=self._native_controller is not None,
+                ):
+                    await self._send_html(writer, 401, _native_token_entry_page("/native/codex-v2"))
+                    return
+                await self._send_native_timeline_v2_page(writer, "codex", headers, query)
                 return
 
             if parsed.path in (
@@ -2607,7 +2623,66 @@ class WorkerLiveStreamServer:
             )
             return
         theme = _optional_nonempty_string(query.get("theme", [""])[0]) or ""
-        await self._send_html(writer, 200, _native_codex_page(provider_name, theme=theme))
+        await self._send_html(
+            writer,
+            200,
+            render_native_template(
+                provider_name,
+                "stable",
+                {
+                    "theme": theme,
+                    "stable_renderer": _native_codex_page,
+                },
+            ),
+        )
+
+    async def _send_native_timeline_v2_page(
+        self,
+        writer: asyncio.StreamWriter,
+        provider_name: str,
+        headers: dict[str, str],
+        query: dict[str, list[str]],
+    ) -> None:
+        provider = self._native_provider(provider_name)
+        if provider is None:
+            await self._send_json(writer, 404, {"error": "unknown native provider"})
+            return
+        if not self._is_authorized(
+            writer,
+            headers,
+            query,
+            require_token=True,
+        ):
+            safe_provider = quote(provider_name, safe="")
+            await self._send_html(
+                writer,
+                401,
+                _native_token_entry_page(f"/native/{safe_provider}-v2"),
+            )
+            return
+        native_thread_id = _optional_nonempty_string(
+            query.get("native_thread_id", [""])[0]
+            or query.get("thread_id", [""])[0]
+        ) or ""
+        initial_events: list[NativeTimelineEvent] = []
+        if native_thread_id and self._native_timeline is not None:
+            initial_events = self._native_timeline.list_item_events(
+                provider_name,
+                native_thread_id,
+                limit=100,
+            )
+        await self._send_html(
+            writer,
+            200,
+            render_native_template(
+                provider_name,
+                "timeline_v2",
+                {
+                    "native_thread_id": native_thread_id,
+                    "initial_events": initial_events,
+                },
+            ),
+        )
 
     async def _read_request_json(
         self,
