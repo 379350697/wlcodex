@@ -156,6 +156,136 @@ def test_native_timeline_item_snapshot_before_uses_item_latest_sequence() -> Non
     ]
 
 
+def test_native_timeline_dedupes_provider_and_model_delta_for_same_item() -> None:
+    store = NativeTimelineStore(sqlite3.connect(":memory:"))
+
+    provider_events = store.project_runtime_event(
+        _runtime_event(
+            EventType.PROVIDER_DISPLAY_DELTA,
+            {
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "agent-1",
+                "delta": "同一片段",
+                "provider": "codex",
+            },
+            event_id=201,
+        )
+    )
+    model_events = store.project_runtime_event(
+        _runtime_event(
+            EventType.MODEL_TEXT_DELTA,
+            {
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "agent-1",
+                "delta": "同一片段",
+                "provider": "codex",
+                "compatibility_projection": EventType.MODEL_TEXT_DELTA,
+            },
+            event_id=202,
+        )
+    )
+
+    assert [event.kind for event in provider_events] == ["text_delta"]
+    assert model_events == []
+    events = store.list_events("codex", "thread-1", after=0, limit=20)
+    assert [(event.kind, event.payload.get("delta")) for event in events] == [
+        ("text_delta", "同一片段")
+    ]
+    items = store.list_items("codex", "thread-1", limit=20)
+    assert [(item.kind, item.text) for item in items] == [("message", "同一片段")]
+
+
+def test_native_timeline_dedupes_compatibility_delta_after_multiple_chunks() -> None:
+    store = NativeTimelineStore(sqlite3.connect(":memory:"))
+
+    for index, delta in enumerate(("第一段", "第二段"), start=1):
+        provider_events = store.project_runtime_event(
+            _runtime_event(
+                EventType.PROVIDER_DISPLAY_DELTA,
+                {
+                    "native_thread_id": "thread-1",
+                    "native_turn_id": "turn-1",
+                    "itemId": "agent-1",
+                    "delta": delta,
+                    "provider": "codex",
+                },
+                event_id=220 + index * 2,
+            )
+        )
+        model_events = store.project_runtime_event(
+            _runtime_event(
+                EventType.MODEL_TEXT_DELTA,
+                {
+                    "native_thread_id": "thread-1",
+                    "native_turn_id": "turn-1",
+                    "itemId": "agent-1",
+                    "delta": delta,
+                    "provider": "codex",
+                    "compatibility_projection": EventType.MODEL_TEXT_DELTA,
+                },
+                event_id=221 + index * 2,
+            )
+        )
+
+        assert [event.kind for event in provider_events] == ["text_delta"]
+        assert model_events == []
+
+    events = store.list_events("codex", "thread-1", after=0, limit=20)
+    assert [(event.kind, event.payload.get("delta")) for event in events] == [
+        ("text_delta", "第一段"),
+        ("text_delta", "第二段"),
+    ]
+    items = store.list_items("codex", "thread-1", limit=20)
+    assert [(item.kind, item.text) for item in items] == [
+        ("message", "第一段第二段")
+    ]
+
+
+def test_native_timeline_dedupes_provider_and_model_completed_for_same_item() -> None:
+    store = NativeTimelineStore(sqlite3.connect(":memory:"))
+
+    provider_events = store.project_runtime_event(
+        _runtime_event(
+            EventType.PROVIDER_DISPLAY_COMPLETED,
+            {
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "agent-1",
+                "text": "最终回复",
+                "provider": "codex",
+            },
+            event_id=211,
+        )
+    )
+    model_events = store.project_runtime_event(
+        _runtime_event(
+            EventType.MODEL_MESSAGE_COMPLETED,
+            {
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "agent-1",
+                "text": "最终回复",
+                "provider": "codex",
+                "compatibility_projection": EventType.MODEL_MESSAGE_COMPLETED,
+            },
+            event_id=212,
+        )
+    )
+
+    assert [event.kind for event in provider_events] == ["message_completed"]
+    assert model_events == []
+    events = store.list_events("codex", "thread-1", after=0, limit=20)
+    assert [(event.kind, event.payload.get("text")) for event in events] == [
+        ("message_completed", "最终回复")
+    ]
+    items = store.list_items("codex", "thread-1", limit=20)
+    assert [(item.kind, item.text, item.status) for item in items] == [
+        ("message", "最终回复", "completed")
+    ]
+
+
 def test_native_timeline_item_snapshot_excludes_internal_command_items() -> None:
     store = NativeTimelineStore(sqlite3.connect(":memory:"))
     store.project_runtime_event(

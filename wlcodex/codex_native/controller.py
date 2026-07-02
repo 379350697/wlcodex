@@ -401,11 +401,6 @@ class CodexNativeController:
                 service_tier=service_tier,
             ),
         )
-        self._project_sent_prompt(
-            native_thread_id=native_thread_id,
-            native_turn_id=turn_id,
-            prompt=prompt,
-        )
         return NativeCodexControlResult(
             native_thread_id=native_thread_id,
             agent_run_id=session.agent_run_id,
@@ -610,21 +605,6 @@ class CodexNativeController:
             self._map_thread({"id": native_thread_id, **thread})
             self._projector.project_history(detail)
         return self._ensure_session(native_thread_id)
-
-    def _project_sent_prompt(
-        self,
-        *,
-        native_thread_id: str,
-        native_turn_id: str,
-        prompt: str,
-    ) -> None:
-        if not prompt.strip():
-            return
-        self._projector.project_user_message(
-            native_thread_id=native_thread_id,
-            native_turn_id=native_turn_id,
-            text=prompt,
-        )
 
     async def _refresh_turn_state(self, native_thread_id: str) -> _TurnState:
         detail = await self._client.attach_session(native_thread_id)

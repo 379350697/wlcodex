@@ -4208,129 +4208,18 @@ def _native_provider_index_html(
       </a>
     """.replace("__TOKEN_SUFFIX__", token_suffix)
     if providers:
-        provider_links: list[str] = []
-        for provider in providers:
-            provider_name = str(provider["provider"])
-            encoded_provider = quote(provider_name, safe="")
-            stable_href = f"/native/{encoded_provider}{token_suffix}"
-            attrs = f'class="provider" href="{stable_href}"'
-            if provider_name == "codex":
-                attrs = (
-                    f'class="provider" href="{stable_href}" data-native-provider="codex" '
-                    f'data-stable-href="{stable_href}" '
-                    f'data-timeline-v2-href="/native/codex-v2{token_suffix}"'
-                )
-            provider_links.append(
-                f"<a {attrs}>"
-                f"<span>{escape(_native_provider_display_name(provider_name))}</span>"
+        links = "\n".join(
+            (
+                f'<a class="provider" href="/native/'
+                f'{quote(str(provider["provider"]), safe="")}{token_suffix}">'
+                f"<span>{escape(_native_provider_display_name(str(provider['provider'])))}</span>"
                 f"<small>{escape(str(provider.get('provider_engine', '')))}</small>"
                 "</a>"
             )
-        links = "\n".join(provider_links)
+            for provider in providers
+        )
     else:
         links = '<div class="empty">No native providers configured.</div>'
-    settings_panel = f"""
-  <button class="native-settings-button" id="nativeSettingsButton" type="button" aria-label="设置 Codex 风格">
-    {_ICON_SVG["settings"]}
-  </button>
-  <div class="native-settings-backdrop" id="nativeSettingsBackdrop" hidden></div>
-  <section class="native-settings-sheet" id="nativeSettingsSheet" aria-label="Codex 风格" hidden>
-    <div class="native-settings-header">
-      <strong>Codex 风格</strong>
-      <button class="native-settings-close" id="nativeSettingsClose" type="button" aria-label="关闭">×</button>
-    </div>
-    <button class="native-style-option" type="button" data-codex-template-option="stable">
-      <span>稳定版</span>
-      <small>当前可用模板</small>
-    </button>
-    <button class="native-style-option" type="button" data-codex-template-option="timeline_v2">
-      <span>重构版 Timeline</span>
-      <small>基于 timeline 投影，发送后等待确认</small>
-    </button>
-  </section>
-  <script>
-    const CODEX_TEMPLATE_STORAGE_KEY = "wlcodex:native-codex-template";
-    const DEFAULT_CODEX_TEMPLATE = "stable";
-    const settingsButton = document.getElementById("nativeSettingsButton");
-    const settingsSheet = document.getElementById("nativeSettingsSheet");
-    const settingsBackdrop = document.getElementById("nativeSettingsBackdrop");
-    const settingsClose = document.getElementById("nativeSettingsClose");
-    const codexLink = document.querySelector('[data-native-provider="codex"]');
-    const templateButtons = Array.from(document.querySelectorAll("[data-codex-template-option]"));
-
-    function savedCodexTemplate() {{
-      try {{
-        return localStorage.getItem(CODEX_TEMPLATE_STORAGE_KEY) || DEFAULT_CODEX_TEMPLATE;
-      }} catch (_error) {{
-        return DEFAULT_CODEX_TEMPLATE;
-      }}
-    }}
-
-    function normalizeCodexTemplate(value) {{
-      return value === "timeline_v2" ? "timeline_v2" : DEFAULT_CODEX_TEMPLATE;
-    }}
-
-    function currentCodexTemplate() {{
-      return normalizeCodexTemplate(savedCodexTemplate());
-    }}
-
-    function codexTemplateHref(template) {{
-      if (!codexLink) return "";
-      return template === "timeline_v2"
-        ? codexLink.dataset.timelineV2Href
-        : codexLink.dataset.stableHref;
-    }}
-
-    function applyCodexTemplate(template) {{
-      const normalized = normalizeCodexTemplate(template);
-      if (codexLink) codexLink.href = codexTemplateHref(normalized);
-      templateButtons.forEach(button => {{
-        const selected = button.dataset.codexTemplateOption === normalized;
-        button.classList.toggle("selected", selected);
-        button.setAttribute("aria-pressed", selected ? "true" : "false");
-      }});
-    }}
-
-    function saveCodexTemplate(template) {{
-      const normalized = normalizeCodexTemplate(template);
-      try {{
-        localStorage.setItem(CODEX_TEMPLATE_STORAGE_KEY, normalized);
-      }} catch (_error) {{}}
-      applyCodexTemplate(normalized);
-    }}
-
-    function openNativeSettings() {{
-      settingsSheet.hidden = false;
-      settingsBackdrop.hidden = false;
-      requestAnimationFrame(() => {{
-        settingsSheet.classList.add("open");
-        settingsBackdrop.classList.add("open");
-      }});
-    }}
-
-    function closeNativeSettings() {{
-      settingsSheet.classList.remove("open");
-      settingsBackdrop.classList.remove("open");
-      window.setTimeout(() => {{
-        settingsSheet.hidden = true;
-        settingsBackdrop.hidden = true;
-      }}, 160);
-    }}
-
-    settingsButton.addEventListener("click", openNativeSettings);
-    settingsClose.addEventListener("click", closeNativeSettings);
-    settingsBackdrop.addEventListener("click", closeNativeSettings);
-    document.addEventListener("keydown", event => {{
-      if (event.key === "Escape" && !settingsSheet.hidden) closeNativeSettings();
-    }});
-    templateButtons.forEach(button => {{
-      button.addEventListener("click", () => {{
-        saveCodexTemplate(button.dataset.codexTemplateOption || DEFAULT_CODEX_TEMPLATE);
-        closeNativeSettings();
-      }});
-    }});
-    applyCodexTemplate(currentCodexTemplate());
-  </script>"""
     return _replace_html_icons(f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -4349,7 +4238,6 @@ def _native_provider_index_html(
     {council_links}
     {links}
   </main>
-  {settings_panel}
 </body>
 </html>""")
 

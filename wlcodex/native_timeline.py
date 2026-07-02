@@ -200,6 +200,12 @@ class NativeTimelineStore:
                 and int(existing["source_priority"]) > 50
             ):
                 return []
+            if (
+                existing is not None
+                and _is_compatibility_projection(payload)
+                and _ends_with_delta(str(existing["text"]), delta)
+            ):
+                return []
             text = (str(existing["text"]) if existing is not None else "") + delta
             item_payload = {
                 "delta": delta,
@@ -231,6 +237,13 @@ class NativeTimelineStore:
             item_key = _first_text(payload, "itemId", "item_id", "message_id") or (
                 "assistant-" + turn_key
             )
+            existing = self._find_item(provider, native_thread_id, turn_key, item_key)
+            if (
+                existing is not None
+                and _is_compatibility_projection(payload)
+                and str(existing["text"]) == text
+            ):
+                return []
             item_payload = {
                 "text": text,
                 "itemId": item_key,
@@ -1028,6 +1041,14 @@ def _compact_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _text_fingerprint(text: str) -> str:
     return hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _is_compatibility_projection(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("compatibility_projection"))
+
+
+def _ends_with_delta(text: str, delta: str) -> bool:
+    return bool(delta) and text.endswith(delta)
 
 
 def _offer(

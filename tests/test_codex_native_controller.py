@@ -704,7 +704,7 @@ async def test_controller_continue_steer_interrupt(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_controller_continue_projects_sent_prompt_as_visible_user_message(
+async def test_controller_continue_does_not_project_sent_prompt_as_visible_user_message(
     tmp_path: Path,
 ) -> None:
     controller, _client, session_store, runtime_store = _controller(tmp_path)
@@ -716,13 +716,7 @@ async def test_controller_continue_projects_sent_prompt_as_visible_user_message(
     assert session is not None
     assert result.turn_id == "turn-2"
     events = runtime_store.list_by_agent_run(session.agent_run_id)
-    assert [event.event_type for event in events] == [
-        EventType.PROVIDER_RAW_FRAME,
-        EventType.USER_MESSAGE_RECEIVED,
-    ]
-    assert events[1].visibility == "user"
-    assert events[1].payload["text"] == "show this on phone"
-    assert events[1].payload["native_turn_id"] == "turn-2"
+    assert [event.event_type for event in events] == []
 
 
 @pytest.mark.asyncio
