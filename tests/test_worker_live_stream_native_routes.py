@@ -5354,6 +5354,21 @@ def test_worker_live_page_native_soft_timeout_does_not_block_followup_poll() -> 
     assert "syncNativeTranscript().then(pollEvents);" in response
 
 
+def test_worker_live_page_rebuilds_native_stream_transactionally() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "function commitRenderedStream(nextEvents)" in response
+    assert "const previousChildren = Array.from(events.childNodes);" in response
+    assert 'const staging = document.createElement("div");' in response
+    assert "renderFoldGroup(group, {latestTurnId, target: staging});" in response
+    assert "function hasRenderedTranscriptContent(nodes)" in response
+    assert "node === empty" in response
+    assert "if (!staging.childNodes.length && hasRenderedTranscriptContent(previousChildren))" in response
+    assert "events.replaceChildren(...Array.from(staging.childNodes));" in response
+    assert "events.replaceChildren(...previousChildren);" in response
+    assert "renderStatus(\"render_recovered\"" in response
+
+
 def test_worker_live_page_history_fold_disabled_state_stays_dark() -> None:
     response = _live_page(42, native_provider="codex")
 
@@ -5537,7 +5552,7 @@ async def test_worker_live_page_orders_mirrored_transcript_items_before_complete
     assert "function orderTranscriptGroupEvents(group)" in response
     assert "function displayEventOrder(event)" in response
     assert "function transcriptItemOrder(event)" in response
-    assert "foldGroups(dedupeDisplayEvents(loadedEvents)).map(orderTranscriptGroupEvents)" in response
+    assert "foldGroups(dedupeDisplayEvents(nextEvents)).map(orderTranscriptGroupEvents)" in response
     assert "hasCompletedAssistantMessageForTurn(event)" in response
     assert "rebuildStream();" in response
 
@@ -5714,7 +5729,7 @@ async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns
     assert "HTTP/1.1 200 OK" in response
     assert "options.latest)" not in response
     assert "const latestTurnId = latestFoldGroupTurnId(groups);" in response
-    assert "renderFoldGroup(group, {latestTurnId});" in response
+    assert "renderFoldGroup(group, {latestTurnId, target: staging});" in response
     assert "function latestFoldGroupTurnId(groups)" in response
     assert "turnFoldTitle(group)" in response
     assert "function foldMessageCount(group)" in response
@@ -5728,7 +5743,7 @@ async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns
     assert "function userMessageTextFingerprint(event)" in response
     assert "function shouldDedupeUserBySyntheticText(event, previous)" in response
     assert "function userMessageDedupePriority(event)" in response
-    assert "const groups = foldGroups(dedupeDisplayEvents(loadedEvents)).map(orderTranscriptGroupEvents);" in response
+    assert "const groups = foldGroups(dedupeDisplayEvents(nextEvents)).map(orderTranscriptGroupEvents);" in response
     assert "title.textContent = turnFoldTitle(group);" in response
     assert "nativeTurnId !== latestTurnId" in response
     assert "completed || nativeTurnId !== latestTurnId" not in response

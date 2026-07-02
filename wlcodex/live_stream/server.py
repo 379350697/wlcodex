@@ -17065,16 +17065,58 @@ __ICONS_JS__
       }
     }
     function rebuildStream() {
-      transcriptNodes.clear();
-      statusNodes.clear();
-      commandNodes.clear();
-      fileChangeSummaryNodes.clear();
-      fileChangeSummaryStates.clear();
-      events.innerHTML = "";
-      const groups = foldGroups(dedupeDisplayEvents(loadedEvents)).map(orderTranscriptGroupEvents);
-      const latestTurnId = latestFoldGroupTurnId(groups);
-      groups.forEach(group => {
-        renderFoldGroup(group, {latestTurnId});
+      commitRenderedStream(loadedEvents);
+    }
+    function commitRenderedStream(nextEvents) {
+      const previousChildren = Array.from(events.childNodes);
+      const previousTarget = renderTarget;
+      const previousTranscriptNodes = new Map(transcriptNodes);
+      const previousStatusNodes = new Map(statusNodes);
+      const previousCommandNodes = new Map(commandNodes);
+      const previousFileChangeSummaryNodes = new Map(fileChangeSummaryNodes);
+      const previousFileChangeSummaryStates = new Map(fileChangeSummaryStates);
+      const staging = document.createElement("div");
+      try {
+        transcriptNodes.clear();
+        statusNodes.clear();
+        commandNodes.clear();
+        fileChangeSummaryNodes.clear();
+        fileChangeSummaryStates.clear();
+        const groups = foldGroups(dedupeDisplayEvents(nextEvents)).map(orderTranscriptGroupEvents);
+        const latestTurnId = latestFoldGroupTurnId(groups);
+        groups.forEach(group => {
+          renderFoldGroup(group, {latestTurnId, target: staging});
+        });
+        if (!staging.childNodes.length && hasRenderedTranscriptContent(previousChildren)) {
+          throw new Error("empty staged native transcript");
+        }
+        events.replaceChildren(...Array.from(staging.childNodes));
+      } catch (error) {
+        transcriptNodes.clear();
+        for (const [key, value] of previousTranscriptNodes) transcriptNodes.set(key, value);
+        statusNodes.clear();
+        for (const [key, value] of previousStatusNodes) statusNodes.set(key, value);
+        commandNodes.clear();
+        for (const [key, value] of previousCommandNodes) commandNodes.set(key, value);
+        fileChangeSummaryNodes.clear();
+        for (const [key, value] of previousFileChangeSummaryNodes) fileChangeSummaryNodes.set(key, value);
+        fileChangeSummaryStates.clear();
+        for (const [key, value] of previousFileChangeSummaryStates) fileChangeSummaryStates.set(key, value);
+        renderTarget = previousTarget;
+        events.replaceChildren(...previousChildren);
+        renderStatus("render_recovered", (error && error.message) || "显示同步已恢复，正在重新连接");
+        setConnectionState("reconnecting");
+        window.setTimeout(pollEvents, 0);
+      } finally {
+        renderTarget = previousTarget;
+      }
+    }
+    function hasRenderedTranscriptContent(nodes) {
+      return Array.from(nodes || []).some(node => {
+        if (!node || node.nodeType !== 1) return false;
+        if (node === empty) return false;
+        if (node.classList && node.classList.contains("empty")) return false;
+        return true;
       });
     }
     function renderLiveEvent(event) {
@@ -17492,9 +17534,10 @@ __ICONS_JS__
       return "";
     }
     function renderFoldGroup(group, options = {}) {
+      const target = options.target || events;
       const summary = buildFoldSummary(group, options.latestTurnId || "");
       if (!summary.shouldCollapse) {
-        for (const event of group) render(event, {scroll: false, historical: true});
+        for (const event of group) render(event, {scroll: false, historical: true, target});
         return;
       }
       const details = document.createElement("details");
@@ -17522,7 +17565,7 @@ __ICONS_JS__
       inner.className = "turn-fold-body-inner";
       body.append(inner);
       details.append(head, body);
-      events.append(details);
+      target.append(details);
       const previousTarget = renderTarget;
       renderTarget = inner;
       try {
