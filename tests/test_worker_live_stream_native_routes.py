@@ -3958,6 +3958,18 @@ async def test_native_timeline_endpoint_replays_visible_messages_not_raw_tail(
     ]
     assert body["events"][0]["payload"]["text"] == "用户真实消息"
     assert body["events"][1]["payload"]["text"] == "助手真实回复"
+    assert body["events"][1]["type"] == "message_completed"
+    assert body["events"][1]["source_type"] == "provider.display.completed"
+    assert body["events"][1]["role"] == "assistant"
+    assert body["events"][1]["visible"] is True
+    assert body["visible_event_count"] == 2
+    assert body["hidden_event_count_by_reason"] == {}
+    assert body["latest_sequence"] == body["events"][1]["sequence"]
+    assert body["latest_visible_sequence"] == body["events"][1]["sequence"]
+    assert body["source_type_counts"] == {
+        "user.message.received": 1,
+        "provider.display.completed": 1,
+    }
     assert all(event["type"] != "provider.raw.frame" for event in body["events"])
 
 
@@ -4064,12 +4076,33 @@ async def test_native_timeline_endpoint_initial_snapshot_compacts_delta_burst(
 
 
 @pytest.mark.asyncio
-async def test_native_timeline_json_syncs_codex_transcript_before_read(
+async def test_native_timeline_json_returns_projection_before_background_sync(
     tmp_path: Path,
 ) -> None:
     runtime_store = _store(tmp_path)
     timeline_store = NativeTimelineStore(runtime_store._conn)
     runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="user.message.received",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-0",
+                "itemId": "user-0",
+                "text": "已投影消息",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
 
     class TimelineSyncMirror(FakeTranscriptMirror):
         def __init__(self) -> None:
@@ -4120,13 +4153,15 @@ async def test_native_timeline_json_syncs_codex_transcript_before_read(
             "Host: test\r\nAuthorization: Bearer secret\r\n"
             "Connection: close\r\n\r\n",
         )
+        await asyncio.sleep(0.1)
     finally:
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
     assert ("sync_thread", "thread-1") in mirror.calls
     body = _json_body(response)
-    assert [event["payload"]["text"] for event in body["events"]] == ["tail 已同步"]
+    assert body["native_sync_pending"] is True
+    assert [event["payload"]["text"] for event in body["events"]] == ["已投影消息"]
 
 
 @pytest.mark.asyncio
@@ -4212,12 +4247,33 @@ async def test_native_timeline_stream_uses_sequence_cursor_and_live_events(
 
 
 @pytest.mark.asyncio
-async def test_native_timeline_stream_syncs_codex_transcript_before_replay(
+async def test_native_timeline_stream_replays_projection_before_background_sync(
     tmp_path: Path,
 ) -> None:
     runtime_store = _store(tmp_path)
     timeline_store = NativeTimelineStore(runtime_store._conn)
     runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="user.message.received",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-0",
+                "itemId": "user-0",
+                "text": "stream 已投影",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
 
     class TimelineSyncMirror(FakeTranscriptMirror):
         def __init__(self) -> None:
@@ -4271,6 +4327,7 @@ async def test_native_timeline_stream_syncs_codex_transcript_before_replay(
         await writer.drain()
         await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
         first = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        await asyncio.sleep(0.1)
     finally:
         if writer is not None:
             writer.close()
@@ -4279,7 +4336,7 @@ async def test_native_timeline_stream_syncs_codex_transcript_before_replay(
 
     assert ("sync_thread", "thread-1") in mirror.calls
     assert b"id: 1\n" in first
-    assert "stream tail 已同步" in first.decode("utf-8")
+    assert "stream 已投影" in first.decode("utf-8")
 
 
 @pytest.mark.asyncio
@@ -4924,13 +4981,15 @@ def test_live_page_waits_during_active_turn_when_provider_cannot_steer() -> None
     assert 'mode === "wait" ? "等待当前轮"' in response
 
 
-def test_native_live_page_hides_provider_display_completed_projection() -> None:
+def test_native_live_page_keeps_canonical_provider_completed_timeline_visible() -> None:
     response = _live_page(42, native_provider="codex")
 
     assert "function isProviderDisplayCompletedEvent(event)" in response
-    assert 'event.type === "provider.display.completed"' in response
+    assert "function isCanonicalNativeDisplayEvent(event)" in response
+    assert "isCanonicalNativeDisplayEvent(event)" in response
     assert "isProviderDisplayCompletedEvent(event)" in response
     assert 'event.kind === "message_completed"' in response
+    assert "if (isCanonicalNativeDisplayEvent(event)) return false;" in response
 
 
 def test_native_live_page_hides_compatibility_projection_mirrors() -> None:

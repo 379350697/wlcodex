@@ -984,6 +984,54 @@ class WorkerLiveStreamServer:
             self._native_background_errors.pop(error_key, None)
         return sync_error
 
+    def _schedule_native_timeline_transcript_sync_if_needed(
+        self,
+        provider: str,
+        native_thread_id: str,
+        *,
+        force: bool = False,
+    ) -> bool:
+        provider_name = provider.strip().lower() or "codex"
+        if provider_name != "codex" or self._native_transcript_mirror is None:
+            return False
+        if not native_thread_id:
+            return False
+        signature_key = (provider_name, native_thread_id)
+        signature = self._native_transcript_file_signature(
+            provider_name,
+            native_thread_id,
+        )
+        if (
+            not force
+            and signature
+            and signature == self._native_transcript_file_signatures.get(signature_key)
+        ):
+            return False
+        task_key = ("native_transcript", provider_name, native_thread_id)
+        existing = self._native_background_tasks.get(task_key)
+        if existing is not None and not existing.done():
+            return True
+
+        async def sync() -> None:
+            try:
+                await asyncio.sleep(_NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS)
+                await self._sync_native_timeline_transcript_if_needed(
+                    provider_name,
+                    native_thread_id,
+                    force=force,
+                )
+            except Exception as exc:
+                self._native_background_errors[task_key] = (
+                    str(exc) or "native transcript sync failed"
+                )
+            finally:
+                if self._native_background_tasks.get(task_key) is task:
+                    self._native_background_tasks.pop(task_key, None)
+
+        task = asyncio.create_task(sync())
+        self._native_background_tasks[task_key] = task
+        return True
+
     def _schedule_native_startup_warmup(self) -> bool:
         if self._native_transcript_mirror is None:
             return False
@@ -2820,15 +2868,26 @@ class WorkerLiveStreamServer:
         limit: int = 100,
         item_snapshot: bool = False,
     ) -> None:
-        sync_error = await self._sync_native_timeline_transcript_if_needed(
-            provider,
+        provider_key = provider.strip().lower() or "codex"
+        sync_error = self._native_background_errors.get(
+            ("native_transcript", provider_key, native_thread_id),
+            "",
+        )
+        sync_pending = self._schedule_native_timeline_transcript_sync_if_needed(
+            provider_key,
             native_thread_id,
         )
         if self._native_timeline is None:
             await self._send_json(
                 writer,
                 200,
-                {"provider": provider, "native_thread_id": native_thread_id, "events": []},
+                {
+                    "provider": provider,
+                    "native_thread_id": native_thread_id,
+                    "events": [],
+                    "native_sync_error": sync_error,
+                    "native_sync_pending": sync_pending,
+                },
             )
             return
         if item_snapshot:
@@ -2864,15 +2923,19 @@ class WorkerLiveStreamServer:
             if first_sequence
             else 0
         )
+        display_events = [_native_timeline_display_event(event) for event in events]
+        timeline_summary = _native_timeline_display_summary(display_events)
         await self._send_json(
             writer,
             200,
             {
                 "provider": provider,
                 "native_thread_id": native_thread_id,
-                "events": [event.to_json_dict() for event in events],
+                "events": display_events,
                 "previous_event_count": previous_event_count,
                 "native_sync_error": sync_error,
+                "native_sync_pending": sync_pending,
+                **timeline_summary,
             },
         )
 
@@ -2896,7 +2959,7 @@ class WorkerLiveStreamServer:
         await writer.drain()
         if self._native_timeline is None:
             return
-        await self._sync_native_timeline_transcript_if_needed(
+        self._schedule_native_timeline_transcript_sync_if_needed(
             provider,
             native_thread_id,
         )
@@ -3658,10 +3721,46 @@ def format_sse_event(event: WorkerStreamEvent) -> bytes:
 
 
 def format_native_timeline_sse_event(event: NativeTimelineEvent) -> bytes:
-    payload = json.dumps(event.to_json_dict(), ensure_ascii=False)
+    payload = json.dumps(_native_timeline_display_event(event), ensure_ascii=False)
     return (
         f"id: {event.sequence}\nevent: {event.kind}\ndata: {payload}\n\n"
     ).encode("utf-8")
+
+
+def _native_timeline_display_event(event: NativeTimelineEvent) -> dict[str, Any]:
+    if hasattr(event, "to_display_json_dict"):
+        return event.to_display_json_dict()
+    data = event.to_json_dict()
+    data.setdefault("source_type", data.get("type"))
+    data["type"] = data.get("kind", data.get("type"))
+    return data
+
+
+def _native_timeline_display_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    source_type_counts: dict[str, int] = {}
+    hidden_by_reason: dict[str, int] = {}
+    latest_sequence = 0
+    latest_visible_sequence = 0
+    visible_event_count = 0
+    for event in events:
+        sequence = _safe_int(event.get("sequence", event.get("id", 0)), default=0)
+        latest_sequence = max(latest_sequence, sequence)
+        source_type = str(event.get("source_type") or event.get("type") or "")
+        if source_type:
+            source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
+        if event.get("visible") is False:
+            reason = str(event.get("hidden_reason") or "not_visible")
+            hidden_by_reason[reason] = hidden_by_reason.get(reason, 0) + 1
+            continue
+        visible_event_count += 1
+        latest_visible_sequence = max(latest_visible_sequence, sequence)
+    return {
+        "visible_event_count": visible_event_count,
+        "hidden_event_count_by_reason": hidden_by_reason,
+        "latest_sequence": latest_sequence,
+        "latest_visible_sequence": latest_visible_sequence,
+        "source_type_counts": source_type_counts,
+    }
 
 
 def _agent_id_from_path(path: str, *, prefix: str, suffix: str) -> int | None:
@@ -16739,6 +16838,7 @@ __ICONS_JS__
       return false;
     }
     function isInternalEvent(event) {
+      if (isCanonicalNativeDisplayEvent(event)) return false;
       return Boolean(
         event && (
           event.type === "model.usage.updated" ||
@@ -16749,6 +16849,18 @@ __ICONS_JS__
           isNativeReasoningDetail(event) ||
           (isNativeActivityDetail(event) && !isNativePlanEvent(event))
         )
+      );
+    }
+    function isCanonicalNativeDisplayEvent(event) {
+      if (!isNativeFeedbackMode(event) || !event) return false;
+      if (event.visible === false) return false;
+      return (
+        event.kind === "user_message" ||
+        event.kind === "text_delta" ||
+        event.kind === "message_completed" ||
+        isNativePlanEvent(event) ||
+        event.kind === "approval_requested" ||
+        event.kind === "approval_resolved"
       );
     }
     function isProviderRawFrameEvent(event) {

@@ -216,7 +216,9 @@ def _provider_label(provider: str) -> str:
 
 
 def _event_dict(event: Any) -> dict[str, Any]:
-    if hasattr(event, "to_json_dict"):
+    if hasattr(event, "to_display_json_dict"):
+        value = event.to_display_json_dict()
+    elif hasattr(event, "to_json_dict"):
         value = event.to_json_dict()
     elif isinstance(event, dict):
         value = dict(event)

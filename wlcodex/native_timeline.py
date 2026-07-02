@@ -40,6 +40,26 @@ class NativeTimelineEvent:
             "payload": dict(self.payload),
         }
 
+    def to_display_json_dict(self) -> dict[str, Any]:
+        payload = dict(self.payload)
+        role = _display_role_for_kind(self.kind, payload)
+        return {
+            "id": self.sequence,
+            "sequence": self.sequence,
+            "type": self.kind,
+            "source_type": self.type,
+            "kind": self.kind,
+            "role": role,
+            "visible": _is_visible_display_kind(self.kind),
+            "provider": self.provider,
+            "native_thread_id": self.native_thread_id,
+            "occurred_at": self.occurred_at,
+            "runtime_event_id": self.runtime_event_id,
+            "agent_run_id": self.agent_run_id,
+            "conversation_id": self.conversation_id,
+            "payload": payload,
+        }
+
 
 @dataclass(frozen=True)
 class NativeTimelineItem:
@@ -947,6 +967,35 @@ def _item_from_row(row: sqlite3.Row) -> NativeTimelineItem:
         status=str(row["status"]),
         payload=json.loads(str(row["payload_json"] or "{}")),
     )
+
+
+def _display_role_for_kind(kind: str, payload: dict[str, Any]) -> str:
+    payload_role = str(payload.get("role") or "").strip().lower()
+    if payload_role in {"user", "assistant", "system"}:
+        return payload_role
+    if kind == "user_message":
+        return "user"
+    if kind in {
+        "text_delta",
+        "message_completed",
+        "reasoning_delta",
+        "activity",
+        "approval_requested",
+        "approval_resolved",
+    }:
+        return "assistant"
+    return "system"
+
+
+def _is_visible_display_kind(kind: str) -> bool:
+    return kind in {
+        "user_message",
+        "text_delta",
+        "message_completed",
+        "activity",
+        "approval_requested",
+        "approval_resolved",
+    }
 
 
 def _normalize_provider(provider: str) -> str:
