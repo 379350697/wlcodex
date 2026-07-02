@@ -757,6 +757,45 @@ async def test_native_provider_index_links_static_stylesheet(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_native_provider_index_exposes_codex_template_settings(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=FakeNativeController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /native?token=secret HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert 'class="native-settings-button"' in response
+    assert 'id="nativeSettingsButton"' in response
+    assert 'id="nativeSettingsSheet"' in response
+    assert "Codex 风格" in response
+    assert "稳定版" in response
+    assert "重构版 Timeline" in response
+    assert 'data-native-provider="codex"' in response
+    assert 'data-stable-href="/native/codex?token=secret"' in response
+    assert 'data-timeline-v2-href="/native/codex-v2?token=secret"' in response
+    assert 'const CODEX_TEMPLATE_STORAGE_KEY = "wlcodex:native-codex-template";' in response
+    assert 'const DEFAULT_CODEX_TEMPLATE = "stable";' in response
+    assert "href = codexTemplateHref(normalized)" in response
+
+
+@pytest.mark.asyncio
 async def test_native_provider_page_links_single_static_stylesheet(tmp_path: Path) -> None:
     store = _store(tmp_path)
     server = WorkerLiveStreamServer(
