@@ -359,6 +359,175 @@ def test_transcript_mirror_imports_task_complete_last_agent_message(
     assert str(events[2].payload["itemId"]).startswith("jsonl-assistant-final:")
 
 
+def test_transcript_mirror_imports_response_item_assistant_message_as_final(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    thread_id = "019f22ce-a37d-7e91-8827-1a48c92cbe57"
+    root = tmp_path / "sessions"
+    _write_session_jsonl(
+        root,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-07-02T12:30:00.000Z",
+                "type": "turn_context",
+                "payload": {"turn_id": "official-turn-response-item"},
+            },
+            {
+                "timestamp": "2026-07-02T12:30:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "这个格式为什么卡住",
+                },
+            },
+            {
+                "timestamp": "2026-07-02T12:30:03.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "official-assistant-item",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "是的，核心问题不是模型没跑完。\n\n"
+                                "1. WLCodex 同步请求太早超时。\n"
+                                "2. 最终消息应该从 transcript 补齐。"
+                            ),
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+        tail_lines=20,
+    )
+
+    projected_count = mirror.sync_thread(thread_id)
+    session = session_store.get_by_thread_id(thread_id)
+    assert session is not None
+    events = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
+
+    assert projected_count == 2
+    assert [event.event_type for event in events] == [
+        EventType.USER_MESSAGE_RECEIVED,
+        EventType.PROVIDER_DISPLAY_COMPLETED,
+        EventType.MODEL_MESSAGE_COMPLETED,
+    ]
+    assert events[2].payload["text"].startswith("是的，核心问题")
+    assert events[2].payload["native_turn_id"] == "official-turn-response-item"
+    assert events[2].payload["itemId"] == "official-assistant-item"
+
+
+def test_transcript_mirror_drops_agent_delta_when_final_exists_for_turn(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    thread_id = "019f22ce-a37d-7e91-8827-1a48c92cbe57"
+    root = tmp_path / "sessions"
+    _write_session_jsonl(
+        root,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-07-02T12:31:00.000Z",
+                "type": "turn_context",
+                "payload": {"turn_id": "official-turn-final-wins"},
+            },
+            {
+                "timestamp": "2026-07-02T12:31:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "是的，大概率会快很多",
+                },
+            },
+            {
+                "timestamp": "2026-07-02T12:31:08.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "official-final-item",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "是的，大概率会快很多。\n\n"
+                                "但是要注意几个关键点：\n"
+                                "1. 真实域名本身不会加速。"
+                            ),
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+        tail_lines=20,
+    )
+
+    projected_count = mirror.sync_thread(thread_id)
+    session = session_store.get_by_thread_id(thread_id)
+    assert session is not None
+    events = _logical_events(runtime_store.list_by_agent_run(session.agent_run_id, limit=20))
+
+    assert projected_count == 1
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_DISPLAY_COMPLETED,
+        EventType.MODEL_MESSAGE_COMPLETED,
+    ]
+    assert events[1].payload["text"].startswith("是的，大概率会快很多。")
+    assert all(event.event_type != EventType.MODEL_TEXT_DELTA for event in events)
+
+
+def test_transcript_mirror_ignores_assistant_response_item_without_text(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    thread_id = "019f22ce-a37d-7e91-8827-1a48c92cbe57"
+    root = tmp_path / "sessions"
+    _write_session_jsonl(
+        root,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-07-02T12:32:00.000Z",
+                "type": "turn_context",
+                "payload": {"turn_id": "official-turn-no-text"},
+            },
+            {
+                "timestamp": "2026-07-02T12:32:01.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "assistant-no-text",
+                    "content": [{"type": "reasoning"}],
+                },
+            },
+        ],
+    )
+    mirror = CodexSessionTranscriptMirror(
+        root=root,
+        session_store=session_store,
+        runtime_store=runtime_store,
+        tail_lines=20,
+    )
+
+    assert mirror.sync_thread(thread_id) == 0
+
+
 def test_transcript_mirror_imports_official_plan_response_item_as_plan_activity(
     tmp_path: Path,
 ) -> None:

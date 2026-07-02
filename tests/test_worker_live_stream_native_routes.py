@@ -5239,7 +5239,9 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).then(() => {" not in response
     assert "attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).catch" not in response
     assert "attachNative().then(loadNativeSessionInfo).catch" in response
-    assert "timeoutMs: 2500" in response
+    assert "async function withNativeSoftTimeout(promise, message, delayMs = 12000)" in response
+    assert "timeoutMs: 2500" not in response
+    assert "同步原生 transcript 较慢" in response
     assert "hasLiveDisplayEvents" in response
     assert "model.usage.updated" in response
     assert "function normalizeEventList(sourceEvents)" in response
@@ -5336,6 +5338,7 @@ async def test_worker_live_page_renders_assistant_markdown_blocks(
     assert 'replace(/\\r\\n/g, "\\n")' in response
     assert 'paragraph.join("\\n").trim()' in response
     assert 'codeLines.join("\\n")' in response
+    assert "line.match(/^\\s*\\d+[.)]\\s*(.+)$/)" in response
     assert "\\[([^\\]]+)\\]\\(([^)]+)\\)" in response
     assert "renderMarkdownLite(node.body, visibleText);" in response
     assert "node.text += visibleText;" in response
@@ -5668,7 +5671,10 @@ def test_worker_live_page_dedupes_assistant_mirror_text_by_turn() -> None:
 
     assert "function completedAssistantTextByTurn(sourceEvents)" in response
     assert "function assistantDisplayTextFingerprint(event)" in response
-    assert "function shouldDropAssistantMirrorEvent(event, completedAssistantTexts)" in response
+    assert "function shouldDropAssistantMirrorEvent(event, completedAssistantTexts, completedAssistantFinalTurns = new Set())" in response
+    assert "function completedAssistantFinalTurnSet(sourceEvents)" in response
+    assert "const completedAssistantFinalTurns = completedAssistantFinalTurnSet(sourceEvents);" in response
+    assert "if (turnId && completedAssistantFinalTurns.has(turnId)) return true;" in response
     assert 'const globalKey = "__global__";' in response
     assert "byTurn.get(globalKey).add(fingerprint);" in response
     assert 'completedAssistantTexts.get("__global__")?.has(fingerprint)' in response
@@ -5683,7 +5689,7 @@ def test_worker_live_page_dedupes_assistant_mirror_text_by_turn() -> None:
     assert 'if (!turnId) return `global:${fingerprint}`;' in response
     assert 'return `turn:${turnId}:${fingerprint}`;' in response
     assert "const completedAssistantTexts = completedAssistantTextByTurn(sourceEvents);" in response
-    assert "if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) continue;" in response
+    assert "if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts, completedAssistantFinalTurns)) continue;" in response
     assert "normalizeTranscriptText(visibleTranscriptText(event))" in response
 
 

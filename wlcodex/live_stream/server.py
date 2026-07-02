@@ -14767,6 +14767,18 @@ __ICONS_JS__
         if (timeoutId) window.clearTimeout(timeoutId);
       }
     }
+    async function withNativeSoftTimeout(promise, message, delayMs = 12000) {
+      let settled = false;
+      const timer = window.setTimeout(() => {
+        if (!settled) updateRunState(message, "busy");
+      }, delayMs);
+      try {
+        return await promise;
+      } finally {
+        settled = true;
+        window.clearTimeout(timer);
+      }
+    }
     async function loadProviderCapabilities() {
       try {
         providerCapabilities = await api(`${API_BASE}/capabilities`);
@@ -14794,7 +14806,10 @@ __ICONS_JS__
         return;
       }
       try {
-        const session = await api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}`, {timeoutMs: 2500});
+        const session = await withNativeSoftTimeout(
+          api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}`),
+          "同步会话状态较慢"
+        );
         updateNativeSessionInfo(session || {});
       } catch (error) {
         updateNativeSessionInfo({status: error.message || "不可用"});
@@ -16550,11 +16565,10 @@ __ICONS_JS__
       if (!nativeThreadId || attached) return;
       attached = true;
       try {
-        const result = await api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/attach`, {
+        const result = await withNativeSoftTimeout(api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/attach`, {
           method: "POST",
-          body: "{}",
-          timeoutMs: 2500
-        });
+          body: "{}"
+        }), "连接原生会话较慢");
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.active_turn_id || "";
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
@@ -16567,11 +16581,10 @@ __ICONS_JS__
     async function syncNativeTranscript() {
       if (!nativeThreadId || invalidNativeThreadId) return;
       try {
-        const result = await api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`, {
+        const result = await withNativeSoftTimeout(api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`, {
           method: "POST",
-          body: "{}",
-          timeoutMs: 2500
-        });
+          body: "{}"
+        }), "同步原生 transcript 较慢");
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.turn_running ? (result.active_turn_id || result.turn_id || activeTurnId || "") : "";
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
@@ -17008,6 +17021,7 @@ __ICONS_JS__
     function dedupeDisplayEvents(sourceEvents) {
       const officialAssistantTurns = completedAssistantTurnSet(sourceEvents);
       const completedAssistantTexts = completedAssistantTextByTurn(sourceEvents);
+      const completedAssistantFinalTurns = completedAssistantFinalTurnSet(sourceEvents);
       const canonicalUserTurns = canonicalUserTranscriptTurnSet(sourceEvents);
       const seen = new Set();
       const seenUserMessages = new Map();
@@ -17018,7 +17032,7 @@ __ICONS_JS__
       for (const event of normalizeEventList(sourceEvents)) {
         if (isInternalEvent(event)) continue;
         if (isAssistantMessageEvent(event) && !hasVisibleTranscriptText(event)) continue;
-        if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) continue;
+        if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts, completedAssistantFinalTurns)) continue;
         if (isAssistantMessageEvent(event)) {
           const assistantFingerprint = assistantDisplayTextFingerprint(event);
           const previousAssistantIndex = assistantFingerprint
@@ -17138,12 +17152,13 @@ __ICONS_JS__
       }
       return byTurn;
     }
-    function shouldDropAssistantMirrorEvent(event, completedAssistantTexts) {
+    function shouldDropAssistantMirrorEvent(event, completedAssistantTexts, completedAssistantFinalTurns = new Set()) {
       if (!event || event.kind !== "text_delta") return false;
       const payload = event.payload || {};
       const itemId = String(payload.itemId || payload.item_id || "");
       if (!isProviderDisplayDeltaEvent(event) && !itemId.startsWith("jsonl-assistant")) return false;
       const turnId = eventFoldTurnId(event);
+      if (turnId && completedAssistantFinalTurns.has(turnId)) return true;
       const fingerprint = assistantDisplayTextFingerprint(event);
       return Boolean(
         fingerprint &&
@@ -17152,6 +17167,15 @@ __ICONS_JS__
           completedAssistantTexts.get("__global__")?.has(fingerprint)
         )
       );
+    }
+    function completedAssistantFinalTurnSet(sourceEvents) {
+      const turns = new Set();
+      for (const event of normalizeEventList(sourceEvents)) {
+        if (!event || event.kind !== "message_completed") continue;
+        const key = assistantTurnKey(event);
+        if (key) turns.add(key);
+      }
+      return turns;
     }
     function assistantDisplayTextFingerprint(event) {
       return normalizeTranscriptText(visibleTranscriptText(event));
@@ -17260,7 +17284,8 @@ __ICONS_JS__
     function isDuplicateDisplayEvent(event, previousEvents) {
       if (!isValidEventObject(event)) return true;
       const completedAssistantTexts = completedAssistantTextByTurn(previousEvents);
-      if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts)) return true;
+      const completedAssistantFinalTurns = completedAssistantFinalTurnSet(previousEvents);
+      if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts, completedAssistantFinalTurns)) return true;
       if (event.kind === "message_completed") {
         const completedFingerprint = completedAssistantTextFingerprint(event);
         if (completedFingerprint) {
@@ -18367,7 +18392,7 @@ __ICONS_JS__
           continue;
         }
         const unordered = line.match(/^\\s*[-*]\\s+(.+)$/);
-        const ordered = line.match(/^\\s*\\d+[.)]\\s+(.+)$/);
+        const ordered = line.match(/^\\s*\\d+[.)]\\s*(.+)$/);
         if (unordered || ordered) {
           flushParagraph();
           const type = ordered ? "ol" : "ul";

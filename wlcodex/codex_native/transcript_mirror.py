@@ -436,25 +436,46 @@ def _parse_transcript_items(
         if row_type == "response_item":
             if row_turn_id:
                 current_turn_id = row_turn_id
-            if payload_type != "plan":
+            if payload_type == "plan":
+                text = _response_item_text(payload)
+                if not text:
+                    continue
+                item_turn_id = row_turn_id or current_turn_id
+                item_id = _text(payload.get("id")) or _stable_id(
+                    "jsonl-plan",
+                    native_thread_id,
+                    item_turn_id,
+                    text,
+                )
+                items.append(
+                    _TranscriptItem(
+                        role="plan",
+                        text=text,
+                        timestamp=timestamp,
+                        turn_id=item_turn_id,
+                        item_id=item_id,
+                    )
+                )
+                continue
+            if not _is_assistant_response_item(payload):
                 continue
             text = _response_item_text(payload)
             if not text:
                 continue
             item_turn_id = row_turn_id or current_turn_id
-            item_id = _text(payload.get("id")) or _stable_id(
-                "jsonl-plan",
-                native_thread_id,
-                item_turn_id,
-                text,
-            )
             items.append(
                 _TranscriptItem(
-                    role="plan",
+                    role="assistant_final",
                     text=text,
                     timestamp=timestamp,
                     turn_id=item_turn_id,
-                    item_id=item_id,
+                    item_id=_text(payload.get("id"))
+                    or _stable_id(
+                        "jsonl-assistant-final",
+                        native_thread_id,
+                        item_turn_id,
+                        text,
+                    ),
                 )
             )
             continue
@@ -521,14 +542,12 @@ def _parse_transcript_items(
 
 
 def _dedupe_transcript_items(items: list[_TranscriptItem]) -> list[_TranscriptItem]:
-    final_texts = {
-        (item.turn_id, item.text)
-        for item in items
-        if item.role == "assistant_final"
+    final_turn_ids = {
+        item.turn_id for item in items if item.role == "assistant_final" and item.turn_id
     }
     result: list[_TranscriptItem] = []
     for item in items:
-        if item.role == "assistant" and (item.turn_id, item.text) in final_texts:
+        if item.role == "assistant" and item.turn_id in final_turn_ids:
             continue
         result.append(item)
     return result
@@ -547,11 +566,34 @@ def _text(value: object) -> str:
 
 
 def _response_item_text(payload: dict[str, Any]) -> str:
-    for key in ("text", "plan", "summary", "content"):
-        text = _text(payload.get(key))
+    for key in ("text", "plan", "summary", "content", "output"):
+        text = _content_text(payload.get(key))
         if text:
             return text
     return ""
+
+
+def _content_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [_content_text(item) for item in value]
+        return "\n".join(part for part in parts if part).strip()
+    if isinstance(value, dict):
+        for key in ("text", "output_text", "content", "message", "summary"):
+            text = _content_text(value.get(key))
+            if text:
+                return text
+        return ""
+    return _text(value)
+
+
+def _is_assistant_response_item(payload: dict[str, Any]) -> bool:
+    payload_type = str(payload.get("type") or "")
+    role = str(payload.get("role") or "")
+    if role == "assistant":
+        return payload_type in {"message", "assistant_message", "output_text", ""}
+    return payload_type in {"assistant_message", "assistant_final"}
 
 
 def _turn_id(payload: dict[str, Any]) -> str:
