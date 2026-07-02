@@ -941,6 +941,49 @@ class WorkerLiveStreamServer:
                     errors.append(str(exc) or type(exc).__name__)
         return "; ".join(error for error in errors if error)
 
+    async def _sync_native_timeline_transcript_if_needed(
+        self,
+        provider: str,
+        native_thread_id: str,
+        *,
+        force: bool = False,
+    ) -> str:
+        provider_name = provider.strip().lower() or "codex"
+        if provider_name != "codex" or self._native_transcript_mirror is None:
+            return ""
+        if not native_thread_id:
+            return ""
+        signature_key = (provider_name, native_thread_id)
+        signature = self._native_transcript_file_signature(
+            provider_name,
+            native_thread_id,
+        )
+        if (
+            not force
+            and signature
+            and signature == self._native_transcript_file_signatures.get(signature_key)
+        ):
+            return ""
+        sync_error = await self._sync_native_transcript(
+            native_thread_id,
+            native_provider=provider_name,
+            include_provider=False,
+        )
+        refreshed_signature = self._native_transcript_file_signature(
+            provider_name,
+            native_thread_id,
+        )
+        if refreshed_signature or signature:
+            self._native_transcript_file_signatures[signature_key] = (
+                refreshed_signature or signature
+            )
+        error_key = ("native_transcript", provider_name, native_thread_id)
+        if sync_error:
+            self._native_background_errors[error_key] = sync_error
+        else:
+            self._native_background_errors.pop(error_key, None)
+        return sync_error
+
     def _schedule_native_startup_warmup(self) -> bool:
         if self._native_transcript_mirror is None:
             return False
@@ -2777,6 +2820,10 @@ class WorkerLiveStreamServer:
         limit: int = 100,
         item_snapshot: bool = False,
     ) -> None:
+        sync_error = await self._sync_native_timeline_transcript_if_needed(
+            provider,
+            native_thread_id,
+        )
         if self._native_timeline is None:
             await self._send_json(
                 writer,
@@ -2825,6 +2872,7 @@ class WorkerLiveStreamServer:
                 "native_thread_id": native_thread_id,
                 "events": [event.to_json_dict() for event in events],
                 "previous_event_count": previous_event_count,
+                "native_sync_error": sync_error,
             },
         )
 
@@ -2848,6 +2896,10 @@ class WorkerLiveStreamServer:
         await writer.drain()
         if self._native_timeline is None:
             return
+        await self._sync_native_timeline_transcript_if_needed(
+            provider,
+            native_thread_id,
+        )
         latest = after_id
         queue = self._native_timeline.subscribe(
             provider=provider,
@@ -2865,7 +2917,17 @@ class WorkerLiveStreamServer:
                 latest = event.sequence
                 await _write_native_timeline_sse(writer, event)
             while not writer.is_closing():
-                event = await queue.get()
+                try:
+                    event = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=_NATIVE_TRANSCRIPT_WATCH_INTERVAL_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    await self._sync_native_timeline_transcript_if_needed(
+                        provider,
+                        native_thread_id,
+                    )
+                    continue
                 if event.sequence <= latest:
                     continue
                 latest = event.sequence
