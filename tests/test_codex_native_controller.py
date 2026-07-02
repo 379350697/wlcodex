@@ -17,6 +17,7 @@ from wlcodex.codex_native.projector import _METHOD_TO_BACKEND_EVENT
 from wlcodex.codex_native.session_store import NativeCodexSessionStore
 from wlcodex.db import Ledger
 from wlcodex.jsonrpc import JsonRpcError
+from wlcodex.native_timeline import NativeTimelineStore
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import EventType
 
@@ -704,7 +705,7 @@ async def test_controller_continue_steer_interrupt(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_controller_continue_does_not_project_sent_prompt_as_visible_user_message(
+async def test_controller_continue_projects_sent_prompt_as_visible_user_message(
     tmp_path: Path,
 ) -> None:
     controller, _client, session_store, runtime_store = _controller(tmp_path)
@@ -716,7 +717,34 @@ async def test_controller_continue_does_not_project_sent_prompt_as_visible_user_
     assert session is not None
     assert result.turn_id == "turn-2"
     events = runtime_store.list_by_agent_run(session.agent_run_id)
-    assert [event.event_type for event in events] == []
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.USER_MESSAGE_RECEIVED,
+    ]
+    assert events[1].payload["text"] == "show this on phone"
+    assert events[1].payload["native_thread_id"] == "thread-1"
+    assert events[1].payload["native_turn_id"] == "turn-2"
+    assert events[1].payload["provider"] == "codex"
+    assert events[1].payload["itemId"] == "local-user-turn-2"
+
+
+@pytest.mark.asyncio
+async def test_controller_continue_seeds_native_timeline_before_history_sync(
+    tmp_path: Path,
+) -> None:
+    controller, _client, _session_store, runtime_store = _controller(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    await controller.list_sessions()
+
+    result = await controller.continue_session("thread-1", "show this immediately")
+
+    events = timeline_store.list_item_events("codex", "thread-1", limit=10)
+    assert result.turn_id == "turn-2"
+    assert len(events) == 1
+    assert events[0].kind == "user_message"
+    assert events[0].payload["text"] == "show this immediately"
+    assert events[0].payload["native_turn_id"] == "turn-2"
 
 
 @pytest.mark.asyncio
@@ -1153,7 +1181,7 @@ async def test_controller_passes_native_model_settings_and_images(tmp_path: Path
 async def test_controller_starts_new_project_session_with_model_settings(
     tmp_path: Path,
 ) -> None:
-    controller, client, session_store, _runtime_store = _controller(tmp_path)
+    controller, client, session_store, runtime_store = _controller(tmp_path)
 
     result = await controller.start_session(
         "/workspace/two",
@@ -1175,6 +1203,15 @@ async def test_controller_starts_new_project_session_with_model_settings(
         "effort": "medium",
         "service_tier": "fast",
     }
+    events = runtime_store.list_by_agent_run(session.agent_run_id)
+    assert [event.event_type for event in events] == [
+        EventType.PROVIDER_RAW_FRAME,
+        EventType.USER_MESSAGE_RECEIVED,
+    ]
+    assert events[1].payload["text"] == "start work"
+    assert events[1].payload["native_thread_id"] == "thread-new"
+    assert events[1].payload["native_turn_id"] == "turn-2"
+    assert events[1].payload["itemId"] == "local-user-turn-2"
     assert client.calls == [
         ("start_thread", "/workspace/two", "gpt-5.5", "fast"),
         (

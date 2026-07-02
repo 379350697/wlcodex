@@ -401,6 +401,12 @@ class CodexNativeController:
                 service_tier=service_tier,
             ),
         )
+        self._projector.project_user_message(
+            native_thread_id=native_thread_id,
+            native_turn_id=turn_id,
+            text=prompt,
+            item_id=f"local-user-{turn_id}",
+        )
         return NativeCodexControlResult(
             native_thread_id=native_thread_id,
             agent_run_id=session.agent_run_id,

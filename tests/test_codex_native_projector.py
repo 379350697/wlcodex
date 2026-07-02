@@ -152,6 +152,49 @@ def test_projector_history_preserves_in_progress_turn_status(tmp_path: Path) -> 
     assert session_store._ledger.get_agent_run(session.agent_run_id).status == "running"
 
 
+def test_projector_history_skips_user_message_when_local_seed_exists(
+    tmp_path: Path,
+) -> None:
+    session_store, runtime_store = _stores(tmp_path)
+    projector = NativeCodexEventProjector(session_store, runtime_store)
+
+    projector.project_user_message(
+        native_thread_id="thread_seeded",
+        native_turn_id="turn_seeded",
+        text="show immediately",
+        item_id="local-user-turn_seeded",
+    )
+
+    projector.project_history(
+        {
+            "thread": {"id": "thread_seeded"},
+            "turns": [
+                {
+                    "id": "turn_seeded",
+                    "status": "completed",
+                    "items": [
+                        {
+                            "type": "userMessage",
+                            "id": "official-user-1",
+                            "text": "show immediately",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    session = session_store.get_by_thread_id("thread_seeded")
+    assert session is not None
+    user_events = [
+        event
+        for event in runtime_store.list_by_agent_run(session.agent_run_id)
+        if event.event_type == EventType.USER_MESSAGE_RECEIVED
+    ]
+    assert len(user_events) == 1
+    assert user_events[0].payload["itemId"] == "local-user-turn_seeded"
+
+
 def test_projector_history_dedupes_sensitive_redacted_items(tmp_path: Path) -> None:
     session_store, runtime_store = _stores(tmp_path)
     projector = NativeCodexEventProjector(session_store, runtime_store)
