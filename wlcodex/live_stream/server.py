@@ -17211,13 +17211,17 @@ __ICONS_JS__
             : undefined;
           if (previousAssistantIndex !== undefined) {
             const previousAssistant = result[previousAssistantIndex];
-            if (
-              assistantVisibleDedupePriority(event) >
-              assistantVisibleDedupePriority(previousAssistant)
-            ) {
-              result[previousAssistantIndex] = event;
+            if (!previousAssistant) {
+              seenAssistantVisible.delete(assistantFingerprint);
+            } else {
+              if (
+                assistantVisibleDedupePriority(event) >
+                assistantVisibleDedupePriority(previousAssistant)
+              ) {
+                result[previousAssistantIndex] = event;
+              }
+              continue;
             }
-            continue;
           }
           if (assistantFingerprint) seenAssistantVisible.set(assistantFingerprint, result.length);
         }
@@ -17228,13 +17232,17 @@ __ICONS_JS__
             : undefined;
           if (previousCompletedIndex !== undefined) {
             const previousCompleted = result[previousCompletedIndex];
-            if (
-              completedAssistantDedupePriority(event) >
-              completedAssistantDedupePriority(previousCompleted)
-            ) {
-              result[previousCompletedIndex] = event;
+            if (!previousCompleted) {
+              seenAssistantCompleted.delete(completedFingerprint);
+            } else {
+              if (
+                completedAssistantDedupePriority(event) >
+                completedAssistantDedupePriority(previousCompleted)
+              ) {
+                result[previousCompletedIndex] = event;
+              }
+              continue;
             }
-            continue;
           }
           if (completedFingerprint) seenAssistantCompleted.set(completedFingerprint, result.length);
         }
@@ -17359,6 +17367,7 @@ __ICONS_JS__
       return `turn:${turnId}:${fingerprint}`;
     }
     function completedAssistantDedupePriority(event) {
+      if (!event) return 0;
       const payload = (event && event.payload) || {};
       const itemId = String(payload.itemId || payload.item_id || "");
       if (event.type === "model.message.completed" && /^item-[0-9]+$/.test(itemId)) return 50;
@@ -17368,6 +17377,7 @@ __ICONS_JS__
       return 10;
     }
     function assistantVisibleDedupePriority(event) {
+      if (!event) return 0;
       if (event.kind === "message_completed") return completedAssistantDedupePriority(event);
       if (isOfficialAssistantTranscriptEvent(event)) return 15;
       if (isProviderDisplayDeltaEvent(event)) return 5;

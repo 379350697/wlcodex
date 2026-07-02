@@ -5380,6 +5380,16 @@ def test_worker_live_page_fold_helpers_skip_invalid_events() -> None:
     assert "Number((left && left.id) || 0)" in response
 
 
+def test_worker_live_page_dedupe_recovers_from_stale_assistant_indexes() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert "if (!previousAssistant) {" in response
+    assert "seenAssistantVisible.delete(assistantFingerprint);" in response
+    assert "if (!previousCompleted) {" in response
+    assert "seenAssistantCompleted.delete(completedFingerprint);" in response
+    assert "if (!event) return 0;" in response
+
+
 def test_worker_live_page_history_fold_disabled_state_stays_dark() -> None:
     response = _live_page(42, native_provider="codex")
 
