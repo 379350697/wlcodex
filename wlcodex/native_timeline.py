@@ -521,12 +521,14 @@ class NativeTimelineStore:
         provider: str,
         native_thread_id: str,
         *,
+        after: int = 0,
         before: int | None = None,
         limit: int = 100,
     ) -> list[NativeTimelineEvent]:
         provider_key = _normalize_provider(provider)
         thread_id = str(native_thread_id or "").strip()
         safe_limit = max(1, min(int(limit or 100), 500))
+        after_sequence = int(after or 0)
         if before is not None and before > 0:
             rows = self._conn.execute(
                 """
@@ -564,6 +566,52 @@ class NativeTimelineStore:
                 ORDER BY e.sequence ASC
                 """,
                 (provider_key, thread_id, provider_key, thread_id, int(before), safe_limit),
+            ).fetchall()
+            return [_item_event_from_row(row) for row in rows]
+        if after_sequence > 0:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    e.*,
+                    i.turn_key AS item_turn_key,
+                    i.item_key AS item_item_key,
+                    i.role AS item_role,
+                    i.kind AS item_kind,
+                    i.text AS item_text,
+                    i.status AS item_status,
+                    i.payload_json AS item_payload_json
+                FROM native_timeline_events e
+                JOIN native_timeline_items i ON i.id = e.item_row_id
+                JOIN (
+                    SELECT item_row_id, MAX(sequence) AS max_sequence
+                    FROM native_timeline_events
+                    WHERE provider = ? AND native_thread_id = ?
+                      AND sequence > ?
+                      AND item_row_id IS NOT NULL
+                      AND item_row_id IN (
+                          SELECT id FROM native_timeline_items
+                          WHERE provider = ? AND native_thread_id = ?
+                            AND kind IN (
+                                'user_message', 'message',
+                                'activity', 'approval_requested'
+                            )
+                      )
+                    GROUP BY item_row_id
+                    ORDER BY max_sequence ASC
+                    LIMIT ?
+                ) latest
+                  ON latest.item_row_id = e.item_row_id
+                 AND latest.max_sequence = e.sequence
+                ORDER BY e.sequence ASC
+                """,
+                (
+                    provider_key,
+                    thread_id,
+                    after_sequence,
+                    provider_key,
+                    thread_id,
+                    safe_limit,
+                ),
             ).fetchall()
             return [_item_event_from_row(row) for row in rows]
         rows = self._conn.execute(

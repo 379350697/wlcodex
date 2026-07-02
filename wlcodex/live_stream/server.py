@@ -661,7 +661,6 @@ class WorkerLiveStreamServer:
                         after,
                     )
                     return
-                has_after = "after" in query
                 after = _safe_int(query.get("after", ["0"])[0], default=0)
                 before_value = query.get("before", [""])[0]
                 before = (
@@ -677,7 +676,7 @@ class WorkerLiveStreamServer:
                     after=after,
                     before=before,
                     limit=limit,
-                    item_snapshot=not has_after,
+                    item_snapshot=True,
                 )
                 return
 
@@ -2900,6 +2899,7 @@ class WorkerLiveStreamServer:
             events = self._native_timeline.list_item_events(
                 provider,
                 native_thread_id,
+                after=after,
                 before=before,
                 limit=limit,
             )
@@ -2975,7 +2975,7 @@ class WorkerLiveStreamServer:
             native_thread_id=native_thread_id,
         )
         try:
-            for event in self._native_timeline.list_events(
+            for event in self._native_timeline.list_item_events(
                 provider,
                 native_thread_id,
                 after=after_id,
@@ -2984,6 +2984,8 @@ class WorkerLiveStreamServer:
                 if event.sequence <= latest:
                     continue
                 latest = event.sequence
+                if not _is_visible_native_timeline_event(event):
+                    continue
                 await _write_native_timeline_sse(writer, event)
             while not writer.is_closing():
                 try:
@@ -3000,6 +3002,8 @@ class WorkerLiveStreamServer:
                 if event.sequence <= latest:
                     continue
                 latest = event.sequence
+                if not _is_visible_native_timeline_event(event):
+                    continue
                 await _write_native_timeline_sse(writer, event)
         finally:
             self._native_timeline.unsubscribe(
@@ -3740,6 +3744,10 @@ def _native_timeline_display_event(event: NativeTimelineEvent) -> dict[str, Any]
     data.setdefault("source_type", data.get("type"))
     data["type"] = data.get("kind", data.get("type"))
     return data
+
+
+def _is_visible_native_timeline_event(event: NativeTimelineEvent) -> bool:
+    return bool(_native_timeline_display_event(event).get("visible"))
 
 
 def _native_timeline_display_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
