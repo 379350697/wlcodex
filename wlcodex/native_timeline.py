@@ -139,6 +139,7 @@ class NativeTimelineStore:
         *,
         provider: str,
         native_thread_id: str,
+        native_turn_id: str | None = None,
         text: str,
         images: list[dict[str, Any]] | None = None,
     ) -> list[NativeTimelineEvent]:
@@ -146,12 +147,15 @@ class NativeTimelineStore:
         thread_id = str(native_thread_id or "").strip()
         if not thread_id:
             return []
+        turn_key = str(native_turn_id or "").strip() or "local"
         item_key = f"local-user-{_text_fingerprint(text)}"
         payload = {"text": text or "", "images": images or [], "local": True}
+        if turn_key != "local":
+            payload["native_turn_id"] = turn_key
         item_id = self._upsert_item(
             provider=provider_key,
             native_thread_id=thread_id,
-            turn_key="local",
+            turn_key=turn_key,
             item_key=item_key,
             role="user",
             kind="user_message",

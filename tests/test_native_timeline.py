@@ -229,6 +229,37 @@ def test_native_timeline_merges_local_echo_with_official_user_message() -> None:
     assert [local[0].sequence, official[0].sequence] == [1, 2]
 
 
+def test_native_timeline_local_echo_can_use_control_turn_id_before_official_merge() -> None:
+    store = NativeTimelineStore(sqlite3.connect(":memory:"))
+
+    store.record_local_user_message(
+        provider="codex",
+        native_thread_id="thread-1",
+        native_turn_id="turn-9",
+        text="同一个任务",
+    )
+    store.project_runtime_event(
+        _runtime_event(
+            EventType.USER_MESSAGE_RECEIVED,
+            {
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-9",
+                "itemId": "item-9",
+                "text": "同一个任务",
+                "provider": "codex",
+            },
+            event_id=211,
+        )
+    )
+
+    events = store.list_events("codex", "thread-1", limit=20)
+    items = store.list_items("codex", "thread-1", limit=20)
+    assert [event.payload["native_turn_id"] for event in events] == ["turn-9", "turn-9"]
+    assert [(item.turn_key, item.item_key, item.status, item.text) for item in items] == [
+        ("turn-9", "item-9", "completed", "同一个任务")
+    ]
+
+
 def test_native_timeline_ignores_raw_frames_and_preserves_visible_delta_text() -> None:
     store = NativeTimelineStore(sqlite3.connect(":memory:"))
 

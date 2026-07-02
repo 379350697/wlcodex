@@ -1662,9 +1662,11 @@ async def test_native_continue_posts_json_body_and_returns_control_result(
     }
     assert controller.calls == [("continue_session", "thread-1", "keep going")]
     items = timeline_store.list_items("codex", "thread-1")
-    assert [(item.role, item.status, item.text) for item in items] == [
-        ("user", "pending", "keep going")
+    assert [(item.turn_key, item.role, item.status, item.text) for item in items] == [
+        ("turn-2", "user", "pending", "keep going")
     ]
+    events = timeline_store.list_events("codex", "thread-1")
+    assert events[0].payload["native_turn_id"] == "turn-2"
 
 
 @pytest.mark.asyncio

@@ -2039,14 +2039,19 @@ class WorkerLiveStreamServer:
             except KeyError:
                 await self._send_json(writer, 404, {"error": "native session not found"})
                 return
+            result_json = _json_object(result)
+            native_turn_id = _optional_nonempty_string(
+                result_json.get("turn_id") or result_json.get("active_turn_id")
+            )
             if self._native_timeline is not None:
                 self._native_timeline.record_local_user_message(
                     provider=provider_name,
                     native_thread_id=thread_id,
+                    native_turn_id=native_turn_id,
                     text=str(body.get("prompt", "")),
                     images=images,
                 )
-            await self._send_json(writer, 200, _json_object(result))
+            await self._send_json(writer, 200, result_json)
             return
         if method == "POST" and action == "steer" and len(parts) == 2:
             capabilities = provider.capabilities()
