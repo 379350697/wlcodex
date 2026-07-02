@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from wlcodex.config import WorkspaceConfig
 from wlcodex.db import Ledger
 from wlcodex.live_stream import server as live_server
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
@@ -217,6 +218,51 @@ async def test_council_projects_api_lists_projects_root_directories(
         ],
     }
     assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_council_projects_api_prefers_configured_workspace_catalog(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        workspace_catalog=(
+            WorkspaceConfig("wlcodex", tmp_path / "wlcodex", True),
+            WorkspaceConfig("lightfee", tmp_path / "LightFeeV2", True),
+        ),
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/council/projects HTTP/1.1\r\n"
+            "Host: test\r\nConnection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    assert _json_body(response) == {
+        "root": "",
+        "projects": [
+            {
+                "alias": "wlcodex",
+                "name": "wlcodex",
+                "cwd": str(tmp_path / "wlcodex"),
+                "allow_write": True,
+            },
+            {
+                "alias": "lightfee",
+                "name": "lightfee",
+                "cwd": str(tmp_path / "LightFeeV2"),
+                "allow_write": True,
+            },
+        ],
+    }
 
 
 @pytest.mark.asyncio

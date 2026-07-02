@@ -3645,12 +3645,11 @@ async def test_native_codex_page_filters_session_workspace_projects_to_projects_
     assert "projectCatalog = Array.isArray(data.projects) ? data.projects : [];" in response
     assert "addProjectOption(project.cwd, project.name);" in response
     assert "for (const project of projectCatalog)" in response
-    assert "for (const session of sessions)" in response
-    assert "if (!isKnownProjectWorkspace(session.cwd)) continue;" in response
+    assert "if (!isKnownProjectWorkspace(session.cwd)) continue;" not in response
     assert "function isKnownProjectWorkspace(cwd)" in response
     assert "projectCatalog.some(project => String(project.cwd || \"\") === value)" in response
-    assert "const normalizedRoot = projectRoot.endsWith(\"/\") ? projectRoot : projectRoot + \"/\";" in response
-    assert "return parts.length === 1;" in response
+    assert "const normalizedRoot = projectRoot.endsWith(\"/\") ? projectRoot : projectRoot + \"/\";" not in response
+    assert "return parts.length === 1;" not in response
     assert "await loadProjects();" in response
     assert "if (seen.size >= 4) break;" not in response
 

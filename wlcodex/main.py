@@ -470,6 +470,7 @@ def _create_live_stream_components(
         native_timeline=native_timeline,
         workflow_service=workflow_service,
         relay_service=relay_service,
+        workspace_catalog=config.workspaces,
     )
     logger.info(
         "Worker live stream configured at http://%s:%s",

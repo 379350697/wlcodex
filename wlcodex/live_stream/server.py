@@ -324,6 +324,7 @@ class WorkerLiveStreamServer:
         native_timeline: NativeTimelineStore | None = None,
         workflow_service: Any = None,
         relay_service: Any = None,
+        workspace_catalog: Any = None,
         native_sync_timeout_seconds: float = 3.0,
         native_sessions_timeout_seconds: float = 3.0,
     ) -> None:
@@ -342,6 +343,7 @@ class WorkerLiveStreamServer:
         self._native_timeline = native_timeline
         self._workflow_service = workflow_service
         self._relay_service = relay_service
+        self._workspace_catalog = tuple(workspace_catalog or ())
         self._native_sync_timeout_seconds = max(0.1, float(native_sync_timeout_seconds))
         self._native_sessions_timeout_seconds = max(
             0.1,
@@ -1542,7 +1544,7 @@ class WorkerLiveStreamServer:
             "/native/workflows/relay/skills",
             "/native/workflows/relay/profile",
         ):
-            project_rows = _relay_project_rows()
+            project_rows = _relay_project_rows(self._workspace_catalog)
             selected_workspace = _relay_selected_workspace(
                 str((query.get("workspace") or [""])[0] or ""),
                 project_rows,
@@ -2396,7 +2398,11 @@ class WorkerLiveStreamServer:
             if method != "GET":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
-            await self._send_json(writer, 200, _council_projects_payload())
+            await self._send_json(
+                writer,
+                200,
+                _council_projects_payload(workspaces=self._workspace_catalog),
+            )
             return
 
         if path == "/api/council/runs":
@@ -4323,9 +4329,35 @@ def _first_model_id(models: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -
     return ""
 
 
+def _workspace_catalog_payload(workspaces: Any) -> dict[str, Any] | None:
+    rows: list[dict[str, Any]] = []
+    for workspace in workspaces or ():
+        alias = str(getattr(workspace, "alias", "") or "").strip()
+        path = getattr(workspace, "path", "")
+        cwd = str(path or "").strip()
+        if not alias or not cwd:
+            continue
+        rows.append(
+            {
+                "alias": alias,
+                "name": alias,
+                "cwd": cwd,
+                "allow_write": bool(getattr(workspace, "allow_write", False)),
+            }
+        )
+    if not rows:
+        return None
+    return {"root": "", "projects": rows}
+
+
 def _council_projects_payload(
     projects_root: Path | None = None,
+    *,
+    workspaces: Any = None,
 ) -> dict[str, Any]:
+    catalog = _workspace_catalog_payload(workspaces)
+    if catalog is not None:
+        return catalog
     projects_root = projects_root or _COUNCIL_PROJECTS_ROOT
     projects: list[dict[str, str]] = []
     try:
@@ -4987,9 +5019,13 @@ def _relay_config_href(workspace: str, access_token: str) -> str:
     return f"/native/workflows/relay/config{suffix}"
 
 
-def _relay_project_rows() -> list[dict[str, str]]:
-    payload = _council_projects_payload()
-    return [project for project in payload.get("projects", []) if str(project.get("cwd", "") or "")]
+def _relay_project_rows(workspaces: Any = None) -> list[dict[str, Any]]:
+    payload = _council_projects_payload(workspaces=workspaces)
+    return [
+        project
+        for project in payload.get("projects", [])
+        if str(project.get("cwd", "") or "")
+    ]
 
 
 def _relay_default_workspace(projects: list[Any]) -> str:
@@ -12964,7 +13000,9 @@ __ICONS_JS__
     }
 
     function currentDirectoryProject() {
-      const current = projectCatalog.find(project => lastPath(project.cwd || "") === "wlcodex");
+      const current = projectCatalog.find(project => String(project.alias || "") === "wlcodex")
+        || projectCatalog.find(project => lastPath(project.cwd || "") === "wlcodex")
+        || projectCatalog[0];
       if (current) return {cwd: String(current.cwd || ""), name: current.name || lastPath(current.cwd || "")};
       return {cwd: projectRoot, name: lastPath(projectRoot || "")};
     }
@@ -13035,10 +13073,6 @@ __ICONS_JS__
       }
       for (const project of projectCatalog) {
         addProjectOption(project.cwd, project.name);
-      }
-      for (const session of sessions) {
-        if (!isKnownProjectWorkspace(session.cwd)) continue;
-        addProjectOption(session.cwd || "", lastPath(session.cwd || ""));
       }
       projectNewChat.hidden = true;
       renderProjectAction();
@@ -13484,12 +13518,7 @@ __ICONS_JS__
     function isKnownProjectWorkspace(cwd) {
       const value = String(cwd || "");
       if (!value) return false;
-      if (projectCatalog.some(project => String(project.cwd || "") === value)) return true;
-      if (!projectRoot) return false;
-      const normalizedRoot = projectRoot.endsWith("/") ? projectRoot : projectRoot + "/";
-      if (!value.startsWith(normalizedRoot)) return false;
-      const parts = value.slice(normalizedRoot.length).split("/").filter(Boolean);
-      return parts.length === 1;
+      return projectCatalog.some(project => String(project.cwd || "") === value);
     }
     function sortedSessions() {
       return [...sessions].sort((left, right) => {
