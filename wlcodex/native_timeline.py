@@ -134,52 +134,6 @@ class NativeTimelineStore:
         )
         self._conn.commit()
 
-    def record_local_user_message(
-        self,
-        *,
-        provider: str,
-        native_thread_id: str,
-        native_turn_id: str | None = None,
-        text: str,
-        images: list[dict[str, Any]] | None = None,
-    ) -> list[NativeTimelineEvent]:
-        provider_key = _normalize_provider(provider)
-        thread_id = str(native_thread_id or "").strip()
-        if not thread_id:
-            return []
-        turn_key = str(native_turn_id or "").strip() or "local"
-        item_key = f"local-user-{_text_fingerprint(text)}"
-        payload = {"text": text or "", "images": images or [], "local": True}
-        if turn_key != "local":
-            payload["native_turn_id"] = turn_key
-        item_id = self._upsert_item(
-            provider=provider_key,
-            native_thread_id=thread_id,
-            turn_key=turn_key,
-            item_key=item_key,
-            role="user",
-            kind="user_message",
-            text=text or "",
-            status="pending",
-            payload=payload,
-            source_priority=10,
-            merge_local=False,
-        )
-        return [
-            self._append_event(
-                provider=provider_key,
-                native_thread_id=thread_id,
-                item_row_id=item_id,
-                runtime_event_id=None,
-                event_type=EventType.USER_MESSAGE_RECEIVED,
-                kind="user_message",
-                payload=_compact_payload(payload),
-                occurred_at=now_iso(),
-                agent_run_id=None,
-                conversation_id=None,
-            )
-        ]
-
     def project_runtime_event(self, event: RuntimeEvent) -> list[NativeTimelineEvent]:
         event_type = str(event.event_type or "")
         if event_type == EventType.PROVIDER_RAW_FRAME:
