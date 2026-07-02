@@ -5321,7 +5321,13 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "const nextEvents = normalizeEventList(snapshot.events);" in response
     assert "function nativeTimelinePath(params)" in response
     assert "eventsPath(`after=${latestEventId}&limit=100`)" not in response
-    assert "nativeTimelinePath(`after=${latestEventId}&limit=100`)" in response
+    assert "let latestVisibleEventId = 0;" in response
+    assert "let latestStreamEventId = 0;" in response
+    assert "nativeTimelinePath(`after=${latestVisibleEventId}&limit=100`)" in response
+    assert "nativeTimelinePath(`after=${latestEventId}&limit=100`)" not in response
+    assert "if (event.id) latestStreamEventId = Math.max(latestStreamEventId, event.id);" in response
+    assert "if (isInternalEvent(event)) {" in response
+    assert "if (event.id) latestVisibleEventId = Math.max(latestVisibleEventId, event.id);" in response
     assert "function eventsPath(params, options = {})" in response
     assert 'if (nativeThreadId) search.set("native_thread_id", nativeThreadId);' in response
     assert "function streamPathWithCursor(afterId)" in response
@@ -5608,6 +5614,18 @@ async def test_worker_live_page_hides_native_execution_details_from_user_feedbac
     assert "if (isNativeExecutionDetail(event)) {" in response
     assert "isNativeActivityDetail(event)" in response
     assert "handleHiddenNativeFeedback(event);" in response
+    assert "applyNativeTurnState(event);" not in response[
+        response.index("function handleHiddenNativeFeedback(event)") :
+        response.index("function renderTranscript(event, role, label, opts = {})")
+    ]
+    assert "setComposerActivity(nativeTurnRunning || sendingPrompt);" not in response[
+        response.index("function handleHiddenNativeFeedback(event)") :
+        response.index("function renderTranscript(event, role, label, opts = {})")
+    ]
+    assert "updateRunState(" not in response[
+        response.index("function handleHiddenNativeFeedback(event)") :
+        response.index("function renderTranscript(event, role, label, opts = {})")
+    ]
     assert "else if (isNativeExecutionDetail(event)) renderToolCall(event);" not in response
     assert (
         'else if (event.kind === "command_started" || event.kind === "command_output" '

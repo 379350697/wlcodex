@@ -14551,6 +14551,8 @@ __ICONS_JS__
     let loadedEvents = [];
     let oldestEventId = 0;
     let latestEventId = 0;
+    let latestVisibleEventId = 0;
+    let latestStreamEventId = 0;
     let previousEventCount = 0;
     let source = null;
     let streamReconnectTimer = null;
@@ -16782,7 +16784,7 @@ __ICONS_JS__
     window.addEventListener("pagehide", closeLiveEventSource);
     window.addEventListener("beforeunload", closeLiveEventSource);
     window.addEventListener("pageshow", () => {
-      if (!source && latestEventId) openStream(latestEventId);
+      if (!source && currentStreamCursor()) openStream(currentStreamCursor());
       pollEvents();
     });
     function refreshNativeControlInBackground() {
@@ -16813,9 +16815,11 @@ __ICONS_JS__
       previousEventCount = snapshot.previous_event_count || 0;
       oldestEventId = loadedEvents.length ? loadedEvents[0].id : 0;
       latestEventId = loadedEvents.length ? loadedEvents[loadedEvents.length - 1].id : 0;
+      latestVisibleEventId = nativeThreadId ? lastVisibleEventId(loadedEvents) : latestEventId;
+      latestStreamEventId = nativeThreadId ? latestVisibleEventId : latestEventId;
       rebuildStream();
       updateHistoryFold();
-      openStream(latestEventId);
+      openStream(currentStreamCursor());
       pollEvents();
     }
     function handleNativeSyncSnapshot(snapshot) {
@@ -16828,6 +16832,18 @@ __ICONS_JS__
     function normalizeEventList(sourceEvents) {
       if (!Array.isArray(sourceEvents)) return [];
       return sourceEvents.filter(isValidEventObject);
+    }
+    function lastVisibleEventId(sourceEvents) {
+      let lastId = 0;
+      for (const event of normalizeEventList(sourceEvents)) {
+        if (!event || isInternalEvent(event) || !event.id) continue;
+        lastId = Math.max(lastId, event.id);
+      }
+      return lastId;
+    }
+    function hasLoadedEventId(eventId) {
+      if (!eventId) return false;
+      return loadedEvents.some(event => event && event.id === eventId);
     }
     function hasLiveDisplayEvents(sourceEvents) {
       return normalizeEventList(sourceEvents).some(event => {
@@ -17002,9 +17018,12 @@ __ICONS_JS__
       }
       streamReconnectTimer = window.setTimeout(() => {
         streamReconnectTimer = null;
-        openStream(latestEventId);
+        openStream(currentStreamCursor());
         streamReconnectDelay = Math.min(streamReconnectDelay * 2, 5000);
       }, streamReconnectDelay);
+    }
+    function currentStreamCursor() {
+      return nativeThreadId ? latestStreamEventId : latestEventId;
     }
     function openStream(afterId) {
       closeLiveEventSource();
@@ -17081,7 +17100,7 @@ __ICONS_JS__
       pollInFlight = true;
       try {
         const snapshot = nativeThreadId
-          ? await api(nativeTimelinePath(`after=${latestEventId}&limit=100`))
+          ? await api(nativeTimelinePath(`after=${latestVisibleEventId}&limit=100`))
           : await api(eventsPath("after=" + latestEventId + "&limit=100"));
         handleNativeSyncSnapshot(snapshot);
         const nextEvents = normalizeEventList(snapshot.events);
@@ -17150,11 +17169,22 @@ __ICONS_JS__
     }
     function renderLiveEvent(event) {
       if (!isValidEventObject(event)) return;
-      if (event.id && event.id <= latestEventId) return;
+      if (!nativeThreadId && event.id && event.id <= latestEventId) return;
+      if (nativeThreadId && event.id && hasLoadedEventId(event.id)) {
+        latestStreamEventId = Math.max(latestStreamEventId, event.id);
+        if (!isInternalEvent(event) && event.id) {
+          latestVisibleEventId = Math.max(latestVisibleEventId, event.id);
+        }
+        return;
+      }
       const previousLatestTurnId = latestFoldGroupTurnId(foldGroups(dedupeDisplayEvents(loadedEvents)));
-      if (event.id) latestEventId = event.id;
+      if (event.id) latestStreamEventId = Math.max(latestStreamEventId, event.id);
+      if (!nativeThreadId && event.id) latestEventId = Math.max(latestEventId, event.id);
       const incomingTurnId = eventFoldTurnId(event);
       const duplicateDisplayEvent = isDuplicateDisplayEvent(event, loadedEvents);
+      if (!isInternalEvent(event)) {
+        if (event.id) latestVisibleEventId = Math.max(latestVisibleEventId, event.id);
+      }
       loadedEvents.push(event);
       scheduleTerminalTranscriptSync(event);
       if (isInternalEvent(event)) {
@@ -18019,18 +18049,6 @@ __ICONS_JS__
     function handleHiddenNativeFeedback(event) {
       const payload = event.payload || {};
       if (payload.native_thread_id) nativeThreadId = payload.native_thread_id;
-      applyNativeTurnState(event);
-      updateComposerDisabled();
-      if (isNativeExecutionDetail(event)) {
-        updateRunState(
-          nativeExecutionStatus(event),
-          event.kind === "command_failed" ? "failed" : "busy"
-        );
-      } else if (isNativeReasoningDetail(event)) {
-        updateRunState("思考中", "busy");
-      } else if (isNativeActivityDetail(event)) {
-        updateRunState(statusText(event, payload) || statusTitle(event, "处理中"), statusTone(event));
-      }
       if (event.id) cursor.textContent = "#" + event.id;
     }
     function renderTranscript(event, role, label, opts = {}) {
