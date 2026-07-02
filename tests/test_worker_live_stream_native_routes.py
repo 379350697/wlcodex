@@ -5276,7 +5276,11 @@ async def test_worker_live_page_keeps_latest_turn_open_and_collapses_prior_turns
     assert 'if (event.kind === "lifecycle" || event.kind === "completed") return "";' in response
     assert "function dedupeDisplayEvents(sourceEvents)" in response
     assert "const seenUserMessages = new Map();" in response
+    assert "const seenUserMessageText = new Map();" in response
     assert "function isSyntheticUserMessageEvent(event)" in response
+    assert "function isTurnlessSyntheticUserMessageEvent(event)" in response
+    assert "function userMessageTextFingerprint(event)" in response
+    assert "function shouldDedupeUserBySyntheticText(event, previous)" in response
     assert "function userMessageDedupePriority(event)" in response
     assert "const groups = foldGroups(dedupeDisplayEvents(loadedEvents)).map(orderTranscriptGroupEvents);" in response
     assert "title.textContent = turnFoldTitle(group);" in response

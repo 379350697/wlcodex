@@ -16810,6 +16810,7 @@ __ICONS_JS__
       const canonicalUserTurns = canonicalUserTranscriptTurnSet(sourceEvents);
       const seen = new Set();
       const seenUserMessages = new Map();
+      const seenUserMessageText = new Map();
       const seenAssistantVisible = new Map();
       const seenAssistantCompleted = new Map();
       const result = [];
@@ -16878,6 +16879,20 @@ __ICONS_JS__
             }
           }
           if (userFingerprint) seenUserMessages.set(userFingerprint, result.length);
+          const userTextFingerprint = userMessageTextFingerprint(event);
+          const previousUserTextIndex = userTextFingerprint
+            ? seenUserMessageText.get(userTextFingerprint)
+            : undefined;
+          if (previousUserTextIndex !== undefined) {
+            const previousUser = result[previousUserTextIndex];
+            if (shouldDedupeUserBySyntheticText(event, previousUser)) {
+              if (userMessageDedupePriority(event) > userMessageDedupePriority(previousUser)) {
+                result[previousUserTextIndex] = event;
+              }
+              continue;
+            }
+          }
+          if (userTextFingerprint) seenUserMessageText.set(userTextFingerprint, result.length);
         }
         const key = mirroredDisplayKey(event);
         if (key) {
@@ -16977,7 +16992,27 @@ __ICONS_JS__
       const payload = event.payload || {};
       const itemId = String(payload.itemId || payload.item_id || "");
       const turnId = String(payload.native_turn_id || payload.turnId || "");
-      return itemId.startsWith("local-user-") || itemId.startsWith("jsonl-user:") || turnId.startsWith("jsonl-turn:");
+      return Boolean(payload.local) || itemId.startsWith("local-user-") || itemId.startsWith("jsonl-user:") || turnId.startsWith("jsonl-turn:");
+    }
+    function isTurnlessSyntheticUserMessageEvent(event) {
+      return isSyntheticUserMessageEvent(event) && !eventFoldTurnId(event);
+    }
+    function userMessageTextFingerprint(event) {
+      if (!event || event.kind !== "user_message") return "";
+      const payload = event.payload || {};
+      const text = normalizeTranscriptText(
+        String(payload.text || payload.delta || payload.summary || payload.content || payload.prompt || "")
+      );
+      const images = Array.isArray(payload.images) ? payload.images.length : 0;
+      if (!text && !images) return "";
+      return `user-message-text:${text}:${images}`;
+    }
+    function shouldDedupeUserBySyntheticText(event, previous) {
+      return Boolean(
+        userMessageTextFingerprint(event) &&
+        userMessageTextFingerprint(event) === userMessageTextFingerprint(previous) &&
+        (isTurnlessSyntheticUserMessageEvent(event) || isTurnlessSyntheticUserMessageEvent(previous))
+      );
     }
     function userMessageDedupePriority(event) {
       if (isCanonicalTranscriptItem(event)) return 30;
@@ -17044,6 +17079,9 @@ __ICONS_JS__
       if (event.kind === "user_message") {
         const fingerprint = canonicalUserMessageFingerprint(event);
         if (fingerprint && normalizeEventList(previousEvents).some(previous => canonicalUserMessageFingerprint(previous) === fingerprint)) {
+          return true;
+        }
+        if (normalizeEventList(previousEvents).some(previous => shouldDedupeUserBySyntheticText(event, previous))) {
           return true;
         }
       }
