@@ -263,6 +263,7 @@ _UNICODE_ICON_MAP = {
     "↑": _ICON_SVG["send"],
     "■": _ICON_SVG["stop"],
     "✓": _ICON_SVG["check"],
+    "✎": _ICON_SVG["pencil"],
 }
 
 # ICONS object injected into <script> blocks for dynamic JS icon use
@@ -14588,6 +14589,18 @@ __MARVIS_CSS_LINK__  <style>
     .plan-card-execute { min-height: 44px; align-self: end; justify-self: start; padding: 0 18px; border-radius: 22px; border: 1px solid rgba(255,255,255,.14); background: #f4f4f5; color: #111; font-size: 16px; font-weight: var(--weight-extrabold); z-index: 1; }
     .plan-card-execute:disabled { opacity: .48; }
     .plan-card-readonly { min-height: 44px; align-self: end; justify-self: start; display: inline-flex; align-items: center; padding: 0 18px; border-radius: 22px; border: 1px solid rgba(255,255,255,.14); color: #d4d4d8; font-size: 15px; font-weight: var(--weight-bold); z-index: 1; }
+    .plan-execution-bar { position: fixed; left: 14px; right: 14px; bottom: calc(var(--codex-dock-height, 150px) + 12px + env(safe-area-inset-bottom)); z-index: 10; display: grid; overflow: hidden; padding: 14px 16px 10px; border: 1px solid rgba(255,255,255,.08); border-radius: 18px; background: #242426; color: #f4f4f5; box-shadow: 0 18px 44px rgba(0,0,0,.55); }
+    .plan-execution-bar[hidden] { display: none; }
+    body.has-plan-execution-bar main { padding-bottom: calc(var(--codex-dock-height, 150px) + 210px + env(safe-area-inset-bottom)); }
+    .plan-execution-title { display: block; padding: 0 0 13px; color: #f4f4f5; font-size: 15px; line-height: 1.35; font-weight: var(--weight-medium); }
+    .plan-execution-row { width: 100%; min-height: 48px; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 0; border: 0; border-top: 1px solid rgba(255,255,255,.08); border-radius: 0; background: transparent; color: #f4f4f5; text-align: left; font-size: 15px; line-height: 1.3; font-weight: var(--weight-medium); }
+    .plan-execution-row:disabled { opacity: .48; }
+    .plan-execution-confirm svg, .plan-execution-revise svg { width: 18px; height: 18px; stroke-width: 2.2; }
+    .plan-execution-icon { width: 28px; min-height: 28px; display: grid; place-items: center; color: #e4e4e7; }
+    .plan-execution-secondary { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+    .plan-execution-revise { min-width: 0; min-height: 48px; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 0; border: 0; border-radius: 0; background: transparent; color: #f4f4f5; text-align: left; font-size: 15px; line-height: 1.3; }
+    .plan-execution-revise:disabled { opacity: .48; }
+    .plan-execution-skip { min-height: 34px; padding: 0 14px; border: 1px solid rgba(255,255,255,.1); border-radius: 17px; background: #f4f4f5; color: #111; font-size: 14px; font-weight: var(--weight-bold); }
     .plan-page-backdrop { position: fixed; inset: 0; z-index: 12; overflow-y: auto; overflow-x: hidden; max-width: 100vw; background: #000; color: #fff; }
     .plan-page-backdrop[hidden] { display: none; }
     .plan-page-shell { box-sizing: border-box; width: 100%; max-width: 100vw; min-height: 100vh; min-width: 0; display: grid; grid-template-rows: auto 1fr; overflow-x: hidden; background: #000; }
@@ -14775,6 +14788,7 @@ __MARVIS_CSS_LINK__  <style>
     @media (min-width: 820px) {
       main { max-width: 780px; margin: 0 auto; }
       .codex-input-dock { left: 50%; transform: translateX(-50%); width: min(780px, 100%); }
+      .plan-execution-bar { left: 50%; right: auto; transform: translateX(-50%); width: min(748px, calc(100% - 28px)); }
     }
   </style>
 </head>
@@ -14855,6 +14869,20 @@ __MARVIS_CSS_LINK__  <style>
         <span class="composer-activity-dot"></span>
       </div>
     </main>
+    <section class="plan-execution-bar" id="planExecutionBar" aria-label="执行计划" hidden>
+      <span class="plan-execution-title">是否执行此计划?</span>
+      <button class="plan-execution-row plan-execution-confirm" id="planExecutionConfirm" type="button">
+        <span class="plan-execution-icon">✓</span>
+        <span>是，执行此计划</span>
+      </button>
+      <div class="plan-execution-row plan-execution-secondary">
+        <button class="plan-execution-revise" id="planExecutionRevise" type="button">
+          <span class="plan-execution-icon">✎</span>
+          <span>否，请说明修改内容</span>
+        </button>
+        <button class="plan-execution-skip" id="planExecutionSkip" type="button">跳过</button>
+      </div>
+    </section>
     <section class="codex-input-dock">
       <div class="attachment-strip" id="attachmentStrip" hidden></div>
       <div class="composer-tools">
@@ -15180,6 +15208,10 @@ __ICONS_JS__
     const planPageSummary = document.getElementById("planPageSummary");
     const planPageBody = document.getElementById("planPageBody");
     const planPageExecute = document.getElementById("planPageExecute");
+    const planExecutionBar = document.getElementById("planExecutionBar");
+    const planExecutionConfirm = document.getElementById("planExecutionConfirm");
+    const planExecutionRevise = document.getElementById("planExecutionRevise");
+    const planExecutionSkip = document.getElementById("planExecutionSkip");
     const streamPathBase = "__STREAM_PATH__";
     const agentRunId = __AGENT_RUN_ID__;
     const NATIVE_TIMELINE_RECENT_LIMIT = 80;
@@ -16452,6 +16484,12 @@ __ICONS_JS__
       copyPromptCardText(planPageCopy, activePlan.body);
     };
     planPageExecute.onclick = executeActivePlan;
+    planExecutionConfirm.onclick = executeActivePlan;
+    planExecutionSkip.onclick = hidePlanExecutionBar;
+    planExecutionRevise.onclick = () => {
+      hidePlanExecutionBar();
+      promptInput.focus({preventScroll: true});
+    };
     handoffIntent.onchange = resetHandoffPreview;
     handoffNote.oninput = resetHandoffPreview;
     for (const button of handoffTargetButtons) {
@@ -16847,6 +16885,7 @@ __ICONS_JS__
         executable: true
       };
       updatePlanActionState();
+      showPlanExecutionBar(activePlan);
       return activePlan;
     }
     function openPlanPage(plan = activePlan) {
@@ -16880,12 +16919,34 @@ __ICONS_JS__
       planPage.hidden = true;
       document.body.style.overflow = "";
     }
+    function showPlanExecutionBar(plan = activePlan) {
+      if (!planExecutionBar) return;
+      const visible = Boolean(plan && plan.executable && nativeThreadId);
+      planExecutionBar.hidden = !visible;
+      document.body.classList.toggle("has-plan-execution-bar", visible);
+      updatePlanExecutionBar();
+      requestAnimationFrame(syncDockHeight);
+    }
+    function hidePlanExecutionBar() {
+      if (!planExecutionBar) return;
+      planExecutionBar.hidden = true;
+      document.body.classList.remove("has-plan-execution-bar");
+    }
+    function updatePlanExecutionBar() {
+      const disabled = !activePlan || !activePlan.executable || !nativeThreadId || sendingPrompt || nativeTurnRunning;
+      if (planExecutionConfirm) planExecutionConfirm.disabled = disabled;
+      if (planExecutionRevise) planExecutionRevise.disabled = sendingPrompt;
+      if (planExecutionBar && !planExecutionBar.hidden && (!activePlan || !activePlan.executable)) {
+        hidePlanExecutionBar();
+      }
+    }
     function updatePlanActionState() {
       const disabled = !activePlan || !activePlan.executable || !nativeThreadId || sendingPrompt || nativeTurnRunning;
       planPageExecute.disabled = disabled;
       document.querySelectorAll(".plan-card-execute").forEach(button => {
         button.disabled = disabled;
       });
+      updatePlanExecutionBar();
     }
     function planExecutionPrompt(planText) {
       return "PLEASE IMPLEMENT THIS PLAN:\\n\\n" + String(planText || "").trim();
@@ -16905,6 +16966,7 @@ __ICONS_JS__
       }
       const prompt = planExecutionPrompt(activePlan.body);
       clearSelectedPlanModeForExecution();
+      hidePlanExecutionBar();
       const body = buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()});
       body.force_new_turn = true;
       renderLocalUserEcho(prompt, []);

@@ -5733,6 +5733,9 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert ".plan-card { position: relative; display: grid;" in response
     assert ".plan-card-title { margin: 0; color: #ffffff; font-size: 33px;" in response
     assert ".plan-card:not(.expanded)::after" in response
+    assert ".plan-execution-bar { position: fixed; left: 14px; right: 14px;" in response
+    assert "body.has-plan-execution-bar main { padding-bottom: calc(var(--codex-dock-height, 150px) + 210px + env(safe-area-inset-bottom)); }" in response
+    assert ".plan-execution-confirm svg" in response
     assert ".plan-page-backdrop { position: fixed; inset: 0; z-index: 12; overflow-y: auto; overflow-x: hidden;" in response
     assert ".plan-page-shell { box-sizing: border-box; width: 100%; max-width: 100vw; min-height: 100vh;" in response
     assert ".plan-page-top { position: sticky; top: 0; z-index: 1; box-sizing: border-box;" in response
@@ -5744,12 +5747,25 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert 'class="plan-page-backdrop" id="planPage"' in response
     assert 'id="planPageClose"' in response
     assert 'id="planPageExecute"' in response
+    assert 'class="plan-execution-bar" id="planExecutionBar" aria-label="执行计划" hidden' in response
+    assert 'class="plan-execution-title">是否执行此计划?</span>' in response
+    assert 'id="planExecutionConfirm"' in response
+    assert 'id="planExecutionRevise"' in response
+    assert 'id="planExecutionSkip"' in response
+    assert "是，执行此计划" in response
+    assert "否，请说明修改内容" in response
+    assert "跳过" in response
     assert "let activePlan = null;" in response
+    assert 'const planExecutionBar = document.getElementById("planExecutionBar");' in response
+    assert 'const planExecutionConfirm = document.getElementById("planExecutionConfirm");' in response
+    assert 'const planExecutionRevise = document.getElementById("planExecutionRevise");' in response
+    assert 'const planExecutionSkip = document.getElementById("planExecutionSkip");' in response
     assert "function isNativePlanEvent(event)" in response
     assert 'payload.action === "plan_updated"' in response
     assert "else if (isNativePlanEvent(event)) renderPlanEvent(event);" in response
     assert "function renderPlanEvent(event)" in response
     assert "setActivePlanFromEvent(event, planText, titleText, summaryText);" in response
+    assert "showPlanExecutionBar(activePlan);" in response
     assert "label.innerHTML = `${ICONS.plan}<span>计划</span>`;" in response
     assert "download.innerHTML = ICONS.download;" in response
     assert 'copy.setAttribute("aria-label", "复制计划");' in response
@@ -5760,6 +5776,12 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert "function openPlanPage(plan = activePlan)" in response
     assert "function renderPlanPage(plan)" in response
     assert "function closePlanPage()" in response
+    assert "function showPlanExecutionBar(plan = activePlan)" in response
+    assert "function hidePlanExecutionBar()" in response
+    assert "function updatePlanExecutionBar()" in response
+    assert "planExecutionConfirm.onclick = executeActivePlan;" in response
+    assert "planExecutionSkip.onclick = hidePlanExecutionBar;" in response
+    assert "planExecutionRevise.onclick = () => {" in response
     assert (
         "function createPlanCardElement(planText, titleFallback, options = {})"
         in response
@@ -5778,6 +5800,12 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert response.index("clearSelectedPlanModeForExecution();") < response.index(
         "const body = buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()});"
     )
+    assert (
+        "const prompt = planExecutionPrompt(activePlan.body);\n"
+        "      clearSelectedPlanModeForExecution();\n"
+        "      hidePlanExecutionBar();\n"
+        "      const body = buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()});"
+    ) in response
     assert (
         "const body = buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()});\n"
         "      body.force_new_turn = true;"
