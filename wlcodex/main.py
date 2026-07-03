@@ -260,16 +260,15 @@ def _create_live_stream_components(
                 create_codex_native_transport,
             )
 
-            transport = create_codex_native_transport(
-                transport=config.codex_native.transport,
-                binary=config.codex.binary,
-                sock_path=config.codex_native.sock_path,
-                listen_endpoint=config.codex_native.listen_endpoint,
-                startup_timeout_seconds=config.backend.startup_timeout_seconds,
-                remote_control=config.codex_native.remote_control,
-            )
-
             async def _start_native_client() -> CodexNativeClient:
+                transport = create_codex_native_transport(
+                    transport=config.codex_native.transport,
+                    binary=config.codex.binary,
+                    sock_path=config.codex_native.sock_path,
+                    listen_endpoint=config.codex_native.listen_endpoint,
+                    startup_timeout_seconds=config.backend.startup_timeout_seconds,
+                    remote_control=config.codex_native.remote_control,
+                )
                 client = CodexNativeClient(
                     send_json=transport.send_json,
                     close=transport.close,

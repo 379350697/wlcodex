@@ -8,6 +8,7 @@ import pytest
 
 from wlcodex.codex_native.client import CodexNativeClient, LazyNativeClient
 from wlcodex.codex_native.models import NativeCodexStatus
+from wlcodex.jsonrpc import JsonRpcTimeout
 
 
 class FakeTransport:
@@ -551,6 +552,77 @@ async def test_lazy_native_client_defers_factory_and_replays_handlers() -> None:
     ]
     assert created[0].calls == [("status",), ("list_sessions", 2)]
     assert created[0].resolved == [("req-1", {"decision": "approved"})]
+
+
+@pytest.mark.asyncio
+async def test_lazy_native_client_retries_once_after_initialize_timeout() -> None:
+    class TimeoutThenReadyClient:
+        def __init__(self, *, fail: bool) -> None:
+            self.fail = fail
+            self.closed = False
+
+        async def status(self) -> NativeCodexStatus:
+            if self.fail:
+                raise JsonRpcTimeout("Request initialize (id=1) timed out after 60.0s")
+            return NativeCodexStatus(
+                enabled=True,
+                connected=True,
+                remote_control_status="ready",
+            )
+
+        async def close(self) -> None:
+            self.closed = True
+
+    created: list[TimeoutThenReadyClient] = []
+
+    async def factory() -> TimeoutThenReadyClient:
+        client = TimeoutThenReadyClient(fail=not created)
+        created.append(client)
+        return client
+
+    lazy = LazyNativeClient(factory)
+
+    status = await lazy.status()
+
+    assert status.remote_control_status == "ready"
+    assert len(created) == 2
+    assert created[0].closed is True
+    assert created[1].closed is False
+
+
+@pytest.mark.asyncio
+async def test_lazy_native_client_does_not_retry_non_initialize_timeout() -> None:
+    class TurnTimeoutClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def start_turn(
+            self,
+            native_thread_id: str,
+            prompt: str,
+            **_kwargs: Any,
+        ) -> str:
+            assert native_thread_id == "thread-1"
+            assert prompt == "continue"
+            raise JsonRpcTimeout("Request turn/start (id=2) timed out after 60.0s")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    created: list[TurnTimeoutClient] = []
+
+    async def factory() -> TurnTimeoutClient:
+        client = TurnTimeoutClient()
+        created.append(client)
+        return client
+
+    lazy = LazyNativeClient(factory)
+
+    with pytest.raises(JsonRpcTimeout, match="turn/start"):
+        await lazy.start_turn("thread-1", "continue")
+
+    assert len(created) == 1
+    assert created[0].closed is True
 
 
 @pytest.mark.asyncio

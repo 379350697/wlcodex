@@ -12,7 +12,7 @@ from wlcodex.codex_backend import (
     parse_turn_response,
 )
 from wlcodex.codex_native.models import NativeCodexStatus
-from wlcodex.jsonrpc import JsonRpcClient
+from wlcodex.jsonrpc import JsonRpcClient, JsonRpcTimeout
 
 
 def _collaboration_mode_with_settings(
@@ -317,11 +317,39 @@ class LazyNativeClient:
                 self._client = client
         return self._client
 
+    async def _drop_client(self, client: CodexNativeClient) -> None:
+        async with self._lock:
+            if self._client is client:
+                self._client = None
+        await client.close()
+
+    @staticmethod
+    def _is_initialize_timeout(exc: BaseException) -> bool:
+        return isinstance(exc, JsonRpcTimeout) and "Request initialize " in str(exc)
+
+    async def _call(
+        self,
+        callback: Callable[[CodexNativeClient], Awaitable[Any]],
+    ) -> Any:
+        client = await self._get()
+        try:
+            return await callback(client)
+        except (JsonRpcTimeout, ConnectionError, OSError) as exc:
+            await self._drop_client(client)
+            if self._is_initialize_timeout(exc):
+                retry_client = await self._get()
+                try:
+                    return await callback(retry_client)
+                except (JsonRpcTimeout, ConnectionError, OSError):
+                    await self._drop_client(retry_client)
+                    raise
+            raise
+
     async def status(self) -> NativeCodexStatus:
-        return await (await self._get()).status()
+        return await self._call(lambda client: client.status())
 
     async def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
-        return await (await self._get()).list_sessions(limit=limit)
+        return await self._call(lambda client: client.list_sessions(limit=limit))
 
     async def list_models(
         self,
@@ -329,9 +357,11 @@ class LazyNativeClient:
         limit: int = 100,
         include_hidden: bool = False,
     ) -> list[dict[str, Any]]:
-        return await (await self._get()).list_models(
-            limit=limit,
-            include_hidden=include_hidden,
+        return await self._call(
+            lambda client: client.list_models(
+                limit=limit,
+                include_hidden=include_hidden,
+            )
         )
 
     async def start_thread(
@@ -344,13 +374,15 @@ class LazyNativeClient:
         approvals_reviewer: str | None = None,
         sandbox: str | None = None,
     ) -> dict[str, Any]:
-        return await (await self._get()).start_thread(
-            cwd,
-            model=model,
-            service_tier=service_tier,
-            approval_policy=approval_policy,
-            approvals_reviewer=approvals_reviewer,
-            sandbox=sandbox,
+        return await self._call(
+            lambda client: client.start_thread(
+                cwd,
+                model=model,
+                service_tier=service_tier,
+                approval_policy=approval_policy,
+                approvals_reviewer=approvals_reviewer,
+                sandbox=sandbox,
+            )
         )
 
     async def read_session(
@@ -359,13 +391,15 @@ class LazyNativeClient:
         *,
         include_turns: bool = True,
     ) -> dict[str, Any]:
-        return await (await self._get()).read_session(
-            native_thread_id,
-            include_turns=include_turns,
+        return await self._call(
+            lambda client: client.read_session(
+                native_thread_id,
+                include_turns=include_turns,
+            )
         )
 
     async def attach_session(self, native_thread_id: str) -> dict[str, Any]:
-        return await (await self._get()).attach_session(native_thread_id)
+        return await self._call(lambda client: client.attach_session(native_thread_id))
 
     async def continue_session(
         self,
@@ -381,17 +415,19 @@ class LazyNativeClient:
         sandbox_policy: dict[str, object] | None = None,
         collaboration_mode: dict[str, object] | None = None,
     ) -> str:
-        return await (await self._get()).continue_session(
-            native_thread_id,
-            prompt,
-            model=model,
-            effort=effort,
-            service_tier=service_tier,
-            images=images,
-            approval_policy=approval_policy,
-            approvals_reviewer=approvals_reviewer,
-            sandbox_policy=sandbox_policy,
-            collaboration_mode=collaboration_mode,
+        return await self._call(
+            lambda client: client.continue_session(
+                native_thread_id,
+                prompt,
+                model=model,
+                effort=effort,
+                service_tier=service_tier,
+                images=images,
+                approval_policy=approval_policy,
+                approvals_reviewer=approvals_reviewer,
+                sandbox_policy=sandbox_policy,
+                collaboration_mode=collaboration_mode,
+            )
         )
 
     async def start_turn(
@@ -408,17 +444,19 @@ class LazyNativeClient:
         sandbox_policy: dict[str, object] | None = None,
         collaboration_mode: dict[str, object] | None = None,
     ) -> str:
-        return await (await self._get()).start_turn(
-            native_thread_id,
-            prompt,
-            model=model,
-            effort=effort,
-            service_tier=service_tier,
-            images=images,
-            approval_policy=approval_policy,
-            approvals_reviewer=approvals_reviewer,
-            sandbox_policy=sandbox_policy,
-            collaboration_mode=collaboration_mode,
+        return await self._call(
+            lambda client: client.start_turn(
+                native_thread_id,
+                prompt,
+                model=model,
+                effort=effort,
+                service_tier=service_tier,
+                images=images,
+                approval_policy=approval_policy,
+                approvals_reviewer=approvals_reviewer,
+                sandbox_policy=sandbox_policy,
+                collaboration_mode=collaboration_mode,
+            )
         )
 
     async def steer_turn(
@@ -429,15 +467,17 @@ class LazyNativeClient:
         *,
         images: list[dict[str, Any]] | None = None,
     ) -> None:
-        await (await self._get()).steer_turn(
-            native_thread_id,
-            expected_turn_id,
-            prompt,
-            images=images,
+        await self._call(
+            lambda client: client.steer_turn(
+                native_thread_id,
+                expected_turn_id,
+                prompt,
+                images=images,
+            )
         )
 
     async def interrupt_turn(self, native_thread_id: str, turn_id: str) -> None:
-        await (await self._get()).interrupt_turn(native_thread_id, turn_id)
+        await self._call(lambda client: client.interrupt_turn(native_thread_id, turn_id))
 
     def register_notification_handler(
         self,
