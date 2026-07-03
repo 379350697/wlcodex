@@ -14541,6 +14541,11 @@ __MARVIS_CSS_LINK__  <style>
     .transcript-body strong { color: var(--text-heading); font-weight: var(--weight-extrabold); }
     .transcript-body a { color: var(--color-link); text-decoration: none; border-bottom: 1px solid rgba(147, 197, 253, .45); transition: border-color 150ms ease; }
     .transcript-body a:hover { border-bottom-color: rgba(147, 197, 253, .7); }
+    .transcript-body .markdown-table-wrap { max-width: 100%; margin: 0 0 14px; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #383c46 transparent; }
+    .transcript-body table { width: max-content; min-width: min(100%, 520px); border-collapse: collapse; color: var(--btn-primary-bg); font-size: var(--native-ui-font-size); line-height: 1.35; }
+    .transcript-body th, .transcript-body td { padding: 9px 12px; border-bottom: 1px solid rgba(255,255,255,0.08); white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+    .transcript-body th:first-child, .transcript-body td:first-child { text-align: left; }
+    .transcript-body th { color: var(--text-heading); font-weight: var(--weight-extrabold); }
     .transcript-body code { white-space: normal; overflow-wrap: anywhere; word-break: break-word; padding: 1px 5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06); background: var(--bg-code); color: var(--text-code); font: var(--native-code-font-size)/1.45 var(--font-mono); }
     .transcript-body pre { margin: 0 0 13px; overflow: auto; padding: 14px 16px; border: 1px solid var(--border-code); border-radius: 8px; background: linear-gradient(145deg, #0c0e14, #101420); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); white-space: pre; scrollbar-width: thin; scrollbar-color: #383c46 transparent; }
     .transcript-body pre code { white-space: pre; overflow-wrap: normal; word-break: normal; padding: 0; border-radius: 0; background: transparent; font-size: var(--native-code-font-size); line-height: 1.5; }
@@ -19235,6 +19240,14 @@ __ICONS_JS__
           flushList();
           continue;
         }
+        const table = tryReadMarkdownTable(lines, index);
+        if (table) {
+          flushParagraph();
+          flushList();
+          renderMarkdownTable(target, table);
+          index = table.endIndex;
+          continue;
+        }
         const heading = line.match(/^#{1,3}\\s+(.+)$/);
         if (heading) {
           flushParagraph();
@@ -19262,6 +19275,54 @@ __ICONS_JS__
       }
       flushParagraph();
       flushList();
+    }
+    function tryReadMarkdownTable(lines, startIndex) {
+      const header = splitMarkdownTableRow(lines[startIndex] || "");
+      const separator = splitMarkdownTableRow(lines[startIndex + 1] || "");
+      if (header.length < 2 || separator.length < header.length) return null;
+      if (!separator.every(cell => /^:?-{3,}:?$/.test(cell.replace(/\\s+/g, "")))) return null;
+      const rows = [];
+      let index = startIndex + 2;
+      while (index < lines.length) {
+        const cells = splitMarkdownTableRow(lines[index] || "");
+        if (cells.length < 2) break;
+        rows.push(cells);
+        index += 1;
+      }
+      return {header, rows, endIndex: index - 1};
+    }
+    function splitMarkdownTableRow(line) {
+      const value = String(line || "").trim();
+      if (!value.includes("|")) return [];
+      const trimmed = value.replace(/^\\|/, "").replace(/\\|$/, "");
+      return trimmed.split("|").map(cell => cell.trim());
+    }
+    function renderMarkdownTable(target, table) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "markdown-table-wrap";
+      const tableNode = document.createElement("table");
+      const thead = document.createElement("thead");
+      const headerRow = document.createElement("tr");
+      for (const cell of table.header) {
+        const th = document.createElement("th");
+        appendInlineMarkdown(th, cell);
+        headerRow.append(th);
+      }
+      thead.append(headerRow);
+      tableNode.append(thead);
+      const tbody = document.createElement("tbody");
+      for (const row of table.rows) {
+        const tr = document.createElement("tr");
+        for (let index = 0; index < table.header.length; index++) {
+          const td = document.createElement("td");
+          appendInlineMarkdown(td, row[index] || "");
+          tr.append(td);
+        }
+        tbody.append(tr);
+      }
+      tableNode.append(tbody);
+      wrapper.append(tableNode);
+      target.append(wrapper);
     }
     function appendInlineMarkdown(target, text) {
       const source = String(text || "");

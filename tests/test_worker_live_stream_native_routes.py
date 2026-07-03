@@ -6319,9 +6319,14 @@ async def test_worker_live_page_renders_assistant_markdown_blocks(
 
     assert "HTTP/1.1 200 OK" in response
     assert "function renderMarkdownLite(target, text)" in response
+    assert "function tryReadMarkdownTable(lines, startIndex)" in response
+    assert "function renderMarkdownTable(target, table)" in response
     assert "function appendInlineMarkdown(target, text)" in response
     assert "function appendMarkdownLink(target, label, href)" in response
     assert 'replace(/\\r\\n/g, "\\n")' in response
+    assert "const table = tryReadMarkdownTable(lines, index);" in response
+    assert 'wrapper.className = "markdown-table-wrap";' in response
+    assert 'const tableNode = document.createElement("table");' in response
     assert 'paragraph.join("\\n").trim()' in response
     assert 'codeLines.join("\\n")' in response
     assert "line.match(/^\\s*\\d+[.)]\\s*(.+)$/)" in response
@@ -6331,6 +6336,8 @@ async def test_worker_live_page_renders_assistant_markdown_blocks(
     assert "node.text = visibleText;" in response
     assert ".transcript-body p" in response
     assert ".transcript-body ul" in response
+    assert ".transcript-body .markdown-table-wrap" in response
+    assert ".transcript-body table" in response
     assert ".transcript-body pre" in response
 
 
