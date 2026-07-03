@@ -17913,9 +17913,17 @@ __ICONS_JS__
     }
     function orderTranscriptGroupEvents(group) {
       return group.slice().sort((left, right) => {
+        const leftItemOrder = transcriptItemOrder(left);
+        const rightItemOrder = transcriptItemOrder(right);
+        if (leftItemOrder !== Number.MAX_SAFE_INTEGER || rightItemOrder !== Number.MAX_SAFE_INTEGER) {
+          return (
+            leftItemOrder - rightItemOrder ||
+            displayEventOrder(left) - displayEventOrder(right) ||
+            Number((left && left.id) || 0) - Number((right && right.id) || 0)
+          );
+        }
         return (
           displayEventOrder(left) - displayEventOrder(right) ||
-          transcriptItemOrder(left) - transcriptItemOrder(right) ||
           Number((left && left.id) || 0) - Number((right && right.id) || 0)
         );
       });

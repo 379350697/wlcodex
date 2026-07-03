@@ -2534,6 +2534,19 @@ def test_native_template_registry_renders_stable_and_timeline_v2_variants() -> N
     assert "nativeTimelinePath(`after=${latestEventId}&limit=100`)" in v2
 
 
+def test_native_codex_template_orders_official_transcript_items_before_roles() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert (
+        "const leftItemOrder = transcriptItemOrder(left);\n"
+        "        const rightItemOrder = transcriptItemOrder(right);\n"
+        "        if (leftItemOrder !== Number.MAX_SAFE_INTEGER || rightItemOrder !== Number.MAX_SAFE_INTEGER) {\n"
+        "          return (\n"
+        "            leftItemOrder - rightItemOrder ||\n"
+        "            displayEventOrder(left) - displayEventOrder(right) ||"
+    ) in response
+
+
 def test_native_codex_stable_template_does_not_include_timeline_v2_state() -> None:
     response = _native_codex_page("codex")
 
