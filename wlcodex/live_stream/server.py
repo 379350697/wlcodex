@@ -3090,16 +3090,16 @@ class WorkerLiveStreamServer:
                 },
             )
             return
-        items = self._native_timeline.list_conversation_items(
+        items = self._native_timeline.list_conversation_items_by_id(
             provider_key,
             native_thread_id,
             after=after,
             before=before,
             limit=limit,
         )
-        first_cursor = items[0].cursor if items else int(before or after or 0)
+        first_cursor = items[0].id if items else int(before or after or 0)
         previous_item_count = (
-            self._native_timeline.count_conversation_items_before(
+            self._native_timeline.count_conversation_items_before_id(
                 provider_key,
                 native_thread_id,
                 before=first_cursor,
@@ -3107,11 +3107,7 @@ class WorkerLiveStreamServer:
             if first_cursor
             else 0
         )
-        latest_sequence = self._native_timeline.latest_sequence(
-            provider_key,
-            native_thread_id,
-        )
-        cursor = max([latest_sequence, *(item.cursor for item in items)])
+        cursor = max([int(after or 0), *(item.id for item in items)])
         run_state = self._native_timeline.latest_turn_run_state(
             provider_key,
             native_thread_id,
@@ -3164,15 +3160,15 @@ class WorkerLiveStreamServer:
             native_thread_id=native_thread_id,
         )
         try:
-            for item in self._native_timeline.list_conversation_items(
+            for item in self._native_timeline.list_conversation_items_by_id(
                 provider_key,
                 native_thread_id,
                 after=after_id,
                 limit=500,
             ):
-                if item.cursor <= latest:
+                if item.id <= latest:
                     continue
-                latest = item.cursor
+                latest = item.id
                 await _write_native_message_sse(writer, item, replay=True)
             while not writer.is_closing():
                 try:
@@ -3185,21 +3181,21 @@ class WorkerLiveStreamServer:
                         provider_key,
                         native_thread_id,
                     )
-                    for item in self._native_timeline.list_conversation_items(
+                    for item in self._native_timeline.list_conversation_items_by_id(
                         provider_key,
                         native_thread_id,
                         after=latest,
                         limit=500,
                     ):
-                        if item.cursor <= latest:
+                        if item.id <= latest:
                             continue
-                        latest = item.cursor
+                        latest = item.id
                         await _write_native_message_sse(writer, item, replay=True)
                     continue
                 item = self._native_timeline.get_conversation_item(event.item_row_id)
-                if item is None or item.cursor <= latest:
+                if item is None or item.id < latest:
                     continue
-                latest = item.cursor
+                latest = max(latest, item.id)
                 await _write_native_message_sse(writer, item, replay=False)
         finally:
             self._native_timeline.unsubscribe(
@@ -3944,17 +3940,18 @@ def format_native_timeline_sse_event(event: NativeTimelineEvent) -> bytes:
 
 
 def format_native_message_sse_event(item: NativeTimelineItem, *, replay: bool = False) -> bytes:
+    public_cursor = int(item.id)
     payload = json.dumps(
         {
             "item": _native_conversation_item_json(item),
             "event": _native_conversation_item_display_event(item),
-            "cursor": item.cursor,
+            "cursor": public_cursor,
             "replay": replay,
         },
         ensure_ascii=False,
     )
     return (
-        f"id: {item.cursor}\n"
+        f"id: {public_cursor}\n"
         f"event: {_native_message_sse_event_name(item, replay=replay)}\n"
         f"data: {payload}\n\n"
     ).encode("utf-8")
@@ -3972,6 +3969,8 @@ def _native_message_sse_event_name(item: NativeTimelineItem, *, replay: bool = F
 
 def _native_conversation_item_json(item: NativeTimelineItem) -> dict[str, Any]:
     data = item.to_json_dict()
+    data["sequence_cursor"] = item.cursor
+    data["cursor"] = int(item.id)
     payload = dict(data.get("payload") or {})
     payload.pop("delta", None)
     payload["text"] = item.text
@@ -3992,7 +3991,7 @@ def _native_conversation_item_display_event(item: NativeTimelineItem) -> dict[st
     if item.kind == "message":
         kind = "message_completed" if item.status == "completed" else "text_delta"
     return {
-        "id": item.cursor,
+        "id": int(item.id),
         "sequence": item.cursor,
         "type": kind,
         "source_type": "native.conversation.item",
@@ -17536,6 +17535,12 @@ __ICONS_JS__
         latestStreamEventId = Math.max(latestStreamEventId, event.id);
         if (!isInternalEvent(event) && event.id) {
           latestVisibleEventId = Math.max(latestVisibleEventId, event.id);
+        }
+        if (isAssistantMessageEvent(event) || event.kind === "message_completed") {
+          loadedEvents = loadedEvents.filter(existing => !existing || existing.id !== event.id);
+          loadedEvents.push(event);
+          rebuildStream();
+          scrollToBottom();
         }
         return;
       }

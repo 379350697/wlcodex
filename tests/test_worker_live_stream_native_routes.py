@@ -4484,6 +4484,88 @@ async def test_native_messages_endpoint_returns_visible_items_without_command_pa
 
 
 @pytest.mark.asyncio
+async def test_native_messages_endpoint_orders_recent_snapshot_by_item_id(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="provider.display.completed",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-old",
+                "itemId": "assistant-old",
+                "text": "旧消息",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store._conn.execute(
+        "UPDATE native_timeline_items SET last_sequence = 999 WHERE item_key = ?",
+        ("assistant-old",),
+    )
+    runtime_store._conn.commit()
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="provider.display.completed",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex_transcript",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-new",
+                "itemId": "assistant-new",
+                "text": "新消息",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1/messages?limit=1 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [item["text"] for item in body["items"]] == ["新消息"]
+    assert body["cursor"] == body["items"][0]["id"]
+    assert body["items"][0]["cursor"] == body["items"][0]["id"]
+    assert "sequence_cursor" in body["items"][0]
+
+
+@pytest.mark.asyncio
 async def test_native_messages_run_state_stays_active_until_turn_lifecycle_finishes(
     tmp_path: Path,
 ) -> None:

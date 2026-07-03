@@ -602,6 +602,69 @@ class NativeTimelineStore:
         ).fetchall()
         return [_item_from_row(row) for row in reversed(rows)]
 
+    def list_conversation_items_by_id(
+        self,
+        provider: str,
+        native_thread_id: str,
+        *,
+        after: int = 0,
+        before: int | None = None,
+        limit: int = 100,
+    ) -> list[NativeTimelineItem]:
+        provider_key = _normalize_provider(provider)
+        thread_id = str(native_thread_id or "").strip()
+        safe_limit = max(1, min(int(limit or 100), 500))
+        if before is not None and before > 0:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM native_timeline_items
+                WHERE provider = ? AND native_thread_id = ?
+                  AND kind IN ({_visible_item_kind_placeholders()})
+                  AND id < ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (
+                    provider_key,
+                    thread_id,
+                    *_VISIBLE_CONVERSATION_ITEM_KINDS,
+                    int(before),
+                    safe_limit,
+                ),
+            ).fetchall()
+            return [_item_from_row(row) for row in reversed(rows)]
+        after_id = int(after or 0)
+        if after_id > 0:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM native_timeline_items
+                WHERE provider = ? AND native_thread_id = ?
+                  AND kind IN ({_visible_item_kind_placeholders()})
+                  AND id > ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (
+                    provider_key,
+                    thread_id,
+                    *_VISIBLE_CONVERSATION_ITEM_KINDS,
+                    after_id,
+                    safe_limit,
+                ),
+            ).fetchall()
+            return [_item_from_row(row) for row in rows]
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM native_timeline_items
+            WHERE provider = ? AND native_thread_id = ?
+              AND kind IN ({_visible_item_kind_placeholders()})
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (provider_key, thread_id, *_VISIBLE_CONVERSATION_ITEM_KINDS, safe_limit),
+        ).fetchall()
+        return [_item_from_row(row) for row in reversed(rows)]
+
     def get_conversation_item(self, item_row_id: int | None) -> NativeTimelineItem | None:
         if item_row_id is None:
             return None
@@ -628,6 +691,30 @@ class NativeTimelineStore:
             WHERE provider = ? AND native_thread_id = ?
               AND kind IN ({_visible_item_kind_placeholders()})
               AND COALESCE(NULLIF(last_sequence, 0), id) < ?
+            """,
+            (
+                _normalize_provider(provider),
+                str(native_thread_id or "").strip(),
+                *_VISIBLE_CONVERSATION_ITEM_KINDS,
+                int(before),
+            ),
+        ).fetchone()
+        return int(row["count"] if row is not None else 0)
+
+    def count_conversation_items_before_id(
+        self,
+        provider: str,
+        native_thread_id: str,
+        *,
+        before: int,
+    ) -> int:
+        row = self._conn.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM native_timeline_items
+            WHERE provider = ? AND native_thread_id = ?
+              AND kind IN ({_visible_item_kind_placeholders()})
+              AND id < ?
             """,
             (
                 _normalize_provider(provider),
