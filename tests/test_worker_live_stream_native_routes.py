@@ -2467,6 +2467,9 @@ def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
     assert '<section class="compose-hero" id="composeHero" hidden>' in response
     assert '<h2>开始处理</h2>' in response
     assert 'id="composeProjectButton"' in response
+    assert 'id="workspaceBar"' not in response
+    assert "workspaceBarChip" not in response
+    assert "renderWorkspaceBar" not in response
     assert '<section class="project-picker" id="projectPicker" hidden aria-label="选择项目">' in response
     assert 'function openProjectPicker()' in response
     assert 'function closeProjectPicker()' in response
