@@ -14597,9 +14597,13 @@ __MARVIS_CSS_LINK__  <style>
     .plan-execution-row:disabled { opacity: .48; }
     .plan-execution-confirm svg, .plan-execution-revise svg { width: 18px; height: 18px; stroke-width: 2.2; }
     .plan-execution-icon { width: 28px; min-height: 28px; display: grid; place-items: center; color: #e4e4e7; }
-    .plan-execution-secondary { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
-    .plan-execution-revise { min-width: 0; min-height: 48px; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 0; border: 0; border-radius: 0; background: transparent; color: #f4f4f5; text-align: left; font-size: 15px; line-height: 1.3; }
+    .plan-execution-confirm { min-height: 48px; margin: 0 0 8px; padding: 0 14px; border-top: 0; border-radius: 14px; background: #f4f4f5; color: #111; font-weight: var(--weight-extrabold); }
+    .plan-execution-confirm .plan-execution-icon { color: #111; }
+    .plan-execution-secondary { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.08); }
+    .plan-execution-revise { min-width: 0; min-height: 48px; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 0; border: 0; border-radius: 0; background: transparent; color: #9ca3af; text-align: left; font-size: 15px; line-height: 1.3; }
+    .plan-execution-revise .plan-execution-icon { color: #a1a1aa; }
     .plan-execution-revise:disabled { opacity: .48; }
+    .plan-execution-placeholder { min-width: 0; color: #9ca3af; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .plan-execution-skip { min-height: 34px; padding: 0 14px; border: 1px solid rgba(255,255,255,.1); border-radius: 17px; background: #f4f4f5; color: #111; font-size: 14px; font-weight: var(--weight-bold); }
     .plan-page-backdrop { position: fixed; inset: 0; z-index: 12; overflow-y: auto; overflow-x: hidden; max-width: 100vw; background: #000; color: #fff; }
     .plan-page-backdrop[hidden] { display: none; }
@@ -14878,7 +14882,7 @@ __MARVIS_CSS_LINK__  <style>
       <div class="plan-execution-row plan-execution-secondary">
         <button class="plan-execution-revise" id="planExecutionRevise" type="button">
           <span class="plan-execution-icon">✎</span>
-          <span>否，请说明修改内容</span>
+          <span class="plan-execution-placeholder">否，请说明修改内容</span>
         </button>
         <button class="plan-execution-skip" id="planExecutionSkip" type="button">跳过</button>
       </div>
@@ -16747,6 +16751,13 @@ __ICONS_JS__
       } else if (mirroredTranscript) {
         return;
       } else if (
+        event.kind === "user_message" &&
+        payload.native_turn_id &&
+        !hasTerminalTurnEvent(payload.native_turn_id)
+      ) {
+        activeTurnId = payload.native_turn_id;
+        nativeTurnRunning = true;
+      } else if (
         event.kind === "text_delta" ||
         event.kind === "reasoning_delta" ||
         event.kind === "command_started" ||
@@ -16778,6 +16789,11 @@ __ICONS_JS__
       if (action === "turn_completed" || action === "turn_failed") return true;
       if (event.kind === "lifecycle") return isCompletedStatus(status) || isFailedStatus(status);
       return false;
+    }
+    function hasTerminalTurnEvent(turnId) {
+      const targetTurnId = String(turnId || "");
+      if (!targetTurnId) return false;
+      return loadedEvents.some(candidate => isTerminalTurnEvent(candidate) && eventFoldTurnId(candidate) === targetTurnId);
     }
     function isCompletedStatus(status) {
       return ["completed", "done", "succeeded", "success"].includes(
@@ -16932,8 +16948,18 @@ __ICONS_JS__
       planExecutionBar.hidden = true;
       document.body.classList.remove("has-plan-execution-bar");
     }
+    function isWaitingOnActivePlanConfirmation() {
+      if (!activePlan || !activePlan.executable || !nativeTurnRunning) return false;
+      const planTurnId = String(activePlan.turnId || "");
+      const currentTurnId = String(activeTurnId || nativeTurnId || turnStatus.turnId || "");
+      return Boolean(planTurnId && currentTurnId && planTurnId === currentTurnId);
+    }
+    function canExecuteActivePlan() {
+      if (!activePlan || !activePlan.executable || !nativeThreadId || sendingPrompt) return false;
+      return !nativeTurnRunning || isWaitingOnActivePlanConfirmation();
+    }
     function updatePlanExecutionBar() {
-      const disabled = !activePlan || !activePlan.executable || !nativeThreadId || sendingPrompt || nativeTurnRunning;
+      const disabled = !canExecuteActivePlan();
       if (planExecutionConfirm) planExecutionConfirm.disabled = disabled;
       if (planExecutionRevise) planExecutionRevise.disabled = sendingPrompt;
       if (planExecutionBar && !planExecutionBar.hidden && (!activePlan || !activePlan.executable)) {
@@ -16941,7 +16967,7 @@ __ICONS_JS__
       }
     }
     function updatePlanActionState() {
-      const disabled = !activePlan || !activePlan.executable || !nativeThreadId || sendingPrompt || nativeTurnRunning;
+      const disabled = !canExecuteActivePlan();
       planPageExecute.disabled = disabled;
       document.querySelectorAll(".plan-card-execute").forEach(button => {
         button.disabled = disabled;
@@ -16960,7 +16986,7 @@ __ICONS_JS__
         setSendStatus("仅文本计划，不能一键执行", "error");
         return;
       }
-      if (nativeTurnRunning) {
+      if (nativeTurnRunning && !isWaitingOnActivePlanConfirmation()) {
         setSendStatus("等待当前轮结束", "error");
         return;
       }
@@ -16993,6 +17019,22 @@ __ICONS_JS__
         continueButton.classList.remove("loading");
         updateComposerDisabled();
       }
+    }
+    function isPlanExecutionUserMessage(event) {
+      if (!event || event.kind !== "user_message") return false;
+      const payload = event.payload || {};
+      const text = String(payload.text || payload.delta || payload.summary || payload.content || payload.prompt || "").trim();
+      return text === "Implement the proposed plan." || isPlanExecutionPrompt(text);
+    }
+    function syncPlanExecutionUiFromEvent(event) {
+      if (!isPlanExecutionUserMessage(event)) return;
+      clearSelectedPlanModeForExecution();
+      hidePlanExecutionBar();
+      closePlanPage();
+      if (activePlan) {
+        activePlan = {...activePlan, executable: false, status: "executing"};
+      }
+      updatePlanActionState();
     }
     async function previewHandoff() {
       if (!nativeThreadId) {
@@ -17551,6 +17593,15 @@ __ICONS_JS__
     function hasNativePlanEvents(sourceEvents) {
       return normalizeEventList(sourceEvents).some(event => isNativePlanEvent(event));
     }
+    function nativePlanTurnSet(sourceEvents) {
+      const turns = new Set();
+      for (const event of normalizeEventList(sourceEvents)) {
+        if (!isNativePlanEvent(event)) continue;
+        const turnId = eventFoldTurnId(event);
+        if (turnId) turns.add(turnId);
+      }
+      return turns;
+    }
     function mergeDisplayEvents(currentEvents, nextEvents) {
       const byId = new Map();
       for (const event of normalizeEventList(currentEvents)) {
@@ -17635,7 +17686,13 @@ __ICONS_JS__
     }
     function isNativePlanEvent(event) {
       const payload = (event && event.payload) || {};
-      return isNativeFeedbackMode(event) && event && event.kind === "activity" && payload.action === "plan_updated";
+      const itemId = String(payload.itemId || payload.item_id || "");
+      return Boolean(
+        isNativeFeedbackMode(event) &&
+        event &&
+        event.kind === "activity" &&
+        (payload.action === "plan_updated" || itemId.endsWith("-plan"))
+      );
     }
     function isNativeFeedbackMode(event) {
       const payload = (event && event.payload) || {};
@@ -17989,6 +18046,7 @@ __ICONS_JS__
       });
     }
     function dedupeDisplayEvents(sourceEvents) {
+      const nativePlanTurns = nativePlanTurnSet(sourceEvents);
       const officialAssistantTurns = completedAssistantTurnSet(sourceEvents);
       const completedAssistantTexts = completedAssistantTextByTurn(sourceEvents);
       const completedAssistantFinalTurns = completedAssistantFinalTurnSet(sourceEvents);
@@ -18002,6 +18060,13 @@ __ICONS_JS__
       for (const event of normalizeEventList(sourceEvents)) {
         if (isInternalEvent(event)) continue;
         if (isAssistantMessageEvent(event) && !hasVisibleTranscriptText(event)) continue;
+        if (
+          isAssistantMessageEvent(event) &&
+          nativePlanTurns.has(eventFoldTurnId(event)) &&
+          proposedPlanTextFromText(visibleTranscriptText(event))
+        ) {
+          continue;
+        }
         if (shouldDropAssistantMirrorEvent(event, completedAssistantTexts, completedAssistantFinalTurns)) continue;
         if (isAssistantMessageEvent(event)) {
           const assistantFingerprint = assistantDisplayTextFingerprint(event);
@@ -18550,6 +18615,7 @@ __ICONS_JS__
       const payload = event.payload || {};
       if (payload.native_thread_id) nativeThreadId = payload.native_thread_id;
       applyNativeTurnState(event, options);
+      syncPlanExecutionUiFromEvent(event);
       updateComposerDisabled();
       cursor.textContent = event.id ? "#" + event.id : "";
       if (empty && empty.isConnected) empty.remove();
@@ -18845,6 +18911,19 @@ __ICONS_JS__
       }
     }
     function renderGeneratedPromptTranscript(target, text, event) {
+      const proposedPlan = proposedPlanTextFromText(text);
+      if (proposedPlan) {
+        target.replaceChildren();
+        if (hasNativePlanEventForTurn(event)) return true;
+        const titleText = planTitleFromText(proposedPlan, "");
+        const summaryText = planSummaryFromText(proposedPlan);
+        setActivePlanFromEvent(event, proposedPlan, titleText, summaryText);
+        const plan = document.createElement("div");
+        plan.className = "plan-item prompt-plan-fallback";
+        plan.append(createPlanCardElement(proposedPlan, titleText, {executable: true}));
+        target.append(plan);
+        return true;
+      }
       const split = splitGeneratedPromptText(text);
       if (!split) return false;
       target.replaceChildren();
@@ -18865,6 +18944,11 @@ __ICONS_JS__
       }
       target.append(createPlainPromptCard(split.prompt));
       return true;
+    }
+    function proposedPlanTextFromText(text) {
+      const source = String(text || "").replace(/\\r\\n/g, "\\n").trim();
+      const match = source.match(/<proposed_plan>\\s*([\\s\\S]*?)\\s*<\\/proposed_plan>/i);
+      return match ? match[1].trim() : "";
     }
     function hasNativePlanEventForTurn(event) {
       const payload = (event && event.payload) || {};

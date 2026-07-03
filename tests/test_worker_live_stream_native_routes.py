@@ -5785,6 +5785,11 @@ def test_live_page_renders_generated_prompt_messages_as_mobile_prompt_cards() ->
     assert "function generatedPromptStartMatch(source)" in response
     assert "PLEASE IMPLEMENT THIS PLAN:" in response
     assert "function renderGeneratedPromptTranscript(target, text, event)" in response
+    assert "const proposedPlan = proposedPlanTextFromText(text);" in response
+    assert "function proposedPlanTextFromText(text)" in response
+    assert 'source.match(/<proposed_plan>\\s*([\\s\\S]*?)\\s*<\\/proposed_plan>/i)' in response
+    assert "setActivePlanFromEvent(event, proposedPlan, titleText, summaryText);" in response
+    assert "plan.append(createPlanCardElement(proposedPlan, titleText, {executable: true}));" in response
     assert "const renderedPrompt = renderGeneratedPromptTranscript(node.body, node.text, event);" in response
     assert "function hasNativePlanEventForTurn(event)" in response
     assert "function planTextFromExecutionPrompt(text)" in response
@@ -5813,6 +5818,9 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert ".plan-card:not(.expanded)::after" in response
     assert ".plan-execution-bar { position: fixed; left: 14px; right: 14px;" in response
     assert "body.has-plan-execution-bar main { padding-bottom: calc(var(--codex-dock-height, 150px) + 210px + env(safe-area-inset-bottom)); }" in response
+    assert ".plan-execution-confirm { min-height: 48px; margin: 0 0 8px;" in response
+    assert ".plan-execution-confirm .plan-execution-icon { color: #111; }" in response
+    assert ".plan-execution-placeholder { min-width: 0; color: #9ca3af;" in response
     assert ".plan-execution-confirm svg" in response
     assert ".plan-page-backdrop { position: fixed; inset: 0; z-index: 12; overflow-y: auto; overflow-x: hidden;" in response
     assert ".plan-page-shell { box-sizing: border-box; width: 100%; max-width: 100vw; min-height: 100vh;" in response
@@ -5831,7 +5839,7 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert 'id="planExecutionRevise"' in response
     assert 'id="planExecutionSkip"' in response
     assert "是，执行此计划" in response
-    assert "否，请说明修改内容" in response
+    assert 'class="plan-execution-placeholder">否，请说明修改内容</span>' in response
     assert "跳过" in response
     assert "let activePlan = null;" in response
     assert 'const planExecutionBar = document.getElementById("planExecutionBar");' in response
@@ -5857,6 +5865,9 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert "function showPlanExecutionBar(plan = activePlan)" in response
     assert "function hidePlanExecutionBar()" in response
     assert "function updatePlanExecutionBar()" in response
+    assert "function isWaitingOnActivePlanConfirmation()" in response
+    assert "function canExecuteActivePlan()" in response
+    assert "const disabled = !canExecuteActivePlan();" in response
     assert "planExecutionConfirm.onclick = executeActivePlan;" in response
     assert "planExecutionSkip.onclick = hidePlanExecutionBar;" in response
     assert "planExecutionRevise.onclick = () => {" in response
@@ -5873,7 +5884,12 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert "function planSummaryFromText(text)" in response
     assert "function downloadPlanText(title, text)" in response
     assert "function executeActivePlan()" in response
+    assert "if (nativeTurnRunning && !isWaitingOnActivePlanConfirmation()) {" in response
     assert "planExecutionPrompt(activePlan.body)" in response
+    assert "function isPlanExecutionUserMessage(event)" in response
+    assert '"Implement the proposed plan."' in response
+    assert "function syncPlanExecutionUiFromEvent(event)" in response
+    assert "syncPlanExecutionUiFromEvent(event);" in response
     assert "function clearSelectedPlanModeForExecution()" in response
     assert response.index("clearSelectedPlanModeForExecution();") < response.index(
         "const body = buildNativePromptBody(prompt, {collaborationMode: explicitDefaultCollaborationMode()});"
@@ -6751,7 +6767,9 @@ async def test_worker_live_page_clears_running_composer_state_on_terminal_turn_e
     assert "await syncNativeTranscript();" in response
     assert "await pollEvents();" in response
     assert 'if (event.kind === "lifecycle") return isCompletedStatus(status) || isFailedStatus(status);' in response
-    assert 'return false;\n    }\n    function isCompletedStatus(status)' in response
+    assert "function hasTerminalTurnEvent(turnId)" in response
+    assert "loadedEvents.some(candidate => isTerminalTurnEvent(candidate) && eventFoldTurnId(candidate) === targetTurnId)" in response
+    assert 'return false;\n    }\n    function hasTerminalTurnEvent(turnId)' in response
 
 
 def test_worker_live_page_recovers_after_post_fetch_drop_without_resubmitting() -> None:
