@@ -4321,6 +4321,212 @@ async def test_native_timeline_incremental_route_skips_hidden_command_events(
 
 
 @pytest.mark.asyncio
+async def test_native_messages_endpoint_returns_visible_items_without_command_payload(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="user.message.received",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "用户问题",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="command.output.delta",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="internal",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "command": "very-large-command",
+                "delta": "hidden-output-" * 1000,
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="provider.display.completed",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "assistant-1",
+                "text": "助手回答",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:02+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1/messages?limit=20 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [item["kind"] for item in body["items"]] == ["user_message", "message"]
+    assert [item["text"] for item in body["items"]] == ["用户问题", "助手回答"]
+    assert all("hidden-output" not in json.dumps(item, ensure_ascii=False) for item in body["items"])
+    assert body["cursor"] >= 3
+    assert body["previous_item_count"] == 0
+    assert body["run_state"]["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_native_messages_stream_replays_and_updates_visible_items_only(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="user.message.received",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "第一条",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    reader = writer = None
+    try:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        writer.write(
+            b"GET /api/native/codex/sessions/thread-1/messages/stream?after=0 HTTP/1.1\r\n"
+            b"Host: test\r\nAuthorization: Bearer secret\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        await writer.drain()
+        await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        initial = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        assert b"event: message_added\n" in initial
+        assert "第一条" in initial.decode("utf-8")
+
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type="command.output.delta",
+                aggregate_type="agent_run",
+                aggregate_id="42",
+                correlation_id="agent:42",
+                source="codex",
+                actor="codex_native",
+                visibility="internal",
+                payload={
+                    "native_thread_id": "thread-1",
+                    "native_turn_id": "turn-1",
+                    "command": "hidden-command",
+                    "delta": "hidden output",
+                    "provider": "codex",
+                },
+                occurred_at="2026-05-30T00:00:01+00:00",
+                agent_run_id=42,
+            )
+        )
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type="provider.display.delta",
+                aggregate_type="agent_run",
+                aggregate_id="42",
+                correlation_id="agent:42",
+                source="codex",
+                actor="codex_native",
+                visibility="user",
+                payload={
+                    "native_thread_id": "thread-1",
+                    "native_turn_id": "turn-1",
+                    "itemId": "assistant-1",
+                    "delta": "第二条",
+                    "provider": "codex",
+                },
+                occurred_at="2026-05-30T00:00:02+00:00",
+                agent_run_id=42,
+            )
+        )
+        rest = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await server.stop()
+
+    decoded = rest.decode("utf-8")
+    assert "event: message_added" in decoded or "event: message_updated" in decoded
+    assert "第二条" in decoded
+    assert "hidden output" not in decoded
+
+
+@pytest.mark.asyncio
 async def test_native_timeline_stream_replays_projection_before_background_sync(
     tmp_path: Path,
 ) -> None:
@@ -5352,7 +5558,8 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "HTTP/1.1 200 OK" in response
     assert "NATIVE_TIMELINE_RECENT_LIMIT" in response
     assert "OLDER_VISIBLE_PAGE_ATTEMPTS" in response
-    assert 'nativeTimelinePath("limit=" + NATIVE_TIMELINE_RECENT_LIMIT)' in response
+    assert 'nativeMessagesPath("limit=" + NATIVE_TIMELINE_RECENT_LIMIT)' in response
+    assert 'nativeTimelinePath("limit=" + NATIVE_TIMELINE_RECENT_LIMIT)' not in response
     assert 'eventsPath("tail=" + CURRENT_TURN_EVENT_LIMIT, {currentTurn: true})' not in response
     assert "function syncNativeTranscript" in response
     assert '`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`' in response
@@ -5380,8 +5587,9 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "function normalizeEventList(sourceEvents)" in response
     assert "function loadRecentEvents" in response
     assert "if (nativeThreadId) {" in response
-    assert "loadNativeTimelineEvents" in response
-    assert "loadedEvents = normalizeEventList(snapshot.events);" in response
+    assert "loadNativeTimelineEvents" not in response
+    assert "loadNativeMessages" in response
+    assert "loadedEvents = nativeMessageItemsToEvents(snapshot.items);" in response
     assert "function hasNativePlanEvents(sourceEvents)" in response
     assert "hasUnresolvedApprovalRequests(loadedEvents)\n        ) && nativeTurnId" not in response
     assert "function loadOlderEvents" in response
@@ -5393,12 +5601,14 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "function displayEventCount(sourceEvents)" in response
     assert "function pollEvents" in response
     assert "startNativeTranscriptSyncLoop();" in response
-    assert "const nextEvents = normalizeEventList(snapshot.events);" in response
-    assert "function nativeTimelinePath(params)" in response
+    assert "const nextEvents = nativeMessageItemsToEvents(snapshot.items);" in response
+    assert "function nativeMessagesPath(params)" in response
+    assert "function nativeMessagesStreamPath(afterId)" in response
     assert "eventsPath(`after=${latestEventId}&limit=100`)" not in response
     assert "let latestVisibleEventId = 0;" in response
     assert "let latestStreamEventId = 0;" in response
-    assert "nativeTimelinePath(`after=${latestVisibleEventId}&limit=100`)" in response
+    assert "nativeMessagesPath(`after=${latestVisibleEventId}&limit=100`)" in response
+    assert "nativeTimelinePath(`after=${latestVisibleEventId}&limit=100`)" not in response
     assert "nativeTimelinePath(`after=${latestEventId}&limit=100`)" not in response
     assert "if (event.id) latestStreamEventId = Math.max(latestStreamEventId, event.id);" in response
     assert "if (isInternalEvent(event)) {" in response
@@ -5406,7 +5616,7 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "function eventsPath(params, options = {})" in response
     assert 'if (nativeThreadId) search.set("native_thread_id", nativeThreadId);' in response
     assert "function streamPathWithCursor(afterId)" in response
-    assert 'return nativeTimelineStreamPath(afterId);' in response
+    assert 'return nativeMessagesStreamPath(afterId);' in response
     assert 'if (PROVIDER) params.set("native_provider", PROVIDER);' in response
     assert "let streamReconnectTimer = null;" in response
     assert "function closeLiveEventSource()" in response

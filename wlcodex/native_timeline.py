@@ -24,6 +24,7 @@ class NativeTimelineEvent:
     runtime_event_id: int | None = None
     agent_run_id: int | None = None
     conversation_id: int | None = None
+    item_row_id: int | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +38,7 @@ class NativeTimelineEvent:
             "runtime_event_id": self.runtime_event_id,
             "agent_run_id": self.agent_run_id,
             "conversation_id": self.conversation_id,
+            "item_row_id": self.item_row_id,
             "payload": dict(self.payload),
         }
 
@@ -57,6 +59,7 @@ class NativeTimelineEvent:
             "runtime_event_id": self.runtime_event_id,
             "agent_run_id": self.agent_run_id,
             "conversation_id": self.conversation_id,
+            "item_row_id": self.item_row_id,
             "payload": payload,
         }
 
@@ -64,6 +67,7 @@ class NativeTimelineEvent:
 @dataclass(frozen=True)
 class NativeTimelineItem:
     id: int
+    cursor: int
     provider: str
     native_thread_id: str
     turn_key: str
@@ -73,10 +77,12 @@ class NativeTimelineItem:
     text: str
     status: str
     payload: dict[str, Any]
+    updated_at: str
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "cursor": self.cursor,
             "provider": self.provider,
             "native_thread_id": self.native_thread_id,
             "turn_key": self.turn_key,
@@ -86,6 +92,7 @@ class NativeTimelineItem:
             "text": self.text,
             "status": self.status,
             "payload": dict(self.payload),
+            "updated_at": self.updated_at,
         }
 
 
@@ -115,12 +122,22 @@ class NativeTimelineStore:
                 status TEXT NOT NULL DEFAULT 'streaming',
                 payload_json TEXT NOT NULL DEFAULT '{}',
                 source_priority INTEGER NOT NULL DEFAULT 0,
+                last_sequence INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(provider, native_thread_id, turn_key, item_key)
             )
             """
         )
+        item_columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(native_timeline_items)")
+        }
+        if "last_sequence" not in item_columns:
+            self._conn.execute(
+                "ALTER TABLE native_timeline_items "
+                "ADD COLUMN last_sequence INTEGER NOT NULL DEFAULT 0"
+            )
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS native_timeline_events (
@@ -150,6 +167,12 @@ class NativeTimelineStore:
             """
             CREATE INDEX IF NOT EXISTS idx_native_timeline_items_thread_updated
             ON native_timeline_items(provider, native_thread_id, updated_at)
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_native_timeline_items_thread_sequence
+            ON native_timeline_items(provider, native_thread_id, last_sequence)
             """
         )
         self._conn.commit()
@@ -515,6 +538,116 @@ class NativeTimelineStore:
             (_normalize_provider(provider), str(native_thread_id or "").strip(), limit),
         ).fetchall()
         return [_item_from_row(row) for row in rows]
+
+    def list_conversation_items(
+        self,
+        provider: str,
+        native_thread_id: str,
+        *,
+        after: int = 0,
+        before: int | None = None,
+        limit: int = 100,
+    ) -> list[NativeTimelineItem]:
+        provider_key = _normalize_provider(provider)
+        thread_id = str(native_thread_id or "").strip()
+        safe_limit = max(1, min(int(limit or 100), 500))
+        if before is not None and before > 0:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM native_timeline_items
+                WHERE provider = ? AND native_thread_id = ?
+                  AND kind IN ({_visible_item_kind_placeholders()})
+                  AND COALESCE(NULLIF(last_sequence, 0), id) < ?
+                ORDER BY COALESCE(NULLIF(last_sequence, 0), id) DESC, id DESC
+                LIMIT ?
+                """,
+                (
+                    provider_key,
+                    thread_id,
+                    *_VISIBLE_CONVERSATION_ITEM_KINDS,
+                    int(before),
+                    safe_limit,
+                ),
+            ).fetchall()
+            return [_item_from_row(row) for row in reversed(rows)]
+        after_sequence = int(after or 0)
+        if after_sequence > 0:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM native_timeline_items
+                WHERE provider = ? AND native_thread_id = ?
+                  AND kind IN ({_visible_item_kind_placeholders()})
+                  AND COALESCE(NULLIF(last_sequence, 0), id) > ?
+                ORDER BY COALESCE(NULLIF(last_sequence, 0), id) ASC, id ASC
+                LIMIT ?
+                """,
+                (
+                    provider_key,
+                    thread_id,
+                    *_VISIBLE_CONVERSATION_ITEM_KINDS,
+                    after_sequence,
+                    safe_limit,
+                ),
+            ).fetchall()
+            return [_item_from_row(row) for row in rows]
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM native_timeline_items
+            WHERE provider = ? AND native_thread_id = ?
+              AND kind IN ({_visible_item_kind_placeholders()})
+            ORDER BY COALESCE(NULLIF(last_sequence, 0), id) DESC, id DESC
+            LIMIT ?
+            """,
+            (provider_key, thread_id, *_VISIBLE_CONVERSATION_ITEM_KINDS, safe_limit),
+        ).fetchall()
+        return [_item_from_row(row) for row in reversed(rows)]
+
+    def get_conversation_item(self, item_row_id: int | None) -> NativeTimelineItem | None:
+        if item_row_id is None:
+            return None
+        row = self._conn.execute(
+            f"""
+            SELECT * FROM native_timeline_items
+            WHERE id = ? AND kind IN ({_visible_item_kind_placeholders()})
+            """,
+            (int(item_row_id), *_VISIBLE_CONVERSATION_ITEM_KINDS),
+        ).fetchone()
+        return _item_from_row(row) if row is not None else None
+
+    def count_conversation_items_before(
+        self,
+        provider: str,
+        native_thread_id: str,
+        *,
+        before: int,
+    ) -> int:
+        row = self._conn.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM native_timeline_items
+            WHERE provider = ? AND native_thread_id = ?
+              AND kind IN ({_visible_item_kind_placeholders()})
+              AND COALESCE(NULLIF(last_sequence, 0), id) < ?
+            """,
+            (
+                _normalize_provider(provider),
+                str(native_thread_id or "").strip(),
+                *_VISIBLE_CONVERSATION_ITEM_KINDS,
+                int(before),
+            ),
+        ).fetchone()
+        return int(row["count"] if row is not None else 0)
+
+    def latest_sequence(self, provider: str, native_thread_id: str) -> int:
+        row = self._conn.execute(
+            """
+            SELECT COALESCE(MAX(sequence), 0) AS latest_sequence
+            FROM native_timeline_events
+            WHERE provider = ? AND native_thread_id = ?
+            """,
+            (_normalize_provider(provider), str(native_thread_id or "").strip()),
+        ).fetchone()
+        return int(row["latest_sequence"] if row is not None else 0)
 
     def list_item_events(
         self,
@@ -926,6 +1059,15 @@ class NativeTimelineStore:
                 conversation_id,
             ),
         )
+        if item_row_id is not None:
+            self._conn.execute(
+                """
+                UPDATE native_timeline_items
+                SET last_sequence = MAX(last_sequence, ?), updated_at = ?
+                WHERE id = ?
+                """,
+                (sequence, occurred_at, int(item_row_id)),
+            )
         self._conn.commit()
         event = NativeTimelineEvent(
             sequence=sequence,
@@ -938,6 +1080,7 @@ class NativeTimelineStore:
             runtime_event_id=runtime_event_id,
             agent_run_id=agent_run_id,
             conversation_id=conversation_id,
+            item_row_id=item_row_id,
         )
         self._publish(event)
         return event
@@ -961,6 +1104,7 @@ def _event_from_row(row: sqlite3.Row) -> NativeTimelineEvent:
         runtime_event_id=row["runtime_event_id"],
         agent_run_id=row["agent_run_id"],
         conversation_id=row["conversation_id"],
+        item_row_id=row["item_row_id"],
     )
 
 
@@ -999,12 +1143,16 @@ def _item_event_from_row(row: sqlite3.Row) -> NativeTimelineEvent:
         runtime_event_id=row["runtime_event_id"],
         agent_run_id=row["agent_run_id"],
         conversation_id=row["conversation_id"],
+        item_row_id=row["item_row_id"],
     )
 
 
 def _item_from_row(row: sqlite3.Row) -> NativeTimelineItem:
+    last_sequence = int(row["last_sequence"] or 0)
+    item_id = int(row["id"])
     return NativeTimelineItem(
-        id=int(row["id"]),
+        id=item_id,
+        cursor=last_sequence or item_id,
         provider=str(row["provider"]),
         native_thread_id=str(row["native_thread_id"]),
         turn_key=str(row["turn_key"]),
@@ -1014,7 +1162,20 @@ def _item_from_row(row: sqlite3.Row) -> NativeTimelineItem:
         text=str(row["text"] or ""),
         status=str(row["status"]),
         payload=json.loads(str(row["payload_json"] or "{}")),
+        updated_at=str(row["updated_at"]),
     )
+
+
+_VISIBLE_CONVERSATION_ITEM_KINDS = (
+    "user_message",
+    "message",
+    "activity",
+    "approval_requested",
+)
+
+
+def _visible_item_kind_placeholders() -> str:
+    return ",".join("?" for _ in _VISIBLE_CONVERSATION_ITEM_KINDS)
 
 
 def _display_role_for_kind(kind: str, payload: dict[str, Any]) -> str:

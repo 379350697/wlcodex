@@ -46,7 +46,11 @@ from wlcodex.live_stream.collapse import (
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.live_stream.native_templates.registry import render_native_template
-from wlcodex.native_timeline import NativeTimelineEvent, NativeTimelineStore
+from wlcodex.native_timeline import (
+    NativeTimelineEvent,
+    NativeTimelineItem,
+    NativeTimelineStore,
+)
 from wlcodex.jsonrpc import JsonRpcError, JsonRpcTimeout
 from wlcodex.relay.display import (
     dict_looks_like_role_envelope as relay_dict_looks_like_role_envelope,
@@ -637,6 +641,45 @@ class WorkerLiveStreamServer:
                     parsed.path,
                     headers,
                     query,
+                )
+                return
+
+            native_messages_route = _native_messages_route_from_path(parsed.path)
+            if native_messages_route is not None:
+                if method != "GET":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                if not self._is_authorized(writer, headers, query):
+                    await self._send_json(writer, 401, {"error": "unauthorized"})
+                    return
+                provider, native_thread_id, stream = native_messages_route
+                if stream:
+                    after = _safe_int(
+                        query.get("after", [headers.get("last-event-id", "0")])[0],
+                        default=0,
+                    )
+                    await self._send_native_messages_sse(
+                        writer,
+                        provider,
+                        native_thread_id,
+                        after,
+                    )
+                    return
+                after = _safe_int(query.get("after", ["0"])[0], default=0)
+                before_value = query.get("before", [""])[0]
+                before = (
+                    _safe_int(before_value, default=0)
+                    if str(before_value).strip()
+                    else None
+                )
+                limit = _safe_int(query.get("limit", ["100"])[0], default=100)
+                await self._send_native_messages_json(
+                    writer,
+                    provider,
+                    native_thread_id,
+                    after=after,
+                    before=before,
+                    limit=limit,
                 )
                 return
 
@@ -3012,6 +3055,143 @@ class WorkerLiveStreamServer:
                 queue=queue,
             )
 
+    async def _send_native_messages_json(
+        self,
+        writer: asyncio.StreamWriter,
+        provider: str,
+        native_thread_id: str,
+        *,
+        after: int = 0,
+        before: int | None = None,
+        limit: int = 100,
+    ) -> None:
+        provider_key = provider.strip().lower() or "codex"
+        sync_error = self._native_background_errors.get(
+            ("native_transcript", provider_key, native_thread_id),
+            "",
+        )
+        sync_pending = self._schedule_native_timeline_transcript_sync_if_needed(
+            provider_key,
+            native_thread_id,
+        )
+        if self._native_timeline is None:
+            await self._send_json(
+                writer,
+                200,
+                {
+                    "provider": provider_key,
+                    "native_thread_id": native_thread_id,
+                    "items": [],
+                    "cursor": 0,
+                    "previous_item_count": 0,
+                    "run_state": _native_messages_run_state([]),
+                    "native_sync_error": sync_error,
+                    "native_sync_pending": sync_pending,
+                },
+            )
+            return
+        items = self._native_timeline.list_conversation_items(
+            provider_key,
+            native_thread_id,
+            after=after,
+            before=before,
+            limit=limit,
+        )
+        first_cursor = items[0].cursor if items else int(before or after or 0)
+        previous_item_count = (
+            self._native_timeline.count_conversation_items_before(
+                provider_key,
+                native_thread_id,
+                before=first_cursor,
+            )
+            if first_cursor
+            else 0
+        )
+        latest_sequence = self._native_timeline.latest_sequence(
+            provider_key,
+            native_thread_id,
+        )
+        cursor = max([latest_sequence, *(item.cursor for item in items)])
+        await self._send_json(
+            writer,
+            200,
+            {
+                "provider": provider_key,
+                "native_thread_id": native_thread_id,
+                "items": [_native_conversation_item_json(item) for item in items],
+                "cursor": cursor,
+                "previous_item_count": previous_item_count,
+                "run_state": _native_messages_run_state(items),
+                "native_sync_error": sync_error,
+                "native_sync_pending": sync_pending,
+            },
+        )
+
+    async def _send_native_messages_sse(
+        self,
+        writer: asyncio.StreamWriter,
+        provider: str,
+        native_thread_id: str,
+        after_id: int,
+    ) -> None:
+        header = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream; charset=utf-8\r\n"
+            "Cache-Control: no-cache\r\n"
+            "X-Accel-Buffering: no\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+        writer.write(header.encode("utf-8"))
+        writer.write(b": connected\n\n")
+        await writer.drain()
+        if self._native_timeline is None:
+            return
+        provider_key = provider.strip().lower() or "codex"
+        self._schedule_native_timeline_transcript_sync_if_needed(
+            provider_key,
+            native_thread_id,
+        )
+        latest = int(after_id or 0)
+        queue = self._native_timeline.subscribe(
+            provider=provider_key,
+            native_thread_id=native_thread_id,
+        )
+        try:
+            for item in self._native_timeline.list_conversation_items(
+                provider_key,
+                native_thread_id,
+                after=after_id,
+                limit=500,
+            ):
+                if item.cursor <= latest:
+                    continue
+                latest = item.cursor
+                await _write_native_message_sse(writer, item, replay=True)
+            while not writer.is_closing():
+                try:
+                    event = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=_NATIVE_TRANSCRIPT_WATCH_INTERVAL_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    await self._sync_native_timeline_transcript_if_needed(
+                        provider_key,
+                        native_thread_id,
+                    )
+                    continue
+                item = self._native_timeline.get_conversation_item(event.item_row_id)
+                if item is None or item.cursor <= latest:
+                    continue
+                latest = item.cursor
+                await _write_native_message_sse(writer, item, replay=False)
+        finally:
+            self._native_timeline.unsubscribe(
+                provider=provider_key,
+                native_thread_id=native_thread_id,
+                queue=queue,
+            )
+
     async def _send_html(
         self,
         writer: asyncio.StreamWriter,
@@ -3188,6 +3368,16 @@ async def _write_native_timeline_sse(
     event: NativeTimelineEvent,
 ) -> None:
     writer.write(format_native_timeline_sse_event(event))
+    await writer.drain()
+
+
+async def _write_native_message_sse(
+    writer: asyncio.StreamWriter,
+    item: NativeTimelineItem,
+    *,
+    replay: bool,
+) -> None:
+    writer.write(format_native_message_sse_event(item, replay=replay))
     await writer.drain()
 
 
@@ -3737,6 +3927,88 @@ def format_native_timeline_sse_event(event: NativeTimelineEvent) -> bytes:
     ).encode("utf-8")
 
 
+def format_native_message_sse_event(item: NativeTimelineItem, *, replay: bool = False) -> bytes:
+    payload = json.dumps(
+        {
+            "item": _native_conversation_item_json(item),
+            "event": _native_conversation_item_display_event(item),
+            "cursor": item.cursor,
+            "replay": replay,
+        },
+        ensure_ascii=False,
+    )
+    return (
+        f"id: {item.cursor}\n"
+        f"event: {_native_message_sse_event_name(item, replay=replay)}\n"
+        f"data: {payload}\n\n"
+    ).encode("utf-8")
+
+
+def _native_message_sse_event_name(item: NativeTimelineItem, *, replay: bool = False) -> str:
+    if replay:
+        return "message_added"
+    if item.kind == "message" and item.status == "completed":
+        return "message_completed"
+    if item.kind == "message":
+        return "message_updated"
+    return "message_added"
+
+
+def _native_conversation_item_json(item: NativeTimelineItem) -> dict[str, Any]:
+    data = item.to_json_dict()
+    payload = dict(data.get("payload") or {})
+    payload.pop("delta", None)
+    payload["text"] = item.text
+    data["payload"] = payload
+    return data
+
+
+def _native_conversation_item_display_event(item: NativeTimelineItem) -> dict[str, Any]:
+    payload = dict(item.payload)
+    payload["text"] = item.text
+    payload.setdefault("itemId", item.item_key)
+    payload.setdefault("item_id", item.item_key)
+    payload.setdefault("native_turn_id", item.turn_key)
+    payload["status"] = item.status
+    payload["role"] = item.role
+    payload["message_snapshot"] = True
+    kind = item.kind
+    if item.kind == "message":
+        kind = "message_completed" if item.status == "completed" else "text_delta"
+    return {
+        "id": item.cursor,
+        "sequence": item.cursor,
+        "type": kind,
+        "source_type": "native.conversation.item",
+        "kind": kind,
+        "role": item.role,
+        "visible": True,
+        "provider": item.provider,
+        "native_thread_id": item.native_thread_id,
+        "occurred_at": item.updated_at,
+        "payload": payload,
+    }
+
+
+def _native_messages_run_state(items: list[NativeTimelineItem]) -> dict[str, Any]:
+    active_statuses = {"queued", "streaming", "waiting", "pending", "running"}
+    active_items = [
+        item
+        for item in items
+        if str(item.status or "").strip().lower() in active_statuses
+        and item.kind != "user_message"
+    ]
+    if not active_items:
+        return {"active": False, "status": "idle", "active_turn_id": ""}
+    latest = active_items[-1]
+    return {
+        "active": True,
+        "status": str(latest.status or "streaming"),
+        "active_turn_id": latest.turn_key,
+        "item_id": latest.id,
+    }
+
+
 def _native_timeline_display_event(event: NativeTimelineEvent) -> dict[str, Any]:
     if hasattr(event, "to_display_json_dict"):
         return event.to_display_json_dict()
@@ -3797,6 +4069,23 @@ def _native_timeline_route_from_path(path: str) -> tuple[str, str, bool] | None:
         len(parts) == 5
         and parts[1] == "sessions"
         and parts[3] == "timeline"
+        and parts[4] == "stream"
+    ):
+        return parts[0], parts[2], True
+    return None
+
+
+def _native_messages_route_from_path(path: str) -> tuple[str, str, bool] | None:
+    prefix = "/api/native/"
+    if not path.startswith(prefix):
+        return None
+    parts = [unquote(part) for part in path[len(prefix) :].split("/") if part]
+    if len(parts) == 4 and parts[1] == "sessions" and parts[3] == "messages":
+        return parts[0], parts[2], False
+    if (
+        len(parts) == 5
+        and parts[1] == "sessions"
+        and parts[3] == "messages"
         and parts[4] == "stream"
     ):
         return parts[0], parts[2], True
@@ -16803,9 +17092,9 @@ __ICONS_JS__
     async function loadRecentEvents() {
       let snapshot;
       if (nativeThreadId) {
-        snapshot = await api(nativeTimelinePath("limit=" + NATIVE_TIMELINE_RECENT_LIMIT));
+        snapshot = await api(nativeMessagesPath("limit=" + NATIVE_TIMELINE_RECENT_LIMIT));
         handleNativeSyncSnapshot(snapshot);
-        loadedEvents = normalizeEventList(snapshot.events);
+        loadedEvents = nativeMessageItemsToEvents(snapshot.items);
       } else {
         snapshot = await api(eventsPath("tail=" + NATIVE_TIMELINE_RECENT_LIMIT));
         handleNativeSyncSnapshot(snapshot);
@@ -16825,12 +17114,24 @@ __ICONS_JS__
       latestEventId = loadedEvents.length ? loadedEvents[loadedEvents.length - 1].id : 0;
       latestVisibleEventId = nativeThreadId ? lastVisibleEventId(loadedEvents) : latestEventId;
       latestStreamEventId = nativeThreadId ? latestVisibleEventId : latestEventId;
+      if (nativeThreadId && typeof snapshot.cursor === "number") {
+        latestVisibleEventId = Math.max(latestVisibleEventId, snapshot.cursor);
+        latestStreamEventId = Math.max(latestStreamEventId, snapshot.cursor);
+      }
       rebuildStream();
       updateHistoryFold();
       openStream(currentStreamCursor());
       pollEvents();
     }
     function handleNativeSyncSnapshot(snapshot) {
+      if (snapshot && typeof snapshot.previous_item_count === "number") {
+        snapshot.previous_event_count = snapshot.previous_item_count;
+      }
+      if (nativeThreadId && snapshot && typeof snapshot.cursor === "number") {
+        latestVisibleEventId = Math.max(latestVisibleEventId, snapshot.cursor);
+        latestStreamEventId = Math.max(latestStreamEventId, snapshot.cursor);
+      }
+      if (snapshot && snapshot.run_state) applyNativeRunState(snapshot.run_state);
       if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
       else clearStatusNode("native_sync_failed");
     }
@@ -16840,6 +17141,46 @@ __ICONS_JS__
     function normalizeEventList(sourceEvents) {
       if (!Array.isArray(sourceEvents)) return [];
       return sourceEvents.filter(isValidEventObject);
+    }
+    function nativeMessageItemsToEvents(items) {
+      if (!Array.isArray(items)) return [];
+      return items.map(nativeMessageItemToEvent).filter(isValidEventObject);
+    }
+    function nativeMessageItemToEvent(item) {
+      if (!item || typeof item !== "object") return null;
+      const payload = Object.assign({}, item.payload || {});
+      payload.text = String(item.text || payload.text || "");
+      payload.itemId = String(payload.itemId || item.item_key || item.id || "");
+      payload.item_id = String(payload.item_id || payload.itemId);
+      payload.native_turn_id = String(payload.native_turn_id || item.turn_key || "");
+      payload.status = String(item.status || payload.status || "");
+      payload.role = String(item.role || payload.role || "");
+      payload.message_snapshot = true;
+      let kind = String(item.kind || "");
+      if (kind === "message") {
+        kind = payload.status === "completed" ? "message_completed" : "text_delta";
+      }
+      return {
+        id: Number(item.cursor || item.id || 0),
+        sequence: Number(item.cursor || item.id || 0),
+        type: kind,
+        source_type: "native.conversation.item",
+        kind,
+        role: String(item.role || ""),
+        visible: true,
+        provider: item.provider || PROVIDER,
+        native_thread_id: item.native_thread_id || nativeThreadId,
+        occurred_at: item.updated_at || "",
+        payload
+      };
+    }
+    function applyNativeRunState(runState) {
+      if (!nativeThreadId || !runState || typeof runState !== "object") return;
+      nativeTurnRunning = Boolean(runState.active);
+      activeTurnId = nativeTurnRunning ? String(runState.active_turn_id || activeTurnId || "") : "";
+      setComposerActivity(nativeTurnRunning || sendingPrompt);
+      updateNativeHeaderContext();
+      updateComposerDisabled();
     }
     function lastVisibleEventId(sourceEvents) {
       let lastId = 0;
@@ -16987,10 +17328,12 @@ __ICONS_JS__
         for (let attempt = 0; attempt < OLDER_VISIBLE_PAGE_ATTEMPTS; attempt++) {
           if (!oldestEventId || !previousEventCount) break;
           const snapshot = nativeThreadId
-            ? await loadNativeTimelineEvents(`before=${oldestEventId}&limit=${OLDER_EVENT_LIMIT}`)
+            ? await loadNativeMessages(`before=${oldestEventId}&limit=${OLDER_EVENT_LIMIT}`)
             : await api(eventsPath(`before=${oldestEventId}&limit=${OLDER_EVENT_LIMIT}`));
           handleNativeSyncSnapshot(snapshot);
-          const older = normalizeEventList(snapshot.events);
+          const older = nativeThreadId
+            ? nativeMessageItemsToEvents(snapshot.items)
+            : normalizeEventList(snapshot.events);
           if (!older.length) {
             previousEventCount = snapshot.previous_event_count || 0;
             break;
@@ -17045,8 +17388,13 @@ __ICONS_JS__
         pollEvents();
         scheduleStreamReconnect();
       };
-      source.onmessage = (message) => renderLiveEvent(JSON.parse(message.data));
+      source.onmessage = (message) => renderNativeStreamPayload(JSON.parse(message.data));
       [
+        "message_added",
+        "message_updated",
+        "message_completed",
+        "run_state",
+        "sync_state",
         "lifecycle",
         "activity",
         "user_message",
@@ -17065,12 +17413,25 @@ __ICONS_JS__
         "failed",
         "event"
       ].forEach(kind => {
-        source.addEventListener(kind, message => renderLiveEvent(JSON.parse(message.data)));
+        source.addEventListener(kind, message => renderNativeStreamPayload(JSON.parse(message.data)));
       });
+    }
+    function renderNativeStreamPayload(payload) {
+      if (nativeThreadId && payload && typeof payload === "object") {
+        if (payload.run_state) {
+          applyNativeRunState(payload.run_state);
+          return;
+        }
+        if (payload.item) {
+          renderLiveEvent(payload.event || nativeMessageItemToEvent(payload.item));
+          return;
+        }
+      }
+      renderLiveEvent(payload);
     }
     function streamPathWithCursor(afterId) {
       if (nativeThreadId) {
-        return nativeTimelineStreamPath(afterId);
+        return nativeMessagesStreamPath(afterId);
       }
       const params = new URLSearchParams();
       if (token) params.set("token", token);
@@ -17088,13 +17449,26 @@ __ICONS_JS__
       const base = `${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/timeline/stream`;
       return suffix ? base + "?" + suffix : base;
     }
+    function nativeMessagesStreamPath(afterId) {
+      const params = new URLSearchParams();
+      if (token) params.set("token", token);
+      if (afterId) params.set("after", String(afterId));
+      const suffix = params.toString();
+      const base = `${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/messages/stream`;
+      return suffix ? base + "?" + suffix : base;
+    }
     function nativeTimelinePath(params) {
       const search = new URLSearchParams(params);
       if (token) search.set("token", token);
       return `${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/timeline?${search.toString()}`;
     }
-    function loadNativeTimelineEvents(params) {
-      return api(nativeTimelinePath(params));
+    function nativeMessagesPath(params) {
+      const search = new URLSearchParams(params);
+      if (token) search.set("token", token);
+      return `${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/messages?${search.toString()}`;
+    }
+    function loadNativeMessages(params) {
+      return api(nativeMessagesPath(params));
     }
     function eventsPath(params, options = {}) {
       const search = new URLSearchParams(params);
@@ -17108,9 +17482,15 @@ __ICONS_JS__
       pollInFlight = true;
       try {
         const snapshot = nativeThreadId
-          ? await api(nativeTimelinePath(`after=${latestVisibleEventId}&limit=100`))
+          ? await api(nativeMessagesPath(`after=${latestVisibleEventId}&limit=100`))
           : await api(eventsPath("after=" + latestEventId + "&limit=100"));
         handleNativeSyncSnapshot(snapshot);
+        if (nativeThreadId) {
+          const nextEvents = nativeMessageItemsToEvents(snapshot.items);
+          for (const event of nextEvents) renderLiveEvent(event);
+          setConnectionState("connected");
+          return;
+        }
         const nextEvents = normalizeEventList(snapshot.events);
         for (const event of nextEvents) renderLiveEvent(event);
         setConnectionState("connected");
@@ -18083,9 +18463,9 @@ __ICONS_JS__
       }
       const incomingText = visibleText;
       if (assistantRole) {
-        if (event.kind === "message_completed") {
+        if (event.kind === "message_completed" || payload.message_snapshot) {
           node.text = visibleText;
-          node.row.dataset.completed = "true";
+          if (event.kind === "message_completed") node.row.dataset.completed = "true";
         } else {
           node.text += visibleText;
           visibleText = node.text;
