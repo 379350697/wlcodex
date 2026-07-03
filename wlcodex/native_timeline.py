@@ -785,12 +785,40 @@ class NativeTimelineStore:
                     "status": _terminal_turn_status(event_type, payload),
                     "active_turn_id": "",
                 }
+            latest_item = self._latest_visible_item_for_run_state(provider_key, thread_id)
+            if latest_item is not None and str(latest_item["turn_key"]) != turn_key:
+                latest_status = str(latest_item["status"] or "").strip().lower()
+                if latest_status in _NATIVE_ACTIVE_ITEM_STATUSES:
+                    return {
+                        "active": True,
+                        "status": latest_status,
+                        "active_turn_id": str(latest_item["turn_key"]),
+                    }
+                return {"active": False, "status": "idle", "active_turn_id": ""}
             return {
                 "active": True,
                 "status": _active_turn_status(event_type, payload),
                 "active_turn_id": turn_key,
             }
         return {"active": False, "status": "idle", "active_turn_id": ""}
+
+    def _latest_visible_item_for_run_state(
+        self,
+        provider: str,
+        native_thread_id: str,
+    ) -> sqlite3.Row | None:
+        placeholders = _visible_item_kind_placeholders()
+        return self._conn.execute(
+            f"""
+            SELECT *
+            FROM native_timeline_items
+            WHERE provider = ? AND native_thread_id = ?
+              AND kind IN ({placeholders})
+            ORDER BY last_sequence DESC, id DESC
+            LIMIT 1
+            """,
+            (provider, native_thread_id, *_VISIBLE_CONVERSATION_ITEM_KINDS),
+        ).fetchone()
 
     def list_item_events(
         self,
@@ -1338,6 +1366,8 @@ _NATIVE_TURN_STATE_EVENT_TYPES = (
     *_NATIVE_TURN_ACTIVE_EVENT_TYPES,
     *_NATIVE_TURN_TERMINAL_EVENT_TYPES,
 )
+
+_NATIVE_ACTIVE_ITEM_STATUSES = {"queued", "streaming", "waiting", "pending", "running"}
 
 
 def _visible_item_kind_placeholders() -> str:
