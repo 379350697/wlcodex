@@ -75,6 +75,9 @@ class CodexAppServerProvider:
         sessions = await self._controller.list_cached_sessions(limit)
         return [_session_from_codex(session) for session in sessions]
 
+    async def read_cached_session(self, native_session_id: str) -> dict[str, Any]:
+        return await self._controller.read_cached_session(native_session_id)
+
     async def list_models(self) -> list[dict[str, Any]]:
         models = await self._controller.list_models()
         return [_model_with_highest_reasoning_default(model) for model in models]

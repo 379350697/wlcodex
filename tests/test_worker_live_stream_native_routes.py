@@ -2037,6 +2037,61 @@ async def test_native_status_and_read_routes_return_json(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_native_read_route_returns_cached_session_when_daemon_is_slow(
+    tmp_path: Path,
+) -> None:
+    class SlowCachedNativeController(FakeNativeController):
+        async def read_session(self, native_thread_id: str) -> dict[str, Any]:
+            self.calls.append(("read_session", native_thread_id))
+            await asyncio.sleep(2)
+            return {"thread": {"id": native_thread_id, "title": "daemon title"}}
+
+        async def read_cached_session(self, native_thread_id: str) -> dict[str, Any]:
+            self.calls.append(("read_cached_session", native_thread_id))
+            return {
+                "thread": {
+                    "id": native_thread_id,
+                    "title": "cached title",
+                    "cwd": "/workspace/cached",
+                    "status": "running",
+                },
+                "agent_run_id": 42,
+                "native_session_source": "cache",
+            }
+
+    store = _store(tmp_path)
+    controller = SlowCachedNativeController()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+        native_sessions_timeout_seconds=0.2,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        await asyncio.sleep(0.1)
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert body["thread"]["title"] == "cached title"
+    assert body["thread"]["cwd"] == "/workspace/cached"
+    assert body["native_session_source"] == "cache"
+    assert body["native_sync_pending"] is False
+    assert controller.calls == [("read_cached_session", "thread-1")]
+
+
+@pytest.mark.asyncio
 async def test_native_attach_route_resumes_session_without_prompt(
     tmp_path: Path,
 ) -> None:

@@ -157,6 +157,31 @@ class CodexNativeController:
     async def list_cached_sessions(self, limit: int = 50) -> list[NativeCodexSession]:
         return self._session_store.list_recent(limit=limit)
 
+    async def read_cached_session(self, native_thread_id: str) -> dict[str, Any]:
+        native_thread_id = native_thread_id.strip()
+        if not native_thread_id:
+            raise ValueError("native_thread_id is required")
+        session = self._session_store.get_by_thread_id(native_thread_id)
+        if session is None:
+            raise KeyError(f"native session not found: {native_thread_id}")
+        return {
+            "native_thread_id": session.native_thread_id,
+            "agent_run_id": session.agent_run_id,
+            "native_session_source": "cache",
+            "thread": {
+                "id": session.native_thread_id,
+                "threadId": session.native_thread_id,
+                "title": session.title,
+                "cwd": session.cwd,
+                "sourceKind": session.source_kind,
+                "status": session.status,
+                "last_turn_id": session.last_turn_id,
+                "activity_at": session.activity_at,
+                "updated_at": session.updated_at,
+                "metadata": session.metadata,
+            },
+        }
+
     async def list_models(self) -> list[dict[str, Any]]:
         return await self._client.list_models()
 

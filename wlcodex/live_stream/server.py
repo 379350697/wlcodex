@@ -1198,6 +1198,110 @@ class WorkerLiveStreamServer:
             return await result
         return list(result)
 
+    async def _read_cached_native_session(
+        self,
+        target: Any,
+        native_thread_id: str,
+    ) -> dict[str, Any] | None:
+        cached = getattr(target, "read_cached_session", None)
+        if cached is not None:
+            try:
+                result = cached(native_thread_id)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                payload = _json_object(result)
+                payload.setdefault("native_session_source", "cache")
+                return payload
+            except KeyError:
+                return None
+        for session in await self._list_cached_native_sessions(target):
+            payload = _json_object(session)
+            session_thread_id = str(
+                payload.get("native_thread_id")
+                or payload.get("native_session_id")
+                or payload.get("id")
+                or ""
+            )
+            if session_thread_id != native_thread_id:
+                continue
+            return _native_cached_session_detail(payload)
+        return None
+
+    def _schedule_native_session_refresh(
+        self,
+        provider_name: str,
+        target: Any,
+        native_thread_id: str,
+    ) -> bool:
+        key = ("native_session", provider_name, native_thread_id)
+        existing = self._native_background_tasks.get(key)
+        if existing is not None and not existing.done():
+            return True
+
+        async def refresh() -> None:
+            try:
+                await asyncio.sleep(_NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS)
+                result = target.read_session(native_thread_id)
+                if asyncio.iscoroutine(result):
+                    await result
+                self._native_background_errors.pop(key, None)
+            except Exception as exc:
+                self._native_background_errors[key] = str(exc) or "native session sync failed"
+            finally:
+                if self._native_background_tasks.get(key) is task:
+                    self._native_background_tasks.pop(key, None)
+
+        task = asyncio.create_task(refresh())
+        self._native_background_tasks[key] = task
+        return True
+
+    async def _native_session_payload(
+        self,
+        provider_name: str,
+        target: Any,
+        native_thread_id: str,
+    ) -> dict[str, Any]:
+        key = ("native_session", provider_name, native_thread_id)
+        native_sync_error = self._native_background_errors.get(key, "")
+        cached = await self._read_cached_native_session(target, native_thread_id)
+        if cached is not None:
+            payload = dict(cached)
+            payload["native_sync_pending"] = self._schedule_native_timeline_transcript_sync_if_needed(
+                provider_name,
+                native_thread_id,
+            )
+            if native_sync_error:
+                payload["native_sync_error"] = native_sync_error
+            return payload
+        try:
+            result = await asyncio.wait_for(
+                target.read_session(native_thread_id),
+                timeout=self._native_sessions_timeout_seconds,
+            )
+            payload = _json_object(result)
+            payload.setdefault("native_session_source", "daemon")
+            payload["native_sync_pending"] = False
+            self._native_background_errors.pop(key, None)
+            return payload
+        except KeyError:
+            raise
+        except (asyncio.TimeoutError, JsonRpcTimeout) as exc:
+            native_sync_error = str(exc) or "native session sync timed out"
+        except Exception as exc:
+            native_sync_error = str(exc) or "native session sync failed"
+        payload = {
+            "native_thread_id": native_thread_id,
+            "native_session_source": "stub",
+            "native_sync_error": native_sync_error,
+            "native_sync_pending": self._schedule_native_session_refresh(
+                provider_name,
+                target,
+                native_thread_id,
+            ),
+            "thread": {"id": native_thread_id, "threadId": native_thread_id},
+        }
+        return payload
+
     async def _native_sessions_payload(
         self,
         provider_name: str,
@@ -2211,7 +2315,11 @@ class WorkerLiveStreamServer:
 
         if method == "GET" and action == "" and len(parts) == 1:
             try:
-                session = await target.read_session(thread_id)
+                session = await self._native_session_payload(
+                    provider_name,
+                    target,
+                    thread_id,
+                )
             except KeyError:
                 await self._send_json(writer, 404, {"error": "native session not found"})
                 return
@@ -4565,6 +4673,43 @@ def _json_object(value: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return dict(raw)
     return {"value": value}
+
+
+def _native_cached_session_detail(session: dict[str, Any]) -> dict[str, Any]:
+    native_thread_id = str(
+        session.get("native_thread_id")
+        or session.get("native_session_id")
+        or session.get("id")
+        or ""
+    )
+    thread = session.get("thread")
+    if not isinstance(thread, dict):
+        thread = {}
+    thread = dict(thread)
+    if native_thread_id:
+        thread.setdefault("id", native_thread_id)
+        thread.setdefault("threadId", native_thread_id)
+    for source_key, target_key in (
+        ("title", "title"),
+        ("name", "name"),
+        ("cwd", "cwd"),
+        ("workdir", "cwd"),
+        ("source_kind", "sourceKind"),
+        ("sourceKind", "sourceKind"),
+        ("status", "status"),
+        ("last_turn_id", "last_turn_id"),
+        ("activity_at", "activity_at"),
+        ("updated_at", "updated_at"),
+        ("metadata", "metadata"),
+    ):
+        if target_key not in thread and source_key in session:
+            thread[target_key] = session[source_key]
+    return {
+        "native_thread_id": native_thread_id,
+        "agent_run_id": session.get("agent_run_id"),
+        "native_session_source": "cache",
+        "thread": thread,
+    }
 
 
 def _native_disabled_reason(capabilities: Any, key: str) -> str:
