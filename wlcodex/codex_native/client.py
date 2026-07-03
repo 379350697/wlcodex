@@ -484,20 +484,18 @@ class LazyNativeClient:
         method: str,
         handler: Callable[..., Awaitable[None]],
     ) -> None:
+        self._pending_notification_handlers.append((method, handler))
         if self._client is not None:
             self._client.register_notification_handler(method, handler)
-            return
-        self._pending_notification_handlers.append((method, handler))
 
     def register_server_request_handler(
         self,
         method: str,
         handler: Callable[..., Awaitable[None]],
     ) -> None:
+        self._pending_server_request_handlers.append((method, handler))
         if self._client is not None:
             self._client.register_server_request_handler(method, handler)
-            return
-        self._pending_server_request_handlers.append((method, handler))
 
     def resolve_request(self, request_id: str, result: dict[str, Any]) -> None:
         if self._client is None:

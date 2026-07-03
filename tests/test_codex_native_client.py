@@ -591,6 +591,63 @@ async def test_lazy_native_client_retries_once_after_initialize_timeout() -> Non
 
 
 @pytest.mark.asyncio
+async def test_lazy_native_client_replays_handlers_registered_after_start_on_reconnect() -> None:
+    class ReconnectClient:
+        def __init__(self) -> None:
+            self.fail = False
+            self.closed = False
+            self.notification_handlers: list[tuple[str, Any]] = []
+            self.server_request_handlers: list[tuple[str, Any]] = []
+
+        async def status(self) -> NativeCodexStatus:
+            if self.fail:
+                raise JsonRpcTimeout("Request initialize (id=1) timed out after 60.0s")
+            return NativeCodexStatus(
+                enabled=True,
+                connected=True,
+                remote_control_status="ready",
+            )
+
+        def register_notification_handler(self, method: str, handler: Any) -> None:
+            self.notification_handlers.append((method, handler))
+
+        def register_server_request_handler(self, method: str, handler: Any) -> None:
+            self.server_request_handlers.append((method, handler))
+
+        async def close(self) -> None:
+            self.closed = True
+
+    created: list[ReconnectClient] = []
+
+    async def factory() -> ReconnectClient:
+        client = ReconnectClient()
+        created.append(client)
+        return client
+
+    async def handler(*_args: Any) -> None:
+        return None
+
+    lazy = LazyNativeClient(factory)
+    await lazy.status()
+    lazy.register_notification_handler("turn/started", handler)
+    lazy.register_server_request_handler(
+        "item/commandExecution/requestApproval",
+        handler,
+    )
+
+    created[0].fail = True
+    status = await lazy.status()
+
+    assert status.remote_control_status == "ready"
+    assert len(created) == 2
+    assert created[0].closed is True
+    assert created[1].notification_handlers == [("turn/started", handler)]
+    assert created[1].server_request_handlers == [
+        ("item/commandExecution/requestApproval", handler)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_lazy_native_client_does_not_retry_non_initialize_timeout() -> None:
     class TurnTimeoutClient:
         def __init__(self) -> None:
