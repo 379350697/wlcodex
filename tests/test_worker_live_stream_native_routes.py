@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -5871,6 +5872,14 @@ def test_live_page_renders_native_plan_updates_as_plan_cards() -> None:
     assert "planExecutionConfirm.onclick = executeActivePlan;" in response
     assert "planExecutionSkip.onclick = hidePlanExecutionBar;" in response
     assert "planExecutionRevise.onclick = () => {" in response
+    revise_handler = re.search(
+        r"planExecutionRevise\.onclick = \(\) => \{(?P<body>.*?)\n    \};",
+        response,
+        re.S,
+    )
+    assert revise_handler is not None
+    assert "promptInput.focus({preventScroll: true});" in revise_handler.group("body")
+    assert "hidePlanExecutionBar();" not in revise_handler.group("body")
     assert (
         "function createPlanCardElement(planText, titleFallback, options = {})"
         in response

@@ -16491,7 +16491,6 @@ __ICONS_JS__
     planExecutionConfirm.onclick = executeActivePlan;
     planExecutionSkip.onclick = hidePlanExecutionBar;
     planExecutionRevise.onclick = () => {
-      hidePlanExecutionBar();
       promptInput.focus({preventScroll: true});
     };
     handoffIntent.onchange = resetHandoffPreview;
