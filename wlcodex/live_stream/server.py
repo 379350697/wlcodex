@@ -15214,6 +15214,7 @@ __ICONS_JS__
     let currentSessionInfo = {};
     let sendingPrompt = false;
     let nativeTurnRunning = false;
+    const turnStatus = {active: false, turnId: "", label: "连接会话", tone: "neutral", terminal: false};
     let modelCatalog = [];
     let providerCapabilities = {};
     let savedDisplaySettings = loadSavedDisplaySettings();
@@ -15404,7 +15405,7 @@ __ICONS_JS__
         timer = window.setTimeout(() => {
           if (!settled) {
             timedOut = true;
-            updateRunState(message, "busy");
+            requestTurnStatusUpdate(message, "busy");
           }
           resolve({});
         }, delayMs);
@@ -16368,7 +16369,7 @@ __ICONS_JS__
       setApprovalButtons(card, action, state);
       if (state === "pending" || state === "resolved") stateNode.textContent = approvalStateText(action, state);
       else if (state === "failed") stateNode.textContent = message || "审批失败";
-      updateRunState(stateNode.textContent, state === "failed" ? "failed" : "busy");
+      requestTurnStatusUpdate(stateNode.textContent, state === "failed" ? "failed" : "busy");
     }
     function setApprovalButtons(card, action, state) {
       const locked = state === "pending" || state === "resolved";
@@ -16604,6 +16605,7 @@ __ICONS_JS__
         text: normalizeTranscriptText(prompt),
         images: attachmentsSnapshot.length
       };
+      requestTurnStatusUpdate(action === "steer" ? "修正中" : "发送中", "busy");
       closeInterruptionChoice();
       const draftTurnId = activeTurnId || nativeTurnId || "";
       if (action !== "steer") renderLocalUserEcho(prompt, attachmentsSnapshot, draftTurnId);
@@ -16617,6 +16619,7 @@ __ICONS_JS__
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.active_turn_id || (result.turn_running ? result.turn_id || "" : "");
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
+        if (nativeTurnRunning) requestTurnStatusUpdate("正在处理", "busy");
         updateNativeHeaderContext();
         pendingUserEcho = null;
         setSendStatus("已发送", "ok");
@@ -16625,6 +16628,7 @@ __ICONS_JS__
         if (await recoverNativeControlAfterFetchFailure(error, controlSnapshot)) {
           pendingUserEcho = null;
           clearComposerDraft();
+          requestTurnStatusUpdate(nativeTurnRunning ? "正在处理" : "已发送", nativeTurnRunning ? "busy" : "neutral");
           setSendStatus("已发送", "ok");
           return;
         }
@@ -16666,11 +16670,13 @@ __ICONS_JS__
       if (!activeTurnId) return;
       sendingPrompt = true;
       updateComposerDisabled();
+      requestTurnStatusUpdate("中断中", "busy");
       setSendStatus("中断中", "");
       try {
         await nativeControl("interrupt", {turn_id: activeTurnId});
         activeTurnId = "";
         nativeTurnRunning = false;
+        requestTurnStatusUpdate("已中断", "done", {terminal: true});
         updateNativeHeaderContext();
         setSendStatus("已中断", "ok");
         await pollEvents();
@@ -16714,6 +16720,11 @@ __ICONS_JS__
       }
       setComposerActivity(nativeTurnRunning || sendingPrompt);
       updateNativeHeaderContext();
+      if (isTerminalTurnEvent(event)) {
+        requestTurnStatusUpdate(statusTitle(event, statusText(event, payload)), statusTone(event), {event, terminal: true});
+      } else if (nativeTurnRunning || sendingPrompt) {
+        requestTurnStatusUpdate("正在处理", "busy", {event});
+      }
     }
     function isMirroredTranscriptEvent(event) {
       const payload = (event && event.payload) || {};
@@ -16737,6 +16748,54 @@ __ICONS_JS__
     }
     function setComposerActivity(active) {
       composerActivity.classList.toggle("active", Boolean(active));
+    }
+    function reconcileTurnStatusFromFlags(label = "", tone = "") {
+      const active = Boolean(nativeTurnRunning || sendingPrompt || activeTurnId);
+      turnStatus.active = active;
+      turnStatus.turnId = active ? String(activeTurnId || nativeTurnId || turnStatus.turnId || "") : "";
+      if (active) {
+        turnStatus.terminal = false;
+        turnStatus.tone = "busy";
+        turnStatus.label = label || turnStatus.label || "正在处理";
+      } else if (label || tone) {
+        turnStatus.terminal = false;
+        turnStatus.tone = tone || "neutral";
+        turnStatus.label = label || turnStatus.label || "连接会话";
+      }
+    }
+    function isTerminalRunStatusUpdate(_tone, options = {}) {
+      const event = options.event || null;
+      if (options.terminal === true) return true;
+      if (event && isTerminalTurnEvent(event)) return true;
+      return false;
+    }
+    function isNonTerminalCompletionLabel(label) {
+      return ["完成", "已完成", "审批已处理", "已批准一次", "本会话已批准", "已拒绝"].includes(
+        String(label || "").trim()
+      );
+    }
+    function requestTurnStatusUpdate(label, tone, options = {}) {
+      label = String(label || "").trim();
+      tone = tone || "neutral";
+      const terminal = isTerminalRunStatusUpdate(tone, options);
+      reconcileTurnStatusFromFlags(label, tone);
+      if (turnStatus.active && !terminal && isNonTerminalCompletionLabel(label)) label = "正在处理";
+      if (turnStatus.active && !terminal) {
+        tone = "busy";
+        label = label || turnStatus.label || "正在处理";
+        turnStatus.terminal = false;
+      } else if (terminal) {
+        turnStatus.active = false;
+        turnStatus.turnId = "";
+        turnStatus.terminal = true;
+        turnStatus.tone = tone;
+        turnStatus.label = label || (tone === "failed" ? "失败" : "完成");
+      } else {
+        turnStatus.terminal = false;
+        turnStatus.tone = tone;
+        turnStatus.label = label || turnStatus.label || "连接会话";
+      }
+      updateRunState(turnStatus.label, turnStatus.tone);
     }
     function toggleHandoffPanel() {
       if (handoffPanel.hidden && !handoffTargetProvider) {
@@ -16854,11 +16913,13 @@ __ICONS_JS__
       updateComposerDisabled();
       setSendStatus("执行计划", "");
       continueButton.classList.add("loading");
+      requestTurnStatusUpdate("执行计划", "busy");
       try {
         const result = await nativeControl("continue", body);
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.active_turn_id || (result.turn_running ? result.turn_id || "" : "");
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
+        if (nativeTurnRunning) requestTurnStatusUpdate("正在处理", "busy");
         setSendStatus("已发送", "ok");
         await pollEvents();
       } catch (error) {
@@ -17218,6 +17279,7 @@ __ICONS_JS__
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.active_turn_id || "";
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
+        requestTurnStatusUpdate(nativeTurnRunning ? "正在处理" : "连接会话", nativeTurnRunning ? "busy" : "neutral");
         updateComposerDisabled();
         updateNativeHeaderContext();
       } catch (error) {
@@ -17234,6 +17296,7 @@ __ICONS_JS__
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.turn_running ? (result.active_turn_id || result.turn_id || activeTurnId || "") : "";
         nativeTurnRunning = Boolean(result.turn_running || activeTurnId);
+        requestTurnStatusUpdate(nativeTurnRunning ? "正在处理" : "连接会话", nativeTurnRunning ? "busy" : "neutral");
         updateComposerDisabled();
         updateNativeHeaderContext();
       } catch (error) {
@@ -17396,8 +17459,10 @@ __ICONS_JS__
     }
     function applyNativeRunState(runState) {
       if (!nativeThreadId || !runState || typeof runState !== "object") return;
+      const wasActive = Boolean(nativeTurnRunning || activeTurnId || turnStatus.active);
       nativeTurnRunning = Boolean(runState.active);
       activeTurnId = nativeTurnRunning ? String(runState.active_turn_id || activeTurnId || "") : "";
+      requestTurnStatusUpdate(nativeTurnRunning ? "正在处理" : wasActive ? "完成" : "连接会话", nativeTurnRunning ? "busy" : wasActive ? "done" : "neutral", {terminal: wasActive && !nativeTurnRunning, runState});
       setComposerActivity(nativeTurnRunning || sendingPrompt);
       updateNativeHeaderContext();
       updateComposerDisabled();
@@ -18444,7 +18509,7 @@ __ICONS_JS__
         renderStatusEvent(event, "审批已处理", "done");
       }
       else if (shouldRenderStatusEvent(event)) renderStatusEvent(event, statusText(event, payload), statusTone(event));
-      else updateRunState(statusTitle(event, statusText(event, payload)), statusTone(event));
+      else requestTurnStatusUpdate(statusTitle(event, statusText(event, payload)), statusTone(event), {event});
       } finally {
         renderTarget = previousTarget;
       }
@@ -18517,7 +18582,7 @@ __ICONS_JS__
       row.className = "plan-item";
       row.append(createPlanCardElement(planText, titleText, {executable: true}));
       renderTarget.append(row);
-      updateRunState("计划已更新", "busy");
+      requestTurnStatusUpdate("计划已更新", "busy", {event});
     }
     function createPlanCardElement(planText, titleFallback, options = {}) {
       const executable = options.executable === true;
@@ -18940,7 +19005,7 @@ __ICONS_JS__
       node.title.textContent = display.title;
       node.detail.textContent = display.detail;
       node.detail.hidden = !display.detail;
-      updateRunState(display.title || display.detail, tone || "neutral");
+      requestTurnStatusUpdate(display.title || display.detail, tone || "neutral", {event});
     }
     function renderToolCall(event) {
       const payload = event.payload || {};
@@ -18970,7 +19035,7 @@ __ICONS_JS__
       node.status.textContent = commandStatus(event.kind);
       node.card.classList.toggle("failed", event.kind === "command_failed");
       appendText(node.output, payload.delta || payload.output || "");
-      updateRunState(commandStatus(event.kind), event.kind === "command_failed" ? "failed" : "busy");
+      requestTurnStatusUpdate(commandStatus(event.kind), event.kind === "command_failed" ? "failed" : "busy", {event});
     }
     function renderFileChangeSummary(event) {
       const payload = event.payload || {};
@@ -19124,7 +19189,7 @@ __ICONS_JS__
         setApprovalState(card, approvalResolvedAction(alreadyResolved, card), "resolved");
         return;
       }
-      updateRunState("等待审批", "busy");
+      requestTurnStatusUpdate("等待审批", "busy", {event});
     }
     function markApprovalResolved(event) {
       const key = approvalRequestKey(event);

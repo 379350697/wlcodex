@@ -5850,6 +5850,42 @@ def test_live_page_waits_during_active_turn_when_provider_cannot_steer() -> None
     assert 'mode === "wait" ? "等待当前轮"' in response
 
 
+def test_live_page_routes_global_status_through_turn_state_gate() -> None:
+    response = _live_page(42, native_provider="codex")
+
+    assert (
+        'const turnStatus = {active: false, turnId: "", label: "连接会话", tone: "neutral", terminal: false};'
+        in response
+    )
+    assert "function requestTurnStatusUpdate(label, tone, options = {})" in response
+    assert "function reconcileTurnStatusFromFlags(label = \"\", tone = \"\")" in response
+    assert "function isTerminalRunStatusUpdate(_tone, options = {})" in response
+    assert "function isNonTerminalCompletionLabel(label)" in response
+    assert 'if (turnStatus.active && !terminal && isNonTerminalCompletionLabel(label)) label = "正在处理";' in response
+    assert 'if (turnStatus.active && !terminal) {' in response
+    assert 'tone = "busy";' in response
+    assert 'label = label || turnStatus.label || "正在处理";' in response
+    assert 'requestTurnStatusUpdate(display.title || display.detail, tone || "neutral", {event});' in response
+    assert (
+        'requestTurnStatusUpdate(commandStatus(event.kind), event.kind === "command_failed" ? "failed" : "busy", {event});'
+        in response
+    )
+    assert 'requestTurnStatusUpdate("等待审批", "busy", {event});' in response
+    assert 'requestTurnStatusUpdate(statusTitle(event, statusText(event, payload)), statusTone(event), {event});' in response
+    assert (
+        'requestTurnStatusUpdate(nativeTurnRunning ? "正在处理" : wasActive ? "完成" : "连接会话", '
+        'nativeTurnRunning ? "busy" : wasActive ? "done" : "neutral", {terminal: wasActive && !nativeTurnRunning, runState});'
+        in response
+    )
+    assert "updateRunState(display.title || display.detail, tone || \"neutral\");" not in response
+    assert (
+        'updateRunState(commandStatus(event.kind), event.kind === "command_failed" ? "failed" : "busy");'
+        not in response
+    )
+    assert 'updateRunState("等待审批", "busy");' not in response
+    assert "updateRunState(statusTitle(event, statusText(event, payload)), statusTone(event));" not in response
+
+
 def test_native_live_page_keeps_canonical_provider_completed_timeline_visible() -> None:
     response = _live_page(42, native_provider="codex")
 
