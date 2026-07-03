@@ -649,6 +649,62 @@ class NativeTimelineStore:
         ).fetchone()
         return int(row["latest_sequence"] if row is not None else 0)
 
+    def latest_turn_run_state(self, provider: str, native_thread_id: str) -> dict[str, Any]:
+        provider_key = _normalize_provider(provider)
+        thread_id = str(native_thread_id or "").strip()
+        placeholders = ",".join("?" for _ in _NATIVE_TURN_STATE_EVENT_TYPES)
+        rows = self._conn.execute(
+            f"""
+            SELECT event_type, payload_json
+            FROM runtime_events
+            WHERE event_type IN ({placeholders})
+            ORDER BY id DESC
+            LIMIT 200
+            """,
+            _NATIVE_TURN_STATE_EVENT_TYPES,
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"] or "{}"))
+            except json.JSONDecodeError:
+                continue
+            if _normalize_provider(
+                _first_text(payload, "provider", "native_provider") or provider_key
+            ) != provider_key:
+                continue
+            payload_thread = _first_text(
+                payload,
+                "native_thread_id",
+                "native_session_id",
+                "thread_id",
+                "threadId",
+                "session_id",
+            )
+            if payload_thread != thread_id:
+                continue
+            event_type = str(row["event_type"])
+            turn_key = _first_text(
+                payload,
+                "native_turn_id",
+                "turnId",
+                "turn_id",
+                "active_turn_id",
+            )
+            if event_type in _NATIVE_TURN_TERMINAL_EVENT_TYPES or _is_terminal_turn_payload(
+                payload
+            ):
+                return {
+                    "active": False,
+                    "status": _terminal_turn_status(event_type, payload),
+                    "active_turn_id": "",
+                }
+            return {
+                "active": True,
+                "status": _active_turn_status(event_type, payload),
+                "active_turn_id": turn_key,
+            }
+        return {"active": False, "status": "idle", "active_turn_id": ""}
+
     def list_item_events(
         self,
         provider: str,
@@ -1173,9 +1229,63 @@ _VISIBLE_CONVERSATION_ITEM_KINDS = (
     "approval_requested",
 )
 
+_NATIVE_TURN_ACTIVE_EVENT_TYPES = (
+    EventType.AGENT_RUN_QUEUED,
+    EventType.AGENT_RUN_STARTED,
+    EventType.AGENT_RUN_ACTIVITY,
+    EventType.AGENT_RUN_HEARTBEAT,
+    EventType.AGENT_RUN_WAITING_FOR_APPROVAL,
+)
+
+_NATIVE_TURN_TERMINAL_EVENT_TYPES = (
+    EventType.AGENT_RUN_COMPLETED,
+    EventType.AGENT_RUN_FAILED,
+    EventType.AGENT_RUN_TIMED_OUT,
+    EventType.AGENT_RUN_ORPHANED,
+    EventType.RUN_COMPLETED,
+    EventType.RUN_FAILED,
+    EventType.RUN_CANCELLED,
+)
+
+_NATIVE_TURN_STATE_EVENT_TYPES = (
+    *_NATIVE_TURN_ACTIVE_EVENT_TYPES,
+    *_NATIVE_TURN_TERMINAL_EVENT_TYPES,
+)
+
 
 def _visible_item_kind_placeholders() -> str:
     return ",".join("?" for _ in _VISIBLE_CONVERSATION_ITEM_KINDS)
+
+
+def _is_terminal_turn_payload(payload: dict[str, Any]) -> bool:
+    action = _first_text(payload, "action").strip().lower()
+    return action in {"turn_completed", "turn_failed", "turn_cancelled", "turn_interrupted"}
+
+
+def _terminal_turn_status(event_type: str, payload: dict[str, Any]) -> str:
+    status = _first_text(payload, "status").strip().lower()
+    if status:
+        return status
+    if event_type == EventType.AGENT_RUN_COMPLETED or event_type == EventType.RUN_COMPLETED:
+        return "completed"
+    if event_type == EventType.AGENT_RUN_TIMED_OUT:
+        return "timed_out"
+    if event_type == EventType.AGENT_RUN_ORPHANED:
+        return "orphaned"
+    if event_type == EventType.RUN_CANCELLED:
+        return "cancelled"
+    return "failed"
+
+
+def _active_turn_status(event_type: str, payload: dict[str, Any]) -> str:
+    status = _first_text(payload, "status").strip().lower()
+    if status and status not in {"completed", "done", "succeeded", "success"}:
+        return status
+    if event_type == EventType.AGENT_RUN_QUEUED:
+        return "queued"
+    if event_type == EventType.AGENT_RUN_WAITING_FOR_APPROVAL:
+        return "waiting"
+    return "running"
 
 
 def _display_role_for_kind(kind: str, payload: dict[str, Any]) -> str:

@@ -3112,6 +3112,12 @@ class WorkerLiveStreamServer:
             native_thread_id,
         )
         cursor = max([latest_sequence, *(item.cursor for item in items)])
+        run_state = self._native_timeline.latest_turn_run_state(
+            provider_key,
+            native_thread_id,
+        )
+        if not run_state.get("active") and run_state.get("status") == "idle":
+            run_state = _native_messages_run_state(items)
         await self._send_json(
             writer,
             200,
@@ -3121,7 +3127,7 @@ class WorkerLiveStreamServer:
                 "items": [_native_conversation_item_json(item) for item in items],
                 "cursor": cursor,
                 "previous_item_count": previous_item_count,
-                "run_state": _native_messages_run_state(items),
+                "run_state": run_state,
                 "native_sync_error": sync_error,
                 "native_sync_pending": sync_pending,
             },
@@ -16523,10 +16529,10 @@ __ICONS_JS__
       const payload = (event && event.payload) || {};
       const status = String(payload.status || "").trim().toLowerCase();
       const action = String(payload.action || "").trim().toLowerCase();
-      if (event.kind === "message_completed" && payload.native_turn_id) return true;
       if (event.kind === "completed" || event.kind === "failed") return true;
       if (action === "turn_completed" || action === "turn_failed") return true;
-      return isCompletedStatus(status) || isFailedStatus(status);
+      if (event.kind === "lifecycle") return isCompletedStatus(status) || isFailedStatus(status);
+      return false;
     }
     function isCompletedStatus(status) {
       return ["completed", "done", "succeeded", "success"].includes(

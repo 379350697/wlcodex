@@ -4421,6 +4421,118 @@ async def test_native_messages_endpoint_returns_visible_items_without_command_pa
 
 
 @pytest.mark.asyncio
+async def test_native_messages_run_state_stays_active_until_turn_lifecycle_finishes(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_STARTED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="internal",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "provider": "codex",
+                "status": "running",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.PROVIDER_DISPLAY_COMPLETED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "assistant-1",
+                "text": "第一段回复",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1/messages?limit=20 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.AGENT_RUN_COMPLETED,
+                aggregate_type="agent_run",
+                aggregate_id="42",
+                correlation_id="agent:42",
+                source="codex",
+                actor="codex_native",
+                visibility="internal",
+                payload={
+                    "native_thread_id": "thread-1",
+                    "native_turn_id": "turn-1",
+                    "provider": "codex",
+                    "status": "completed",
+                },
+                occurred_at="2026-05-30T00:00:02+00:00",
+                agent_run_id=42,
+            )
+        )
+        completed_response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1/messages?limit=20 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [item["kind"] for item in body["items"]] == ["message"]
+    assert body["run_state"] == {
+        "active": True,
+        "status": "running",
+        "active_turn_id": "turn-1",
+    }
+
+    completed_body = _json_body(completed_response)
+    assert completed_body["run_state"] == {
+        "active": False,
+        "status": "completed",
+        "active_turn_id": "",
+    }
+
+
+@pytest.mark.asyncio
 async def test_native_messages_stream_replays_and_updates_visible_items_only(
     tmp_path: Path,
 ) -> None:
@@ -5997,7 +6109,7 @@ async def test_worker_live_page_clears_running_composer_state_on_terminal_turn_e
     assert "HTTP/1.1 200 OK" in response
     assert "function isTerminalTurnEvent(event)" in response
     assert "isTerminalTurnEvent(event)" in response
-    assert 'if (event.kind === "message_completed" && payload.native_turn_id) return true;' in response
+    assert 'if (event.kind === "message_completed" && payload.native_turn_id) return true;' not in response
     assert '["completed", "done", "succeeded", "success"]' in response
     assert '["failed", "error", "cancelled", "canceled", "interrupted", "aborted"]' in response
     assert "nativeTurnRunning = false;" in response
@@ -6010,7 +6122,8 @@ async def test_worker_live_page_clears_running_composer_state_on_terminal_turn_e
     assert "scheduleTerminalTranscriptSync(event);" in response
     assert "await syncNativeTranscript();" in response
     assert "await pollEvents();" in response
-    assert 'if (event.kind === "message_completed") return false;' in response
+    assert 'if (event.kind === "lifecycle") return isCompletedStatus(status) || isFailedStatus(status);' in response
+    assert 'return false;\n    }\n    function isCompletedStatus(status)' in response
 
 
 def test_worker_live_page_recovers_after_post_fetch_drop_without_resubmitting() -> None:
