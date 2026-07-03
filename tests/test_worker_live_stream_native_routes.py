@@ -3945,6 +3945,49 @@ async def test_native_timeline_endpoint_replays_visible_messages_not_raw_tail(
             agent_run_id=42,
         )
     )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.COMMAND_OUTPUT_DELTA,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="internal",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "command_id": "cmd-after-visible",
+                "command": "post-visible-hidden-command",
+                "delta": "hidden-after-visible-" * 1000,
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:03+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="command.output.delta",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="internal",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "command_id": "cmd-after-visible",
+                "delta": "hidden-after-visible",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:03+00:00",
+            agent_run_id=42,
+        )
+    )
     server = WorkerLiveStreamServer(
         host="127.0.0.1",
         port=0,
@@ -4431,7 +4474,11 @@ async def test_native_messages_endpoint_returns_visible_items_without_command_pa
     assert [item["kind"] for item in body["items"]] == ["user_message", "message"]
     assert [item["text"] for item in body["items"]] == ["用户问题", "助手回答"]
     assert all("hidden-output" not in json.dumps(item, ensure_ascii=False) for item in body["items"])
-    assert body["cursor"] >= 3
+    assert all(
+        "hidden-after-visible" not in json.dumps(item, ensure_ascii=False)
+        for item in body["items"]
+    )
+    assert body["cursor"] == 3
     assert body["previous_item_count"] == 0
     assert body["run_state"]["active"] is False
 
@@ -4652,6 +4699,122 @@ async def test_native_messages_stream_replays_and_updates_visible_items_only(
     assert "event: message_added" in decoded or "event: message_updated" in decoded
     assert "第二条" in decoded
     assert "hidden output" not in decoded
+
+
+@pytest.mark.asyncio
+async def test_native_messages_stream_replays_items_created_by_transcript_sync(
+    tmp_path: Path,
+) -> None:
+    class SuppressibleTimelineStore(NativeTimelineStore):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.suppress_publish = False
+
+        def _publish(self, event: Any) -> None:
+            if self.suppress_publish:
+                return
+            super()._publish(event)
+
+    runtime_store = _store(tmp_path)
+    timeline_store = SuppressibleTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="user.message.received",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "用户问题",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+
+    class TimelineSyncMirror(FakeTranscriptMirror):
+        def __init__(self) -> None:
+            super().__init__()
+            self.thread_signatures["thread-1"] = "sig:1"
+            self.synced = False
+
+        def thread_file_signature(self, native_thread_id: str) -> str:
+            self.calls.append(("thread_file_signature", native_thread_id))
+            return "sig:2" if self.synced else "sig:1"
+
+        def sync_thread(self, native_thread_id: str, *, tail_lines: int | None = None) -> int:
+            super().sync_thread(native_thread_id, tail_lines=tail_lines)
+            if self.synced:
+                return 0
+            self.synced = True
+            timeline_store.suppress_publish = True
+            try:
+                runtime_store.append(
+                    RuntimeEvent(
+                        schema_version=1,
+                        event_type="provider.display.delta",
+                        aggregate_type="agent_run",
+                        aggregate_id="42",
+                        correlation_id="agent:42",
+                        source="codex_transcript",
+                        actor="codex_native",
+                        visibility="user",
+                        payload={
+                            "native_thread_id": native_thread_id,
+                            "native_turn_id": "turn-1",
+                            "itemId": "assistant-1",
+                            "delta": "官方 transcript 已经有输出",
+                            "provider": "codex",
+                        },
+                        occurred_at="2026-05-30T00:00:01+00:00",
+                        agent_run_id=42,
+                    )
+                )
+            finally:
+                timeline_store.suppress_publish = False
+            return 1
+
+    mirror = TimelineSyncMirror()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        native_transcript_mirror=mirror,
+        access_token="secret",
+    )
+    await server.start()
+    reader = writer = None
+    try:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        writer.write(
+            b"GET /api/native/codex/sessions/thread-1/messages/stream?after=0 HTTP/1.1\r\n"
+            b"Host: test\r\nAuthorization: Bearer secret\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        await writer.drain()
+        await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        initial = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        synced = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.5)
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await server.stop()
+
+    assert "用户问题" in initial.decode("utf-8")
+    decoded = synced.decode("utf-8")
+    assert "event: message_added" in decoded or "event: message_updated" in decoded
+    assert "官方 transcript 已经有输出" in decoded
 
 
 @pytest.mark.asyncio
@@ -6146,7 +6309,13 @@ def test_worker_live_page_recovers_after_post_fetch_drop_without_resubmitting() 
     response = _live_page(42, native_provider="codex")
 
     assert "function isFetchNetworkError(error)" in response
+    assert "function isNativeControlRecoverableError(error)" in response
     assert "function nativeTurnAdvancedSince(snapshot)" in response
+    assert "latestVisibleEventId" in response[
+        response.index("function snapshotNativeTurnControl()") :
+        response.index("function clearComposerDraft()")
+    ]
+    assert "JsonRpcTimeout" in response
     assert "async function recoverNativeControlAfterFetchFailure(error, snapshot)" in response
     assert "await delay(700);" in response
     assert "await syncNativeTranscript();" in response

@@ -3185,6 +3185,16 @@ class WorkerLiveStreamServer:
                         provider_key,
                         native_thread_id,
                     )
+                    for item in self._native_timeline.list_conversation_items(
+                        provider_key,
+                        native_thread_id,
+                        after=latest,
+                        limit=500,
+                    ):
+                        if item.cursor <= latest:
+                            continue
+                        latest = item.cursor
+                        await _write_native_message_sse(writer, item, replay=True)
                     continue
                 item = self._native_timeline.get_conversation_item(event.item_row_id)
                 if item is None or item.cursor <= latest:
@@ -15083,6 +15093,10 @@ __ICONS_JS__
       const text = String((error && error.message) || error || "");
       return Boolean(error && error.name === "TypeError") || /failed to fetch|network/i.test(text);
     }
+    function isNativeControlRecoverableError(error) {
+      const text = String((error && error.message) || error || "");
+      return isFetchNetworkError(error) || /JsonRpcTimeout|timeout|timed out/i.test(text);
+    }
     function delay(ms) {
       return new Promise(resolve => window.setTimeout(resolve, ms));
     }
@@ -15090,7 +15104,8 @@ __ICONS_JS__
       return {
         nativeTurnId,
         activeTurnId,
-        nativeTurnRunning
+        nativeTurnRunning,
+        latestVisibleEventId
       };
     }
     function nativeTurnAdvancedSince(snapshot) {
@@ -15098,11 +15113,12 @@ __ICONS_JS__
       return Boolean(
         (nativeTurnId && nativeTurnId !== before.nativeTurnId) ||
         (activeTurnId && activeTurnId !== before.activeTurnId) ||
-        (nativeTurnRunning && !before.nativeTurnRunning)
+        (nativeTurnRunning && !before.nativeTurnRunning) ||
+        (latestVisibleEventId > Number(before.latestVisibleEventId || 0))
       );
     }
     async function recoverNativeControlAfterFetchFailure(error, snapshot) {
-      if (!isFetchNetworkError(error)) return false;
+      if (!isNativeControlRecoverableError(error)) return false;
       await delay(700);
       await syncNativeTranscript();
       await pollEvents();
