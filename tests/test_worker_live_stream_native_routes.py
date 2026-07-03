@@ -4561,8 +4561,169 @@ async def test_native_messages_endpoint_orders_recent_snapshot_by_item_id(
     body = _json_body(response)
     assert [item["text"] for item in body["items"]] == ["新消息"]
     assert body["cursor"] == body["items"][0]["id"]
+    assert body["item_cursor"] == body["items"][0]["id"]
+    assert body["update_cursor"] >= body["items"][0]["sequence_cursor"]
+
+
+@pytest.mark.asyncio
+async def test_native_messages_endpoint_replays_same_item_updates_by_update_cursor(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="provider.display.delta",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "assistant-1",
+                "delta": "第一段",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    first_update_cursor = timeline_store.latest_sequence("codex", "thread-1")
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="provider.display.delta",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "assistant-1",
+                "delta": "第二段",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /api/native/codex/sessions/thread-1/messages?after_update={first_update_cursor}&limit=20 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [item["item_key"] for item in body["items"]] == ["assistant-1"]
+    assert body["items"][0]["text"] == "第一段第二段"
     assert body["items"][0]["cursor"] == body["items"][0]["id"]
+    assert body["update_cursor"] > first_update_cursor
     assert "sequence_cursor" in body["items"][0]
+
+
+@pytest.mark.asyncio
+async def test_native_messages_update_cursor_does_not_skip_limited_items(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type="provider.display.delta",
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "assistant-1",
+                "delta": "第一段",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    first_update_cursor = timeline_store.latest_sequence("codex", "thread-1")
+    for item_id, text, timestamp in (
+        ("assistant-2", "第二段", "2026-05-30T00:00:01+00:00"),
+        ("assistant-3", "第三段", "2026-05-30T00:00:02+00:00"),
+    ):
+        runtime_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type="provider.display.delta",
+                aggregate_type="agent_run",
+                aggregate_id="42",
+                correlation_id="agent:42",
+                source="codex",
+                actor="codex_native",
+                visibility="user",
+                payload={
+                    "native_thread_id": "thread-1",
+                    "native_turn_id": "turn-1",
+                    "itemId": item_id,
+                    "delta": text,
+                    "provider": "codex",
+                },
+                occurred_at=timestamp,
+                agent_run_id=42,
+            )
+        )
+    latest_update_cursor = timeline_store.latest_sequence("codex", "thread-1")
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            f"GET /api/native/codex/sessions/thread-1/messages?after_update={first_update_cursor}&limit=1 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [item["item_key"] for item in body["items"]] == ["assistant-2"]
+    assert body["update_cursor"] == body["items"][0]["sequence_cursor"]
+    assert body["update_cursor"] < latest_update_cursor
 
 
 @pytest.mark.asyncio
@@ -5978,14 +6139,16 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "function nativeMessagesPath(params)" in response
     assert "function nativeMessagesStreamPath(afterId)" in response
     assert "eventsPath(`after=${latestEventId}&limit=100`)" not in response
-    assert "let latestVisibleEventId = 0;" in response
-    assert "let latestStreamEventId = 0;" in response
-    assert "nativeMessagesPath(`after=${latestVisibleEventId}&limit=100`)" in response
-    assert "nativeTimelinePath(`after=${latestVisibleEventId}&limit=100`)" not in response
+    assert "let nativeItemCursor = 0;" in response
+    assert "let nativeUpdateCursor = 0;" in response
+    assert "nativeMessagesPath(`after_update=${nativeUpdateCursor}&limit=100`)" in response
+    assert "nativeMessagesPath(`after=${nativeItemCursor}&limit=100`)" not in response
+    assert "nativeTimelinePath(`after=${nativeItemCursor}&limit=100`)" not in response
     assert "nativeTimelinePath(`after=${latestEventId}&limit=100`)" not in response
-    assert "if (event.id) latestStreamEventId = Math.max(latestStreamEventId, event.id);" in response
+    assert 'params.set("after_update", String(afterId));' in response
     assert "if (isInternalEvent(event)) {" in response
-    assert "if (event.id) latestVisibleEventId = Math.max(latestVisibleEventId, event.id);" in response
+    assert "function applyNativeFeedSnapshot(snapshot, snapshotEvents = [])" in response
+    assert "function advanceNativeFeedCursors(event, options = {})" in response
     assert "function eventsPath(params, options = {})" in response
     assert 'if (nativeThreadId) search.set("native_thread_id", nativeThreadId);' in response
     assert "function streamPathWithCursor(afterId)" in response
@@ -6393,7 +6556,11 @@ def test_worker_live_page_recovers_after_post_fetch_drop_without_resubmitting() 
     assert "function isFetchNetworkError(error)" in response
     assert "function isNativeControlRecoverableError(error)" in response
     assert "function nativeTurnAdvancedSince(snapshot)" in response
-    assert "latestVisibleEventId" in response[
+    assert "nativeItemCursor" in response[
+        response.index("function snapshotNativeTurnControl()") :
+        response.index("function clearComposerDraft()")
+    ]
+    assert "nativeUpdateCursor" in response[
         response.index("function snapshotNativeTurnControl()") :
         response.index("function clearComposerDraft()")
     ]

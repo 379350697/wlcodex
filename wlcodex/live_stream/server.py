@@ -654,18 +654,25 @@ class WorkerLiveStreamServer:
                     return
                 provider, native_thread_id, stream = native_messages_route
                 if stream:
-                    after = _safe_int(
-                        query.get("after", [headers.get("last-event-id", "0")])[0],
+                    after_update = _safe_int(
+                        query.get(
+                            "after_update",
+                            query.get("after", [headers.get("last-event-id", "0")]),
+                        )[0],
                         default=0,
                     )
                     await self._send_native_messages_sse(
                         writer,
                         provider,
                         native_thread_id,
-                        after,
+                        after_update,
                     )
                     return
                 after = _safe_int(query.get("after", ["0"])[0], default=0)
+                after_update = _safe_int(
+                    query.get("after_update", ["0"])[0],
+                    default=0,
+                )
                 before_value = query.get("before", [""])[0]
                 before = (
                     _safe_int(before_value, default=0)
@@ -678,6 +685,7 @@ class WorkerLiveStreamServer:
                     provider,
                     native_thread_id,
                     after=after,
+                    after_update=after_update,
                     before=before,
                     limit=limit,
                 )
@@ -3062,6 +3070,7 @@ class WorkerLiveStreamServer:
         native_thread_id: str,
         *,
         after: int = 0,
+        after_update: int = 0,
         before: int | None = None,
         limit: int = 100,
     ) -> None:
@@ -3083,6 +3092,8 @@ class WorkerLiveStreamServer:
                     "native_thread_id": native_thread_id,
                     "items": [],
                     "cursor": 0,
+                    "item_cursor": 0,
+                    "update_cursor": 0,
                     "previous_item_count": 0,
                     "run_state": _native_messages_run_state([]),
                     "native_sync_error": sync_error,
@@ -3090,13 +3101,29 @@ class WorkerLiveStreamServer:
                 },
             )
             return
-        items = self._native_timeline.list_conversation_items_by_id(
-            provider_key,
-            native_thread_id,
-            after=after,
-            before=before,
-            limit=limit,
-        )
+        if after_update > 0 and before is None:
+            item_events = self._native_timeline.list_item_events(
+                provider_key,
+                native_thread_id,
+                after=after_update,
+                limit=limit,
+            )
+            items = []
+            seen_item_ids: set[int] = set()
+            for event in item_events:
+                item = self._native_timeline.get_conversation_item(event.item_row_id)
+                if item is None or item.id in seen_item_ids:
+                    continue
+                seen_item_ids.add(item.id)
+                items.append(item)
+        else:
+            items = self._native_timeline.list_conversation_items_by_id(
+                provider_key,
+                native_thread_id,
+                after=after,
+                before=before,
+                limit=limit,
+            )
         first_cursor = items[0].id if items else int(before or after or 0)
         previous_item_count = (
             self._native_timeline.count_conversation_items_before_id(
@@ -3107,7 +3134,13 @@ class WorkerLiveStreamServer:
             if first_cursor
             else 0
         )
-        cursor = max([int(after or 0), *(item.id for item in items)])
+        item_cursor = max([int(after or 0), *(item.id for item in items)])
+        update_cursor_values = [int(after_update or 0), *(int(item.cursor or 0) for item in items)]
+        if not after_update:
+            update_cursor_values.append(
+                self._native_timeline.latest_sequence(provider_key, native_thread_id)
+            )
+        update_cursor = max(update_cursor_values)
         run_state = self._native_timeline.latest_turn_run_state(
             provider_key,
             native_thread_id,
@@ -3121,7 +3154,9 @@ class WorkerLiveStreamServer:
                 "provider": provider_key,
                 "native_thread_id": native_thread_id,
                 "items": [_native_conversation_item_json(item) for item in items],
-                "cursor": cursor,
+                "cursor": item_cursor,
+                "item_cursor": item_cursor,
+                "update_cursor": update_cursor,
                 "previous_item_count": previous_item_count,
                 "run_state": run_state,
                 "native_sync_error": sync_error,
@@ -3134,7 +3169,7 @@ class WorkerLiveStreamServer:
         writer: asyncio.StreamWriter,
         provider: str,
         native_thread_id: str,
-        after_id: int,
+        after_update: int,
     ) -> None:
         header = (
             "HTTP/1.1 200 OK\r\n"
@@ -3154,22 +3189,31 @@ class WorkerLiveStreamServer:
             provider_key,
             native_thread_id,
         )
-        latest = int(after_id or 0)
+        latest = int(after_update or 0)
         queue = self._native_timeline.subscribe(
             provider=provider_key,
             native_thread_id=native_thread_id,
         )
         try:
-            for item in self._native_timeline.list_conversation_items_by_id(
+            for event in self._native_timeline.list_item_events(
                 provider_key,
                 native_thread_id,
-                after=after_id,
+                after=after_update,
                 limit=500,
             ):
-                if item.id <= latest:
+                if event.sequence <= latest:
                     continue
-                latest = item.id
-                await _write_native_message_sse(writer, item, replay=True)
+                item = self._native_timeline.get_conversation_item(event.item_row_id)
+                if item is None:
+                    latest = event.sequence
+                    continue
+                latest = event.sequence
+                await _write_native_message_sse(
+                    writer,
+                    item,
+                    replay=True,
+                    update_cursor=event.sequence,
+                )
             while not writer.is_closing():
                 try:
                     event = await asyncio.wait_for(
@@ -3181,22 +3225,41 @@ class WorkerLiveStreamServer:
                         provider_key,
                         native_thread_id,
                     )
-                    for item in self._native_timeline.list_conversation_items_by_id(
+                    for event in self._native_timeline.list_item_events(
                         provider_key,
                         native_thread_id,
                         after=latest,
                         limit=500,
                     ):
-                        if item.id <= latest:
+                        if event.sequence <= latest:
                             continue
-                        latest = item.id
-                        await _write_native_message_sse(writer, item, replay=True)
+                        item = self._native_timeline.get_conversation_item(
+                            event.item_row_id
+                        )
+                        if item is None:
+                            latest = event.sequence
+                            continue
+                        latest = event.sequence
+                        await _write_native_message_sse(
+                            writer,
+                            item,
+                            replay=True,
+                            update_cursor=event.sequence,
+                        )
                     continue
                 item = self._native_timeline.get_conversation_item(event.item_row_id)
-                if item is None or item.id < latest:
+                if event.sequence <= latest:
                     continue
-                latest = max(latest, item.id)
-                await _write_native_message_sse(writer, item, replay=False)
+                if item is None:
+                    latest = event.sequence
+                    continue
+                latest = event.sequence
+                await _write_native_message_sse(
+                    writer,
+                    item,
+                    replay=False,
+                    update_cursor=event.sequence,
+                )
         finally:
             self._native_timeline.unsubscribe(
                 provider=provider_key,
@@ -3388,8 +3451,15 @@ async def _write_native_message_sse(
     item: NativeTimelineItem,
     *,
     replay: bool,
+    update_cursor: int | None = None,
 ) -> None:
-    writer.write(format_native_message_sse_event(item, replay=replay))
+    writer.write(
+        format_native_message_sse_event(
+            item,
+            replay=replay,
+            update_cursor=update_cursor,
+        )
+    )
     await writer.drain()
 
 
@@ -3939,13 +4009,20 @@ def format_native_timeline_sse_event(event: NativeTimelineEvent) -> bytes:
     ).encode("utf-8")
 
 
-def format_native_message_sse_event(item: NativeTimelineItem, *, replay: bool = False) -> bytes:
-    public_cursor = int(item.id)
+def format_native_message_sse_event(
+    item: NativeTimelineItem,
+    *,
+    replay: bool = False,
+    update_cursor: int | None = None,
+) -> bytes:
+    public_cursor = int(update_cursor or item.cursor or item.id)
     payload = json.dumps(
         {
             "item": _native_conversation_item_json(item),
             "event": _native_conversation_item_display_event(item),
             "cursor": public_cursor,
+            "item_cursor": int(item.id),
+            "update_cursor": public_cursor,
             "replay": replay,
         },
         ensure_ascii=False,
@@ -14815,8 +14892,8 @@ __ICONS_JS__
     let loadedEvents = [];
     let oldestEventId = 0;
     let latestEventId = 0;
-    let latestVisibleEventId = 0;
-    let latestStreamEventId = 0;
+    let nativeItemCursor = 0;
+    let nativeUpdateCursor = 0;
     let previousEventCount = 0;
     let source = null;
     let streamReconnectTimer = null;
@@ -15104,7 +15181,8 @@ __ICONS_JS__
         nativeTurnId,
         activeTurnId,
         nativeTurnRunning,
-        latestVisibleEventId
+        nativeItemCursor,
+        nativeUpdateCursor
       };
     }
     function nativeTurnAdvancedSince(snapshot) {
@@ -15113,7 +15191,8 @@ __ICONS_JS__
         (nativeTurnId && nativeTurnId !== before.nativeTurnId) ||
         (activeTurnId && activeTurnId !== before.activeTurnId) ||
         (nativeTurnRunning && !before.nativeTurnRunning) ||
-        (latestVisibleEventId > Number(before.latestVisibleEventId || 0))
+        (nativeItemCursor > Number(before.nativeItemCursor || 0)) ||
+        (nativeUpdateCursor > Number(before.nativeUpdateCursor || 0))
       );
     }
     async function recoverNativeControlAfterFetchFailure(error, snapshot) {
@@ -17085,12 +17164,7 @@ __ICONS_JS__
       previousEventCount = snapshot.previous_event_count || 0;
       oldestEventId = loadedEvents.length ? loadedEvents[0].id : 0;
       latestEventId = loadedEvents.length ? loadedEvents[loadedEvents.length - 1].id : 0;
-      latestVisibleEventId = nativeThreadId ? lastVisibleEventId(loadedEvents) : latestEventId;
-      latestStreamEventId = nativeThreadId ? latestVisibleEventId : latestEventId;
-      if (nativeThreadId && typeof snapshot.cursor === "number") {
-        latestVisibleEventId = Math.max(latestVisibleEventId, snapshot.cursor);
-        latestStreamEventId = Math.max(latestStreamEventId, snapshot.cursor);
-      }
+      if (nativeThreadId) applyNativeFeedSnapshot(snapshot, loadedEvents);
       rebuildStream();
       updateHistoryFold();
       openStream(currentStreamCursor());
@@ -17100,13 +17174,36 @@ __ICONS_JS__
       if (snapshot && typeof snapshot.previous_item_count === "number") {
         snapshot.previous_event_count = snapshot.previous_item_count;
       }
-      if (nativeThreadId && snapshot && typeof snapshot.cursor === "number") {
-        latestVisibleEventId = Math.max(latestVisibleEventId, snapshot.cursor);
-        latestStreamEventId = Math.max(latestStreamEventId, snapshot.cursor);
-      }
+      if (nativeThreadId) applyNativeFeedSnapshot(snapshot);
       if (snapshot && snapshot.run_state) applyNativeRunState(snapshot.run_state);
       if (snapshot.native_sync_error) renderStatus("native_sync_failed", snapshot.native_sync_error);
       else clearStatusNode("native_sync_failed");
+    }
+    function applyNativeFeedSnapshot(snapshot, snapshotEvents = []) {
+      if (!nativeThreadId || !snapshot) return;
+      const itemCursor = Number(
+        snapshot.item_cursor !== undefined ? snapshot.item_cursor : snapshot.cursor
+      );
+      const updateCursor = Number(snapshot.update_cursor);
+      if (Number.isFinite(itemCursor)) {
+        nativeItemCursor = Math.max(nativeItemCursor, itemCursor);
+      } else if (snapshotEvents.length) {
+        nativeItemCursor = Math.max(nativeItemCursor, lastVisibleEventId(snapshotEvents));
+      }
+      if (Number.isFinite(updateCursor)) {
+        nativeUpdateCursor = Math.max(nativeUpdateCursor, updateCursor);
+      }
+    }
+    function advanceNativeFeedCursors(event, options = {}) {
+      if (!nativeThreadId || !event) return;
+      const itemCursor = Number(event.id || 0);
+      if (Number.isFinite(itemCursor) && itemCursor > 0 && options.visible !== false) {
+        nativeItemCursor = Math.max(nativeItemCursor, itemCursor);
+      }
+      const updateCursor = Number(options.updateCursor || 0);
+      if (Number.isFinite(updateCursor) && updateCursor > 0) {
+        nativeUpdateCursor = Math.max(nativeUpdateCursor, updateCursor);
+      }
     }
     function isValidEventObject(event) {
       return Boolean(event && typeof event === "object" && event.kind);
@@ -17347,7 +17444,7 @@ __ICONS_JS__
       }, streamReconnectDelay);
     }
     function currentStreamCursor() {
-      return nativeThreadId ? latestStreamEventId : latestEventId;
+      return nativeThreadId ? nativeUpdateCursor : latestEventId;
     }
     function openStream(afterId) {
       closeLiveEventSource();
@@ -17396,6 +17493,7 @@ __ICONS_JS__
           return;
         }
         if (payload.item) {
+          applyNativeFeedSnapshot(payload);
           renderLiveEvent(payload.event || nativeMessageItemToEvent(payload.item));
           return;
         }
@@ -17425,7 +17523,7 @@ __ICONS_JS__
     function nativeMessagesStreamPath(afterId) {
       const params = new URLSearchParams();
       if (token) params.set("token", token);
-      if (afterId) params.set("after", String(afterId));
+      if (afterId) params.set("after_update", String(afterId));
       const suffix = params.toString();
       const base = `${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/messages/stream`;
       return suffix ? base + "?" + suffix : base;
@@ -17455,7 +17553,7 @@ __ICONS_JS__
       pollInFlight = true;
       try {
         const snapshot = nativeThreadId
-          ? await api(nativeMessagesPath(`after=${latestVisibleEventId}&limit=100`))
+          ? await api(nativeMessagesPath(`after_update=${nativeUpdateCursor}&limit=100`))
           : await api(eventsPath("after=" + latestEventId + "&limit=100"));
         handleNativeSyncSnapshot(snapshot);
         if (nativeThreadId) {
@@ -17532,10 +17630,7 @@ __ICONS_JS__
       if (!isValidEventObject(event)) return;
       if (!nativeThreadId && event.id && event.id <= latestEventId) return;
       if (nativeThreadId && event.id && hasLoadedEventId(event.id)) {
-        latestStreamEventId = Math.max(latestStreamEventId, event.id);
-        if (!isInternalEvent(event) && event.id) {
-          latestVisibleEventId = Math.max(latestVisibleEventId, event.id);
-        }
+        advanceNativeFeedCursors(event, {visible: !isInternalEvent(event)});
         if (isAssistantMessageEvent(event) || event.kind === "message_completed") {
           loadedEvents = loadedEvents.filter(existing => !existing || existing.id !== event.id);
           loadedEvents.push(event);
@@ -17545,12 +17640,13 @@ __ICONS_JS__
         return;
       }
       const previousLatestTurnId = latestFoldGroupTurnId(foldGroups(dedupeDisplayEvents(loadedEvents)));
-      if (event.id) latestStreamEventId = Math.max(latestStreamEventId, event.id);
       if (!nativeThreadId && event.id) latestEventId = Math.max(latestEventId, event.id);
       const incomingTurnId = eventFoldTurnId(event);
       const duplicateDisplayEvent = isDuplicateDisplayEvent(event, loadedEvents);
       if (!isInternalEvent(event)) {
-        if (event.id) latestVisibleEventId = Math.max(latestVisibleEventId, event.id);
+        advanceNativeFeedCursors(event, {visible: true});
+      } else {
+        advanceNativeFeedCursors(event, {visible: false});
       }
       loadedEvents.push(event);
       scheduleTerminalTranscriptSync(event);
