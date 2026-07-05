@@ -13,6 +13,14 @@ from wlcodex.relay.display import (
 )
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.events import RelayEvent, RelayEventBus
+from wlcodex.relay.graph import (
+    MarvisRelayState,
+    RelayInterrupt,
+    RelayTransition,
+    transition_from_round_control,
+    transition_from_role_envelope,
+    transition_from_role_parse_result,
+)
 from wlcodex.relay.models import HandoffPacket, RelayPendingInput, RelayTask, RelayTaskDetail
 from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
 from wlcodex.relay.store import RELAY_ASSIGNMENT_PREFIX
@@ -593,6 +601,57 @@ class RelayService:
     def get_task(self, task_id: int) -> RelayTaskDetail:
         return self._store.get_task_detail(task_id)
 
+    def build_marvis_relay_state(
+        self,
+        task_id: int,
+        round_id: int | None = None,
+    ) -> MarvisRelayState:
+        return self._store.build_marvis_relay_state(task_id, round_id)
+
+    def _marvis_relay_state_payload(
+        self,
+        task_id: int,
+        round_id: int | None = None,
+    ) -> dict[str, Any]:
+        return self.build_marvis_relay_state(task_id, round_id).to_json_dict()
+
+    def _create_handoff_payload(
+        self,
+        task_id: int,
+        round_id: int,
+        *,
+        from_role: str,
+        to_role: str,
+        summary: str,
+        open_questions: list[str] | None = None,
+        evidence_refs: list[str] | None = None,
+        next_action: str = "",
+        transition: Any | None = None,
+    ) -> dict[str, Any]:
+        handoff = HandoffPacket(
+            from_role=from_role,
+            to_role=to_role,
+            summary=summary,
+            confirmed_facts=[],
+            open_questions=list(open_questions or []),
+            evidence_refs=list(evidence_refs or []),
+            next_action=next_action,
+        )
+        handoff_artifact = self._store.save_handoff_packet(
+            task_id,
+            from_role=from_role,
+            to_role=to_role,
+            packet=handoff,
+        )
+        payload = {
+            **handoff.to_json_dict(),
+            "round_id": int(round_id),
+            "artifact_id": int(getattr(handoff_artifact, "id", 0) or 0),
+        }
+        if transition is not None:
+            payload["relay_transition"] = transition.to_json_dict()
+        return payload
+
     async def ensure_task_lifecycle_current(
         self,
         task_id: int,
@@ -896,7 +955,13 @@ class RelayService:
         dispatch_next: bool = True,
         runtime_event_id: int = 0,
     ):
+        round_id = self._store.current_round_id(task_id)
         result = parse_role_envelope(output)
+        transition = transition_from_role_parse_result(
+            result,
+            role=role,
+            round_id=round_id,
+        )
         if not result.ok or result.envelope is None:
             if _looks_like_relay_protocol_attempt(output):
                 self._record_invalid_semantic_artifact(
@@ -947,7 +1012,6 @@ class RelayService:
                     output=output,
                 )
                 return result
-        round_id = self._store.current_round_id(task_id)
         current_job = next(
             (job for job in detail_for_output.role_jobs if job.role == role),
             None,
@@ -971,7 +1035,11 @@ class RelayService:
             task_id,
             "role.envelope",
             role=role,
-            payload={**envelope_payload, "display_text": display_text},
+            payload={
+                **envelope_payload,
+                "display_text": display_text,
+                "relay_transition": transition.to_json_dict(),
+            },
         )
         saved_artifact = self._store.save_artifact(
             task_id,
@@ -987,6 +1055,8 @@ class RelayService:
         role_status = "passed" if envelope.status == "passed" else envelope.status
         if envelope.status == "waiting" and envelope.handoff_to:
             role_status = "passed"
+        if transition.interrupt is not None and transition.goto == "waiting_user":
+            role_status = "waiting"
         self._store.update_role_status(task_id, role, role_status)
         self._events.emit(
             task_id,
@@ -994,11 +1064,21 @@ class RelayService:
             role=role,
             payload={"status": role_status, "round_id": round_id},
         )
-        if envelope.status == "waiting" and not envelope.handoff_to:
+        if transition.interrupt is not None and transition.goto == "waiting_user":
+            transition = transition_from_role_parse_result(
+                result,
+                role=role,
+                round_id=round_id,
+                artifact_id=int(getattr(saved_artifact, "id", 0) or 0),
+            )
             waiting_reason = (
-                "plan_approval"
-                if envelope.artifact_type == "architecture_plan"
-                else "user_input"
+                transition.interrupt.kind
+                if transition.interrupt is not None
+                else (
+                    "plan_approval"
+                    if envelope.artifact_type == "architecture_plan"
+                    else "user_input"
+                )
             )
             confirmation_payload = {
                 "confirmation_source": "relay_prompt_fallback",
@@ -1017,6 +1097,9 @@ class RelayService:
                 "open_questions": envelope.open_questions,
                 "relay_role": role,
                 "artifact_type": envelope.artifact_type,
+                "relay_interrupt": (
+                    transition.interrupt.to_json_dict() if transition.interrupt else None
+                ),
             }
             if saved_artifact.payload != saved_payload:
                 self._store._ledger._conn.execute(
@@ -1066,6 +1149,10 @@ class RelayService:
                     "summary": envelope.summary,
                     "open_questions": envelope.open_questions,
                     "confirmation_options": envelope.confirmation_options,
+                    "relay_interrupt": (
+                        transition.interrupt.to_json_dict() if transition.interrupt else None
+                    ),
+                    "relay_transition": transition.to_json_dict(),
                     **confirmation_payload,
                 },
             )
@@ -1091,20 +1178,24 @@ class RelayService:
                 )
                 return result
             if next_role == "implementer":
-                handoff = HandoffPacket(
-                    from_role=role,
-                    to_role=next_role,
-                    summary=envelope.summary,
-                    confirmed_facts=[],
-                    open_questions=envelope.open_questions,
-                    evidence_refs=envelope.evidence_refs,
-                    next_action=envelope.next_action,
+                handoff_transition = transition_from_role_envelope(
+                    envelope,
+                    role=role,
+                    round_id=round_id,
+                    next_role=next_role,
+                    artifact_id=int(getattr(saved_artifact, "id", 0) or 0),
+                    prefer_handoff=True,
                 )
-                handoff_artifact = self._store.save_handoff_packet(
+                handoff_payload = self._create_handoff_payload(
                     task_id,
                     from_role=role,
                     to_role=next_role,
-                    packet=handoff,
+                    round_id=round_id,
+                    summary=envelope.summary,
+                    open_questions=envelope.open_questions,
+                    evidence_refs=envelope.evidence_refs,
+                    next_action=envelope.next_action,
+                    transition=handoff_transition,
                 )
                 self._store.update_task_status(task_id, "running")
                 self._store.update_role_status(task_id, next_role, "queued")
@@ -1112,11 +1203,7 @@ class RelayService:
                     task_id,
                     "handoff.created",
                     role=role,
-                    payload={
-                        **handoff.to_json_dict(),
-                        "round_id": round_id,
-                        "artifact_id": int(getattr(handoff_artifact, "id", 0) or 0),
-                    },
+                    payload=handoff_payload,
                 )
                 self._events.emit(
                     task_id,
@@ -1153,7 +1240,12 @@ class RelayService:
                 task_id,
                 "task.completed",
                 role=role,
-                payload={"summary": envelope.summary, "round_id": round_id},
+                payload={
+                    "summary": envelope.summary,
+                    "round_id": round_id,
+                    "relay_transition": transition.to_json_dict(),
+                    "marvis_relay_state": self._marvis_relay_state_payload(task_id, round_id),
+                },
             )
             await self.consume_pending_after_round(
                 task_id,
@@ -1181,37 +1273,29 @@ class RelayService:
                 return result
             if not next_role:
                 return result
-            handoff = HandoffPacket(
-                from_role=role,
-                to_role=next_role,
-                summary=envelope.summary,
-                confirmed_facts=[],
-                open_questions=envelope.open_questions,
-                evidence_refs=envelope.evidence_refs,
-                next_action=envelope.next_action,
-            )
-            handoff_artifact = self._store.save_handoff_packet(
-                task_id,
-                from_role=role,
-                to_role=next_role,
-                packet=handoff,
-            )
             self._store.update_task_status(task_id, "running")
             self._reset_required_roles_after_handoff(
                 task_id,
                 detail=detail,
                 next_role=next_role,
             )
+            handoff_payload = self._create_handoff_payload(
+                task_id,
+                round_id,
+                from_role=role,
+                to_role=next_role,
+                summary=envelope.summary,
+                open_questions=envelope.open_questions,
+                evidence_refs=envelope.evidence_refs,
+                next_action=envelope.next_action,
+                transition=transition,
+            )
             self._store.update_role_status(task_id, next_role, "queued")
             self._events.emit(
                 task_id,
                 "handoff.created",
                 role=role,
-                payload={
-                    **handoff.to_json_dict(),
-                    "round_id": round_id,
-                    "artifact_id": int(getattr(handoff_artifact, "id", 0) or 0),
-                },
+                payload=handoff_payload,
             )
             self._events.emit(
                 task_id,
@@ -1381,6 +1465,11 @@ class RelayService:
             artifact_payload["runtime_event_id"] = runtime_event_id
         if decision["route"] == "waiting_user" or decision["requires_user_approval"]:
             artifact_payload.update(confirmation_payload)
+        transition = transition_from_role_parse_result(
+            result,
+            role=role,
+            round_id=round_id,
+        )
         saved_artifact = self._store.save_artifact(
             task_id,
             role,
@@ -1388,17 +1477,51 @@ class RelayService:
             artifact_payload,
             summary=envelope.summary,
         )
+        if decision["route"] == "waiting_user" or decision["requires_user_approval"]:
+            interrupt_kind = "confirmation_options" if envelope.confirmation_options else "user_input"
+            routing_interrupt = RelayInterrupt(
+                kind=interrupt_kind,
+                role=role,
+                reason=envelope.reason,
+                artifact_type="routing_decision",
+                artifact_id=int(getattr(saved_artifact, "id", 0) or 0),
+                open_questions=list(envelope.open_questions),
+                confirmation_options=[dict(option) for option in envelope.confirmation_options],
+                source="routing_decision",
+                payload=dict(artifact_payload),
+            )
+            transition = RelayTransition(
+                update={
+                    "round_id": int(round_id),
+                    "artifact_type": "routing_decision",
+                    "task_status": "waiting_user",
+                    "role_statuses": {role: "waiting"},
+                },
+                goto="waiting_user",
+                interrupt=routing_interrupt,
+                events=[
+                    {
+                        "event_type": "task.waiting_user",
+                        "role": role,
+                        "round_id": int(round_id),
+                        "interrupt": routing_interrupt.to_json_dict(),
+                    }
+                ],
+            )
+        event_payload = {**artifact_payload, "relay_transition": transition.to_json_dict()}
+        if transition.interrupt is not None:
+            event_payload["relay_interrupt"] = transition.interrupt.to_json_dict()
         self._events.emit(
             task_id,
             "routing.decision",
             role=role,
-            payload=artifact_payload,
+            payload=event_payload,
         )
         self._events.emit(
             task_id,
             "role.envelope",
             role=role,
-            payload=artifact_payload,
+            payload=event_payload,
         )
 
         route = decision["route"]
@@ -1413,6 +1536,9 @@ class RelayService:
             )
             return result
         if route == "waiting_user" or decision["requires_user_approval"]:
+            waiting_reason = (
+                transition.interrupt.kind if transition.interrupt is not None else "user_input"
+            )
             self._store.update_role_status(task_id, role, "waiting")
             execution = self._store.lifecycle.round_execution(task_id, round_id)
             self._store.lifecycle.set_round_execution(
@@ -1423,7 +1549,7 @@ class RelayService:
                 execution_strategy=execution.get("execution_strategy")
                 if isinstance(execution.get("execution_strategy"), dict)
                 else {},
-                waiting_reason="user_input",
+                waiting_reason=waiting_reason,
             )
             self._store.lifecycle.set_round_confirmation(
                 task_id,
@@ -1456,12 +1582,16 @@ class RelayService:
                 payload={
                     "role": role,
                     "round_id": round_id,
-                    "waiting_reason": "user_input",
+                    "waiting_reason": waiting_reason,
                     "artifact_type": "routing_decision",
                     "artifact_id": int(getattr(saved_artifact, "id", 0) or 0),
                     "summary": envelope.summary,
                     "open_questions": envelope.open_questions,
                     "confirmation_options": envelope.confirmation_options,
+                    "relay_interrupt": (
+                        transition.interrupt.to_json_dict() if transition.interrupt else None
+                    ),
+                    "relay_transition": transition.to_json_dict(),
                     **confirmation_payload,
                 },
             )
@@ -1494,31 +1624,29 @@ class RelayService:
             await self.dispatch_role(task_id, role)
             return result
         if next_role:
-            handoff = HandoffPacket(
+            handoff_transition = transition_from_role_envelope(
+                envelope,
+                role=role,
+                round_id=round_id,
+                next_role=next_role,
+            )
+            handoff_payload = self._create_handoff_payload(
+                task_id,
+                round_id,
                 from_role=role,
                 to_role=next_role,
                 summary=envelope.summary,
-                confirmed_facts=[],
                 open_questions=envelope.open_questions,
                 evidence_refs=envelope.evidence_refs,
                 next_action=envelope.next_action,
-            )
-            handoff_artifact = self._store.save_handoff_packet(
-                task_id,
-                from_role=role,
-                to_role=next_role,
-                packet=handoff,
+                transition=handoff_transition,
             )
             self._store.update_role_status(task_id, next_role, "queued")
             self._events.emit(
                 task_id,
                 "handoff.created",
                 role=role,
-                payload={
-                    **handoff.to_json_dict(),
-                    "round_id": round_id,
-                    "artifact_id": int(getattr(handoff_artifact, "id", 0) or 0),
-                },
+                payload=handoff_payload,
             )
             self._events.emit(
                 task_id,
@@ -2238,7 +2366,17 @@ class RelayService:
         if decision == "cancel_plan":
             self._store.lifecycle.clear_round_confirmation(task_id, round_id)
             self._store.update_task_status(task_id, "interrupted")
-            payload = {"decision": decision, "round_id": round_id, "comment": comment}
+            transition = transition_from_round_control(
+                decision=decision,
+                round_id=round_id,
+            )
+            payload = {
+                "decision": decision,
+                "round_id": round_id,
+                "comment": comment,
+                "relay_transition": transition.to_json_dict(),
+                "marvis_relay_state": self._marvis_relay_state_payload(task_id, round_id),
+            }
             self._events.emit(task_id, "round.control", role="user", payload=payload)
             return payload
         if decision in {"revise_plan", "continue"}:
@@ -2282,6 +2420,11 @@ class RelayService:
             self._store.lifecycle.clear_round_confirmation(task_id, round_id)
             self._store.update_task_status(task_id, "running")
             self._store.update_role_status(task_id, waiting_role, "queued")
+            transition = transition_from_round_control(
+                decision=decision,
+                role=waiting_role,
+                round_id=round_id,
+            )
             payload = {
                 "decision": decision,
                 "round_id": round_id,
@@ -2290,6 +2433,8 @@ class RelayService:
                 "selected_option_id": selected_option_id,
                 "selected_option_label": selected_option_label,
                 "selected_option_instruction": selected_option_instruction,
+                "relay_transition": transition.to_json_dict(),
+                "marvis_relay_state": self._marvis_relay_state_payload(task_id, round_id),
             }
             self._events.emit(task_id, "round.control", role="user", payload=payload)
             self._events.emit(
@@ -2344,31 +2489,27 @@ class RelayService:
             route=route,
         )
         if next_role:
-            handoff = HandoffPacket(
+            transition = transition_from_round_control(
+                decision=decision,
+                role=role,
+                round_id=round_id,
+                next_role=next_role,
+            )
+            handoff_payload = self._create_handoff_payload(
+                task_id,
+                round_id,
                 from_role=role,
                 to_role=next_role,
                 summary=str(plan_artifact.get("summary") or "Plan approved"),
-                confirmed_facts=[],
-                open_questions=[],
-                evidence_refs=[],
                 next_action="execute approved plan",
-            )
-            handoff_artifact = self._store.save_handoff_packet(
-                task_id,
-                from_role=role,
-                to_role=next_role,
-                packet=handoff,
+                transition=transition,
             )
             self._store.update_role_status(task_id, next_role, "queued")
             self._events.emit(
                 task_id,
                 "handoff.created",
                 role=role,
-                payload={
-                    **handoff.to_json_dict(),
-                    "round_id": round_id,
-                    "artifact_id": int(getattr(handoff_artifact, "id", 0) or 0),
-                },
+                payload=handoff_payload,
             )
             self._events.emit(
                 task_id,
@@ -2382,11 +2523,19 @@ class RelayService:
             )
             if dispatch_next:
                 await self.dispatch_role(task_id, next_role)
+        else:
+            transition = transition_from_round_control(
+                decision=decision,
+                role=role,
+                round_id=round_id,
+            )
         payload = {
             "decision": decision,
             "round_id": round_id,
             "artifact_id": artifact_id,
             "next_role": next_role or "",
+            "relay_transition": transition.to_json_dict(),
+            "marvis_relay_state": self._marvis_relay_state_payload(task_id, round_id),
         }
         self._events.emit(task_id, "round.control", role="user", payload=payload)
         return payload
@@ -2433,9 +2582,36 @@ class RelayService:
         if decision == "cancel_plan":
             self._store.update_role_status(task_id, role, "interrupted")
             self._store.update_task_status(task_id, "interrupted")
+            transition = transition_from_round_control(
+                decision=decision,
+                role=role,
+                round_id=round_id,
+            )
         else:
             self._store.update_role_status(task_id, role, "streaming")
             self._store.update_task_status(task_id, "running")
+            transition = RelayTransition(
+                update={
+                    "round_id": int(round_id),
+                    "task_status": "running",
+                    "role_statuses": {role: "streaming"},
+                },
+                goto=role,
+                events=[
+                    {
+                        "event_type": "round.control",
+                        "decision": decision,
+                        "round_id": int(round_id),
+                        "role": role,
+                    },
+                    {
+                        "event_type": "role.status",
+                        "role": role,
+                        "round_id": int(round_id),
+                        "status": "streaming",
+                    },
+                ],
+            )
         payload = {
             "decision": decision,
             "round_id": round_id,
@@ -2445,6 +2621,8 @@ class RelayService:
             "confirmation_kind": str(confirmation.get("kind") or ""),
             "provider": provider_name,
             "provider_request_id": request_id,
+            "relay_transition": transition.to_json_dict(),
+            "marvis_relay_state": self._marvis_relay_state_payload(task_id, round_id),
         }
         self._events.emit(task_id, "round.control", role="user", payload=payload)
         return payload
@@ -3039,11 +3217,32 @@ class RelayService:
                 },
             )
         else:
+            transition = RelayTransition(
+                update={
+                    "round_id": round_id,
+                    "task_status": "completed",
+                    "role_statuses": {role: final_role_status},
+                },
+                goto="completed",
+                terminal="completed",
+                events=[
+                    {
+                        "event_type": "task.completed",
+                        "role": role,
+                        "round_id": round_id,
+                    }
+                ],
+            )
             self._events.emit(
                 task_id,
                 "task.completed",
                 role=role,
-                payload={"summary": clean_text, "round_id": round_id},
+                payload={
+                    "summary": clean_text,
+                    "round_id": round_id,
+                    "relay_transition": transition.to_json_dict(),
+                    "marvis_relay_state": self._marvis_relay_state_payload(task_id, round_id),
+                },
             )
         return None
 
@@ -3286,6 +3485,7 @@ class RelayService:
             pass
 
     async def interrupt(self, task_id: int, *, role: str | None = None) -> None:
+        round_id = self._store.current_round_id(task_id)
         if role:
             detail = self._store.get_task_detail(task_id)
             job = next((job for job in detail.role_jobs if job.role == role), None)
@@ -3315,10 +3515,26 @@ class RelayService:
                 task_id,
                 "role.status",
                 role=role,
-                payload={"status": "interrupted"},
+                payload={"status": "interrupted", "round_id": round_id},
             )
             if not has_active_role:
-                self._events.emit(task_id, "task.interrupted", payload={})
+                transition = transition_from_round_control(
+                    decision="cancel_plan",
+                    round_id=round_id,
+                )
+                self._events.emit(
+                    task_id,
+                    "task.interrupted",
+                    payload={
+                        "round_id": round_id,
+                        "role": role,
+                        "relay_transition": transition.to_json_dict(),
+                        "marvis_relay_state": self._marvis_relay_state_payload(
+                            task_id,
+                            round_id,
+                        ),
+                    },
+                )
             return
         detail = self._store.get_task_detail(task_id)
         if detail.task.status not in {"queued", "running", "streaming", "waiting_user"}:
@@ -3328,7 +3544,19 @@ class RelayService:
             if job.status in {"queued", "streaming", "waiting"}:
                 await self._interrupt_native_job(job)
                 self._store.update_role_status(task_id, job.role, "interrupted")
-        self._events.emit(task_id, "task.interrupted", payload={})
+        transition = transition_from_round_control(
+            decision="cancel_plan",
+            round_id=round_id,
+        )
+        self._events.emit(
+            task_id,
+            "task.interrupted",
+            payload={
+                "round_id": round_id,
+                "relay_transition": transition.to_json_dict(),
+                "marvis_relay_state": self._marvis_relay_state_payload(task_id, round_id),
+            },
+        )
 
     async def _mark_role_fallback(
         self,

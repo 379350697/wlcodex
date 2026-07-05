@@ -5,6 +5,8 @@ import json
 from wlcodex.relay.marvis_interaction import (
     chat_events,
     project_marvis_agui_events,
+    project_relay_event_to_marvis_typed_event,
+    project_relay_rows_to_marvis_typed_events,
     project_relay_rows_to_marvis_interactions,
     worklog_events,
 )
@@ -16,6 +18,137 @@ def _kinds(events: list[object]) -> list[str]:
 
 def _bodies(events: list[object]) -> list[str]:
     return [str(getattr(event, "body")) for event in events]
+
+
+def test_project_relay_rows_to_typed_marvis_events_separates_chat_handoff_interrupt_and_worklog() -> None:
+    protocol_payload = {
+        "artifact_type": "architecture_plan",
+        "role": "architect",
+        "status": "waiting",
+        "summary": "Plan is structured.",
+        "handoff_to": "",
+        "next_action": "wait",
+    }
+
+    typed = project_relay_rows_to_marvis_typed_events(
+        [
+            {
+                "role": "architect",
+                "kind": "followup_response",
+                "body": "Plan summary in natural language.",
+                "key": "message:1",
+            },
+            {
+                "role": "architect",
+                "kind": "followup_response",
+                "body": json.dumps(protocol_payload, ensure_ascii=False),
+                "key": "protocol:1",
+            },
+            {
+                "role": "tester",
+                "kind": "handoff",
+                "from_role": "implementer",
+                "to_role": "tester",
+                "body": "",
+                "key": "handoff:1",
+            },
+            {
+                "role": "architect",
+                "kind": "waiting",
+                "body": "Approve the plan?",
+                "status": "waiting_user",
+                "key": "waiting:1",
+            },
+        ]
+    )
+
+    event_types = [event["event_type"] for event in typed]
+    assert event_types.count("marvis.chat.message") == 1
+    assert event_types.count("marvis.chat.handoff") == 1
+    assert event_types.count("marvis.interrupt.requested") == 1
+    assert event_types.count("marvis.worklog.entry") == 1
+
+    chat_bodies = [
+        event["body"]
+        for event in typed
+        if event["event_type"] in {"marvis.chat.message", "marvis.chat.handoff"}
+    ]
+    assert "Plan summary in natural language." in chat_bodies
+    assert not any("architecture_plan" in body for body in chat_bodies)
+
+
+def test_project_relay_sse_payload_to_typed_marvis_event() -> None:
+    handoff = project_relay_event_to_marvis_typed_event(
+        "handoff.created",
+        {
+            "role": "implementer",
+            "payload": {
+                "from_role": "implementer",
+                "to_role": "tester",
+                "summary": "Ready for test.",
+                "round_id": 4,
+            },
+        },
+    )
+    assert handoff is not None
+    assert handoff["event_type"] == "marvis.chat.handoff"
+    assert handoff["role"] == "tester"
+    assert handoff["metadata"]["relay_event_type"] == "handoff.created"
+
+    waiting = project_relay_event_to_marvis_typed_event(
+        "task.waiting_user",
+        {
+            "payload": {
+                "role": "architect",
+                "artifact_type": "architecture_plan",
+                "open_questions": ["Approve?"],
+                "confirmation_options": [
+                    {"id": "approve", "label": "Approve", "instruction": "continue"}
+                ],
+                "relay_interrupt": {
+                    "kind": "plan_approval",
+                    "role": "architect",
+                    "artifact_type": "architecture_plan",
+                },
+                "round_id": 4,
+            }
+        },
+    )
+    assert waiting is not None
+    assert waiting["event_type"] == "marvis.interrupt.requested"
+    assert waiting["role"] == "architect"
+    assert waiting["metadata"]["artifact_type"] == "architecture_plan"
+    assert waiting["metadata"]["confirmation_options"][0]["id"] == "approve"
+    assert waiting["metadata"]["relay_interrupt"]["kind"] == "plan_approval"
+
+    control = project_relay_event_to_marvis_typed_event(
+        "round.control",
+        {
+            "sequence": 8,
+            "payload": {
+                "decision": "continue",
+                "role": "architect",
+                "round_id": 4,
+                "relay_transition": {"goto": "architect"},
+                "marvis_relay_state": {"current_node": "architect"},
+            },
+        },
+    )
+    assert control is not None
+    assert control["event_type"] == "marvis.state.update"
+    assert control["kind"] == "round.control"
+    assert control["metadata"]["decision"] == "continue"
+    assert control["metadata"]["relay_transition"]["goto"] == "architect"
+    assert control["metadata"]["marvis_relay_state"]["current_node"] == "architect"
+
+    role_status = project_relay_event_to_marvis_typed_event(
+        "role.status",
+        {"role": "tester", "payload": {"status": "streaming", "round_id": 4}},
+    )
+    assert role_status is not None
+    assert role_status["event_type"] == "marvis.state.update"
+    assert role_status["role"] == "tester"
+    assert role_status["status"] == "streaming"
 
 
 def test_project_marvis_agui_trace_to_unified_interaction_semantics() -> None:

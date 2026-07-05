@@ -71,8 +71,8 @@ from wlcodex.relay.display import (
 )
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.marvis_interaction import (
-    chat_events as marvis_chat_events,
-    project_relay_rows_to_marvis_interactions,
+    project_relay_event_to_marvis_typed_event,
+    project_relay_rows_to_marvis_typed_events,
 )
 from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
 from wlcodex.relay.work_log_projection import (
@@ -1919,7 +1919,11 @@ class WorkerLiveStreamServer:
                     await self._send_json(writer, 405, {"error": "method not allowed"})
                     return
                 detail = await self._relay_task_detail_after_reconcile(task_id)
-                await self._send_json(writer, 200, detail.to_dict())
+                await self._send_json(
+                    writer,
+                    200,
+                    _relay_task_detail_json_payload(detail, self._relay_service),
+                )
                 return
             if suffix == "/events":
                 if method != "GET":
@@ -2059,10 +2063,11 @@ class WorkerLiveStreamServer:
                     images=_safe_image_attachments(body.get("images")),
                     files=_safe_relay_file_attachments(body.get("files")),
                 )
+                detail = await self._relay_task_detail_after_reconcile(task_id)
                 await self._send_json(
                     writer,
                     200,
-                    (await self._relay_task_detail_after_reconcile(task_id)).to_dict(),
+                    _relay_task_detail_json_payload(detail, self._relay_service),
                 )
                 return
             if suffix == "/resume":
@@ -2089,10 +2094,11 @@ class WorkerLiveStreamServer:
                     role,
                     force=bool(body.get("force")),
                 )
+                detail = await self._relay_task_detail_after_reconcile(task_id)
                 await self._send_json(
                     writer,
                     200,
-                    (await self._relay_task_detail_after_reconcile(task_id)).to_dict(),
+                    _relay_task_detail_json_payload(detail, self._relay_service),
                 )
                 return
             if suffix == "/interrupt":
@@ -2107,10 +2113,11 @@ class WorkerLiveStreamServer:
                     task_id,
                     role=_optional_nonempty_string(body.get("role")),
                 )
+                detail = await self._relay_task_detail_after_reconcile(task_id)
                 await self._send_json(
                     writer,
                     200,
-                    (await self._relay_task_detail_after_reconcile(task_id)).to_dict(),
+                    _relay_task_detail_json_payload(detail, self._relay_service),
                 )
                 return
             await self._send_json(writer, 404, {"error": "not found"})
@@ -3923,7 +3930,7 @@ async def _write_relay_sse_payload(
 
 def _compact_relay_sse_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     if event_type != "role.native_event":
-        return payload
+        return _with_marvis_typed_event(event_type, payload)
     compacted = dict(payload)
     nested = compacted.get("payload")
     if isinstance(nested, dict) and (
@@ -3932,6 +3939,20 @@ def _compact_relay_sse_payload(event_type: str, payload: dict[str, Any]) -> dict
         compacted["payload"] = _compact_relay_native_event_payload(nested)
         return compacted
     return _compact_relay_native_event_payload(compacted)
+
+
+def _with_marvis_typed_event(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    marvis_event = project_relay_event_to_marvis_typed_event(event_type, payload)
+    if marvis_event is None:
+        return payload
+    compacted = dict(payload)
+    compacted.setdefault("marvis_event", marvis_event)
+    nested = compacted.get("payload")
+    if isinstance(nested, dict):
+        nested_payload = dict(nested)
+        nested_payload.setdefault("marvis_event", marvis_event)
+        compacted["payload"] = nested_payload
+    return compacted
 
 
 def _compact_relay_native_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -8007,6 +8028,16 @@ def _relay_latest_event_sequence(events: list[Any] | tuple[Any, ...]) -> int:
     return latest
 
 
+def _relay_task_detail_json_payload(detail: Any, relay_service: Any) -> dict[str, Any]:
+    payload = detail.to_dict() if hasattr(detail, "to_dict") else dict(detail)
+    task_payload = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    task_id = int(getattr(getattr(detail, "task", None), "id", 0) or task_payload.get("id") or 0)
+    round_id = int(getattr(detail, "current_round_id", 0) or payload.get("current_round_id") or 0)
+    state = relay_service.build_marvis_relay_state(task_id, round_id or None)
+    payload["marvis_relay_state"] = state.to_json_dict()
+    return payload
+
+
 def _relay_task_detail_page(
     detail: Any,
     *,
@@ -9019,6 +9050,48 @@ def _relay_task_detail_page(
       const segment = ensureMarvisWorkLogSegment(role || "");
       renderMarvisWorkLogEntry(segment, entry);
     }}
+    function marvisInterruptPayloadFromTypedEvent(payload = {{}}) {{
+      const typedEvent = payload?.marvis_event || {{}};
+      if (typedEvent.event_type !== "marvis.interrupt.requested") return payload || {{}};
+      const metadata = typedEvent.metadata || {{}};
+      const normalized = {{ ...(payload || {{}}) }};
+      normalized.role = typedEvent.role || metadata.role || normalized.role || "director";
+      normalized.summary = typedEvent.body || normalized.summary || normalized.next_action || "";
+      normalized.artifact_type = metadata.artifact_type || normalized.artifact_type || "";
+      normalized.open_questions = Array.isArray(metadata.open_questions)
+        ? metadata.open_questions
+        : (Array.isArray(normalized.open_questions) ? normalized.open_questions : []);
+      normalized.round_id = metadata.round_id || normalized.round_id || "";
+      normalized.marvis_event = typedEvent;
+      return normalized;
+    }}
+    function marvisStateProjectionFromTypedEvent(payload = {{}}) {{
+      const typedEvent = payload?.marvis_event || {{}};
+      const metadata = typedEvent.metadata || {{}};
+      const state = metadata.marvis_relay_state && typeof metadata.marvis_relay_state === "object"
+        ? metadata.marvis_relay_state
+        : (payload.marvis_relay_state && typeof payload.marvis_relay_state === "object" ? payload.marvis_relay_state : {{}});
+      const transition = metadata.relay_transition && typeof metadata.relay_transition === "object"
+        ? metadata.relay_transition
+        : (payload.relay_transition && typeof payload.relay_transition === "object" ? payload.relay_transition : {{}});
+      return {{ typedEvent, metadata, state, transition }};
+    }}
+    function applyMarvisRelayStateProjection(payload = {{}}) {{
+      const projection = marvisStateProjectionFromTypedEvent(payload);
+      const state = projection.state || {{}};
+      if (!Object.keys(state).length) return false;
+      if (state.round_id) {{
+        activeRelayRoundId = String(state.round_id);
+        if (followupComposer) followupComposer.dataset.currentRoundId = activeRelayRoundId;
+      }}
+      if (state.terminal_status) updateTaskStatus(state.terminal_status);
+      else if (state.current_node === "waiting_user") updateTaskStatus("waiting_user");
+      else if (state.current_node) updateTaskStatus("running");
+      Object.entries(state.role_statuses || {{}}).forEach(([role, status]) => {{
+        setRoleStatus(role, status, {{ force: true }});
+      }});
+      return true;
+    }}
     function renderMarvisWorkLogConfirmation(payload = {{}}) {{
       if (!marvisWorkLogBody || !payload) return;
       const role = payload.role || "director";
@@ -9955,12 +10028,15 @@ def _relay_task_detail_page(
     addRelayEventListener("round.control", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
+      const stateProjection = marvisStateProjectionFromTypedEvent(payload);
+      const appliedState = applyMarvisRelayStateProjection(payload);
       hidePlanControlSurface();
-      if (payload.decision === "cancel_plan") {{
+      const decision = stateProjection.metadata.decision || payload.decision || "";
+      if (!appliedState && decision === "cancel_plan") {{
         updateTaskStatus("interrupted");
-      }} else {{
+      }} else if (!appliedState) {{
         updateTaskStatus("running");
-        const nextRole = payload.next_role || payload.role || "";
+        const nextRole = stateProjection.transition.goto || payload.next_role || payload.role || "";
         if (nextRole) setRoleStatus(nextRole, "queued", {{ force: true }});
       }}
       waitingControlInput = "";
@@ -10074,8 +10150,9 @@ def _relay_task_detail_page(
     }});
     addRelayEventListener("handoff.created", (event) => {{
       const payload = parseRelayEvent(event);
-      const toRole = payload.to_role || payload.handoff_to;
-      const fromRole = payload.from_role || "";
+      const marvisMetadata = payload.marvis_event?.metadata || {{}};
+      const toRole = marvisMetadata.to_role || payload.to_role || payload.handoff_to;
+      const fromRole = marvisMetadata.from_role || payload.from_role || "";
       const roundId = String(payload.round_id || "1");
       if (!isCurrentRoundEvent(payload)) return;
       if (toRole) setRoleStatus(toRole, "queued");
@@ -10085,27 +10162,32 @@ def _relay_task_detail_page(
     addRelayEventListener("role.status", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
+      const stateProjection = marvisStateProjectionFromTypedEvent(payload);
       const reason = payload.reason || payload.payload?.reason || "";
       const force = reason === "new_followup_turn";
       if (force) clearMarvisConversationPausedRows();
-      setRoleStatus(payload.role, payload.status, {{ force }});
-      if (TERMINAL_ROLE_STATUSES.has(payload.status)) {{
+      const role = stateProjection.typedEvent.role || payload.role;
+      const status = stateProjection.typedEvent.status || stateProjection.metadata.status || payload.status;
+      setRoleStatus(role, status, {{ force }});
+      if (TERMINAL_ROLE_STATUSES.has(status)) {{
         hidePlanControlSurface();
-        clearRolePreview(payload.role);
+        clearRolePreview(role);
       }}
     }});
     addRelayEventListener("task.waiting_user", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
+      const interruptPayload = marvisInterruptPayloadFromTypedEvent(payload);
       updateTaskStatus("waiting_user");
-      setRoleStatus(payload.role || "director", "waiting", {{ force: true }});
-      renderMarvisWorkLogConfirmation(payload);
-      ensurePlanControl(payload);
+      setRoleStatus(interruptPayload.role || "director", "waiting", {{ force: true }});
+      renderMarvisWorkLogConfirmation(interruptPayload);
+      ensurePlanControl(interruptPayload);
     }});
     addRelayEventListener("task.completed", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       hidePlanControlSurface();
+      applyMarvisRelayStateProjection(payload);
       updateTaskStatus("completed");
       clearAllRolePreviews();
     }});
@@ -10113,6 +10195,7 @@ def _relay_task_detail_page(
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
       hidePlanControlSurface();
+      applyMarvisRelayStateProjection(payload);
       updateTaskStatus("interrupted");
       clearAllRolePreviews();
     }});
@@ -10870,8 +10953,17 @@ def _relay_product_process_body(
 def _marvis_chat_rows_from_relay_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     chat_rows: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
-    for event in marvis_chat_events(project_relay_rows_to_marvis_interactions(rows)):
-        row = event.metadata.get("relay_row")
+    for event in project_relay_rows_to_marvis_typed_events(rows):
+        if str(event.get("event_type") or "") not in {
+            "marvis.chat.message",
+            "marvis.chat.handoff",
+            "marvis.interrupt.requested",
+        }:
+            continue
+        metadata = event.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        row = metadata.get("relay_row")
         if not isinstance(row, dict):
             continue
         key = str(row.get("key") or "")

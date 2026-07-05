@@ -373,6 +373,200 @@ def project_relay_rows_to_marvis_interactions(
     return projected
 
 
+def project_relay_rows_to_marvis_typed_events(
+    rows: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return marvis_typed_events(project_relay_rows_to_marvis_interactions(rows))
+
+
+def marvis_typed_events(events: Iterable[MarvisInteractionEvent]) -> list[dict[str, Any]]:
+    return [_marvis_typed_event(event) for event in events]
+
+
+def project_relay_event_to_marvis_typed_event(
+    event_type: str,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    relay_event_type = str(event_type or "").strip()
+    source = payload if isinstance(payload, dict) else {}
+    nested = source.get("payload")
+    event_payload = nested if isinstance(nested, dict) else source
+    role = str(event_payload.get("role") or source.get("role") or "").strip()
+    round_id = str(event_payload.get("round_id") or source.get("round_id") or "").strip()
+    metadata = {
+        "relay_event_type": relay_event_type,
+        "round_id": round_id,
+    }
+    if relay_event_type == "handoff.created":
+        to_role = str(event_payload.get("to_role") or event_payload.get("handoff_to") or role)
+        from_role = str(event_payload.get("from_role") or source.get("role") or "")
+        return {
+            "event_type": "marvis.chat.handoff",
+            "kind": "agent.handoff",
+            "surface": CHAT_SURFACE,
+            "sequence": int(source.get("sequence") or 0),
+            "role": to_role,
+            "title": "",
+            "body": _handoff_text(_public_agent_name(from_role), _public_agent_name(to_role)),
+            "status": str(event_payload.get("status") or "queued"),
+            "tool_name": "",
+            "source_kind": relay_event_type,
+            "metadata": {
+                **metadata,
+                "from_role": from_role,
+                "to_role": to_role,
+            },
+        }
+    if relay_event_type == "task.waiting_user":
+        artifact_type = str(event_payload.get("artifact_type") or "")
+        return {
+            "event_type": "marvis.interrupt.requested",
+            "kind": "task.paused",
+            "surface": CHAT_SURFACE,
+            "sequence": int(source.get("sequence") or 0),
+            "role": role,
+            "title": "",
+            "body": str(event_payload.get("summary") or event_payload.get("waiting_reason") or ""),
+            "status": "waiting_user",
+            "tool_name": "",
+            "source_kind": relay_event_type,
+            "metadata": {
+                **metadata,
+                "artifact_type": artifact_type,
+                "open_questions": list(event_payload.get("open_questions") or []),
+                "confirmation_options": [
+                    dict(option)
+                    for option in event_payload.get("confirmation_options", [])
+                    if isinstance(option, dict)
+                ],
+                "relay_interrupt": _clean_metadata_dict(
+                    event_payload.get("relay_interrupt") or event_payload.get("interrupt")
+                ),
+            },
+        }
+    if relay_event_type == "round.control":
+        decision = str(event_payload.get("decision") or "")
+        return {
+            "event_type": "marvis.state.update",
+            "kind": "round.control",
+            "surface": STATE_SURFACE,
+            "sequence": int(source.get("sequence") or 0),
+            "role": role,
+            "title": "",
+            "body": str(event_payload.get("comment") or ""),
+            "status": "interrupted" if decision == "cancel_plan" else "running",
+            "tool_name": "",
+            "source_kind": relay_event_type,
+            "metadata": {
+                **metadata,
+                "decision": decision,
+                "relay_transition": _clean_metadata_dict(
+                    event_payload.get("relay_transition")
+                ),
+                "marvis_relay_state": _clean_metadata_dict(
+                    event_payload.get("marvis_relay_state")
+                ),
+            },
+        }
+    if relay_event_type == "role.status":
+        status = str(event_payload.get("status") or source.get("status") or "")
+        return {
+            "event_type": "marvis.state.update",
+            "kind": "role.status",
+            "surface": STATE_SURFACE,
+            "sequence": int(source.get("sequence") or 0),
+            "role": role,
+            "title": "",
+            "body": "",
+            "status": status,
+            "tool_name": "",
+            "source_kind": relay_event_type,
+            "metadata": {
+                **metadata,
+                "status": status,
+            },
+        }
+    if relay_event_type in {"role.envelope", "routing.decision"}:
+        artifact_type = str(event_payload.get("artifact_type") or "")
+        return {
+            "event_type": "marvis.worklog.entry",
+            "kind": "worklog.entry",
+            "surface": WORKLOG_SURFACE,
+            "sequence": int(source.get("sequence") or 0),
+            "role": role,
+            "title": artifact_type,
+            "body": str(
+                event_payload.get("display_text")
+                or event_payload.get("summary")
+                or event_payload.get("reason")
+                or ""
+            ),
+            "status": str(event_payload.get("status") or ""),
+            "tool_name": "",
+            "source_kind": relay_event_type,
+            "metadata": {
+                **metadata,
+                "artifact_type": artifact_type,
+            },
+        }
+    if relay_event_type in {"task.completed", "task.interrupted"}:
+        status = "completed" if relay_event_type == "task.completed" else "interrupted"
+        return {
+            "event_type": "marvis.state.update",
+            "kind": relay_event_type,
+            "surface": STATE_SURFACE,
+            "sequence": int(source.get("sequence") or 0),
+            "role": role,
+            "title": "",
+            "body": str(event_payload.get("summary") or ""),
+            "status": status,
+            "tool_name": "",
+            "source_kind": relay_event_type,
+            "metadata": {
+                **metadata,
+                "relay_transition": _clean_metadata_dict(
+                    event_payload.get("relay_transition")
+                ),
+                "marvis_relay_state": _clean_metadata_dict(
+                    event_payload.get("marvis_relay_state")
+                ),
+            },
+        }
+    return None
+
+
+def _marvis_typed_event(event: MarvisInteractionEvent) -> dict[str, Any]:
+    return {
+        "event_type": _marvis_typed_event_type(event),
+        "kind": event.kind,
+        "surface": event.surface,
+        "sequence": event.sequence,
+        "role": event.role,
+        "title": event.title,
+        "body": event.body,
+        "status": event.status,
+        "tool_name": event.tool_name,
+        "source_kind": event.source_kind,
+        "metadata": dict(event.metadata),
+    }
+
+
+def _marvis_typed_event_type(event: MarvisInteractionEvent) -> str:
+    if event.surface == CHAT_SURFACE and event.kind == "agent.handoff":
+        return "marvis.chat.handoff"
+    if event.source_kind == "waiting" or event.kind == "task.paused":
+        return "marvis.interrupt.requested"
+    if event.surface == CHAT_SURFACE:
+        return "marvis.chat.message"
+    if event.surface == WORKLOG_SURFACE:
+        return "marvis.worklog.entry"
+    return "marvis.state.update"
+
+
+def _clean_metadata_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _relay_worklog_entry(row: dict[str, Any], *, sequence: int) -> MarvisInteractionEvent:
     body = str(row.get("body") or "")
     if not body.strip():

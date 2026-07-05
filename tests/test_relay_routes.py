@@ -338,6 +338,10 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
     assert "HTTP/1.1 200 OK" in get_response
     detail = _json_body(get_response)
     assert detail["task"]["id"] == task_id
+    assert detail["marvis_relay_state"]["task_id"] == task_id
+    assert detail["marvis_relay_state"]["round_id"] == 1
+    assert detail["marvis_relay_state"]["current_node"] == "director"
+    assert detail["marvis_relay_state"]["role_statuses"]["director"] == "streaming"
     assert [job["role"] for job in detail["role_jobs"]] == [
         "director",
         "architect",

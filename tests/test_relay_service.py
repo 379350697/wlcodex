@@ -1388,6 +1388,19 @@ def test_auditor_failed_review_returns_to_implementer_for_rework(
     assert detail.task.status == "running"
     assert jobs["auditor"].status == "failed"
     assert jobs["implementer"].status == "queued"
+    auditor_handoff = [
+        event
+        for event in service.events_for_task(task.id)
+        if event.event_type == "handoff.created" and event.role == "auditor"
+    ][-1]
+    auditor_transition = auditor_handoff.payload["relay_transition"]
+    assert auditor_transition["goto"] == "implementer"
+    assert auditor_transition["terminal"] == ""
+    assert auditor_transition["update"]["task_status"] == "running"
+    assert auditor_transition["update"]["role_statuses"] == {
+        "auditor": "failed",
+        "implementer": "queued",
+    }
 
     asyncio.run(
         service.handle_role_output(
@@ -1741,6 +1754,14 @@ def test_round_control_continue_resumes_waiting_role_in_same_round(tmp_path) -> 
             dispatch_next=False,
         )
     )
+    waiting_event = [
+        event for event in service.events_for_task(task.id) if event.event_type == "task.waiting_user"
+    ][-1]
+    assert waiting_event.payload["relay_interrupt"]["kind"] == "user_input"
+    assert waiting_event.payload["relay_interrupt"]["role"] == "director"
+    assert waiting_event.payload["relay_transition"]["interrupt"] == waiting_event.payload[
+        "relay_interrupt"
+    ]
 
     result = asyncio.run(
         service.apply_round_control(
@@ -1758,6 +1779,60 @@ def test_round_control_continue_resumes_waiting_role_in_same_round(tmp_path) -> 
     assert service._store.lifecycle.round_execution(task.id, 1)["waiting_reason"] == "none"
     assert {job.role: job.status for job in detail.role_jobs}["director"] == "streaming"
     assert provider.calls[-1][0] == "start_session"
+
+
+def test_round_control_cancel_interrupts_waiting_round_with_transition(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "director",
+            """
+            {
+              "status": "waiting",
+              "reason": "needs user input",
+              "role": "director",
+              "artifact_type": "routing_decision",
+              "handoff_to": "",
+              "summary": "Need clarification",
+              "evidence_refs": [],
+              "open_questions": ["Which path should we take?"],
+              "next_action": "wait for user",
+              "complexity": "standard",
+              "risk": "medium",
+              "route": "waiting_user",
+              "required_roles": ["director"],
+              "acceptance_criteria": ["clarify route"],
+              "stop_conditions": [],
+              "requires_user_approval": true
+            }
+            """,
+            dispatch_next=False,
+        )
+    )
+
+    result = asyncio.run(
+        service.apply_round_control(
+            task.id,
+            1,
+            decision="cancel_plan",
+            comment="Stop this round.",
+            dispatch_next=False,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    assert detail.task.status == "interrupted"
+    assert result["relay_transition"]["goto"] == "interrupted"
+    assert result["relay_transition"]["terminal"] == "interrupted"
+    assert result["marvis_relay_state"]["terminal_status"] == "interrupted"
+    assert result["marvis_relay_state"]["pending_interrupt"] is None
 
 
 def test_round_control_revise_records_comment_for_current_waiting_round(tmp_path) -> None:
@@ -2016,6 +2091,9 @@ def test_codex_approval_runtime_event_records_native_confirmation_provenance(
     )
 
     assert result["confirmation_source"] == "provider_native_approval"
+    assert result["relay_transition"]["goto"] == "director"
+    assert result["relay_transition"]["update"]["task_status"] == "running"
+    assert result["relay_transition"]["update"]["role_statuses"] == {"director": "streaming"}
     assert provider.calls[-1] == (
         "resolve_approval",
         "req-1",
@@ -6402,7 +6480,10 @@ def test_auditor_passed_returns_to_director_then_final_summary_completes_task(
 
     detail = service.get_task(task.id)
     assert detail.task.status == "completed"
-    assert service.events_for_task(task.id)[-1].event_type == "task.completed"
+    completed_event = service.events_for_task(task.id)[-1]
+    assert completed_event.event_type == "task.completed"
+    assert completed_event.payload["relay_transition"]["terminal"] == "completed"
+    assert completed_event.payload["marvis_relay_state"]["terminal_status"] == "completed"
 
 
 def test_single_role_interrupt_stops_native_session_and_interrupts_task_when_no_roles_active(

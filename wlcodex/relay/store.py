@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
 from wlcodex.models import TeamAgentJob, TeamArtifact, TeamRun
 from wlcodex.relay.artifact_types import is_relay_artifact_type
 from wlcodex.relay.context import build_relay_board
+from wlcodex.relay.graph import MarvisRelayState, build_marvis_relay_state
 from wlcodex.relay.lifecycle import RelayLifecycleStore
 from wlcodex.relay.models import (
     RELAY_ROLE_IDS,
@@ -344,6 +346,56 @@ class RelayStore:
             current_round_id=current_round_id,
             pending_inputs=self.list_pending_inputs(task_id),
             round_execution=self.lifecycle.round_execution(task_id, current_round_id),
+        )
+
+    def build_marvis_relay_state(
+        self,
+        task_id: int,
+        round_id: int | None = None,
+    ) -> MarvisRelayState:
+        detail = self.get_task_detail(task_id)
+        target_round_id = int(round_id or detail.current_round_id or 1)
+        if target_round_id != int(detail.current_round_id or 1):
+            detail = self._task_detail_for_round_projection(detail, target_round_id)
+        return build_marvis_relay_state(
+            detail,
+            round_id=target_round_id,
+        )
+
+    def _task_detail_for_round_projection(
+        self,
+        detail: RelayTaskDetail,
+        round_id: int,
+    ) -> RelayTaskDetail:
+        target_round_id = int(round_id or 1)
+        round_artifacts = _artifacts_for_round(detail.artifacts, target_round_id)
+        round_status = self.lifecycle.round_status(detail.task.id, target_round_id)
+        task = replace(detail.task, status=round_status)
+        role_jobs = self._role_jobs_for_round(
+            detail.task.id,
+            target_round_id,
+            artifacts=round_artifacts,
+        )
+        return RelayTaskDetail(
+            task=task,
+            board=self._latest_board(task, round_artifacts or detail.artifacts),
+            role_jobs=role_jobs,
+            artifacts=detail.artifacts,
+            latest_handoff=self._latest_handoff(round_artifacts),
+            session_links=[
+                RelaySessionLink(
+                    role=job.role,
+                    provider=job.provider,
+                    native_session_id=job.native_session_id,
+                    url=f"/native/{job.provider}?native_thread_id={job.native_session_id}",
+                )
+                for job in role_jobs
+                if job.provider and job.native_session_id
+            ],
+            routing_decision=_latest_routing_decision(round_artifacts),
+            current_round_id=target_round_id,
+            pending_inputs=detail.pending_inputs,
+            round_execution=self.lifecycle.round_execution(detail.task.id, target_round_id),
         )
 
     def save_context_packet(
@@ -750,6 +802,38 @@ class RelayStore:
                 )
             )
         return jobs
+
+    def _role_jobs_for_round(
+        self,
+        task_id: int,
+        round_id: int,
+        *,
+        artifacts: list[dict[str, Any]],
+    ) -> list[RelayRoleJob]:
+        attempts = self.lifecycle.attempts_for_round(task_id, round_id)
+        jobs = self._role_jobs(task_id, artifacts=artifacts)
+        projected: list[RelayRoleJob] = []
+        for job in jobs:
+            attempt = attempts.get(job.role)
+            if attempt is None:
+                projected.append(replace(job, status="idle"))
+                continue
+            projected.append(
+                replace(
+                    job,
+                    status=attempt.status,
+                    provider=attempt.provider or job.provider,
+                    native_session_id=attempt.native_session_id or job.native_session_id,
+                    agent_run_id=(
+                        attempt.agent_run_id
+                        if attempt.agent_run_id is not None
+                        else job.agent_run_id
+                    ),
+                    turn_id=attempt.turn_id or job.turn_id,
+                    active_turn_id=attempt.active_turn_id or job.active_turn_id,
+                )
+            )
+        return projected
 
     def _team_job_for_role(self, task_id: int, role: str) -> TeamAgentJob:
         for job in self._ledger.list_team_agent_jobs(task_id):

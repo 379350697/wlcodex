@@ -6,6 +6,14 @@ from wlcodex.relay.artifact_types import (
 from wlcodex.relay.context import build_relay_board, build_role_context_packet
 from wlcodex.relay.envelopes import default_handoff_target, parse_role_envelope
 from wlcodex.relay.events import RelayEvent, RelayEventBus
+from wlcodex.relay.graph import (
+    MarvisRelayState,
+    RelayInterrupt,
+    RelayTransition,
+    build_marvis_relay_state,
+    transition_from_round_control,
+    transition_from_role_parse_result,
+)
 from wlcodex.relay.models import (
     RELAY_ARTIFACT_TYPES,
     RELAY_ROLE_JOB_STATUSES,
@@ -36,6 +44,9 @@ __all__ = [
     "RelayBoard",
     "RelayEvent",
     "RelayEventBus",
+    "RelayInterrupt",
+    "RelayTransition",
+    "MarvisRelayState",
     "RelayOnsiteBridge",
     "RelayRoleJob",
     "RelayService",
@@ -46,7 +57,10 @@ __all__ = [
     "RoleContextPacket",
     "RoleEnvelope",
     "build_relay_board",
+    "build_marvis_relay_state",
     "build_role_context_packet",
     "default_handoff_target",
     "parse_role_envelope",
+    "transition_from_round_control",
+    "transition_from_role_parse_result",
 ]

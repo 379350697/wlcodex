@@ -1104,7 +1104,7 @@ async def test_relay_task_detail_shows_generic_waiting_confirmation_card_with_op
     assert "/rounds/${encodeURIComponent(roundId)}/control" in response
     assert "confirmation_source" in response
     assert "function renderMarvisWorkLogConfirmation" in response
-    assert "renderMarvisWorkLogConfirmation(payload);" in response
+    assert "renderMarvisWorkLogConfirmation(interruptPayload);" in response
     assert "Relay 澄清确认" in response
 
 
@@ -1717,6 +1717,147 @@ def test_relay_projected_rows_prunes_direct_final_summary_by_round() -> None:
         and row.get("body") == "第二轮已直接完成，并保持对话区简洁。"
         for row in rows
     )
+
+
+def test_marvis_chat_rows_prefers_typed_projection(monkeypatch: pytest.MonkeyPatch) -> None:
+    from wlcodex.live_stream import server as live_server
+
+    source_rows = [{"kind": "followup_response", "key": "source:1", "body": "source"}]
+
+    def fail_legacy_projection(_rows: list[dict[str, Any]]) -> list[Any]:
+        raise AssertionError("legacy Marvis projection should not be used")
+
+    def fake_typed_projection(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        assert rows is source_rows
+        return [
+            {
+                "event_type": "marvis.chat.message",
+                "metadata": {"relay_row": {"kind": "followup_response", "key": "typed:1"}},
+            },
+            {
+                "event_type": "marvis.worklog.entry",
+                "metadata": {"relay_row": {"kind": "role_envelope", "key": "worklog:1"}},
+            },
+            {
+                "event_type": "marvis.chat.handoff",
+                "metadata": {"relay_row": {"kind": "handoff", "key": "typed:handoff"}},
+            },
+        ]
+
+    monkeypatch.setattr(
+        live_server,
+        "project_relay_rows_to_marvis_interactions",
+        fail_legacy_projection,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        live_server,
+        "project_relay_rows_to_marvis_typed_events",
+        fake_typed_projection,
+        raising=False,
+    )
+
+    assert live_server._marvis_chat_rows_from_relay_rows(source_rows) == [
+        {"kind": "followup_response", "key": "typed:1"},
+        {"kind": "handoff", "key": "typed:handoff"},
+    ]
+
+
+def test_relay_sse_payload_includes_marvis_typed_event_without_changing_event_type() -> None:
+    from wlcodex.live_stream.server import _compact_relay_sse_payload
+
+    payload = {
+        "event_type": "handoff.created",
+        "sequence": 9,
+        "role": "implementer",
+        "payload": {
+            "from_role": "implementer",
+            "to_role": "tester",
+            "summary": "Ready for test.",
+            "round_id": 2,
+        },
+    }
+
+    compacted = _compact_relay_sse_payload("handoff.created", payload)
+
+    assert compacted["event_type"] == "handoff.created"
+    assert compacted["marvis_event"]["event_type"] == "marvis.chat.handoff"
+    assert compacted["marvis_event"]["role"] == "tester"
+    assert compacted["payload"]["marvis_event"] == compacted["marvis_event"]
+
+    resumed = _compact_relay_sse_payload(
+        "round.control",
+        {
+            "event_type": "round.control",
+            "sequence": 9,
+            "role": "user",
+            "payload": {
+                "decision": "continue",
+                "round_id": 1,
+                "role": "architect",
+                "relay_transition": {"goto": "architect"},
+                "marvis_relay_state": {"current_node": "architect"},
+            },
+        },
+    )
+    assert resumed["marvis_event"]["event_type"] == "marvis.state.update"
+    assert resumed["marvis_event"]["metadata"]["decision"] == "continue"
+    assert resumed["payload"]["marvis_event"] == resumed["marvis_event"]
+
+    status = _compact_relay_sse_payload(
+        "role.status",
+        {
+            "event_type": "role.status",
+            "sequence": 10,
+            "role": "architect",
+            "payload": {"status": "streaming", "round_id": 1},
+        },
+    )
+    assert status["marvis_event"]["event_type"] == "marvis.state.update"
+    assert status["marvis_event"]["kind"] == "role.status"
+    assert status["marvis_event"]["status"] == "streaming"
+
+
+def test_relay_task_detail_payload_includes_marvis_relay_state(tmp_path: Path) -> None:
+    from wlcodex.live_stream.server import _relay_task_detail_json_payload
+
+    _server_instance, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="State payload",
+        prompt="Expose canonical relay state",
+        workspace="/repo",
+        provider="claude",
+    )
+
+    payload = _relay_task_detail_json_payload(service.get_task(task.id), service)
+
+    assert payload["task"]["id"] == task.id
+    assert payload["marvis_relay_state"]["task_id"] == task.id
+    assert payload["marvis_relay_state"]["round_id"] == 1
+    assert payload["marvis_relay_state"]["current_node"] == "director"
+    assert payload["marvis_relay_state"]["latest_user_input"] == "Expose canonical relay state"
+
+
+def test_marvis_waiting_user_handler_prefers_typed_interrupt_projection(tmp_path: Path) -> None:
+    from wlcodex.live_stream.server import _relay_task_detail_page
+
+    _server_instance, service, _runtime_store = _server(tmp_path)
+    task = service.create_task(
+        title="Typed interrupt UI",
+        prompt="Prefer typed interrupt event",
+        workspace="/repo",
+        provider="claude",
+    )
+
+    page = _relay_task_detail_page(service.get_task(task.id), access_token="secret")
+    waiting_handler = page.split('addRelayEventListener("task.waiting_user"', 1)[1]
+    waiting_handler = waiting_handler.split('addRelayEventListener("task.completed"', 1)[0]
+
+    assert "function marvisInterruptPayloadFromTypedEvent" in page
+    assert "const interruptPayload = marvisInterruptPayloadFromTypedEvent(payload);" in waiting_handler
+    assert "renderMarvisWorkLogConfirmation(interruptPayload);" in waiting_handler
+    assert "ensurePlanControl(interruptPayload);" in waiting_handler
+    assert "renderMarvisWorkLogConfirmation(payload);" not in waiting_handler
 
 
 @pytest.mark.asyncio
@@ -3854,9 +3995,12 @@ async def test_relay_task_detail_does_not_show_stale_round_final_summary_as_assi
     status_handler = response.split('addRelayEventListener("role.status"', 1)[1]
     status_handler = status_handler.split('addRelayEventListener("task.completed"', 1)[0]
     assert "if (!isCurrentRoundEvent(payload)) return;" in status_handler
+    assert "const stateProjection = marvisStateProjectionFromTypedEvent(payload);" in status_handler
+    assert "stateProjection.typedEvent.status" in status_handler
     completed_handler = response.split('addRelayEventListener("task.completed"', 1)[1]
     completed_handler = completed_handler.split('addRelayEventListener("task.interrupted"', 1)[0]
     assert "if (!isCurrentRoundEvent(payload)) return;" in completed_handler
+    assert "applyMarvisRelayStateProjection(payload);" in completed_handler
 
 
 @pytest.mark.asyncio
