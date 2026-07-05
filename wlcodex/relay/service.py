@@ -17,9 +17,14 @@ from wlcodex.relay.graph import (
     MarvisRelayState,
     RelayInterrupt,
     RelayTransition,
+    transition_from_guardrail_result,
     transition_from_round_control,
     transition_from_role_envelope,
     transition_from_role_parse_result,
+)
+from wlcodex.relay.guardrails import (
+    RoleGuardrailAction,
+    guardrail_role_envelope,
 )
 from wlcodex.relay.models import HandoffPacket, RelayPendingInput, RelayTask, RelayTaskDetail
 from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
@@ -957,11 +962,6 @@ class RelayService:
     ):
         round_id = self._store.current_round_id(task_id)
         result = parse_role_envelope(output)
-        transition = transition_from_role_parse_result(
-            result,
-            role=role,
-            round_id=round_id,
-        )
         if not result.ok or result.envelope is None:
             if _looks_like_relay_protocol_attempt(output):
                 self._record_invalid_semantic_artifact(
@@ -987,6 +987,52 @@ class RelayService:
             return result
 
         envelope = result.envelope
+        guardrail = guardrail_role_envelope(envelope, role=role)
+        if not guardrail.accepted:
+            guardrail_transition = transition_from_guardrail_result(
+                action=str(guardrail.action),
+                role=role,
+                round_id=round_id,
+                reason=guardrail.reason,
+                open_questions=list(guardrail.open_questions),
+                confirmation_options=[dict(option) for option in guardrail.confirmation_options],
+            )
+            if (
+                guardrail.action == RoleGuardrailAction.RETRY_ROLE
+                and dispatch_next
+                and await self._retry_role_guardrail(
+                    task_id,
+                    role,
+                    error=guardrail.reason,
+                    output=output,
+                    transition=guardrail_transition,
+                )
+            ):
+                return result
+            if guardrail.action == RoleGuardrailAction.WAITING_USER:
+                self._wait_role_with_guardrail(
+                    task_id,
+                    role,
+                    guardrail.reason,
+                    output=output,
+                    transition=guardrail_transition,
+                )
+                return result
+            self._block_role_with_error(
+                task_id,
+                role,
+                guardrail.reason,
+                output=output,
+                retry_kind="guardrail",
+                guardrail_action=str(guardrail.action),
+                transition=guardrail_transition,
+            )
+            return result
+        transition = transition_from_role_parse_result(
+            result,
+            role=role,
+            round_id=round_id,
+        )
         if envelope.artifact_type == "routing_decision":
             return await self._handle_routing_decision(
                 task_id,
@@ -1803,26 +1849,124 @@ class RelayService:
         reason: str,
         *,
         output: str = "",
+        retry_kind: str = "",
+        guardrail_action: str = "",
+        transition: RelayTransition | None = None,
     ) -> None:
         round_id = self._store.current_round_id(task_id)
+        artifact_payload = {
+            "error": reason,
+            "output": output,
+            "round_id": round_id,
+        }
+        if retry_kind:
+            artifact_payload["retry_kind"] = retry_kind
+        if guardrail_action:
+            artifact_payload["guardrail_action"] = guardrail_action
         self._store.save_artifact(
+            task_id,
+            role,
+            "role_error",
+            artifact_payload,
+            summary=reason,
+        )
+        self._store.update_role_status(task_id, role, "blocked")
+        self._store.update_task_status(task_id, "blocked")
+        event_payload = {"status": "blocked", "error": reason, "round_id": round_id}
+        if retry_kind:
+            event_payload["retry_kind"] = retry_kind
+        if guardrail_action:
+            event_payload["guardrail_action"] = guardrail_action
+        if transition is not None:
+            event_payload["relay_transition"] = transition.to_json_dict()
+        self._events.emit(
+            task_id,
+            "role.status",
+            role=role,
+            payload=event_payload,
+        )
+
+    def _wait_role_with_guardrail(
+        self,
+        task_id: int,
+        role: str,
+        reason: str,
+        *,
+        output: str,
+        transition: RelayTransition,
+    ) -> None:
+        round_id = self._store.current_round_id(task_id)
+        interrupt = transition.interrupt
+        open_questions = list(interrupt.open_questions if interrupt else [])
+        confirmation_options = [
+            dict(option) for option in (interrupt.confirmation_options if interrupt else [])
+        ]
+        artifact = self._store.save_artifact(
             task_id,
             role,
             "role_error",
             {
                 "error": reason,
                 "output": output,
+                "status": "waiting",
+                "retry_kind": "guardrail",
+                "guardrail_action": "waiting_user",
                 "round_id": round_id,
+                "open_questions": open_questions,
+                "confirmation_options": confirmation_options,
             },
             summary=reason,
         )
-        self._store.update_role_status(task_id, role, "blocked")
-        self._store.update_task_status(task_id, "blocked")
+        execution = self._store.lifecycle.round_execution(task_id, round_id)
+        self._store.lifecycle.set_round_execution(
+            task_id,
+            round_id,
+            execution_mode=str(execution.get("execution_mode") or "simple"),
+            execution_goal=str(execution.get("execution_goal") or ""),
+            execution_strategy=execution.get("execution_strategy")
+            if isinstance(execution.get("execution_strategy"), dict)
+            else {},
+            waiting_reason="guardrail_question",
+        )
+        self._store.lifecycle.set_round_confirmation(
+            task_id,
+            round_id,
+            source="guardrail",
+            kind="guardrail_question",
+            role=role,
+        )
+        self._store.update_role_status(task_id, role, "waiting")
+        self._store.update_task_status(task_id, "waiting_user")
         self._events.emit(
             task_id,
             "role.status",
             role=role,
-            payload={"status": "blocked", "error": reason, "round_id": round_id},
+            payload={
+                "status": "waiting",
+                "round_id": round_id,
+                "retry_kind": "guardrail",
+                "guardrail_action": "waiting_user",
+                "relay_transition": transition.to_json_dict(),
+            },
+        )
+        self._events.emit(
+            task_id,
+            "task.waiting_user",
+            role=role,
+            payload={
+                "role": role,
+                "round_id": round_id,
+                "waiting_reason": "guardrail_question",
+                "artifact_type": "role_error",
+                "artifact_id": int(getattr(artifact, "id", 0) or 0),
+                "summary": reason,
+                "open_questions": open_questions,
+                "confirmation_options": confirmation_options,
+                "relay_interrupt": interrupt.to_json_dict() if interrupt else None,
+                "relay_transition": transition.to_json_dict(),
+                "retry_kind": "guardrail",
+                "guardrail_action": "waiting_user",
+            },
         )
 
     def _record_invalid_semantic_artifact(
@@ -1898,6 +2042,113 @@ class RelayService:
             payload=runtime_payload,
         )
         return artifact
+
+    async def _retry_role_guardrail(
+        self,
+        task_id: int,
+        role: str,
+        *,
+        error: str,
+        output: str,
+        transition: RelayTransition,
+    ) -> bool:
+        detail = self._store.get_task_detail(task_id)
+        round_id = self._store.current_round_id(task_id)
+        if _has_retry_kind(detail.artifacts, role, "guardrail", round_id=round_id):
+            return False
+        job = next((job for job in detail.role_jobs if job.role == role), None)
+        if job is None or not job.provider:
+            return False
+        try:
+            provider = self._registry.get(job.provider)
+        except KeyError:
+            return False
+        capabilities = provider.capabilities()
+        can_continue = bool(getattr(capabilities, "can_continue_session", False))
+        if not (can_continue and job.native_session_id):
+            return False
+
+        packet = build_role_context_packet(
+            task=detail.task,
+            role=role,
+            board=detail.board,
+            handoffs=self._store.handoffs_for_role(task_id, role),
+            artifacts=detail.artifacts,
+        )
+        self._store.save_artifact(
+            task_id,
+            role,
+            "role_error",
+            {
+                "error": error,
+                "output": output,
+                "retry_kind": "guardrail",
+                "guardrail_action": "retry_role",
+                "round_id": round_id,
+            },
+            summary=f"角色输出未通过岗位契约校验，已要求重新输出：{error}",
+        )
+        self._store.update_task_status(task_id, "running")
+        self._store.update_role_status(task_id, role, "queued")
+        self._events.emit(
+            task_id,
+            "role.retrying",
+            role=role,
+            payload={
+                "retry_kind": "guardrail",
+                "guardrail_action": "retry_role",
+                "error": error,
+                "relay_transition": transition.to_json_dict(),
+            },
+        )
+        prompt = _role_envelope_retry_prompt(
+            role=role,
+            error=error,
+            output=output,
+            expected_output_envelope=packet.expected_output_envelope,
+        )
+        try:
+            result = await provider.continue_session(job.native_session_id, prompt)
+        except Exception:
+            return False
+        if not _control_result_verified(result):
+            return False
+        native_session_id = (
+            str(getattr(result, "native_session_id", "") or "") or job.native_session_id
+        )
+        self._store.update_role_metadata(
+            task_id,
+            role,
+            provider=job.provider,
+            provider_engine=str(getattr(provider, "provider_engine", "")),
+            native_session_id=native_session_id,
+            agent_run_id=_result_agent_run_id(result),
+            turn_id=_result_turn_id(result),
+            active_turn_id=_result_active_turn_id(result),
+            turn_running=_result_turn_running(result),
+            dispatch_verified=True,
+        )
+        self._store.update_role_status(task_id, role, "streaming")
+        self._events.emit(
+            task_id,
+            "role.streaming",
+            role=role,
+            payload={
+                "role": role,
+                "provider": job.provider,
+                "native_session_id": native_session_id,
+            },
+        )
+        self._events.emit(
+            task_id,
+            "dispatch.verified",
+            role=role,
+            payload={
+                "provider": job.provider,
+                "native_session_id": native_session_id,
+            },
+        )
+        return True
 
     async def _retry_role_envelope_format(
         self,
@@ -4093,6 +4344,16 @@ def _has_format_retry(
     *,
     round_id: int | None = None,
 ) -> bool:
+    return _has_retry_kind(artifacts, role, "format", round_id=round_id)
+
+
+def _has_retry_kind(
+    artifacts: list[dict[str, Any]],
+    role: str,
+    retry_kind: str,
+    *,
+    round_id: int | None = None,
+) -> bool:
     for artifact in artifacts:
         if str(artifact.get("artifact_type") or "") != "role_error":
             continue
@@ -4102,7 +4363,7 @@ def _has_format_retry(
             artifact_round = _coerce_round_id(artifact.get("round_id")) or 1
             if artifact_round != round_id:
                 continue
-        if str(artifact.get("retry_kind") or "") == "format":
+        if str(artifact.get("retry_kind") or "") == retry_kind:
             return True
     return False
 

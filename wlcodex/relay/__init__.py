@@ -11,6 +11,7 @@ from wlcodex.relay.graph import (
     RelayInterrupt,
     RelayTransition,
     build_marvis_relay_state,
+    transition_from_guardrail_result,
     transition_from_round_control,
     transition_from_role_parse_result,
 )
@@ -61,6 +62,7 @@ __all__ = [
     "build_role_context_packet",
     "default_handoff_target",
     "parse_role_envelope",
+    "transition_from_guardrail_result",
     "transition_from_round_control",
     "transition_from_role_parse_result",
 ]

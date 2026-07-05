@@ -119,6 +119,97 @@ def transition_from_role_parse_result(
     )
 
 
+def transition_from_guardrail_result(
+    *,
+    action: str,
+    role: str,
+    round_id: int,
+    reason: str = "",
+    open_questions: list[str] | tuple[str, ...] | None = None,
+    confirmation_options: list[dict[str, str]] | tuple[dict[str, str], ...] | None = None,
+) -> RelayTransition:
+    action_id = str(action or "").strip()
+    role_id = str(role or "").strip()
+    round_number = int(round_id)
+    base_update = {
+        "round_id": round_number,
+        "guardrail_action": action_id,
+        "guardrail_reason": str(reason or ""),
+    }
+    if action_id == "retry_role":
+        return RelayTransition(
+            update={
+                **base_update,
+                "task_status": "running",
+                "role_statuses": {role_id: "queued"},
+            },
+            goto=role_id,
+            events=[
+                {
+                    "event_type": "role.retrying",
+                    "role": role_id,
+                    "round_id": round_number,
+                    "retry_kind": "guardrail",
+                    "error": reason,
+                }
+            ],
+        )
+    if action_id == "waiting_user":
+        interrupt = RelayInterrupt(
+            kind="guardrail_question",
+            role=role_id,
+            reason=str(reason or ""),
+            artifact_type="role_error",
+            open_questions=list(open_questions or ([reason] if reason else [])),
+            confirmation_options=[dict(option) for option in confirmation_options or ()],
+            source="guardrail",
+            payload={
+                "guardrail_action": action_id,
+                "retry_kind": "guardrail",
+                "round_id": round_number,
+            },
+        )
+        return RelayTransition(
+            update={
+                **base_update,
+                "task_status": "waiting_user",
+                "role_statuses": {role_id: "waiting"},
+            },
+            goto="waiting_user",
+            interrupt=interrupt,
+            events=[
+                {
+                    "event_type": "task.waiting_user",
+                    "role": role_id,
+                    "round_id": round_number,
+                    "interrupt": interrupt.to_json_dict(),
+                    "retry_kind": "guardrail",
+                }
+            ],
+        )
+    if action_id == "blocked":
+        return RelayTransition(
+            update={
+                **base_update,
+                "task_status": "blocked",
+                "role_statuses": {role_id: "blocked"},
+            },
+            goto="blocked",
+            terminal="blocked",
+            events=[
+                {
+                    "event_type": "role.status",
+                    "role": role_id,
+                    "round_id": round_number,
+                    "status": "blocked",
+                    "error": reason,
+                    "retry_kind": "guardrail",
+                }
+            ],
+        )
+    return RelayTransition(update=base_update, goto="")
+
+
 def transition_from_role_envelope(
     envelope: RoleEnvelope,
     *,

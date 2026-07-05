@@ -6,6 +6,7 @@ from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.graph import (
     build_marvis_relay_state,
+    transition_from_guardrail_result,
     transition_from_role_envelope,
     transition_from_role_parse_result,
 )
@@ -42,6 +43,50 @@ def _envelope(**overrides):
     }
     payload.update(overrides)
     return json.dumps(payload, ensure_ascii=False)
+
+
+def test_guardrail_transition_models_retry_waiting_and_blocked() -> None:
+    retry = transition_from_guardrail_result(
+        action="retry_role",
+        role="tester",
+        round_id=7,
+        reason="tester may not produce final_summary",
+    )
+
+    assert retry.goto == "tester"
+    assert retry.terminal == ""
+    assert retry.update["task_status"] == "running"
+    assert retry.update["role_statuses"] == {"tester": "queued"}
+    assert retry.events[0]["event_type"] == "role.retrying"
+    assert retry.events[0]["retry_kind"] == "guardrail"
+
+    waiting = transition_from_guardrail_result(
+        action="waiting_user",
+        role="tester",
+        round_id=7,
+        reason="tester needs evidence_refs",
+        open_questions=["Which test evidence should be cited?"],
+    )
+
+    assert waiting.goto == "waiting_user"
+    assert waiting.interrupt is not None
+    assert waiting.interrupt.kind == "guardrail_question"
+    assert waiting.interrupt.open_questions == ["Which test evidence should be cited?"]
+    assert waiting.update["task_status"] == "waiting_user"
+    assert waiting.update["role_statuses"] == {"tester": "waiting"}
+
+    blocked = transition_from_guardrail_result(
+        action="blocked",
+        role="tester",
+        round_id=7,
+        reason="tester passed test_report without evidence_refs",
+    )
+
+    assert blocked.goto == "blocked"
+    assert blocked.terminal == "blocked"
+    assert blocked.update["task_status"] == "blocked"
+    assert blocked.update["role_statuses"] == {"tester": "blocked"}
+    assert blocked.events[0]["retry_kind"] == "guardrail"
 
 
 def test_role_parse_result_transition_models_handoff_interrupt_and_invalid() -> None:

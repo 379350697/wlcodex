@@ -1098,6 +1098,173 @@ def test_invalid_streamed_envelope_retries_format_once(tmp_path) -> None:
     )
 
 
+def test_role_guardrail_retries_contract_violation_without_replacing_relay_state(
+    tmp_path,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay guardrail",
+        prompt="Run tests before final summary",
+        workspace="/repo",
+        provider="claude",
+    )
+    asyncio.run(service.dispatch_role(task.id, "tester"))
+
+    result = asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "tester",
+            json.dumps(
+                {
+                    "status": "passed",
+                    "reason": "wrong terminal artifact",
+                    "role": "tester",
+                    "artifact_type": "final_summary",
+                    "handoff_to": "",
+                    "summary": "Everything is done.",
+                    "evidence_refs": ["pytest"],
+                    "open_questions": [],
+                    "next_action": "finish",
+                }
+            ),
+        )
+    )
+
+    detail = service.get_task(task.id)
+    tester = next(job for job in detail.role_jobs if job.role == "tester")
+    role_errors = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "tester"
+    ]
+    assert result.ok is True
+    assert detail.task.status == "running"
+    assert tester.status == "streaming"
+    assert provider.calls[-1][0] == "continue_session"
+    assert role_errors[-1]["retry_kind"] == "guardrail"
+    assert "tester may not produce final_summary" in role_errors[-1]["error"]
+    retry_event = next(
+        event
+        for event in service.events_for_task(task.id)
+        if event.event_type == "role.retrying" and event.role == "tester"
+    )
+    assert retry_event.payload["relay_transition"]["goto"] == "tester"
+    assert retry_event.payload["relay_transition"]["update"]["role_statuses"] == {
+        "tester": "queued"
+    }
+    assert service.build_marvis_relay_state(task.id).current_node == "tester"
+
+
+def test_role_guardrail_blocks_passed_test_report_without_evidence(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay guardrail",
+        prompt="Run tests before audit",
+        workspace="/repo",
+        provider="claude",
+    )
+
+    result = asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "tester",
+            json.dumps(
+                {
+                    "status": "passed",
+                    "reason": "claims tests passed",
+                    "role": "tester",
+                    "artifact_type": "test_report",
+                    "handoff_to": "auditor",
+                    "summary": "Tests passed.",
+                    "evidence_refs": [],
+                    "open_questions": [],
+                    "next_action": "audit",
+                }
+            ),
+            dispatch_next=False,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    tester = next(job for job in detail.role_jobs if job.role == "tester")
+    role_errors = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "tester"
+    ]
+    assert result.ok is True
+    assert detail.task.status == "blocked"
+    assert tester.status == "blocked"
+    assert role_errors[-1]["retry_kind"] == "guardrail"
+    status_event = next(
+        event
+        for event in reversed(service.events_for_task(task.id))
+        if event.event_type == "role.status" and event.role == "tester"
+    )
+    assert status_event.payload["relay_transition"]["terminal"] == "blocked"
+    assert status_event.payload["guardrail_action"] == "blocked"
+    assert "tester passed test_report without evidence_refs" in role_errors[-1]["error"]
+
+
+def test_role_guardrail_waits_for_user_when_contract_violation_needs_input(
+    tmp_path,
+) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay guardrail",
+        prompt="Run tests before audit",
+        workspace="/repo",
+        provider="claude",
+    )
+
+    result = asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "tester",
+            json.dumps(
+                {
+                    "status": "passed",
+                    "reason": "needs evidence selection",
+                    "role": "tester",
+                    "artifact_type": "test_report",
+                    "handoff_to": "auditor",
+                    "summary": "Tests passed but evidence was not cited.",
+                    "evidence_refs": [],
+                    "open_questions": ["Which test evidence should be cited?"],
+                    "next_action": "await evidence",
+                }
+            ),
+            dispatch_next=False,
+        )
+    )
+
+    detail = service.get_task(task.id)
+    tester = next(job for job in detail.role_jobs if job.role == "tester")
+    waiting_event = next(
+        event for event in service.events_for_task(task.id) if event.event_type == "task.waiting_user"
+    )
+    role_errors = [
+        artifact
+        for artifact in detail.artifacts
+        if artifact.get("artifact_type") == "role_error"
+        and artifact.get("relay_role") == "tester"
+    ]
+    assert result.ok is True
+    assert detail.task.status == "waiting_user"
+    assert tester.status == "waiting"
+    assert role_errors[-1]["retry_kind"] == "guardrail"
+    assert waiting_event.payload["relay_transition"]["goto"] == "waiting_user"
+    assert waiting_event.payload["relay_interrupt"]["kind"] == "guardrail_question"
+    assert waiting_event.payload["open_questions"] == ["Which test evidence should be cited?"]
+    state = service.build_marvis_relay_state(task.id)
+    assert state.current_node == "waiting_user"
+    assert state.pending_interrupt is not None
+    assert state.pending_interrupt.artifact_type == "role_error"
+    assert state.pending_interrupt.open_questions == ["Which test evidence should be cited?"]
+
+
 def test_malformed_director_routing_blocks_explicit_full_relay_after_retry(tmp_path) -> None:
     service, provider = _service(tmp_path)
     task = service.create_task(
