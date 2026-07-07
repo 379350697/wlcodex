@@ -53,6 +53,7 @@ class FakeNativeClient:
                 "turns": [],
             }
         }
+        self.account_rate_limits: dict[str, Any] | None = None
 
     async def status(self) -> dict[str, Any]:
         self.calls.append(("status",))
@@ -274,6 +275,10 @@ class FakeNativeClient:
     async def list_models(self) -> list[dict[str, Any]]:
         self.calls.append(("list_models",))
         return [{"model": "gpt-5.5", "displayName": "GPT-5.5"}]
+
+    async def get_account_rate_limits(self) -> dict[str, Any]:
+        self.calls.append(("get_account_rate_limits",))
+        return self.account_rate_limits or {}
 
     async def steer_turn(
         self,
@@ -546,6 +551,54 @@ async def test_controller_read_session_adds_native_status_from_jsonl(
     assert metadata["rate_limits"]["seven_day"]["remaining_percent"] == 93
     assert metadata["rate_limits"]["seven_day"]["reset_at"] == 1_781_746_761
     assert metadata["native_status"]["context"] == metadata["context"]
+
+
+@pytest.mark.asyncio
+async def test_controller_read_session_adds_live_account_rate_limits(
+    tmp_path: Path,
+) -> None:
+    controller, client, _session_store, _runtime_store = _controller(tmp_path)
+    client.details["thread-1"] = {
+        "thread": {
+            "id": "thread-1",
+            "title": "Live limits",
+            "cwd": "/workspace/limits",
+            "sourceKind": "ide",
+            "status": "idle",
+        },
+        "turns": [],
+    }
+    client.account_rate_limits = {
+        "rateLimitsByLimitId": {
+            "codex": {
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 4,
+                    "windowDurationMins": 300,
+                    "resetsAt": 1_781_213_931,
+                },
+                "secondary": {
+                    "usedPercent": 11,
+                    "windowDurationMins": 10_080,
+                    "resetsAt": 1_781_746_761,
+                },
+            }
+        },
+        "rateLimits": {
+            "limitId": "default",
+            "primary": {"usedPercent": 90},
+        },
+    }
+
+    detail = await controller.read_session("thread-1")
+
+    metadata = detail["thread"]["metadata"]
+    assert ("read_session", "thread-1") in client.calls
+    assert ("get_account_rate_limits",) in client.calls
+    assert metadata["rate_limits"]["five_hour"]["remaining_percent"] == 96
+    assert metadata["rate_limits"]["five_hour"]["reset_at"] == 1_781_213_931
+    assert metadata["rate_limits"]["seven_day"]["remaining_percent"] == 89
+    assert metadata["rate_limits"]["seven_day"]["reset_at"] == 1_781_746_761
 
 
 @pytest.mark.asyncio

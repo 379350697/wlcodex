@@ -1267,10 +1267,16 @@ class WorkerLiveStreamServer:
         cached = await self._read_cached_native_session(target, native_thread_id)
         if cached is not None:
             payload = dict(cached)
-            payload["native_sync_pending"] = self._schedule_native_timeline_transcript_sync_if_needed(
+            session_refresh_pending = self._schedule_native_session_refresh(
+                provider_name,
+                target,
+                native_thread_id,
+            )
+            transcript_sync_pending = self._schedule_native_timeline_transcript_sync_if_needed(
                 provider_name,
                 native_thread_id,
             )
+            payload["native_sync_pending"] = session_refresh_pending or transcript_sync_pending
             if native_sync_error:
                 payload["native_sync_error"] = native_sync_error
             return payload

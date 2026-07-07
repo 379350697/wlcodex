@@ -2088,8 +2088,11 @@ async def test_native_read_route_returns_cached_session_when_daemon_is_slow(
     assert body["thread"]["title"] == "cached title"
     assert body["thread"]["cwd"] == "/workspace/cached"
     assert body["native_session_source"] == "cache"
-    assert body["native_sync_pending"] is False
-    assert controller.calls == [("read_cached_session", "thread-1")]
+    assert body["native_sync_pending"] is True
+    assert controller.calls == [
+        ("read_cached_session", "thread-1"),
+        ("read_session", "thread-1"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -6330,6 +6333,7 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "function refreshNativeControlInBackground()" in response
     assert "refreshNativeControlInBackground();" in response
     assert "loadNativeSessionInfo().catch(() => {});" in response
+    assert "setInterval(() => loadNativeSessionInfo().catch(() => {}), 30000);" not in response
     assert "loadRecentEvents().catch(error => {" in response
     assert "loadNativeSessionInfo().catch(() => {}).then(loadRecentEvents)" not in response
     assert "attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).then(() => {" not in response

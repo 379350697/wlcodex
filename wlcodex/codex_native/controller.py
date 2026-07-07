@@ -47,6 +47,8 @@ class _NativeClient(Protocol):
 
     async def list_models(self) -> list[dict[str, Any]]: ...
 
+    async def get_account_rate_limits(self) -> dict[str, Any]: ...
+
     async def start_thread(
         self,
         cwd: str,
@@ -266,6 +268,7 @@ class CodexNativeController:
     async def read_session(self, native_thread_id: str) -> dict[str, Any]:
         detail = await self._client.read_session(native_thread_id)
         _augment_detail_with_native_status(detail)
+        await self._augment_detail_with_live_rate_limits(detail)
         self._project_detail(native_thread_id, detail)
         return detail
 
@@ -751,6 +754,23 @@ class CodexNativeController:
 
         return handler
 
+    async def _augment_detail_with_live_rate_limits(self, detail: dict[str, Any]) -> None:
+        try:
+            result = await self._client.get_account_rate_limits()
+        except Exception:
+            return
+        rate_limits = _native_account_rate_limits_summary(result)
+        if not rate_limits:
+            return
+        thread = detail.get("thread")
+        if not isinstance(thread, dict):
+            return
+        metadata = thread.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            thread["metadata"] = metadata
+        metadata["rate_limits"] = rate_limits
+
 
 def _string_value(raw: dict[str, Any], key: str) -> str:
     value = raw.get(key)
@@ -1119,20 +1139,52 @@ def _native_rate_limits_summary(raw: object) -> dict[str, Any]:
     return summary
 
 
+def _native_account_rate_limits_summary(raw: object) -> dict[str, Any]:
+    snapshot = _native_account_rate_limits_snapshot(raw)
+    if snapshot is None:
+        return {}
+    return _native_rate_limits_summary(snapshot)
+
+
+def _native_account_rate_limits_snapshot(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    by_limit_id = raw.get("rateLimitsByLimitId")
+    if isinstance(by_limit_id, dict):
+        codex = by_limit_id.get("codex")
+        if isinstance(codex, dict):
+            return codex
+        for value in by_limit_id.values():
+            if isinstance(value, dict):
+                return value
+    rate_limits = raw.get("rateLimits")
+    return rate_limits if isinstance(rate_limits, dict) else None
+
+
 def _native_rate_limit_summary(raw: object) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
-    used_percent = _number_value(raw, "used_percent")
-    remaining_percent = _number_value(raw, "remaining_percent")
+    used_percent = _number_value(raw, "used_percent") or _number_value(raw, "usedPercent")
+    remaining_percent = (
+        _number_value(raw, "remaining_percent")
+        or _number_value(raw, "remainingPercent")
+    )
     if remaining_percent is None and used_percent is not None:
         remaining_percent = max(0.0, min(100.0, 100.0 - used_percent))
     reset_at = (
         _number_value(raw, "resets_at")
+        or _number_value(raw, "resetsAt")
         or _number_value(raw, "reset_at")
+        or _number_value(raw, "resetAt")
         or _string_value(raw, "resets_at")
+        or _string_value(raw, "resetsAt")
         or _string_value(raw, "reset_at")
+        or _string_value(raw, "resetAt")
     )
-    window_minutes = _number_value(raw, "window_minutes")
+    window_minutes = (
+        _number_value(raw, "window_minutes")
+        or _number_value(raw, "windowDurationMins")
+    )
     summary: dict[str, Any] = {}
     if used_percent is not None:
         summary["used_percent"] = used_percent

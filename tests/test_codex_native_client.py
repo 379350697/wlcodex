@@ -334,6 +334,40 @@ async def test_native_client_lists_official_model_catalog() -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_client_reads_account_rate_limits() -> None:
+    def response_for(msg: dict[str, Any]) -> dict[str, Any] | None:
+        match msg["method"]:
+            case "initialize":
+                return {}
+            case "account/rateLimits/read":
+                assert msg["params"] == {}
+                return {
+                    "rateLimits": {
+                        "limitId": "codex",
+                        "primary": {"usedPercent": 3, "resetsAt": 1_781_213_931},
+                        "secondary": {"usedPercent": 9, "resetsAt": 1_781_746_761},
+                    }
+                }
+        raise AssertionError(f"unexpected method: {msg['method']}")
+
+    transport = FakeTransport(response_for)
+    client = CodexNativeClient(
+        send_json=transport.send_json,
+        close=transport.close,
+    )
+    transport.client = client
+
+    result = await client.get_account_rate_limits()
+
+    assert result["rateLimits"]["limitId"] == "codex"
+    assert _method_names(transport.sent) == [
+        "initialize",
+        "initialized",
+        "account/rateLimits/read",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_native_client_starts_thread_and_turn_with_real_model_settings() -> None:
     def response_for(msg: dict[str, Any]) -> dict[str, Any] | None:
         match msg["method"]:

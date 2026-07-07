@@ -122,6 +122,10 @@ class CodexNativeClient:
             if not cursor:
                 return models
 
+    async def get_account_rate_limits(self) -> dict[str, Any]:
+        await self.initialize()
+        return await self.rpc.request("account/rateLimits/read")
+
     async def start_thread(
         self,
         cwd: str,
@@ -363,6 +367,9 @@ class LazyNativeClient:
                 include_hidden=include_hidden,
             )
         )
+
+    async def get_account_rate_limits(self) -> dict[str, Any]:
+        return await self._call(lambda client: client.get_account_rate_limits())
 
     async def start_thread(
         self,
