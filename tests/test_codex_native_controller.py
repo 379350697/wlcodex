@@ -54,6 +54,7 @@ class FakeNativeClient:
             }
         }
         self.account_rate_limits: dict[str, Any] | None = None
+        self.list_models_error: BaseException | None = None
 
     async def status(self) -> dict[str, Any]:
         self.calls.append(("status",))
@@ -274,6 +275,8 @@ class FakeNativeClient:
 
     async def list_models(self) -> list[dict[str, Any]]:
         self.calls.append(("list_models",))
+        if self.list_models_error is not None:
+            raise self.list_models_error
         return [{"model": "gpt-5.5", "displayName": "GPT-5.5"}]
 
     async def get_account_rate_limits(self) -> dict[str, Any]:
@@ -1601,6 +1604,22 @@ async def test_controller_lists_native_models(tmp_path: Path) -> None:
 
     assert models == [{"model": "gpt-5.5", "displayName": "GPT-5.5"}]
     assert client.calls == [("list_models",)]
+
+
+@pytest.mark.asyncio
+async def test_controller_falls_back_when_model_catalog_file_is_missing(
+    tmp_path: Path,
+) -> None:
+    controller, client, _session_store, _runtime_store = _controller(tmp_path)
+    client.list_models_error = FileNotFoundError("model catalog")
+
+    models = await controller.list_models()
+
+    assert client.calls == [("list_models",)]
+    assert models[0]["model"] == "gpt-5.5"
+    assert models[0]["displayName"] == "GPT-5.5"
+    assert models[0]["isDefault"] is True
+    assert "FileNotFoundError" not in json.dumps(models)
 
 
 @pytest.mark.asyncio

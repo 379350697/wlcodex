@@ -39,6 +39,33 @@ class _StaleActiveTurnMismatch(Exception):
 # Keep this race inside the controller so callers do not need a manual prompt path.
 _ROLLOUT_NOT_READY_RETRY_DELAYS = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
 
+_FALLBACK_CODEX_MODEL_CATALOG: tuple[dict[str, Any], ...] = (
+    {
+        "id": "gpt-5.5",
+        "model": "gpt-5.5",
+        "displayName": "GPT-5.5",
+        "description": "Default Codex model",
+        "hidden": False,
+        "isDefault": True,
+        "inputModalities": ["text", "image"],
+        "supportedReasoningEfforts": [
+            {"reasoningEffort": "medium", "description": "Balanced"},
+            {"reasoningEffort": "high", "description": "Deep"},
+            {"reasoningEffort": "xhigh", "description": "Very deep"},
+        ],
+        "defaultReasoningEffort": "xhigh",
+        "serviceTiers": [
+            {"id": "auto", "name": "Auto", "description": "Default"},
+            {"id": "fast", "name": "Fast", "description": "Lower latency"},
+        ],
+        "defaultServiceTier": "auto",
+    },
+)
+
+
+def _fallback_codex_model_catalog() -> list[dict[str, Any]]:
+    return [json.loads(json.dumps(model)) for model in _FALLBACK_CODEX_MODEL_CATALOG]
+
 
 class _NativeClient(Protocol):
     async def status(self) -> Any: ...
@@ -185,7 +212,11 @@ class CodexNativeController:
         }
 
     async def list_models(self) -> list[dict[str, Any]]:
-        return await self._client.list_models()
+        try:
+            models = await self._client.list_models()
+        except FileNotFoundError:
+            return _fallback_codex_model_catalog()
+        return models or _fallback_codex_model_catalog()
 
     async def start_session(
         self,
