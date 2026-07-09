@@ -4952,6 +4952,175 @@ async def test_native_messages_run_state_stays_active_until_turn_lifecycle_finis
 
 
 @pytest.mark.asyncio
+async def test_native_messages_show_interrupted_lifecycle_after_user_turn(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "跑\n",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="internal",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "provider": "codex",
+                "action": "turn_completed",
+                "status": "interrupted",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1/messages?limit=20 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [item["kind"] for item in body["items"]] == ["user_message", "lifecycle"]
+    lifecycle = body["items"][1]
+    assert lifecycle["role"] == "system"
+    assert lifecycle["status"] == "interrupted"
+    assert lifecycle["text"] == "已中断"
+    assert lifecycle["payload"]["status"] == "interrupted"
+    assert lifecycle["payload"]["text"] == "已中断"
+    assert body["run_state"] == {
+        "active": False,
+        "status": "interrupted",
+        "active_turn_id": "",
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_messages_lazily_repair_unprojected_interrupted_lifecycle(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "跑\n",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    user_update_cursor = timeline_store.latest_sequence("codex", "thread-1")
+    RuntimeEventStore(runtime_store._conn).append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="internal",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "provider": "codex",
+                "action": "turn_completed",
+                "status": "interrupted",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1/messages"
+            f"?after_update={user_update_cursor}&limit=20 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [item["kind"] for item in body["items"]] == ["lifecycle"]
+    assert body["items"][0]["status"] == "interrupted"
+    assert body["items"][0]["text"] == "已中断"
+    assert body["update_cursor"] > user_update_cursor
+    assert body["run_state"] == {
+        "active": False,
+        "status": "interrupted",
+        "active_turn_id": "",
+    }
+
+
+@pytest.mark.asyncio
 async def test_native_messages_run_state_ignores_stale_active_turn_after_newer_completed_item(
     tmp_path: Path,
 ) -> None:
@@ -6148,6 +6317,16 @@ async def test_worker_live_page_hides_success_lifecycle_events_from_transcript(
         'if (event.kind === "lifecycle" && status === "running") '
         'return "正在回复";'
     ) in response
+    assert (
+        'if (event.kind === "lifecycle" && '
+        'isFailedStatus((event.payload || {}).status)) return "failed";'
+    ) in response
+    assert (
+        'if (event.kind === "lifecycle" && isFailedStatus(status)) '
+        "return terminalStatusLabel(status);"
+    ) in response
+    assert "function terminalStatusLabel(status)" in response
+    assert 'return "已中断";' in response
 
 
 @pytest.mark.asyncio

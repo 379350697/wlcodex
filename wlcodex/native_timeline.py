@@ -368,6 +368,34 @@ class NativeTimelineStore:
             )
             return [self._event_from_runtime(event, item_id, "activity", item_payload)]
 
+        if _should_project_failed_lifecycle(event_type, payload):
+            status = _terminal_turn_status(event_type, payload)
+            text = _turn_lifecycle_text(status)
+            item_key = _first_text(payload, "itemId", "item_id") or (
+                "lifecycle-" + turn_key
+            )
+            item_payload = {
+                "text": text,
+                "action": _first_text(payload, "action"),
+                "native_turn_id": turn_key,
+                "itemId": item_key,
+                "status": status,
+            }
+            item_id = self._upsert_item(
+                provider=provider,
+                native_thread_id=native_thread_id,
+                turn_key=turn_key,
+                item_key=item_key,
+                role="system",
+                kind="lifecycle",
+                text=text,
+                status=status,
+                payload=item_payload,
+                source_priority=80,
+                merge_local=False,
+            )
+            return [self._event_from_runtime(event, item_id, "lifecycle", item_payload)]
+
         if event_type in (
             EventType.APPROVAL_REQUESTED,
             EventType.AGENT_RUN_WAITING_FOR_APPROVAL,
@@ -742,7 +770,7 @@ class NativeTimelineStore:
         placeholders = ",".join("?" for _ in _NATIVE_TURN_STATE_EVENT_TYPES)
         rows = self._conn.execute(
             f"""
-            SELECT event_type, payload_json
+            SELECT id, event_type, payload_json, occurred_at, agent_run_id, conversation_id
             FROM runtime_events
             WHERE event_type IN ({placeholders})
             ORDER BY id DESC
@@ -780,9 +808,22 @@ class NativeTimelineStore:
             if event_type in _NATIVE_TURN_TERMINAL_EVENT_TYPES or _is_terminal_turn_payload(
                 payload
             ):
+                status = _terminal_turn_status(event_type, payload)
+                if _should_project_failed_lifecycle(event_type, payload):
+                    self._ensure_failed_lifecycle_item(
+                        provider=provider_key,
+                        native_thread_id=thread_id,
+                        turn_key=turn_key,
+                        payload=payload,
+                        event_type=event_type,
+                        runtime_event_id=int(row["id"]),
+                        occurred_at=str(row["occurred_at"] or now_iso()),
+                        agent_run_id=row["agent_run_id"],
+                        conversation_id=row["conversation_id"],
+                    )
                 return {
                     "active": False,
-                    "status": _terminal_turn_status(event_type, payload),
+                    "status": status,
                     "active_turn_id": "",
                 }
             latest_item = self._latest_visible_item_for_run_state(provider_key, thread_id)
@@ -820,6 +861,59 @@ class NativeTimelineStore:
             (provider, native_thread_id, *_VISIBLE_CONVERSATION_ITEM_KINDS),
         ).fetchone()
 
+    def _ensure_failed_lifecycle_item(
+        self,
+        *,
+        provider: str,
+        native_thread_id: str,
+        turn_key: str,
+        payload: dict[str, Any],
+        event_type: str,
+        runtime_event_id: int,
+        occurred_at: str,
+        agent_run_id: int | None,
+        conversation_id: int | None,
+    ) -> None:
+        if not turn_key:
+            return
+        item_key = _first_text(payload, "itemId", "item_id") or ("lifecycle-" + turn_key)
+        if self._find_item(provider, native_thread_id, turn_key, item_key) is not None:
+            return
+        status = _terminal_turn_status(event_type, payload)
+        text = _turn_lifecycle_text(status)
+        item_payload = {
+            "text": text,
+            "action": _first_text(payload, "action"),
+            "native_turn_id": turn_key,
+            "itemId": item_key,
+            "status": status,
+        }
+        item_id = self._upsert_item(
+            provider=provider,
+            native_thread_id=native_thread_id,
+            turn_key=turn_key,
+            item_key=item_key,
+            role="system",
+            kind="lifecycle",
+            text=text,
+            status=status,
+            payload=item_payload,
+            source_priority=80,
+            merge_local=False,
+        )
+        self._append_event(
+            provider=provider,
+            native_thread_id=native_thread_id,
+            item_row_id=item_id,
+            runtime_event_id=runtime_event_id,
+            event_type=event_type,
+            kind="lifecycle",
+            payload=_compact_payload(item_payload),
+            occurred_at=occurred_at,
+            agent_run_id=agent_run_id,
+            conversation_id=conversation_id,
+        )
+
     def list_item_events(
         self,
         provider: str,
@@ -835,7 +929,7 @@ class NativeTimelineStore:
         after_sequence = int(after or 0)
         if before is not None and before > 0:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT
                     e.*,
                     i.turn_key AS item_turn_key,
@@ -855,10 +949,7 @@ class NativeTimelineStore:
                       AND item_row_id IN (
                           SELECT id FROM native_timeline_items
                           WHERE provider = ? AND native_thread_id = ?
-                            AND kind IN (
-                                'user_message', 'message',
-                                'activity', 'approval_requested'
-                            )
+                            AND kind IN ({_visible_item_kind_placeholders()})
                       )
                     GROUP BY item_row_id
                     HAVING max_sequence < ?
@@ -869,12 +960,20 @@ class NativeTimelineStore:
                  AND latest.max_sequence = e.sequence
                 ORDER BY e.sequence ASC
                 """,
-                (provider_key, thread_id, provider_key, thread_id, int(before), safe_limit),
+                (
+                    provider_key,
+                    thread_id,
+                    provider_key,
+                    thread_id,
+                    *_VISIBLE_CONVERSATION_ITEM_KINDS,
+                    int(before),
+                    safe_limit,
+                ),
             ).fetchall()
             return [_item_event_from_row(row) for row in rows]
         if after_sequence > 0:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT
                     e.*,
                     i.turn_key AS item_turn_key,
@@ -895,10 +994,7 @@ class NativeTimelineStore:
                       AND item_row_id IN (
                           SELECT id FROM native_timeline_items
                           WHERE provider = ? AND native_thread_id = ?
-                            AND kind IN (
-                                'user_message', 'message',
-                                'activity', 'approval_requested'
-                            )
+                            AND kind IN ({_visible_item_kind_placeholders()})
                       )
                     GROUP BY item_row_id
                     ORDER BY max_sequence ASC
@@ -914,12 +1010,13 @@ class NativeTimelineStore:
                     after_sequence,
                     provider_key,
                     thread_id,
+                    *_VISIBLE_CONVERSATION_ITEM_KINDS,
                     safe_limit,
                 ),
             ).fetchall()
             return [_item_event_from_row(row) for row in rows]
         rows = self._conn.execute(
-            """
+            f"""
             SELECT
                 e.*,
                 i.turn_key AS item_turn_key,
@@ -939,10 +1036,7 @@ class NativeTimelineStore:
                   AND item_row_id IN (
                       SELECT id FROM native_timeline_items
                       WHERE provider = ? AND native_thread_id = ?
-                        AND kind IN (
-                            'user_message', 'message',
-                            'activity', 'approval_requested'
-                        )
+                        AND kind IN ({_visible_item_kind_placeholders()})
                   )
                 GROUP BY item_row_id
                 ORDER BY max_sequence DESC
@@ -952,7 +1046,14 @@ class NativeTimelineStore:
              AND latest.max_sequence = e.sequence
             ORDER BY e.sequence ASC
             """,
-            (provider_key, thread_id, provider_key, thread_id, safe_limit),
+            (
+                provider_key,
+                thread_id,
+                provider_key,
+                thread_id,
+                *_VISIBLE_CONVERSATION_ITEM_KINDS,
+                safe_limit,
+            ),
         ).fetchall()
         return [_item_event_from_row(row) for row in rows]
 
@@ -981,7 +1082,7 @@ class NativeTimelineStore:
         before: int,
     ) -> int:
         row = self._conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS count
             FROM (
                 SELECT MAX(sequence) AS max_sequence
@@ -991,10 +1092,7 @@ class NativeTimelineStore:
                   AND item_row_id IN (
                       SELECT id FROM native_timeline_items
                       WHERE provider = ? AND native_thread_id = ?
-                        AND kind IN (
-                            'user_message', 'message',
-                            'activity', 'approval_requested'
-                        )
+                        AND kind IN ({_visible_item_kind_placeholders()})
                   )
                 GROUP BY item_row_id
                 HAVING max_sequence < ?
@@ -1005,6 +1103,7 @@ class NativeTimelineStore:
                 str(native_thread_id or "").strip(),
                 _normalize_provider(provider),
                 str(native_thread_id or "").strip(),
+                *_VISIBLE_CONVERSATION_ITEM_KINDS,
                 int(before),
             ),
         ).fetchone()
@@ -1340,6 +1439,7 @@ def _item_from_row(row: sqlite3.Row) -> NativeTimelineItem:
 _VISIBLE_CONVERSATION_ITEM_KINDS = (
     "user_message",
     "message",
+    "lifecycle",
     "activity",
     "approval_requested",
 )
@@ -1368,6 +1468,17 @@ _NATIVE_TURN_STATE_EVENT_TYPES = (
 )
 
 _NATIVE_ACTIVE_ITEM_STATUSES = {"queued", "streaming", "waiting", "pending", "running"}
+_FAILED_TURN_STATUSES = {
+    "failed",
+    "error",
+    "cancelled",
+    "canceled",
+    "interrupted",
+    "aborted",
+    "timed_out",
+    "timeout",
+    "orphaned",
+}
 
 
 def _visible_item_kind_placeholders() -> str:
@@ -1377,6 +1488,39 @@ def _visible_item_kind_placeholders() -> str:
 def _is_terminal_turn_payload(payload: dict[str, Any]) -> bool:
     action = _first_text(payload, "action").strip().lower()
     return action in {"turn_completed", "turn_failed", "turn_cancelled", "turn_interrupted"}
+
+
+def _is_failed_turn_lifecycle(payload: dict[str, Any]) -> bool:
+    if not _is_terminal_turn_payload(payload):
+        return False
+    status = _first_text(payload, "status").strip().lower()
+    action = _first_text(payload, "action").strip().lower()
+    return _is_failed_terminal_status(status) or action in {
+        "turn_failed",
+        "turn_cancelled",
+        "turn_interrupted",
+    }
+
+
+def _should_project_failed_lifecycle(event_type: str, payload: dict[str, Any]) -> bool:
+    if event_type == EventType.AGENT_RUN_ACTIVITY:
+        return _is_failed_turn_lifecycle(payload)
+    if event_type in _NATIVE_TURN_TERMINAL_EVENT_TYPES:
+        return _is_failed_terminal_status(_terminal_turn_status(event_type, payload))
+    return False
+
+
+def _is_failed_terminal_status(status: str) -> bool:
+    return status.strip().lower() in _FAILED_TURN_STATUSES
+
+
+def _turn_lifecycle_text(status: str) -> str:
+    normalized = status.strip().lower()
+    if normalized in {"interrupted", "cancelled", "canceled", "aborted"}:
+        return "已中断"
+    if normalized in {"timed_out", "timeout"}:
+        return "已超时"
+    return "执行失败"
 
 
 def _terminal_turn_status(event_type: str, payload: dict[str, Any]) -> str:

@@ -3248,6 +3248,10 @@ class WorkerLiveStreamServer:
                 },
             )
             return
+        run_state = self._native_timeline.latest_turn_run_state(
+            provider_key,
+            native_thread_id,
+        )
         if after_update > 0 and before is None:
             item_events = self._native_timeline.list_item_events(
                 provider_key,
@@ -3288,10 +3292,6 @@ class WorkerLiveStreamServer:
                 self._native_timeline.latest_sequence(provider_key, native_thread_id)
             )
         update_cursor = max(update_cursor_values)
-        run_state = self._native_timeline.latest_turn_run_state(
-            provider_key,
-            native_thread_id,
-        )
         if not run_state.get("active") and run_state.get("status") == "idle":
             run_state = _native_messages_run_state(items)
         await self._send_json(
@@ -19722,6 +19722,7 @@ __ICONS_JS__
     function statusTone(event) {
       if (event.kind === "completed") return "done";
       if (event.kind === "failed") return "failed";
+      if (event.kind === "lifecycle" && isFailedStatus((event.payload || {}).status)) return "failed";
       if (event.kind === "lifecycle") return "busy";
       return "neutral";
     }
@@ -19750,10 +19751,17 @@ __ICONS_JS__
       const payload = event.payload || {};
       const status = String(payload.status || "").trim().toLowerCase();
       if (event.kind === "lifecycle" && status === "running") return "正在回复";
+      if (event.kind === "lifecycle" && isFailedStatus(status)) return terminalStatusLabel(status);
       if (event.kind === "reasoning_delta") return "Thinking";
       if (event.kind === "completed") return "完成";
       if (event.kind === "failed") return "失败";
       return fallback || event.kind || "状态";
+    }
+    function terminalStatusLabel(status) {
+      const normalized = String(status || "").trim().toLowerCase();
+      if (["interrupted", "cancelled", "canceled", "aborted"].includes(normalized)) return "已中断";
+      if (["timed_out", "timeout"].includes(normalized)) return "已超时";
+      return "失败";
     }
   </script>
 __MARVIS_EXTRA_HTML__
