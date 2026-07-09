@@ -773,10 +773,11 @@ class NativeTimelineStore:
             SELECT id, event_type, payload_json, occurred_at, agent_run_id, conversation_id
             FROM runtime_events
             WHERE event_type IN ({placeholders})
+              AND payload_json LIKE ? ESCAPE '\\'
             ORDER BY id DESC
             LIMIT 200
             """,
-            _NATIVE_TURN_STATE_EVENT_TYPES,
+            (*_NATIVE_TURN_STATE_EVENT_TYPES, _sqlite_like_pattern(thread_id)),
         ).fetchall()
         for row in rows:
             try:
@@ -1483,6 +1484,11 @@ _FAILED_TURN_STATUSES = {
 
 def _visible_item_kind_placeholders() -> str:
     return ",".join("?" for _ in _VISIBLE_CONVERSATION_ITEM_KINDS)
+
+
+def _sqlite_like_pattern(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 def _is_terminal_turn_payload(payload: dict[str, Any]) -> bool:

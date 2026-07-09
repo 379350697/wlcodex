@@ -5086,6 +5086,28 @@ async def test_native_messages_lazily_repair_unprojected_interrupted_lifecycle(
             agent_run_id=42,
         )
     )
+    raw_store = RuntimeEventStore(runtime_store._conn)
+    for index in range(201):
+        raw_store.append(
+            RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.AGENT_RUN_STARTED,
+                aggregate_type="agent_run",
+                aggregate_id=f"unrelated-{index}",
+                correlation_id=f"agent:unrelated-{index}",
+                source="codex",
+                actor="codex_native",
+                visibility="internal",
+                payload={
+                    "native_thread_id": f"other-thread-{index}",
+                    "native_turn_id": f"other-turn-{index}",
+                    "provider": "codex",
+                    "status": "running",
+                },
+                occurred_at="2026-05-30T00:00:02+00:00",
+                agent_run_id=1000 + index,
+            )
+        )
     server = WorkerLiveStreamServer(
         host="127.0.0.1",
         port=0,
