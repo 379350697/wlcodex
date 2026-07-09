@@ -2372,6 +2372,60 @@ async def test_native_routes_return_rpc_error_message_instead_of_exception_class
 
 
 @pytest.mark.asyncio
+async def test_native_continue_translates_codex_thread_not_found_for_history_sessions(
+    tmp_path: Path,
+) -> None:
+    class MissingThreadController(FakeNativeController):
+        async def continue_session(
+            self,
+            native_thread_id: str,
+            prompt: str,
+            *,
+            model: str | None = None,
+            effort: str | None = None,
+            service_tier: str | None = None,
+            images: list[dict[str, Any]] | None = None,
+            approval_policy: str | None = None,
+            approvals_reviewer: str | None = None,
+            sandbox_policy: dict[str, Any] | None = None,
+            collaboration_mode: dict[str, Any] | None = None,
+            force_new_turn: bool = False,
+        ) -> FakeControlResult:
+            raise JsonRpcError(-32600, f"thread not found: {native_thread_id}")
+
+    store = _store(tmp_path)
+    body = json.dumps({"prompt": "hello", "force_new_turn": True})
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=MissingThreadController(),
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "POST /api/native/codex/sessions/thread-stale/continue HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 409" in response
+    assert _json_body(response) == {
+        "error": "历史会话已不在当前 Codex 后台中，无法继续发送。请回到会话列表选择可恢复会话，或新建会话继续。",
+        "code": -32600,
+        "native_error_code": "native_thread_not_found",
+    }
+
+
+@pytest.mark.asyncio
 async def test_native_continue_accepts_mobile_sized_image_json_body(
     tmp_path: Path,
 ) -> None:
@@ -5589,8 +5643,10 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "function submitPrompt" in response
     assert "continueButton.onclick = () => submitPrompt();" in response
     assert 'throw new Error("会话未连接");' in response
-    assert "function nativeErrorMessage(message)" in response
+    assert "function nativeErrorMessage(message, code = \"\")" in response
     assert 'return "会话不存在或已被清理";' in response
+    assert "native_thread_not_found" in response
+    assert "body.native_error_code || body.code || response.status" in response
     assert "let providerCapabilities = {};" in response
     assert "async function loadProviderCapabilities()" in response
     assert "await api(`${API_BASE}/capabilities`)" in response

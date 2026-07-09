@@ -312,6 +312,31 @@ class RequestBodyTooLarge(ValueError):
     pass
 
 
+_NATIVE_THREAD_NOT_FOUND_ERROR = (
+    "历史会话已不在当前 Codex 后台中，无法继续发送。"
+    "请回到会话列表选择可恢复会话，或新建会话继续。"
+)
+
+
+def _is_native_thread_not_found_error(exc: JsonRpcError) -> bool:
+    return exc.code == -32600 and re.match(
+        r"^thread not found:\s*\S+\s*$",
+        str(exc.rpc_message or ""),
+        flags=re.IGNORECASE,
+    ) is not None
+
+
+def _native_json_rpc_error_payload(exc: JsonRpcError) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "error": exc.rpc_message or str(exc),
+        "code": exc.code,
+    }
+    if _is_native_thread_not_found_error(exc):
+        payload["error"] = _NATIVE_THREAD_NOT_FOUND_ERROR
+        payload["native_error_code"] = "native_thread_not_found"
+    return payload
+
+
 class WorkerLiveStreamServer:
     def __init__(
         self,
@@ -953,7 +978,7 @@ class WorkerLiveStreamServer:
                 await self._send_json(
                     writer,
                     409,
-                    {"error": exc.rpc_message or str(exc), "code": exc.code},
+                    _native_json_rpc_error_payload(exc),
                 )
         except Exception as exc:
             if not writer.is_closing():
@@ -15372,8 +15397,11 @@ __ICONS_JS__
     function isValidNativeThreadId(value) {
       return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
     }
-    function nativeErrorMessage(message) {
+    function nativeErrorMessage(message, code = "") {
       const text = String(message || "");
+      if (String(code || "") === "native_thread_not_found" || /^thread not found:\\s*\\S+\\s*$/i.test(text)) {
+        return "历史会话已不在当前 Codex 后台中，无法继续发送。请回到会话列表选择可恢复会话，或新建会话继续。";
+      }
       if (text === "native session not found" || text === "KeyError") {
         return "会话不存在或已被清理";
       }
@@ -15521,7 +15549,13 @@ __ICONS_JS__
         });
         if (!response.ok) {
           const body = await response.json().catch(() => ({}));
-          throw new Error(nativeErrorMessage(body.error || response.statusText));
+          const error = new Error(nativeErrorMessage(
+            body.error || response.statusText,
+            body.native_error_code || ""
+          ));
+          error.code = body.native_error_code || body.code || response.status;
+          error.httpStatus = response.status;
+          throw error;
         }
         return response.json().catch(() => ({}));
       } catch (error) {
