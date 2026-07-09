@@ -305,6 +305,11 @@ class NativeTimelineStore:
                 source_priority=90,
                 merge_local=False,
             )
+            self._suppress_failed_lifecycle_for_completed_turn(
+                provider,
+                native_thread_id,
+                turn_key,
+            )
             return [self._event_from_runtime(event, item_id, "message_completed", item_payload)]
 
         if event_type == EventType.MODEL_REASONING_DELTA:
@@ -811,6 +816,17 @@ class NativeTimelineStore:
             ):
                 status = _terminal_turn_status(event_type, payload)
                 if _should_project_failed_lifecycle(event_type, payload):
+                    if self._completed_message_for_turn_exists(
+                        provider_key,
+                        thread_id,
+                        turn_key,
+                    ):
+                        self._suppress_failed_lifecycle_for_completed_turn(
+                            provider_key,
+                            thread_id,
+                            turn_key,
+                        )
+                        return {"active": False, "status": "idle", "active_turn_id": ""}
                     self._ensure_failed_lifecycle_item(
                         provider=provider_key,
                         native_thread_id=thread_id,
@@ -861,6 +877,49 @@ class NativeTimelineStore:
             """,
             (provider, native_thread_id, *_VISIBLE_CONVERSATION_ITEM_KINDS),
         ).fetchone()
+
+    def _completed_message_for_turn_exists(
+        self,
+        provider: str,
+        native_thread_id: str,
+        turn_key: str,
+    ) -> bool:
+        if not turn_key:
+            return False
+        row = self._conn.execute(
+            """
+            SELECT 1
+            FROM native_timeline_items
+            WHERE provider = ? AND native_thread_id = ? AND turn_key = ?
+              AND kind = 'message' AND status = 'completed'
+            LIMIT 1
+            """,
+            (provider, native_thread_id, turn_key),
+        ).fetchone()
+        return row is not None
+
+    def _suppress_failed_lifecycle_for_completed_turn(
+        self,
+        provider: str,
+        native_thread_id: str,
+        turn_key: str,
+    ) -> None:
+        if not turn_key:
+            return
+        failed_statuses = tuple(sorted(_FAILED_TURN_STATUSES))
+        placeholders = ",".join("?" for _ in failed_statuses)
+        self._conn.execute(
+            f"""
+            UPDATE native_timeline_items
+            SET kind = 'lifecycle_suppressed',
+                status = 'superseded',
+                updated_at = ?
+            WHERE provider = ? AND native_thread_id = ? AND turn_key = ?
+              AND kind = 'lifecycle' AND status IN ({placeholders})
+            """,
+            (now_iso(), provider, native_thread_id, turn_key, *failed_statuses),
+        )
+        self._conn.commit()
 
     def _ensure_failed_lifecycle_item(
         self,

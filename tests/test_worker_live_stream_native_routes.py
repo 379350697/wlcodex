@@ -5143,6 +5143,107 @@ async def test_native_messages_lazily_repair_unprojected_interrupted_lifecycle(
 
 
 @pytest.mark.asyncio
+async def test_native_messages_completed_transcript_supersedes_interrupted_lifecycle(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "跑\n",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="internal",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "provider": "codex",
+                "action": "turn_completed",
+                "status": "interrupted",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.PROVIDER_DISPLAY_COMPLETED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "assistant-1",
+                "text": "跑完了",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:02+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1/messages?limit=20 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [item["kind"] for item in body["items"]] == ["user_message", "message"]
+    assert body["items"][1]["text"] == "跑完了"
+    assert body["run_state"] == {
+        "active": False,
+        "status": "idle",
+        "active_turn_id": "",
+    }
+
+
+@pytest.mark.asyncio
 async def test_native_messages_run_state_ignores_stale_active_turn_after_newer_completed_item(
     tmp_path: Path,
 ) -> None:
