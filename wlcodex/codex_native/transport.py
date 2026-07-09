@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import struct
 from typing import Any, Protocol
@@ -16,6 +17,7 @@ from typing import Any, Protocol
 
 NativeMessageHandler = Callable[[dict[str, Any]], Awaitable[None]]
 _DEFAULT_CONTROL_SOCKET = Path("~/.codex/app-server-control/app-server-control.sock")
+_MACOS_CODEX_APP_BINARY = Path("/Applications/Codex.app/Contents/Resources/codex")
 _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _OP_CONTINUATION = 0x0
 _OP_TEXT = 0x1
@@ -32,6 +34,18 @@ class CodexNativeTransport(Protocol):
     async def close(self) -> None: ...
 
     def describe(self) -> dict[str, Any]: ...
+
+
+def _resolve_codex_binary(binary: str) -> str:
+    value = str(binary or "").strip() or "codex"
+    if "/" in value:
+        return value
+    resolved = shutil.which(value)
+    if resolved:
+        return resolved
+    if value == "codex" and _MACOS_CODEX_APP_BINARY.exists():
+        return str(_MACOS_CODEX_APP_BINARY)
+    return value
 
 
 class WebSocketJsonFramer:
@@ -143,9 +157,17 @@ class WebSocketJsonFramer:
 class CodexDaemonTransport:
     """Connect to the official Codex daemon Unix control socket."""
 
-    def __init__(self, binary: str, sock_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        binary: str,
+        sock_path: Path | None = None,
+        *,
+        fallback_app_server: CodexNativeTransport | None = None,
+    ) -> None:
         self.binary = binary
         self.sock_path = (sock_path or _DEFAULT_CONTROL_SOCKET).expanduser()
+        self._fallback_app_server = fallback_app_server
+        self._active_fallback: CodexNativeTransport | None = None
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -156,9 +178,16 @@ class CodexDaemonTransport:
     ) -> None:
         if self._writer is not None:
             raise RuntimeError("Codex daemon transport is already started")
-        self._reader, self._writer = await asyncio.open_unix_connection(
-            str(self.sock_path)
-        )
+        try:
+            self._reader, self._writer = await asyncio.open_unix_connection(
+                str(self.sock_path)
+            )
+        except FileNotFoundError:
+            if self._fallback_app_server is None:
+                raise
+            await self._fallback_app_server.start(on_message)
+            self._active_fallback = self._fallback_app_server
+            return
         request, key = WebSocketJsonFramer.handshake_request()
         self._writer.write(request)
         await self._writer.drain()
@@ -166,6 +195,9 @@ class CodexDaemonTransport:
         self._reader_task = asyncio.create_task(self._read_stdout(on_message))
 
     async def send_json(self, msg: dict[str, Any]) -> None:
+        if self._active_fallback is not None:
+            await self._active_fallback.send_json(msg)
+            return
         if self._writer is None:
             raise RuntimeError("Codex daemon transport is not started")
         raw = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
@@ -173,6 +205,11 @@ class CodexDaemonTransport:
         await self._writer.drain()
 
     async def close(self) -> None:
+        if self._active_fallback is not None:
+            fallback = self._active_fallback
+            self._active_fallback = None
+            await fallback.close()
+            return
         try:
             if self._reader_task is not None:
                 self._reader_task.cancel()
@@ -200,6 +237,11 @@ class CodexDaemonTransport:
                     pass
 
     def describe(self) -> dict[str, Any]:
+        if self._active_fallback is not None:
+            description = dict(self._active_fallback.describe())
+            description["fallback_from"] = "daemon"
+            description["sock_path"] = str(self.sock_path)
+            return description
         return {
             "transport": "daemon",
             "source": "daemon",
@@ -285,7 +327,7 @@ class CodexAppServerWebSocketTransport:
             raise RuntimeError("Codex app-server transport is already started")
 
         if self.spawn_process:
-            args = [self.binary, "app-server"]
+            args = [_resolve_codex_binary(self.binary), "app-server"]
             if self.remote_control:
                 args.append("--remote-control")
             args.extend(["--listen", self.listen_endpoint])
@@ -390,7 +432,16 @@ def create_codex_native_transport(
     remote_control: bool = True,
 ) -> CodexNativeTransport:
     if transport in {"daemon", "proxy"}:
-        return CodexDaemonTransport(binary=binary, sock_path=sock_path)
+        return CodexDaemonTransport(
+            binary=binary,
+            sock_path=sock_path,
+            fallback_app_server=CodexAppServerWebSocketTransport(
+                binary=binary,
+                listen_endpoint=listen_endpoint,
+                startup_timeout_seconds=startup_timeout_seconds,
+                remote_control=remote_control,
+            ),
+        )
     if transport == "app-server":
         return CodexAppServerWebSocketTransport(
             binary=binary,

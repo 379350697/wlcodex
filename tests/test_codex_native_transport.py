@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from wlcodex.codex_native import transport as transport_module
 from wlcodex.codex_native.transport import (
     CodexAppServerWebSocketTransport,
     CodexDaemonTransport,
@@ -230,6 +231,63 @@ def test_transport_factory_defaults_to_daemon_and_keeps_legacy_explicit(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_daemon_factory_falls_back_to_app_server_when_socket_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    spawned_args: tuple[object, ...] | None = None
+    fake_websocket = _FakeWebSocket()
+
+    async def fake_open_unix_connection(_path: str):
+        raise FileNotFoundError("missing control socket")
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        nonlocal spawned_args
+        spawned_args = args
+        return _FakeProcess()
+
+    async def fake_connect(endpoint: str, max_size: object = None) -> _FakeWebSocket:
+        assert endpoint == "ws://127.0.0.1:18742"
+        assert max_size is None
+        return fake_websocket
+
+    import websockets
+
+    monkeypatch.setattr(transport_module.shutil, "which", lambda binary: binary)
+    monkeypatch.setattr(
+        asyncio,
+        "open_unix_connection",
+        fake_open_unix_connection,
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    transport = create_codex_native_transport(
+        transport="daemon",
+        binary="codex",
+        sock_path=tmp_path / "missing.sock",
+        listen_endpoint="ws://127.0.0.1:18742",
+        startup_timeout_seconds=3.0,
+    )
+    await transport.start(lambda _message: None)
+    await transport.send_json({"jsonrpc": "2.0", "method": "ping"})
+    await transport.close()
+
+    assert spawned_args == (
+        "codex",
+        "app-server",
+        "--remote-control",
+        "--listen",
+        "ws://127.0.0.1:18742",
+        "--analytics-default-enabled",
+    )
+    assert json.loads(fake_websocket.sent[0]) == {
+        "jsonrpc": "2.0",
+        "method": "ping",
+    }
+
+
+@pytest.mark.asyncio
 async def test_app_server_websocket_transport_spawns_remote_control_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -249,6 +307,7 @@ async def test_app_server_websocket_transport_spawns_remote_control_by_default(
 
     import websockets
 
+    monkeypatch.setattr(transport_module.shutil, "which", lambda binary: binary)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(websockets, "connect", fake_connect)
 
@@ -271,6 +330,41 @@ async def test_app_server_websocket_transport_spawns_remote_control_by_default(
 
 
 @pytest.mark.asyncio
+async def test_app_server_websocket_transport_resolves_macos_app_binary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    spawned_args: tuple[object, ...] | None = None
+    macos_binary = tmp_path / "Codex.app" / "Contents" / "Resources" / "codex"
+    macos_binary.parent.mkdir(parents=True)
+    macos_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        nonlocal spawned_args
+        spawned_args = args
+        return _FakeProcess()
+
+    async def fake_connect(endpoint: str, max_size: object = None) -> _FakeWebSocket:
+        assert endpoint == "ws://127.0.0.1:18742"
+        assert max_size is None
+        return _FakeWebSocket()
+
+    import websockets
+
+    monkeypatch.setattr(transport_module.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(transport_module, "_MACOS_CODEX_APP_BINARY", macos_binary)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    transport = CodexAppServerWebSocketTransport("codex")
+    await transport.start(lambda _message: None)
+    await transport.close()
+
+    assert spawned_args is not None
+    assert spawned_args[0] == str(macos_binary)
+
+
+@pytest.mark.asyncio
 async def test_app_server_websocket_transport_can_disable_remote_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -288,6 +382,7 @@ async def test_app_server_websocket_transport_can_disable_remote_control(
 
     import websockets
 
+    monkeypatch.setattr(transport_module.shutil, "which", lambda binary: binary)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(websockets, "connect", fake_connect)
 
