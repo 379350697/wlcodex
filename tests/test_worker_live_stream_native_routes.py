@@ -5244,6 +5244,103 @@ async def test_native_messages_completed_transcript_supersedes_interrupted_lifec
 
 
 @pytest.mark.asyncio
+async def test_native_messages_deduplicates_provider_and_jsonl_final_same_turn_text(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "跑\n",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.PROVIDER_DISPLAY_COMPLETED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "msg-provider-final",
+                "text": "同一条 final",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.MODEL_MESSAGE_COMPLETED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "jsonl-assistant-final:duplicate",
+                "text": "同一条 final",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:02+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/sessions/thread-1/messages?limit=20 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert [item["kind"] for item in body["items"]] == ["user_message", "message"]
+    assert body["items"][1]["item_key"] == "msg-provider-final"
+    assert body["items"][1]["text"] == "同一条 final"
+
+
+@pytest.mark.asyncio
 async def test_native_messages_run_state_ignores_stale_active_turn_after_newer_completed_item(
     tmp_path: Path,
 ) -> None:
@@ -7126,7 +7223,10 @@ async def test_worker_live_page_clears_running_composer_state_on_terminal_turn_e
     assert "isTerminalTurnEvent(event)" in response
     assert 'if (event.kind === "message_completed" && payload.native_turn_id) return true;' not in response
     assert '["completed", "done", "succeeded", "success"]' in response
-    assert '["failed", "error", "cancelled", "canceled", "interrupted", "aborted"]' in response
+    assert (
+        '["failed", "error", "cancelled", "canceled", "interrupted", '
+        '"aborted", "timed_out", "timeout", "orphaned"]'
+    ) in response
     assert "nativeTurnRunning = false;" in response
     assert 'continueButton.innerHTML = mode === "interrupt" ? ICONS.stop : ICONS.send;' in response
     assert "(!nativeTurnRunning && !composerHasDraft())" in response

@@ -9,6 +9,14 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
+from wlcodex.native_turn_semantics import (
+    COMPLETED_TURN_STATUSES,
+    FAILED_TURN_STATUSES,
+    is_active_turn_status,
+    is_failed_turn_status,
+    normalize_turn_status,
+    turn_terminal_label,
+)
 from wlcodex.runtime_events import EventType, RuntimeEvent, now_iso
 
 
@@ -280,6 +288,19 @@ class NativeTimelineStore:
             item_key = _first_text(payload, "itemId", "item_id", "message_id") or (
                 "assistant-" + turn_key
             )
+            duplicate = self._find_completed_message_by_turn_text(
+                provider,
+                native_thread_id,
+                turn_key,
+                text,
+            )
+            if duplicate is not None and str(duplicate["item_key"]) != item_key:
+                if _is_jsonl_assistant_final_item_key(item_key):
+                    return []
+                if _is_jsonl_assistant_final_item_key(str(duplicate["item_key"])):
+                    self._suppress_conversation_item(int(duplicate["id"]))
+                else:
+                    return []
             existing = self._find_item(provider, native_thread_id, turn_key, item_key)
             if (
                 existing is not None
@@ -846,7 +867,7 @@ class NativeTimelineStore:
             latest_item = self._latest_visible_item_for_run_state(provider_key, thread_id)
             if latest_item is not None and str(latest_item["turn_key"]) != turn_key:
                 latest_status = str(latest_item["status"] or "").strip().lower()
-                if latest_status in _NATIVE_ACTIVE_ITEM_STATUSES:
+                if is_active_turn_status(latest_status):
                     return {
                         "active": True,
                         "status": latest_status,
@@ -898,6 +919,96 @@ class NativeTimelineStore:
         ).fetchone()
         return row is not None
 
+    def _find_completed_message_by_turn_text(
+        self,
+        provider: str,
+        native_thread_id: str,
+        turn_key: str,
+        text: str,
+    ) -> sqlite3.Row | None:
+        if not turn_key or not text:
+            return None
+        return self._conn.execute(
+            """
+            SELECT *
+            FROM native_timeline_items
+            WHERE provider = ? AND native_thread_id = ? AND turn_key = ?
+              AND kind = 'message' AND status = 'completed' AND text = ?
+            ORDER BY
+              CASE WHEN item_key LIKE 'jsonl-assistant-final:%' THEN 1 ELSE 0 END ASC,
+              source_priority DESC,
+              id ASC
+            LIMIT 1
+            """,
+            (provider, native_thread_id, turn_key, text),
+        ).fetchone()
+
+    def _suppress_conversation_item(self, item_id: int) -> None:
+        self._conn.execute(
+            """
+            UPDATE native_timeline_items
+            SET kind = 'message_suppressed',
+                status = 'superseded',
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now_iso(), int(item_id)),
+        )
+        self._conn.commit()
+
+    def suppress_duplicate_completed_messages(
+        self,
+        provider: str,
+        native_thread_id: str,
+    ) -> None:
+        rows = self._conn.execute(
+            """
+            SELECT id, turn_key, item_key, text, source_priority
+            FROM native_timeline_items
+            WHERE provider = ? AND native_thread_id = ?
+              AND kind = 'message' AND status = 'completed'
+              AND turn_key != '' AND text != ''
+            ORDER BY turn_key ASC, text ASC, id ASC
+            """,
+            (_normalize_provider(provider), str(native_thread_id or "").strip()),
+        ).fetchall()
+        grouped: dict[tuple[str, str], list[sqlite3.Row]] = defaultdict(list)
+        for row in rows:
+            grouped[(str(row["turn_key"]), str(row["text"]))].append(row)
+        duplicate_ids: list[int] = []
+        for group_rows in grouped.values():
+            if len(group_rows) < 2:
+                continue
+            preferred = min(
+                group_rows,
+                key=lambda row: (
+                    _is_jsonl_assistant_final_item_key(str(row["item_key"])),
+                    -int(row["source_priority"] or 0),
+                    int(row["id"]),
+                ),
+            )
+            duplicate_ids.extend(
+                int(row["id"])
+                for row in group_rows
+                if int(row["id"]) != int(preferred["id"])
+            )
+        if not duplicate_ids:
+            return
+        for offset in range(0, len(duplicate_ids), 500):
+            chunk = duplicate_ids[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            self._conn.execute(
+                f"""
+                UPDATE native_timeline_items
+                SET kind = 'message_suppressed',
+                    status = 'superseded',
+                    updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (now_iso(), *chunk),
+            )
+        self._conn.commit()
+
     def _suppress_failed_lifecycle_for_completed_turn(
         self,
         provider: str,
@@ -906,7 +1017,7 @@ class NativeTimelineStore:
     ) -> None:
         if not turn_key:
             return
-        failed_statuses = tuple(sorted(_FAILED_TURN_STATUSES))
+        failed_statuses = tuple(sorted(FAILED_TURN_STATUSES))
         placeholders = ",".join("?" for _ in failed_statuses)
         self._conn.execute(
             f"""
@@ -1527,20 +1638,6 @@ _NATIVE_TURN_STATE_EVENT_TYPES = (
     *_NATIVE_TURN_TERMINAL_EVENT_TYPES,
 )
 
-_NATIVE_ACTIVE_ITEM_STATUSES = {"queued", "streaming", "waiting", "pending", "running"}
-_FAILED_TURN_STATUSES = {
-    "failed",
-    "error",
-    "cancelled",
-    "canceled",
-    "interrupted",
-    "aborted",
-    "timed_out",
-    "timeout",
-    "orphaned",
-}
-
-
 def _visible_item_kind_placeholders() -> str:
     return ",".join("?" for _ in _VISIBLE_CONVERSATION_ITEM_KINDS)
 
@@ -1576,16 +1673,11 @@ def _should_project_failed_lifecycle(event_type: str, payload: dict[str, Any]) -
 
 
 def _is_failed_terminal_status(status: str) -> bool:
-    return status.strip().lower() in _FAILED_TURN_STATUSES
+    return is_failed_turn_status(status)
 
 
 def _turn_lifecycle_text(status: str) -> str:
-    normalized = status.strip().lower()
-    if normalized in {"interrupted", "cancelled", "canceled", "aborted"}:
-        return "已中断"
-    if normalized in {"timed_out", "timeout"}:
-        return "已超时"
-    return "执行失败"
+    return turn_terminal_label(status)
 
 
 def _terminal_turn_status(event_type: str, payload: dict[str, Any]) -> str:
@@ -1604,8 +1696,8 @@ def _terminal_turn_status(event_type: str, payload: dict[str, Any]) -> str:
 
 
 def _active_turn_status(event_type: str, payload: dict[str, Any]) -> str:
-    status = _first_text(payload, "status").strip().lower()
-    if status and status not in {"completed", "done", "succeeded", "success"}:
+    status = normalize_turn_status(_first_text(payload, "status"))
+    if status and status not in COMPLETED_TURN_STATUSES:
         return status
     if event_type == EventType.AGENT_RUN_QUEUED:
         return "queued"
@@ -1739,6 +1831,10 @@ def _text_fingerprint(text: str) -> str:
 
 def _is_compatibility_projection(payload: dict[str, Any]) -> bool:
     return bool(payload.get("compatibility_projection"))
+
+
+def _is_jsonl_assistant_final_item_key(item_key: str) -> bool:
+    return str(item_key or "").startswith("jsonl-assistant-final:")
 
 
 def _ends_with_delta(text: str, delta: str) -> bool:

@@ -51,6 +51,10 @@ from wlcodex.native_timeline import (
     NativeTimelineItem,
     NativeTimelineStore,
 )
+from wlcodex.native_turn_semantics import (
+    ACTIVE_TURN_STATUSES,
+    turn_semantics_json,
+)
 from wlcodex.jsonrpc import JsonRpcError, JsonRpcTimeout
 from wlcodex.relay.display import (
     dict_looks_like_role_envelope as relay_dict_looks_like_role_envelope,
@@ -3094,6 +3098,10 @@ class WorkerLiveStreamServer:
             )
             return
         if item_snapshot:
+            self._native_timeline.suppress_duplicate_completed_messages(
+                provider_key,
+                native_thread_id,
+            )
             events = self._native_timeline.list_item_events(
                 provider,
                 native_thread_id,
@@ -3163,6 +3171,10 @@ class WorkerLiveStreamServer:
         await writer.drain()
         if self._native_timeline is None:
             return
+        self._native_timeline.suppress_duplicate_completed_messages(
+            provider,
+            native_thread_id,
+        )
         self._schedule_native_timeline_transcript_sync_if_needed(
             provider,
             native_thread_id,
@@ -3248,6 +3260,10 @@ class WorkerLiveStreamServer:
                 },
             )
             return
+        self._native_timeline.suppress_duplicate_completed_messages(
+            provider_key,
+            native_thread_id,
+        )
         run_state = self._native_timeline.latest_turn_run_state(
             provider_key,
             native_thread_id,
@@ -3332,6 +3348,10 @@ class WorkerLiveStreamServer:
         if self._native_timeline is None:
             return
         provider_key = provider.strip().lower() or "codex"
+        self._native_timeline.suppress_duplicate_completed_messages(
+            provider_key,
+            native_thread_id,
+        )
         self._schedule_native_timeline_transcript_sync_if_needed(
             provider_key,
             native_thread_id,
@@ -4244,11 +4264,10 @@ def _native_conversation_item_display_event(item: NativeTimelineItem) -> dict[st
 
 
 def _native_messages_run_state(items: list[NativeTimelineItem]) -> dict[str, Any]:
-    active_statuses = {"queued", "streaming", "waiting", "pending", "running"}
     active_items = [
         item
         for item in items
-        if str(item.status or "").strip().lower() in active_statuses
+        if str(item.status or "").strip().lower() in ACTIVE_TURN_STATUSES
         and item.kind != "user_message"
     ]
     if not active_items:
@@ -12656,6 +12675,7 @@ __MARVIS_CSS_LINK__  <style>
   <script>
     const PROVIDER = __PROVIDER_JSON__;
 __ICONS_JS__
+    const NATIVE_TURN_SEMANTICS = __NATIVE_TURN_SEMANTICS_JSON__;
     const PROVIDER_LABEL = __PROVIDER_LABEL_JSON__;
     const API_BASE = __API_BASE_JSON__;
     const SUPPORTS_PLAN_MODE = __SUPPORTS_PLAN_MODE_JSON__;
@@ -14300,6 +14320,10 @@ __MARVIS_EXTRA_HTML__
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
         .replace(
+            "__NATIVE_TURN_SEMANTICS_JSON__",
+            json.dumps(turn_semantics_json(), ensure_ascii=False),
+        )
+        .replace(
             "__SUPPORTS_PLAN_MODE_JSON__",
             json.dumps(supports_plan_mode),
         )
@@ -15182,6 +15206,7 @@ __MARVIS_CSS_LINK__  <style>
     const token = params.get("token") || "";
     const PROVIDER = __PROVIDER_JSON__;
 __ICONS_JS__
+    const NATIVE_TURN_SEMANTICS = __NATIVE_TURN_SEMANTICS_JSON__;
     const PROVIDER_LABEL = __PROVIDER_LABEL_JSON__;
     const API_BASE = __API_BASE_JSON__;
     const SUPPORTS_PLAN_MODE = __SUPPORTS_PLAN_MODE_JSON__;
@@ -16927,7 +16952,7 @@ __ICONS_JS__
       return loadedEvents.some(candidate => isTerminalTurnEvent(candidate) && eventFoldTurnId(candidate) === targetTurnId);
     }
     function isCompletedStatus(status) {
-      return ["completed", "done", "succeeded", "success"].includes(
+      return (NATIVE_TURN_SEMANTICS.completed || []).includes(
         String(status || "").trim().toLowerCase()
       );
     }
@@ -18732,7 +18757,7 @@ __ICONS_JS__
       return Boolean(event && (event.kind === "failed" || isFailedStatus(payload.status)));
     }
     function isFailedStatus(status) {
-      return ["failed", "error", "cancelled", "canceled", "interrupted", "aborted"].includes(
+      return (NATIVE_TURN_SEMANTICS.failed || []).includes(
         String(status || "").trim().toLowerCase()
       );
     }
@@ -19759,8 +19784,8 @@ __ICONS_JS__
     }
     function terminalStatusLabel(status) {
       const normalized = String(status || "").trim().toLowerCase();
-      if (["interrupted", "cancelled", "canceled", "aborted"].includes(normalized)) return "已中断";
-      if (["timed_out", "timeout"].includes(normalized)) return "已超时";
+      if ((NATIVE_TURN_SEMANTICS.interrupted || []).includes(normalized)) return "已中断";
+      if ((NATIVE_TURN_SEMANTICS.timeout || []).includes(normalized)) return "已超时";
       return "失败";
     }
   </script>
@@ -19780,6 +19805,10 @@ __MARVIS_EXTRA_HTML__
         .replace("__PROVIDER_JSON__", json.dumps(native_provider, ensure_ascii=False))
         .replace("__PROVIDER_LABEL_JSON__", json.dumps(provider_label, ensure_ascii=False))
         .replace("__API_BASE_JSON__", json.dumps(api_base, ensure_ascii=False))
+        .replace(
+            "__NATIVE_TURN_SEMANTICS_JSON__",
+            json.dumps(turn_semantics_json(), ensure_ascii=False),
+        )
         .replace(
             "__SUPPORTS_PLAN_MODE_JSON__",
             json.dumps(supports_plan_mode),
