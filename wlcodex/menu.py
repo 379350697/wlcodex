@@ -1,48 +1,27 @@
-"""Telegram BotCommands definitions and registration helper.
+"""Telegram commands for the compatibility bridge.
 
-Primary commands are ordered around daily conversation use.
-Diagnostic-only legacy commands are hidden from the menu.
+Telegram is no longer a task-creation surface.  The command menu must not
+advertise the historical Workbench flow, because Telegram menus are global and
+cannot be made conditional on a conversation's ``legacy_compatible`` flag.
 """
 
 from __future__ import annotations
 
 _PRIMARY_COMMANDS: list[tuple[str, str]] = [
-    ("new", "新工作台"),
-    ("codex", "问 GPT 工程师"),
-    ("claude", "叫 DeepSeek 工程师"),
-    ("auto", "总工程师模式"),
-    ("stop", "停止当前运行"),
-    ("status", "当前状态"),
-    ("sessions", "会话列表"),
-    ("history", "历史工作台"),
-    ("workspaces", "可用工作区"),
-    ("switch", "切换工作区"),
-    ("model", "切换模型"),
-    ("claude_mode", "DeepSeek 权限"),
-    ("diff", "查看 diff"),
-    ("files", "相关文件"),
-    ("verify", "审计验收"),
-    ("health", "系统健康"),
-    ("help", "帮助"),
+    ("native", "开始直接会话"),
+    ("relay", "创建协作任务"),
+    ("new", "打开新入口"),
+    ("help", "兼容说明"),
 ]
 
-_NATURAL_COMMANDS: list[tuple[str, str]] = [
-    ("new", "新工作台"),
-    ("status", "状态"),
-    ("terminal", "接管现场"),
-    ("history", "历史工作台"),
-    ("workspaces", "工作区"),
-    ("diff", "变更"),
-    ("settings", "设置"),
-    ("help", "帮助"),
-]
+_NATURAL_COMMANDS = _PRIMARY_COMMANDS
 
 
 def build_bot_commands(profile: str = "natural") -> list[tuple[str, str]]:
     """Return bot commands as (command, description) pairs.
 
-    Diagnostic-only legacy commands are excluded from the menu to keep
-    the primary UX conversation-first.
+    Historical commands remain handled for persisted legacy conversations,
+    but are intentionally excluded from the global menu.
     """
     if profile == "natural":
         return list(_NATURAL_COMMANDS)

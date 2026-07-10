@@ -2359,7 +2359,7 @@ async def test_marvis_relay_chat_home_is_the_only_new_task_entry(
 
 
 @pytest.mark.asyncio
-async def test_relay_work_log_shows_subagent_dispatch_decision(tmp_path: Path) -> None:
+async def test_relay_work_log_hides_orchestration_dispatch_metadata(tmp_path: Path) -> None:
     server, service, _runtime_store = _server(tmp_path)
     task = service.create_task(
         title="Plan with helpers",
@@ -2403,9 +2403,9 @@ async def test_relay_work_log_shows_subagent_dispatch_decision(tmp_path: Path) -
         await server.stop()
 
     work_log_html = _relay_work_log_html(response)
-    assert "Claude plan" in work_log_html
-    assert "子代理自动" in work_log_html
-    assert "builtin_subagents" in work_log_html
+    assert "Claude plan" not in work_log_html
+    assert "子代理自动" not in work_log_html
+    assert "builtin_subagents" not in work_log_html
     assert "provider_team_topology" not in work_log_html
 
 

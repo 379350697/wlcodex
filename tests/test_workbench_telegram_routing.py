@@ -597,10 +597,7 @@ async def test_product_returns_to_cockpit_preserves_workbench():
 
 @pytest.mark.asyncio
 async def test_settings_command_sends_settings_card():
-    """Spec §Menu Design: /settings renders settings card.
-
-    The card must include natural settings options, not raw config keys.
-    """
+    """Historical /settings must not advertise retired Telegram controls."""
     update = _make_update("/settings")
 
     handlers = _make_handlers()
@@ -611,12 +608,9 @@ async def test_settings_command_sends_settings_card():
     sent_texts = [c.kwargs["text"] for c in send_calls]
     combined = " ".join(sent_texts)
 
-    # Must contain settings-relevant language
-    settings_terms = ["设置", "工程师", "开发", "审计", "驾驶舱"]
-    found = [term for term in settings_terms if term in combined]
-    assert len(found) >= 2, (
-        f"Settings card missing expected terms. Found: {found}. Text: {combined[:500]}"
-    )
+    assert "历史会话兼容" in combined
+    assert "/auto" not in combined
+    assert "工程师大模型" not in combined
 
 
 # ── User copy must not expose terminal.enabled ─────────────────────
@@ -797,20 +791,11 @@ allow_write = true
 
 
 @pytest.mark.asyncio
-async def test_settings_callback_all_buttons_route_to_controller():
-    """Every settings card button must route to controller, never return
-    '无效的设置回调数据。' (dead-end).  This proves settings card is
-    closed-loop: each button produces a business outcome, not an error."""
+async def test_settings_card_uses_only_primary_surface_urls():
+    """The compatibility card cannot expose old callback-driven controls."""
 
-    controller = MagicMock()
-    controller.handle = AsyncMock(
-        return_value=SimpleNamespace(text="ok", buttons=None)
-    )
+    handlers = _make_handlers()
 
-    handlers = _make_handlers(controller=controller)
-
-    # Collect every callback_data from the settings card buttons
-    # by sending /settings, then extracting callback_data from the reply
     update = _make_update("/settings")
     await handlers.settings_cmd(update, None)
 
@@ -822,43 +807,9 @@ async def test_settings_callback_all_buttons_route_to_controller():
                 for btn in row:
                     all_buttons.append(btn)
 
-    assert len(all_buttons) >= 5, (
-        f"Expected >=5 settings buttons, got {len(all_buttons)}"
-    )
-
-    # Simulate tapping each button through callback_router
-    for btn in all_buttons:
-        # Reset mock to isolate each call
-        controller.handle.reset_mock()
-
-        query = MagicMock()
-        query.data = btn.callback_data
-        query.message = SimpleNamespace(
-            text="settings card", message_id=900,
-            chat=SimpleNamespace(id=100),
-        )
-        query.answer = AsyncMock()
-
-        cb_update = _make_update("/settings")  # reuse base update
-        cb_update.callback_query = query
-
-        await handlers.callback_router(cb_update, None)
-
-        # The engineer-model picker has its own renderer; all other legacy
-        # settings buttons route through the command controller.
-        if not btn.callback_data.startswith("settings:engineer_models"):
-            controller.handle.assert_called_once()
-
-        # Verify the answer was not an error
-        answer_calls = query.answer.call_args_list
-        answer_texts = [c.kwargs.get("text", "") for c in answer_calls]
-        for t in answer_texts:
-            assert "无效" not in t, (
-                f"Button {btn.callback_data!r} returned error answer: {t}"
-            )
-            assert "错误" not in t, (
-                f"Button {btn.callback_data!r} returned error answer: {t}"
-            )
+    assert len(all_buttons) == 2
+    assert all(button.url for button in all_buttons)
+    assert all(button.callback_data is None for button in all_buttons)
 
 
 @pytest.mark.asyncio
@@ -901,7 +852,7 @@ async def test_settings_exec_mode_callbacks_use_correct_controller_command():
 
 
 @pytest.mark.asyncio
-async def test_settings_card_includes_engineer_model_entry():
+async def test_settings_card_links_to_native_and_relay():
     handlers = _make_handlers()
     sent: list[tuple[int, str, object]] = []
 
@@ -916,10 +867,8 @@ async def test_settings_card_includes_engineer_model_entry():
     assert sent
     buttons = sent[-1][2]
     flat = [button for row in buttons for button in row]
-    assert {
-        "text": "工程师大模型",
-        "callback_data": "settings:engineer_models",
-    } in flat
+    assert {button["text"] for button in flat} == {"打开 Native", "打开 Relay"}
+    assert all(button.get("url") for button in flat)
 
 
 @pytest.mark.asyncio

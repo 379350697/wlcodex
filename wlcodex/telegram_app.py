@@ -922,22 +922,12 @@ class WlCodexHandlers:
 
     def _settings_card(self) -> tuple[str, list[list[dict[str, str]]]]:
         return (
-            "⚙️ 设置\n\n"
-            "普通消息：诊断工程师分析/核验\n"
-            "/auto：架构/诊断工程师 → 开发/测试工程师 → 审计工程师\n"
-            "当前视图：驾驶舱\n\n"
-            "你可以调整：",
+            "Telegram 仅保留历史会话兼容。\n\n"
+            "新工作请使用 Native；需要计划、协作或验收时请使用 Relay。"
+            "历史会话的已在途恢复与现场接管不会因这个入口改变。",
             [
-                [{"text": "完整流程（/auto：架构/诊断 → 开发/测试 → 审计）",
-                  "callback_data": "settings:exec_mode:orchestrated"}],
-                [{"text": "只问诊断工程师",
-                  "callback_data": "settings:exec_mode:codex_direct"}],
-                [{"text": "只叫 DeepSeek 开发工程师",
-                  "callback_data": "settings:exec_mode:claude_direct"}],
-                [{"text": "工程师大模型", "callback_data": "settings:engineer_models"}],
-                [{"text": "模型", "callback_data": "settings:model"}],
-                [{"text": "DeepSeek 权限", "callback_data": "settings:claude_permission:normal"}],
-                [{"text": "工作区", "callback_data": "settings:workspace"}],
+                [{"text": "打开 Native", "url": self._primary_surface_url("native")}],
+                [{"text": "打开 Relay", "url": self._primary_surface_url("relay")}],
             ],
         )
 
@@ -2869,7 +2859,8 @@ def build_application(
 
 async def _skeleton_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "WLCodex 已在线。直接发消息继续工作台，或使用 /new 开始新的工作台。"
+        "WLCodex 已在线。Telegram 仅保留历史会话兼容；"
+        "使用 /native 开始直接会话，或使用 /relay 创建协作任务。"
     )
 
 

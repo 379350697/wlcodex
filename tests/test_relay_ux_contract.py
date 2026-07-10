@@ -10,7 +10,6 @@ from wlcodex.live_stream.native_templates.timeline_v2 import (
 from wlcodex.live_stream.server import (
     _marvis_relay_attachment_script,
     _marvis_relay_attachment_sheet_html,
-    _marvis_relay_office_page,
     _live_page,
     _native_codex_page,
     _relay_blocked_inbox_page,
@@ -337,7 +336,6 @@ def test_sse_connection_owns_live_updates_and_hidden_pages_suspend_polling() -> 
     detail_page = _relay_task_detail_page(_detail())
     native_home = _native_codex_page("codex")
     native_page = _live_page(42, native_provider="codex")
-    office_page = _marvis_relay_office_page()
 
     # Relay closes its EventSource while hidden and reconnects from the event
     # cursor.  There is no second-level status poll in the rendered task page.
@@ -356,9 +354,9 @@ def test_sse_connection_owns_live_updates_and_hidden_pages_suspend_polling() -> 
     assert "closeLiveEventSource();" in native_page
     assert "source.onopen = () => {" in native_page
     assert not re.search(r"setInterval\(pollEvents,\s*1000\)", native_page)
-    assert "TOKEN_STATS_REFRESH_INTERVAL_MS = 30000" in office_page
-    assert not re.search(r"setInterval\(refreshTokenStats,\s*2000\)", office_page)
-
+    assert "WLCodexSurfaceRuntime.createConditionalScroller" in native_page
+    assert "const timelineScroller" in native_page
+    assert "function isNearTimelineBottom()" not in native_page
     # The Native session index follows the same rule: no polling while its
     # session EventSource is connected, and no stream while the page is hidden.
     assert "sessionsFallbackPollTimer" in native_home

@@ -89,7 +89,8 @@ def test_task_list_empty() -> None:
 def test_help_is_not_empty() -> None:
     text = render_help()
     assert len(text) > 100
-    assert "新工作台" in text
+    assert "历史兼容" in text
+    assert "/native" in text
     assert "/task" not in text
     assert "/continue" not in text
     assert "/steer" not in text

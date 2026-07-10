@@ -66,51 +66,7 @@ def render_health_card(
 
 
 def render_help() -> str:
-    return """WLCodex — 远程工作台驾驶舱
-
-普通消息：诊断工程师分析/核验
-/auto：工程团队闭环（架构/诊断 → 确认 → 开发/测试 → 确认 → 审计）
-
-驾驶舱与现场：
-  /product — 回驾驶舱
-  /terminal — 接管现场
-  /terminal claude — 接入 DeepSeek 开发现场
-  /terminal codex — 接入 GPT 开发现场
-  /terminal agent claude — 接入 DeepSeek 开发现场（显式）
-  /terminal agent codex — 接入 GPT 开发现场（显式）
-  /terminal tail — 恢复现场推送 / 查看最新输出
-  /terminal pause — 暂停现场推送但保留会话
-  /terminal detach — 停止现场推送但保留会话
-  /terminal product — 回驾驶舱
-  /mode — 查看当前模式
-
-对话模式 — 直接发消息开始：
-  • 普通消息 — 诊断工程师分析/核验
-  • /codex <提示> — 直接让 GPT 开发工程师处理
-  • /claude <提示> — 直接让 DeepSeek 开发工程师实施
-  • /auto <提示> — 工程团队闭环：架构/诊断 → 确认 → 开发/测试 → 确认 → 审计
-
-常用命令：
-  /new — 开始新工作台
-  /stop — 停止当前运行
-  /status — 查看当前工作台
-  /sessions — 查看历史现场
-  /history — 查看历史工作台
-  /workspaces — 查看可用工作区
-  /switch <工作区> — 切换工作区
-  /model — 切换或查看当前模型
-  /claude_mode — 切换 DeepSeek 开发工程师权限模式
-  /diff — 查看变更
-  /files — 相关文件
-  /verify — 审计工程师验收
-  /health — 系统健康
-  /help — 此帮助
-
-安全规则：
-  • 只允许私聊
-  • 只允许白名单用户
-  • 每个工作区同一时间只允许一个写执行
-  • 状态和日志永远不会回灌到模型上下文"""
+    return render_conversation_help()
 
 
 def render_inspection_result(title: str, body: str) -> str:
@@ -406,68 +362,25 @@ def render_conversation_status(
 
 
 def render_conversation_help(profile: str = "natural") -> str:
-    if profile == "natural":
-        return "\n".join(
-            [
-                "WLCodex 已连接",
-                "",
-                "普通消息：诊断工程师分析/核验",
-                "/auto：工程团队闭环（架构/诊断→确认→开发/测试→确认→审计）",
-                "当前视图：驾驶舱",
-                "工作区：当前项目",
-                "GPT 开发工程师：可用",
-                "DeepSeek 开发工程师：可用",
-                "现场接管：可用",
-                "",
-                "直接发消息开始。",
-                "",
-                "[新工作台] [接管现场] [设置]",
-            ]
-        )
-    return """WLCodex — 远程工作台驾驶舱
+    _ = profile  # Kept for callers from pre-compatibility configurations.
+    return """WLCodex Telegram 历史兼容入口（当前为历史会话）
 
-普通消息：诊断工程师分析/核验；/auto：架构/诊断工程师 -> 开发/测试工程师 -> 审计工程师
+此会话可继续原有恢复、回调与现场接管。新 Telegram 消息不会为新消息
+创建旧 Workbench 主状态。
 
-驾驶舱与现场：
-  • /product — 回驾驶舱
-  • /terminal — 接管现场
-  • /terminal claude — 接入 DeepSeek 开发现场
-  • /terminal codex — 接入 GPT 开发现场
-  • /terminal agent claude — 接入 DeepSeek 开发现场（显式）
-  • /terminal agent codex — 接入 GPT 开发现场（显式）
-  • /terminal tail — 恢复现场推送
-  • /terminal pause — 暂停现场推送
-  • /terminal detach — 停止现场推送但保留会话
-  • /terminal product — 回驾驶舱
-  • /mode — 查看当前模式
+历史会话操作：
+  • /codex <提示>、/claude <提示>、/auto <提示> — 继续已有会话
+  • /stop、/status、/terminal — 中断、查看或接管已有现场
+  • /verify — 跳转 Relay，对绑定 implementation run 执行目标验收
 
-对话模式：
-  • 直接发消息 — 诊断工程师分析/核验
-  • /codex <prompt> — 直接让 GPT 开发工程师处理
-  • /claude <prompt> — 直接让 DeepSeek 开发工程师实施
-  • /auto <prompt> — 工程团队闭环（架构/诊断→确认→开发/测试→确认→审计）
-  • /verify — 审计工程师验收最新结果
-
-常用命令：
-  • /new — 开始新工作台
-  • /stop — 停止当前运行
-  • /status — 查看当前对话状态
-  • /sessions — 查看历史现场
-  • /history — 查看历史工作台
-  • /workspaces — 查看可用工作区
-  • /switch <workspace> — 切换工作区
-  • /model — 切换或查看当前模型
-  • /claude_mode — 切换 DeepSeek 开发工程师权限模式
-  • /diff — 查看变更
-  • /files — 相关文件
-  • /health — 系统健康
-  • /help — 此帮助
+新工作不在 Telegram 创建：
+  • /native — 打开 Native，开始直接会话
+  • /relay — 打开 Relay，创建需要计划、协作或验收的任务
+  • /new — 显示这两个入口
 
 安全规则：
-  • 只允许私聊
-  • 只允许白名单用户
-  • 每个工作区同一时间只允许一个写执行
-  • 状态和日志永远不会回灌到模型上下文"""
+  • 只允许私聊和白名单用户
+  • 历史状态与日志不会回灌到模型上下文"""
 
 
 def render_workbench_history(sessions: Sequence[ConversationSession]) -> str:

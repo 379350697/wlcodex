@@ -189,14 +189,15 @@ def test_render_task_card_waiting_slot_shows_blocker_and_position() -> None:
     assert "队列位置：第 1 位" in text
 
 
-def test_render_conversation_help_is_compact_for_natural_profile() -> None:
+def test_render_conversation_help_explains_the_compatibility_boundary() -> None:
     from wlcodex.status import render_conversation_help
 
     text = render_conversation_help(profile="natural")
 
-    assert "直接发消息" in text
+    assert "历史兼容" in text
+    assert "/native" in text
+    assert "/relay" in text
     assert "/task" not in text
-    assert len(text.splitlines()) <= 14
 
 
 # ═══════════════════════════════════════════════════════════════

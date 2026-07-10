@@ -6351,53 +6351,6 @@ def _relay_chat_home_page(
 </html>""")
 
 
-def _relay_construction_page(
-    *,
-    active: str,
-    selected_workspace: str = "",
-    access_token: str = "",
-) -> str:
-    token_suffix = _token_suffix(access_token)
-    selected_workspace = str(selected_workspace or "")
-    workspace_label = Path(selected_workspace).name or selected_workspace or "wlcodex"
-    topbar_html = _marvis_relay_topbar(
-        title="Marvis",
-        subtitle=workspace_label,
-        back_href=f"/native{token_suffix}",
-        right_html=f"""
-          <a class="marvis-relay-icon-button" href="/native/workflows/relay/office{token_suffix}" aria-label="Marvis办公室">
-            <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
-          </a>
-          <a class="marvis-relay-icon-button" href="/native/workflows/relay{token_suffix}" aria-label="任务">
-            <span class="marvis-relay-icon-list" aria-hidden="true"></span>
-          </a>
-        """,
-    )
-    bottom_nav_html = _marvis_relay_bottom_nav(
-        active,
-        access_token=access_token,
-        selected_workspace=selected_workspace,
-    )
-    return _replace_html_icons(f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-{_relay_mobile_web_head("正在建设中")}
-</head>
-<body data-marvis-relay-view="construction">
-  <div class="marvis-relay-phone">
-    {topbar_html}
-    <main class="marvis-relay-construction" aria-label="正在建设中">
-      <img src="/static/marvis/relay-under-construction.svg" alt="" aria-hidden="true">
-      <h2>正在建设中</h2>
-    </main>
-    <nav class="marvis-relay-bottom-nav" aria-label="Marvis relay navigation">
-      {bottom_nav_html}
-    </nav>
-  </div>
-</body>
-</html>""")
-
-
 def _relay_config_page(
     *,
     providers: list[dict[str, str]],
@@ -7708,9 +7661,6 @@ def _marvis_relay_work_log_segments(
     invalid_artifacts = _marvis_relay_invalid_artifact_payloads_by_role(
         getattr(detail, "artifacts", []) or []
     )
-    dispatch_payloads = _marvis_relay_dispatch_payloads_by_role(
-        getattr(detail, "artifacts", []) or []
-    )
     artifact_payloads = _marvis_relay_summary_payloads_by_role(
         getattr(detail, "artifacts", []) or []
     )
@@ -7786,20 +7736,6 @@ def _marvis_relay_work_log_segments(
             )
         )
         artifact_keys_added.add(key)
-
-    for role, payload in dispatch_payloads.items():
-        decision_text = _marvis_relay_dispatch_decision_text(payload)
-        if not decision_text:
-            continue
-        append_entry(
-            role,
-            WorkLogEntry(
-                kind="dispatch",
-                key=f"dispatch:{payload.get('id') or role}",
-                text=decision_text,
-                chip="调度",
-            ),
-        )
 
     round_execution = getattr(detail, "round_execution", {}) or {}
     confirmation = (
@@ -7928,49 +7864,6 @@ def _marvis_relay_work_log_segments(
 
     _marvis_relay_finalize_work_log_segments(segments)
     return segments
-
-
-def _marvis_relay_dispatch_payloads_by_role(
-    artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
-) -> dict[str, dict[str, Any]]:
-    payloads: dict[str, dict[str, Any]] = {}
-    for artifact in artifacts:
-        payload = dict(artifact or {})
-        if str(payload.get("artifact_type") or "") != "role_dispatch_metadata":
-            continue
-        role = str(payload.get("role") or payload.get("relay_role") or "")
-        if role:
-            payloads[role] = payload
-    return payloads
-
-
-def _marvis_relay_dispatch_decision_text(payload: dict[str, Any]) -> str:
-    provider_mode = payload.get("provider_mode")
-    if not isinstance(provider_mode, dict):
-        provider_mode = {}
-    provider_mode_key = str(provider_mode.get("provider_mode") or "default")
-    decision = provider_mode.get("subagent_decision_json")
-    if not isinstance(decision, dict):
-        decision = {}
-    if provider_mode_key == "default" and not decision:
-        return ""
-    mode_label = {
-        "codex_plan": "Codex plan",
-        "claude_plan": "Claude plan",
-        "prompt_plan_fallback": "Plan fallback",
-        "prompt_goal_contract": "Goal contract",
-        "default": "默认调度",
-    }.get(provider_mode_key, provider_mode_key)
-    allow_subagents = str(provider_mode.get("allow_subagents") or "auto")
-    subagent_label = "子代理关闭" if allow_subagents == "off" else "子代理自动"
-    capability = str(decision.get("capability") or "").strip()
-    provider = str(payload.get("provider") or decision.get("provider") or "").strip()
-    parts = [mode_label, subagent_label]
-    if capability:
-        parts.append(capability)
-    if provider:
-        parts.append(provider)
-    return " · ".join(_relay_humanize_display_text(part) for part in parts if part)
 
 
 def _marvis_relay_role_error_payloads_by_role(
@@ -16044,22 +15937,14 @@ __ICONS_JS__
     const SUPPORTS_PLAN_MODE = __SUPPORTS_PLAN_MODE_JSON__;
     const SUPPORTS_PLUGIN_MENU = __SUPPORTS_PLUGIN_MENU_JSON__;
     const USES_CLAUDE_PLAN_PERMISSION_MODE = __USES_CLAUDE_PLAN_PERMISSION_MODE_JSON__;
-    function isNearTimelineBottom() {
-      const remaining = document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
-      return remaining < 96;
-    }
+    const timelineScroller = window.WLCodexSurfaceRuntime.createConditionalScroller({
+      container: window,
+      threshold: 96,
+      notice: newMessagesNotice,
+    });
     function scrollToBottom(force = false) {
-      if (force || isNearTimelineBottom()) {
-        window.scrollTo({top: document.documentElement.scrollHeight, behavior: "smooth"});
-        if (newMessagesNotice) newMessagesNotice.hidden = true;
-        return;
-      }
-      if (newMessagesNotice) newMessagesNotice.hidden = false;
+      return timelineScroller.scrollToBottom(force);
     }
-    newMessagesNotice?.addEventListener("click", () => scrollToBottom(true));
-    window.addEventListener("scroll", () => {
-      if (isNearTimelineBottom() && newMessagesNotice) newMessagesNotice.hidden = true;
-    }, {passive: true});
     let nativeThreadId = params.get("native_thread_id") || "";
     let invalidNativeThreadId = Boolean(nativeThreadId && !isValidNativeThreadId(nativeThreadId));
     if (invalidNativeThreadId) nativeThreadId = "";

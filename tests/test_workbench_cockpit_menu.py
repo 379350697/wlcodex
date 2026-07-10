@@ -1,17 +1,11 @@
-"""Task 2: Cockpit Menu and Help UX tests.
-
-Validates that the natural-profile menu exposes only daily phone-cockpit
-actions and that help text uses product language, not implementation
-details.
-"""
+"""Telegram compatibility-menu and help-contract tests."""
 
 from wlcodex.menu import build_bot_commands
 
 # ── Menu shape ──────────────────────────────────────────────────────────
 
 EXPECTED_NATURAL_MENU = [
-    "new", "status", "terminal", "history", "workspaces",
-    "diff", "settings", "help",
+    "native", "relay", "new", "help",
 ]
 
 HIDDEN_FROM_NATURAL = [
@@ -26,15 +20,17 @@ HIDDEN_FROM_NATURAL = [
     "stop",
     "switch",
     "verify",
+    "terminal",
+    "settings",
 ]
 
 # ── Help semantics ──────────────────────────────────────────────────────
 
 REQUIRED_HELP_PHRASES = [
-    "普通消息：诊断工程师分析/核验",
-    "/auto：工程团队闭环（架构/诊断→确认→开发/测试→确认→审计）",
-    "当前视图：驾驶舱",
-    "接管现场",
+    "Telegram 历史兼容入口",
+    "/native",
+    "/relay",
+    "不会为新消息\n创建旧 Workbench 主状态",
 ]
 
 FORBIDDEN_HELP_PHRASES = [
@@ -48,8 +44,7 @@ FORBIDDEN_HELP_PHRASES = [
 ]
 
 
-def test_natural_menu_has_exactly_eight_daily_actions():
-    """The natural menu exposes cockpit daily actions including history and workspaces."""
+def test_natural_menu_has_only_primary_surface_actions():
     commands = build_bot_commands(profile="natural")
     names = [cmd[0] for cmd in commands]
     assert names == EXPECTED_NATURAL_MENU
@@ -72,26 +67,19 @@ def test_natural_menu_hides_typed_only_commands():
         assert hidden not in names, f"{hidden!r} must be hidden from natural menu"
 
 
-def test_legacy_menu_is_preserved():
-    """The legacy menu must still carry the full operator command set."""
+def test_legacy_menu_uses_the_same_global_compatibility_boundary():
     commands = build_bot_commands(profile="legacy")
     names = [cmd[0] for cmd in commands]
-    # legacy must still include the typed-direct commands
-    assert "codex" in names
-    assert "claude" in names
-    assert "auto" in names
-    assert "task" not in names  # diagnostic commands still hidden everywhere
+    assert names == EXPECTED_NATURAL_MENU
 
 
-def test_natural_help_contains_cockpit_language():
-    """Natural help must describe the cockpit, workflow, and onsite entry."""
+def test_natural_help_describes_the_compatibility_boundary():
     from wlcodex.status import render_conversation_help
 
     text = render_conversation_help(profile="natural")
     for phrase in REQUIRED_HELP_PHRASES:
         assert phrase in text, f"help must contain {phrase!r}"
 
-    assert "工作区" in text
     assert "WLCodex" in text
 
 
@@ -120,23 +108,22 @@ def test_natural_help_does_not_reference_product_terminal_split():
     assert "手机端模式" not in text
 
 
-def test_menu_labels_use_cockpit_product_language():
-    """Descriptions in the natural menu should use cockpit language."""
+def test_menu_labels_describe_the_real_primary_surfaces():
     commands = build_bot_commands(profile="natural")
     cmd_map = dict(commands)
-    assert cmd_map.get("terminal") == "接管现场"
-    assert cmd_map.get("new") == "新工作台"
-    assert cmd_map.get("status") == "状态"
-    assert cmd_map.get("diff") == "变更"
-    assert cmd_map.get("settings") == "设置"
-    assert cmd_map.get("help") == "帮助"
+    assert cmd_map.get("native") == "开始直接会话"
+    assert cmd_map.get("relay") == "创建协作任务"
+    assert cmd_map.get("new") == "打开新入口"
+    assert cmd_map.get("help") == "兼容说明"
 
 
-def test_legacy_help_keeps_advanced_diagnostics_hidden():
-    """Legacy help still avoids teaching the old task command flow."""
+def test_legacy_help_preserves_recoverable_historical_actions():
     from wlcodex.status import render_conversation_help
 
     text = render_conversation_help(profile="legacy")
     assert "/task" not in text
     assert "/continue" not in text
     assert "/steer" not in text
+    assert "/auto <提示>" in text
+    assert "/codex <提示>" in text
+    assert "/terminal" in text

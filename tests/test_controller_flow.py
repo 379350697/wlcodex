@@ -1369,15 +1369,14 @@ async def test_legacy_diff_command_with_id(ctrl: CommandController) -> None:
 
 
 @pytest.mark.asyncio
-async def test_help_shows_new_commands(ctrl: CommandController) -> None:
+async def test_help_shows_primary_surface_boundary(ctrl: CommandController) -> None:
     response = await ctrl.handle("/help", {})
     assert "WLCodex" in response.text
-    assert "普通消息：诊断工程师分析/核验" in response.text
-    assert "Codex 主导闭环" in response.text or "/auto" in response.text
-    assert "当前视图：驾驶舱" in response.text
-    assert "[新工作台]" in response.text
-    assert "[接管现场]" in response.text
-    assert len(response.text.splitlines()) <= 14
+    assert "历史兼容入口" in response.text
+    assert "/native" in response.text
+    assert "/relay" in response.text
+    assert "/auto" in response.text
+    assert "不会为新消息\n创建旧 Workbench 主状态" in response.text
 
 
 @pytest.mark.asyncio
