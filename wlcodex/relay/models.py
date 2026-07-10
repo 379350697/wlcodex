@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from wlcodex.relay.artifact_types import ALL_RELAY_ARTIFACT_TYPES
+from wlcodex.presentation_contract import build_presentation_payload
 
 
 @dataclass(frozen=True)
@@ -353,7 +354,14 @@ class RelayPresentation:
     allowed_actions: list[str]
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return build_presentation_payload(
+            state=self.state,
+            freshness=self.freshness,
+            current_actor=self.current_actor,
+            blocking_reason=self.blocking_reason,
+            next_action=self.next_action,
+            allowed_actions=self.allowed_actions,
+        )
 
 
 def build_relay_presentation(
@@ -404,7 +412,10 @@ def build_relay_presentation(
     if recovery_required:
         state = "blocked"
     updated_at = str(task.updated_at or "").strip()
-    stale_reason = _presentation_stale_reason(updated_at)
+    # Only an actively executing task requires a continuing provider
+    # heartbeat. Terminal, blocked, and user/approval-waiting records are
+    # durable states: their age is useful evidence, not stale execution truth.
+    stale_reason = _presentation_stale_reason(updated_at) if state == "running" else ""
     if stale_reason and state == "running":
         state = "stale"
     if state == "stale" and not stale_reason:

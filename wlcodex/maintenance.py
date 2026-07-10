@@ -27,6 +27,26 @@ CREATE TABLE IF NOT EXISTS runtime_maintenance_window (
     operator_note TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
+
+-- A Native session is long-lived history; it is not evidence that a provider
+-- turn is still writing.  A maintenance window therefore records a fresh,
+-- read-only provider probe for each pre-existing active-session candidate.
+-- The probe belongs to one concrete window so an old successful observation
+-- can never authorize a later archive/compact operation.
+CREATE TABLE IF NOT EXISTS runtime_maintenance_native_turn_probes (
+    maintenance_opened_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    native_thread_id TEXT NOT NULL,
+    native_turn_id TEXT NOT NULL DEFAULT '',
+    verdict TEXT NOT NULL CHECK (verdict IN ('active', 'terminal', 'unknown')),
+    observed_status TEXT NOT NULL DEFAULT '',
+    diagnostic TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (maintenance_opened_at, provider, native_thread_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_maintenance_native_turn_probes_window
+    ON runtime_maintenance_native_turn_probes(maintenance_opened_at, verdict);
 """
 
 
@@ -137,6 +157,7 @@ _ACTIVE_WORK_QUERIES: tuple[tuple[str, str], ...] = (
             'done', 'failed', 'aborted', 'completed', 'interrupted',
             'cancelled', 'superseded'
         )
+          AND role NOT LIKE '%\\_native' ESCAPE '\\'
         """,
     ),
     (
@@ -217,16 +238,6 @@ _ACTIVE_WORK_QUERIES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
-        "native Codex sessions",
-        """
-        SELECT COUNT(*) FROM native_codex_sessions
-        WHERE status NOT IN (
-            'done', 'completed', 'failed', 'error', 'aborted', 'interrupted',
-            'cancelled', 'superseded', 'idle'
-        )
-        """,
-    ),
-    (
         "workflow handoffs",
         """
         SELECT COUNT(*) FROM collaboration_workflow_runs
@@ -237,6 +248,123 @@ _ACTIVE_WORK_QUERIES: tuple[tuple[str, str], ...] = (
         """,
     ),
 )
+
+_NATIVE_TURN_CANDIDATE_STATUSES = (
+    "running",
+    "active",
+    "waiting_user",
+    "waiting_approval",
+    "paused",
+)
+
+
+def native_turn_probe_candidates(conn: sqlite3.Connection) -> list[str]:
+    """Return stored sessions that require a live provider observation.
+
+    ``native_codex_sessions`` is a historical session index.  In particular,
+    imported ``notLoaded`` rows must never be treated as a live turn.  Only
+    statuses that previously represented an in-flight turn become candidates,
+    and they are resolved by ``maintenance-probe-native`` after submissions
+    have been frozen.
+    """
+
+    placeholders = ",".join("?" for _ in _NATIVE_TURN_CANDIDATE_STATUSES)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT native_thread_id
+            FROM native_codex_sessions
+            WHERE lower(status) IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            _NATIVE_TURN_CANDIDATE_STATUSES,
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if _is_missing_table(exc):
+            return []
+        raise
+    return [str(row[0]) for row in rows if str(row[0] or "").strip()]
+
+
+def record_native_turn_probe(
+    conn: sqlite3.Connection,
+    *,
+    maintenance_opened_at: str,
+    provider: str,
+    native_thread_id: str,
+    native_turn_id: str = "",
+    verdict: str,
+    observed_status: str = "",
+    diagnostic: str = "",
+) -> None:
+    """Persist one sanitized, read-only Native turn observation."""
+
+    clean_verdict = str(verdict or "").strip().lower()
+    if clean_verdict not in {"active", "terminal", "unknown"}:
+        raise ValueError(f"invalid native maintenance probe verdict: {verdict!r}")
+    ensure_maintenance_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO runtime_maintenance_native_turn_probes (
+            maintenance_opened_at, provider, native_thread_id, native_turn_id,
+            verdict, observed_status, diagnostic, checked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(maintenance_opened_at, provider, native_thread_id)
+        DO UPDATE SET
+            native_turn_id = excluded.native_turn_id,
+            verdict = excluded.verdict,
+            observed_status = excluded.observed_status,
+            diagnostic = excluded.diagnostic,
+            checked_at = excluded.checked_at
+        """,
+        (
+            str(maintenance_opened_at or ""),
+            str(provider or "codex").strip().lower() or "codex",
+            str(native_thread_id or "").strip(),
+            str(native_turn_id or "").strip(),
+            clean_verdict,
+            str(observed_status or "").strip()[:120],
+            str(diagnostic or "").strip()[:500],
+            _now(),
+        ),
+    )
+
+
+def _native_turn_probe_work(
+    conn: sqlite3.Connection,
+    *,
+    maintenance_opened_at: str,
+) -> dict[str, int]:
+    candidates = native_turn_probe_candidates(conn)
+    if not candidates:
+        return {}
+    placeholders = ",".join("?" for _ in candidates)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT native_thread_id, verdict
+            FROM runtime_maintenance_native_turn_probes
+            WHERE maintenance_opened_at = ?
+              AND provider = 'codex'
+              AND native_thread_id IN ({placeholders})
+            """,
+            (maintenance_opened_at, *candidates),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if _is_missing_table(exc):
+            return {"native Codex turn probes pending": len(candidates)}
+        raise
+    verdicts = {str(row[0]): str(row[1]) for row in rows}
+    active = sum(1 for candidate in candidates if verdicts.get(candidate) == "active")
+    pending = sum(
+        1 for candidate in candidates if verdicts.get(candidate) not in {"active", "terminal"}
+    )
+    work: dict[str, int] = {}
+    if active:
+        work["native Codex turns"] = active
+    if pending:
+        work["native Codex turn probes pending"] = pending
+    return work
 
 
 def active_work_counts(conn: sqlite3.Connection) -> dict[str, int]:
@@ -253,6 +381,11 @@ def active_work_counts(conn: sqlite3.Connection) -> dict[str, int]:
         count = int(row[0]) if row is not None else 0
         if count:
             counts[label] = count
+    row = _window_row(conn)
+    if row is not None and bool(_row_value(row, "submissions_frozen", 0)):
+        opened_at = str(_row_value(row, "opened_at", 1) or "")
+        if opened_at:
+            counts.update(_native_turn_probe_work(conn, maintenance_opened_at=opened_at))
     return counts
 
 

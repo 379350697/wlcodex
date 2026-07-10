@@ -46,6 +46,10 @@ wlcodex-retain-raw-frames --config config/wlcodex.toml dry-run
 wlcodex-retain-raw-frames --config config/wlcodex.toml \
   maintenance-begin --note "2026-07-10 release"
 
+# 只读探测维护窗口前遗留的 Native Codex 候选会话；绝不 start/continue/
+# steer/interrupt。unknown 或 active 都会让 ready=false。
+wlcodex-retain-raw-frames --config config/wlcodex.toml maintenance-probe-native
+
 # 只读查看维护闸门和剩余活跃工作；ready=true 后才可继续。
 wlcodex-retain-raw-frames --config config/wlcodex.toml maintenance-status
 
@@ -71,10 +75,12 @@ wlcodex-retain-raw-frames --config config/wlcodex.toml maintenance-cancel
 首次大库迁移（例如数十 GB）不是常规请求的一部分。维护窗口必须满足以下顺序；
 任一前置条件不成立即取消窗口，不切换数据库：
 
-1. 运行 `maintenance-begin` 关闭新的提交入口，并用
-   `maintenance-status` 等待所有活跃 Relay task、Native turn、待审批项和历史
-   `orchestration_runs` 排空。`apply`/`compact` 会再次原子校验这个条件；无法
-   排空时运行 `maintenance-cancel`，而不是强行归档活跃 frame。
+1. 运行 `maintenance-begin` 关闭新的提交入口。随后执行
+   `maintenance-probe-native`，只读确认维护前遗留的 Native Codex 候选会话是否
+   真的仍有 active/waiting turn；`notLoaded`、缓存历史和 `idle` 不会误阻塞。
+   `maintenance-status` 必须显示 `ready=true`，即所有活跃 Relay task、真实 Native
+   turn、待审批项和历史 `orchestration_runs` 均已排空。探测失败或状态未知同样阻塞；
+   无法排空时运行 `maintenance-cancel`，而不是强行归档活跃 frame。
 2. 记录当前版本，停止 `com.wlcodex.formal`，并在同一文件系统创建发布前
    SQLite 快照和 archive 目录快照。确认目标卷有足够空间容纳旧库、归档和新库。
 3. 先运行 `dry-run`，人工确认候选数量、活跃跳过数和 archive 目标目录；再运行

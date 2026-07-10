@@ -11,6 +11,7 @@ exists.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import gzip
 import hashlib
 import json
@@ -33,6 +34,8 @@ from wlcodex.maintenance import (
     begin_maintenance_window,
     cancel_maintenance_window,
     maintenance_window_status,
+    native_turn_probe_candidates,
+    record_native_turn_probe,
 )
 from wlcodex.runtime_events import redact_payload
 
@@ -236,6 +239,206 @@ def initial_retention_migration_verified(conn: sqlite3.Connection) -> bool:
             return False
         raise
     return bool(row is not None and int(row[0]))
+
+
+async def _probe_native_turns(
+    conn: sqlite3.Connection,
+    config: Any,
+) -> dict[str, object]:
+    """Probe only existing Native-turn candidates without controlling them.
+
+    The retention CLI must not create a private app-server as a side effect of
+    a maintenance check.  It either attaches to the configured Codex daemon,
+    or to the already-running local app-server endpoint.  A missing endpoint
+    is deliberately recorded as ``unknown`` so the maintenance window remains
+    blocked instead of guessing that an old turn is finished.
+    """
+
+    from wlcodex.codex_native.client import CodexNativeClient
+    from wlcodex.codex_native.controller import _active_turn_id, _latest_turn, _turns
+    from wlcodex.codex_native.transport import (
+        CodexAppServerWebSocketTransport,
+        CodexDaemonTransport,
+    )
+
+    status = maintenance_window_status(conn, include_active_work=False)
+    if not status.submissions_frozen or not status.opened_at:
+        raise MaintenanceWindowError(
+            "maintenance window is not active; run maintenance-begin before maintenance-probe-native"
+        )
+    candidates = native_turn_probe_candidates(conn)
+    if not candidates:
+        return {"probed": 0, "active": 0, "terminal": 0, "unknown": 0}
+
+    native_config = config.codex_native
+    configured_transport = str(native_config.transport or "daemon").strip().lower()
+    sock_path = native_config.sock_path.expanduser() if native_config.sock_path else None
+    if configured_transport in {"daemon", "proxy"} and sock_path is not None and sock_path.exists():
+        transport = CodexDaemonTransport(
+            binary=config.codex.binary,
+            sock_path=sock_path,
+            fallback_app_server=None,
+        )
+    else:
+        transport = CodexAppServerWebSocketTransport(
+            binary=config.codex.binary,
+            listen_endpoint=native_config.listen_endpoint,
+            connect_endpoint=native_config.listen_endpoint,
+            startup_timeout_seconds=config.backend.startup_timeout_seconds,
+            remote_control=native_config.remote_control,
+            spawn_process=False,
+        )
+
+    client = CodexNativeClient(
+        send_json=transport.send_json,
+        close=transport.close,
+        request_timeout_seconds=config.backend.request_timeout_seconds,
+        metadata=transport.describe,
+    )
+
+    async def on_message(message: dict[str, Any]) -> None:
+        await client.rpc.receive_message(message)
+
+    try:
+        try:
+            await transport.start(on_message)
+        except Exception as exc:
+            # A provider connection failure is itself an unknown observation.
+            # Persist that conclusion for every candidate so maintenance-status
+            # remains fail-closed and explains why it cannot advance, rather
+            # than relying on an unhandled CLI failure with no durable record.
+            results = _record_native_probe_connection_failure(
+                conn,
+                maintenance_opened_at=status.opened_at,
+                candidates=candidates,
+                diagnostic=f"provider_connect_failed:{type(exc).__name__}",
+            )
+        else:
+            results = await _record_native_turn_probes(
+                conn,
+                maintenance_opened_at=status.opened_at,
+                candidates=candidates,
+                read_session=client.read_session,
+                active_turn_id=_active_turn_id,
+                latest_turn=_latest_turn,
+                turns=_turns,
+            )
+    finally:
+        await client.close()
+    return results
+
+
+def _record_native_probe_connection_failure(
+    conn: sqlite3.Connection,
+    *,
+    maintenance_opened_at: str,
+    candidates: list[str],
+    diagnostic: str,
+) -> dict[str, int]:
+    """Make an unavailable read endpoint a durable, fail-closed observation."""
+
+    for native_thread_id in candidates:
+        record_native_turn_probe(
+            conn,
+            maintenance_opened_at=maintenance_opened_at,
+            provider="codex",
+            native_thread_id=native_thread_id,
+            verdict="unknown",
+            diagnostic=diagnostic,
+        )
+    conn.commit()
+    return {
+        "probed": len(candidates),
+        "active": 0,
+        "terminal": 0,
+        "unknown": len(candidates),
+    }
+
+
+async def _record_native_turn_probes(
+    conn: sqlite3.Connection,
+    *,
+    maintenance_opened_at: str,
+    candidates: list[str],
+    read_session: Callable[..., Any],
+    active_turn_id: Callable[[dict[str, Any]], str],
+    latest_turn: Callable[[list[Any]], Any],
+    turns: Callable[[dict[str, Any]], list[Any]],
+) -> dict[str, int]:
+    """Persist probe results; isolated for control-free integration tests."""
+
+    results = {"probed": 0, "active": 0, "terminal": 0, "unknown": 0}
+    for native_thread_id in candidates:
+        verdict = "unknown"
+        native_turn_id = ""
+        observed_status = ""
+        diagnostic = ""
+        try:
+            detail = await read_session(native_thread_id, include_turns=True)
+            native_turn_id = active_turn_id(detail)
+            current_turn = latest_turn(turns(detail))
+            if isinstance(current_turn, dict):
+                observed_status = str(current_turn.get("status") or "").strip().lower()
+                if not native_turn_id and observed_status in {
+                    "waiting_user",
+                    "waitinguser",
+                    "waiting_approval",
+                    "waitingapproval",
+                    "waitingonapproval",
+                    "waiting_on_approval",
+                }:
+                    native_turn_id = str(
+                        current_turn.get("turnId") or current_turn.get("id") or ""
+                    ).strip()
+            if not observed_status:
+                thread = detail.get("thread")
+                if isinstance(thread, dict):
+                    observed_status = str(thread.get("status") or "").strip().lower()
+            if native_turn_id:
+                # Includes Codex's active approval-wait state.  A waiting
+                # turn remains a live provider-owned turn for maintenance
+                # purposes even though it is not currently producing tokens.
+                verdict = "active"
+            elif observed_status in {
+                "completed",
+                "complete",
+                "done",
+                "failed",
+                "error",
+                "cancelled",
+                "canceled",
+                "interrupted",
+                "aborted",
+                "idle",
+                "notloaded",
+                "not_loaded",
+            }:
+                verdict = "terminal"
+            else:
+                # A successful RPC with no current turn alone is not enough
+                # to prove that a non-terminal provider state is drained.
+                # Keep it fail-closed until the provider returns a known
+                # terminal/idle state or a real active turn identifier.
+                diagnostic = f"provider_unconfirmed_status:{observed_status or 'missing'}"
+        except Exception as exc:
+            # Preserve only an error category.  Provider exception text may
+            # include a remote payload, which does not belong in maintenance
+            # metadata or a CLI transcript.
+            diagnostic = f"provider_read_failed:{type(exc).__name__}"
+        record_native_turn_probe(
+            conn,
+            maintenance_opened_at=maintenance_opened_at,
+            provider="codex",
+            native_thread_id=native_thread_id,
+            native_turn_id=native_turn_id,
+            verdict=verdict,
+            observed_status=observed_status,
+            diagnostic=diagnostic,
+        )
+        conn.commit()
+        results[verdict] += 1
+        results["probed"] += 1
+    return results
 
 
 def mark_initial_retention_migration_verified(conn: sqlite3.Connection) -> None:
@@ -1362,6 +1565,7 @@ def main(argv: list[str] | None = None) -> int:
             "verify",
             "compact",
             "maintenance-begin",
+            "maintenance-probe-native",
             "maintenance-status",
             "maintenance-cancel",
         ),
@@ -1393,7 +1597,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # A dry-run/verify must not upgrade a database as a side effect.  Only
         # explicit maintenance mutations are allowed to install schema tables.
-        if args.command in {"apply", "compact", "maintenance-begin", "maintenance-cancel"}:
+        if args.command in {
+            "apply",
+            "compact",
+            "maintenance-begin",
+            "maintenance-probe-native",
+            "maintenance-cancel",
+        }:
             assert ledger is not None
             ledger.migrate()
             apply_retention_schema(conn)
@@ -1405,6 +1615,16 @@ def main(argv: list[str] | None = None) -> int:
             status = cancel_maintenance_window(conn)
             print(json.dumps(status.to_dict(), ensure_ascii=False, sort_keys=True))
             return 0
+        if args.command == "maintenance-probe-native":
+            status = maintenance_window_status(conn, include_active_work=False)
+            if not status.submissions_frozen:
+                raise MaintenanceWindowError(
+                    "maintenance window is not active; run maintenance-begin before maintenance-probe-native"
+                )
+            payload = asyncio.run(_probe_native_turns(conn, config))
+            payload["maintenance"] = maintenance_window_status(conn).to_dict()
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return 0 if int(payload["unknown"]) == 0 else 1
         if args.command == "maintenance-status":
             status = maintenance_window_status(conn)
             print(json.dumps(status.to_dict(), ensure_ascii=False, sort_keys=True))

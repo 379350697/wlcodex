@@ -27,6 +27,7 @@ from wlcodex.codex_native.projector import (
 )
 from wlcodex.codex_native.session_store import NativeCodexSessionStore
 from wlcodex.jsonrpc import JsonRpcError
+from wlcodex.presentation_contract import build_presentation_payload
 from wlcodex.runtime_event_store import RuntimeEventStore
 
 
@@ -80,9 +81,9 @@ def build_native_session_presentation(
         freshness_stale=freshness_stale,
         has_sync_error=bool(error),
     )
-    return {
-        "state": state,
-        "freshness": {
+    presentation = build_presentation_payload(
+        state=state,
+        freshness={
             "source": source,
             "updated_at": updated_at,
             # ``is_stale`` is the shared presentation contract used by Relay.
@@ -92,15 +93,16 @@ def build_native_session_presentation(
             "stale": freshness_stale,
             "reason": freshness_reason,
         },
-        "current_actor": current_actor,
-        "blocking_reason": blocking_reason,
-        "next_action": next_action,
-        # Native used an object here before the cross-surface presentation
-        # contract existed.  Keep its stable action identifier available, but
-        # make ``next_action`` itself the same user-facing text type as Relay.
-        "next_action_detail": next_action_detail,
-        "allowed_actions": allowed_actions,
-    }
+        current_actor=current_actor,
+        blocking_reason=blocking_reason,
+        next_action=next_action,
+        allowed_actions=allowed_actions,
+    )
+    # Native used an object here before the cross-surface presentation
+    # contract existed.  Keep its stable action identifier available, but
+    # make ``next_action`` itself the same user-facing text type as Relay.
+    presentation["next_action_detail"] = next_action_detail
+    return presentation
 
 
 def _native_presentation_state(

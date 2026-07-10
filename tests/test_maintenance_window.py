@@ -13,6 +13,8 @@ from wlcodex.db import Ledger
 from wlcodex.maintenance import MaintenanceWindowError, assert_maintenance_window_ready
 from wlcodex.relay.store import RelayStore
 from wlcodex.runtime_raw_frame_retention import (
+    _record_native_probe_connection_failure,
+    _record_native_turn_probes,
     initial_retention_migration_verified,
     main as retention_main,
 )
@@ -22,6 +24,16 @@ def _ledger(tmp_path: Path) -> Ledger:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
     return ledger
+
+
+def _native_session(ledger: Ledger, native_thread_id: str, *, status: str) -> None:
+    from wlcodex.codex_native.session_store import NativeCodexSessionStore
+
+    NativeCodexSessionStore(ledger).get_or_create_session(
+        native_thread_id=native_thread_id,
+        title="maintenance candidate",
+        status=status,
+    )
 
 
 def test_maintenance_begin_freezes_new_relay_submissions_until_cancelled(tmp_path: Path) -> None:
@@ -36,6 +48,138 @@ def test_maintenance_begin_freezes_new_relay_submissions_until_cancelled(tmp_pat
         store.assert_submissions_open()
     assert ledger.cancel_maintenance_window().submissions_frozen is False
     store.assert_submissions_open()
+
+
+def test_historical_native_sessions_do_not_block_maintenance_drain(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    _native_session(ledger, "not-loaded", status="notLoaded")
+    _native_session(ledger, "idle", status="idle")
+
+    status = ledger.begin_maintenance_window()
+
+    assert status.active_work == {}
+    assert assert_maintenance_window_ready(ledger._conn).active_work == {}
+
+
+def test_native_probe_connection_failure_is_persisted_and_fail_closed(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    _native_session(ledger, "unreachable-provider", status="running")
+    status = ledger.begin_maintenance_window()
+
+    result = _record_native_probe_connection_failure(
+        ledger._conn,
+        maintenance_opened_at=status.opened_at,
+        candidates=["unreachable-provider"],
+        diagnostic="provider_connect_failed:OSError",
+    )
+
+    assert result == {"probed": 1, "active": 0, "terminal": 0, "unknown": 1}
+    with pytest.raises(MaintenanceWindowError, match="native Codex turn probes pending"):
+        assert_maintenance_window_ready(ledger._conn)
+    probe = ledger._conn.execute(
+        "SELECT verdict, diagnostic FROM runtime_maintenance_native_turn_probes"
+    ).fetchone()
+    assert tuple(probe) == ("unknown", "provider_connect_failed:OSError")
+
+
+@pytest.mark.asyncio
+async def test_native_turn_probe_is_read_only_and_requires_terminal_verdict(tmp_path: Path) -> None:
+    from wlcodex.codex_native.controller import _active_turn_id, _latest_turn, _turns
+
+    ledger = _ledger(tmp_path)
+    _native_session(ledger, "stale-running", status="running")
+    status = ledger.begin_maintenance_window()
+    assert status.active_work == {"native Codex turn probes pending": 1}
+
+    calls: list[tuple[str, bool]] = []
+
+    async def read_session(native_thread_id: str, *, include_turns: bool) -> dict[str, object]:
+        calls.append((native_thread_id, include_turns))
+        return {
+            "thread": {"id": native_thread_id, "status": "idle"},
+            "turns": [{"id": "old-turn", "status": "completed"}],
+        }
+
+    result = await _record_native_turn_probes(
+        ledger._conn,
+        maintenance_opened_at=status.opened_at,
+        candidates=["stale-running"],
+        read_session=read_session,
+        active_turn_id=_active_turn_id,
+        latest_turn=_latest_turn,
+        turns=_turns,
+    )
+
+    assert result == {"probed": 1, "active": 0, "terminal": 1, "unknown": 0}
+    assert calls == [("stale-running", True)]
+    assert assert_maintenance_window_ready(ledger._conn).active_work == {}
+
+
+@pytest.mark.asyncio
+async def test_native_turn_probe_blocks_active_or_unknown_provider_state(tmp_path: Path) -> None:
+    from wlcodex.codex_native.controller import _active_turn_id, _latest_turn, _turns
+
+    ledger = _ledger(tmp_path)
+    _native_session(ledger, "active-turn", status="running")
+    _native_session(ledger, "unknown-turn", status="active")
+    status = ledger.begin_maintenance_window()
+
+    async def read_session(native_thread_id: str, *, include_turns: bool) -> dict[str, object]:
+        assert include_turns is True
+        if native_thread_id == "unknown-turn":
+            raise RuntimeError("provider unavailable")
+        return {
+            "thread": {"id": native_thread_id, "status": "active"},
+            "turns": [{"id": "live-turn", "status": "running"}],
+        }
+
+    result = await _record_native_turn_probes(
+        ledger._conn,
+        maintenance_opened_at=status.opened_at,
+        candidates=["active-turn", "unknown-turn"],
+        read_session=read_session,
+        active_turn_id=_active_turn_id,
+        latest_turn=_latest_turn,
+        turns=_turns,
+    )
+
+    assert result == {"probed": 2, "active": 1, "terminal": 0, "unknown": 1}
+    blocked = ledger.maintenance_window_status().active_work
+    assert blocked == {
+        "native Codex turns": 1,
+        "native Codex turn probes pending": 1,
+    }
+    with pytest.raises(MaintenanceWindowError, match="native Codex turns=1"):
+        assert_maintenance_window_ready(ledger._conn)
+
+
+@pytest.mark.asyncio
+async def test_native_turn_probe_counts_waiting_turn_as_live(tmp_path: Path) -> None:
+    from wlcodex.codex_native.controller import _active_turn_id, _latest_turn, _turns
+
+    ledger = _ledger(tmp_path)
+    _native_session(ledger, "waiting-turn", status="waiting_user")
+    status = ledger.begin_maintenance_window()
+
+    async def read_session(_native_thread_id: str, *, include_turns: bool) -> dict[str, object]:
+        assert include_turns is True
+        return {
+            "thread": {"id": "waiting-turn", "status": "waiting_user"},
+            "turns": [{"id": "waiting-turn-id", "status": "waiting_user"}],
+        }
+
+    result = await _record_native_turn_probes(
+        ledger._conn,
+        maintenance_opened_at=status.opened_at,
+        candidates=["waiting-turn"],
+        read_session=read_session,
+        active_turn_id=_active_turn_id,
+        latest_turn=_latest_turn,
+        turns=_turns,
+    )
+
+    assert result == {"probed": 1, "active": 1, "terminal": 0, "unknown": 0}
+    assert ledger.maintenance_window_status().active_work == {"native Codex turns": 1}
 
 
 def test_maintenance_ready_requires_historical_orchestration_to_drain(tmp_path: Path) -> None:
@@ -241,3 +385,43 @@ def test_retention_cli_apply_requires_open_and_drained_maintenance_window(
 
     assert retention_main([*argv, "maintenance-cancel"]) == 0
     assert json.loads(capsys.readouterr().out)["submissions_frozen"] is False
+
+
+def test_retention_cli_native_probe_requires_open_window_and_reports_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from wlcodex import config as config_module
+    from wlcodex import runtime_raw_frame_retention as retention_module
+
+    ledger = _ledger(tmp_path)
+    db_path = tmp_path / "wlcodex.sqlite3"
+    ledger._conn.close()
+    config = SimpleNamespace(
+        storage=SimpleNamespace(sqlite_path=db_path),
+        runtime_retention=SimpleNamespace(
+            archive_dir=tmp_path / "provider-raw-frame-archives",
+            hot_retention_days=7,
+            archive_retention_days=90,
+            interval_seconds=6 * 60 * 60,
+            batch_size=250,
+        ),
+    )
+    monkeypatch.setattr(config_module, "load_config", lambda _path: config)
+
+    async def probe(_conn, _config):
+        return {"probed": 1, "active": 0, "terminal": 1, "unknown": 0}
+
+    monkeypatch.setattr(retention_module, "_probe_native_turns", probe)
+    argv = ["--config", str(tmp_path / "ignored.toml")]
+
+    assert retention_main([*argv, "maintenance-probe-native"]) == 1
+    assert "maintenance window is not active" in json.loads(capsys.readouterr().out)["error"]
+
+    assert retention_main([*argv, "maintenance-begin"]) == 0
+    capsys.readouterr()
+    assert retention_main([*argv, "maintenance-probe-native"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["terminal"] == 1
+    assert payload["maintenance"]["submissions_frozen"] is True

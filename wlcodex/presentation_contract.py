@@ -25,6 +25,49 @@ PRESENTATION_STATES = frozenset(
     }
 )
 
+PRESENTATION_FIELDS = (
+    "state",
+    "freshness",
+    "current_actor",
+    "blocking_reason",
+    "next_action",
+    "allowed_actions",
+)
+
+
+def build_presentation_payload(
+    *,
+    state: str,
+    freshness: dict[str, Any],
+    current_actor: dict[str, str],
+    blocking_reason: str,
+    next_action: str,
+    allowed_actions: Sequence[str],
+) -> dict[str, Any]:
+    """Create the one transport-neutral presentation payload.
+
+    Native, Relay, SSE, and Telegram keep separate lifecycle records, but all
+    user-facing adapters must serialize the same six fields.  Keeping this
+    constructor here prevents a surface from silently changing a field type
+    or omitting an empty value while retaining each surface's own mapper.
+    """
+
+    normalized_state = str(state or "stale").strip()
+    if normalized_state not in PRESENTATION_STATES:
+        normalized_state = "stale"
+    return {
+        "state": normalized_state,
+        "freshness": dict(freshness),
+        "current_actor": {
+            "role": str(current_actor.get("role") or ""),
+            "label": str(current_actor.get("label") or ""),
+            "status": str(current_actor.get("status") or ""),
+        },
+        "blocking_reason": str(blocking_reason or ""),
+        "next_action": str(next_action or ""),
+        "allowed_actions": [str(action) for action in allowed_actions],
+    }
+
 
 def task_status_label(status: str) -> str:
     """Return the canonical user-facing label for a presentation state."""
@@ -65,16 +108,16 @@ def telegram_compatibility_presentation(
         source = "telegram_redirect"
         reason = "Telegram 不再创建新会话或维护旧主状态，请转到 Native 或 Relay。"
     action = str(next_action or "打开 Native 或 Relay").strip() or "打开 Native 或 Relay"
-    return {
-        "state": "stale",
-        "freshness": {
+    return build_presentation_payload(
+        state="stale",
+        freshness={
             "source": source,
             "updated_at": "",
             "is_stale": True,
             "reason": reason,
         },
-        "current_actor": {"role": "", "label": "", "status": ""},
-        "blocking_reason": reason,
-        "next_action": action,
-        "allowed_actions": list(allowed_actions),
-    }
+        current_actor={"role": "", "label": "", "status": ""},
+        blocking_reason=reason,
+        next_action=action,
+        allowed_actions=allowed_actions,
+    )

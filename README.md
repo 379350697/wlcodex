@@ -112,9 +112,10 @@ Telegram 兼容流还需要在发布前维护窗口中做真实烟测，不能�
 
 一次发布不等于一次冒险。维护窗口按以下门槛推进：
 
-1. 执行 `wlcodex-retain-raw-frames maintenance-begin` 暂停新提交，用
-   `maintenance-status` 确认活跃任务、Native turn、待审批项和历史兼容流程均已
-   排空；未排空就执行 `maintenance-cancel` 取消。
+1. 执行 `wlcodex-retain-raw-frames maintenance-begin` 暂停新提交，再执行
+   `maintenance-probe-native` 只读确认 Native Codex 候选会话的真实 turn 状态；用
+   `maintenance-status` 确认活跃任务、真实 Native turn、待审批项和历史兼容流程均已
+   排空。探测未知或未排空就执行 `maintenance-cancel` 取消。
 2. 备份 SQLite 与 raw-frame archive，预检磁盘，执行 retention dry-run/apply/
    verify，任何 manifest 或完整性失败都不切换。
 3. `apply` 会在同一维护窗口中重新校验 archive；只有成功 `verify` 后才写入允许

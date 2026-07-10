@@ -200,6 +200,35 @@ def test_presentation_marks_unupdated_active_task_stale(tmp_path: Path) -> None:
     assert presentation["allowed_actions"] == ["refresh"]
 
 
+@pytest.mark.parametrize(
+    "durable_status",
+    ["completed", "interrupted", "failed", "blocked", "waiting_user"],
+)
+def test_durable_task_state_is_not_marked_stale_only_because_it_is_old(
+    tmp_path: Path,
+    durable_status: str,
+) -> None:
+    service = _service(tmp_path)
+    task = service.create_task(
+        title="Terminal history",
+        prompt="Keep terminal history truthful.",
+        workspace="/repo",
+        provider="claude",
+    )
+    conn = service._store._ledger._conn
+    conn.execute(
+        "UPDATE team_runs SET status = ?, updated_at = ? WHERE id = ?",
+        (durable_status, "2000-01-01T00:00:00+00:00", task.id),
+    )
+    conn.commit()
+
+    presentation = service.get_task_readonly(task.id).presentation.to_dict()
+
+    assert presentation["state"] == durable_status
+    assert presentation["freshness"]["is_stale"] is False
+    assert presentation["freshness"]["reason"] == ""
+
+
 def test_task_page_filters_presentation_in_database_before_hydrating_page(
     tmp_path: Path,
 ) -> None:
