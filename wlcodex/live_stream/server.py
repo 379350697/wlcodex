@@ -13283,9 +13283,9 @@ __MARVIS_CSS_LINK__  <style>
     .compose-project-button .icon-folder:before { top: -6px; width: 10px; height: 6px; border-width: 2px; }
     .compose-project-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .compose-project-chevron { color: #d7d7dc; font-size: 16px; line-height: 1; }
-    .compose-mode-toggle { display: grid; grid-template-columns: 1fr 1fr; width: 208px; min-height: 68px; overflow: hidden; border: 1px solid #303036; border-radius: 34px; background: #000; }
-    .compose-mode-toggle button { border: 0; border-radius: 0; background: transparent; color: #fff; font-size: 19px; font-weight: var(--weight-black); }
-    .compose-mode-toggle button.selected { background: #4a4a4d; color: #fff; }
+    .compose-mode-hint { display: grid; gap: 6px; width: min(100%, 260px); padding: 16px 18px; border: 1px solid #303036; border-radius: 24px; background: #000; color: var(--text-primary); text-align: left; }
+    .compose-mode-hint strong { font-size: 18px; line-height: 1.2; font-weight: var(--weight-black); }
+    .compose-mode-hint span { color: var(--text-secondary); font-size: 13px; line-height: 1.45; }
     .project-picker { position: fixed; inset: 0; z-index: 7; display: grid; align-content: start; overflow-y: auto; padding: calc(180px + env(safe-area-inset-top)) 72px calc(158px + env(safe-area-inset-bottom)); background: rgba(0,0,0,.9); color: var(--text-primary); }
     .project-picker[hidden] { display: none; }
     .project-picker-panel { display: grid; gap: 26px; min-width: 0; }
@@ -13447,9 +13447,9 @@ __MARVIS_CSS_LINK__  <style>
         <span class="compose-project-label" id="composeProjectLabel">选择项目</span>
         <span class="compose-project-chevron">⌄</span>
       </button>
-      <div class="compose-mode-toggle" aria-label="工作区模式">
-        <button class="selected" type="button"><span>工作区</span></button>
-        <button type="button"><span>工作树</span></button>
+      <div class="compose-mode-hint" role="status" aria-live="polite">
+        <strong>工作区</strong>
+        <span>当前仅提供项目或当前目录起步，不展示未实现的工作树入口。</span>
       </div>
     </section>
     <section class="project-picker" id="projectPicker" hidden aria-label="选择项目">
@@ -15379,229 +15379,6 @@ __MARVIS_EXTRA_HTML__
         )
         .replace("__ICONS_JS__", _ICONS_JS_LITERAL)
     )
-
-
-def _marvis_extra_html() -> str:
-    """Return Marvis-specific HTML: bottom nav, work log panel, persona page, backdrop."""
-    return """
-  <!-- Marvis Bottom Navigation Bar -->
-  <nav class="marvis-bottom-nav" id="marvisBottomNav">
-    <button class="marvis-nav-item active" id="marvisNavChat" type="button">
-      <span class="marvis-nav-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
-      <span class="marvis-nav-label">对话</span>
-    </button>
-    <button class="marvis-nav-item" id="marvisNavTasks" type="button">
-      <span class="marvis-nav-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
-      <span class="marvis-nav-label">任务</span>
-    </button>
-    <button class="marvis-nav-item" id="marvisNavSkills" type="button">
-      <span class="marvis-nav-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span>
-      <span class="marvis-nav-label">技能</span>
-    </button>
-    <button class="marvis-nav-item" id="marvisNavProfile" type="button">
-      <span class="marvis-nav-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
-      <span class="marvis-nav-label">我的</span>
-    </button>
-  </nav>
-
-  <!-- Marvis Backdrop Overlay -->
-  <div class="marvis-backdrop" id="marvisBackdrop"></div>
-
-  <!-- Marvis Work Log Panel -->
-  <section class="marvis-work-log" id="marvisWorkLog" hidden>
-    <div class="marvis-work-log-handle"><span></span></div>
-    <button class="marvis-work-log-close" id="marvisWorkLogClose" type="button" aria-label="关闭">×</button>
-    <div class="marvis-work-log-tabs">
-      <button class="marvis-work-log-tab active" type="button">工作日志</button>
-    </div>
-    <div class="marvis-work-log-body">
-      <div class="marvis-work-log-avatar">
-        <span class="marvis-work-log-avatar-name">Marvis</span>
-      </div>
-      <div class="marvis-work-log-screenshots" id="marvisScreenshots">
-        <div class="marvis-work-log-screenshot"></div>
-        <div class="marvis-work-log-screenshot"></div>
-        <div class="marvis-work-log-screenshot"></div>
-        <div class="marvis-work-log-screenshot"></div>
-      </div>
-      <div class="marvis-work-log-status">
-        <span class="marvis-work-log-status-text">空闲中...</span>
-        <span class="marvis-work-log-status-link">工作状态 ›</span>
-      </div>
-      <div class="marvis-work-log-status">
-        <span class="marvis-work-log-tokens">消耗Token ›</span>
-        <span>0 🔥</span>
-      </div>
-    </div>
-  </section>
-
-  <!-- Marvis Persona Page -->
-  <section class="marvis-persona-page" id="marvisPersonaPage" hidden>
-    <button class="marvis-persona-back" id="marvisPersonaBack" type="button" aria-label="返回">‹</button>
-    <div class="marvis-persona-hero">
-      <div class="marvis-persona-avatar">
-        <svg viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg">
-          <!-- Marvis character - stylized black mascot with red scarf -->
-          <g transform="translate(30,10)">
-            <!-- Body -->
-            <ellipse cx="50" cy="110" rx="38" ry="30" fill="#1A1A1A"/>
-            <!-- Head -->
-            <circle cx="50" cy="55" r="32" fill="#1A1A1A"/>
-            <!-- Ears/Horns -->
-            <path d="M28 28 L22 8 L36 22Z" fill="#1A1A1A"/>
-            <path d="M72 28 L78 8 L64 22Z" fill="#1A1A1A"/>
-            <!-- Eyes -->
-            <rect x="33" y="46" width="14" height="8" rx="2" fill="#FFFFFF"/>
-            <rect x="53" y="46" width="14" height="8" rx="2" fill="#FFFFFF"/>
-            <rect x="37" y="48" width="6" height="4" rx="1" fill="#E53935"/>
-            <rect x="57" y="48" width="6" height="4" rx="1" fill="#E53935"/>
-            <!-- Scarf -->
-            <path d="M22 72 Q50 85 78 72 Q78 92 62 90 L58 105 L50 95 L42 105 L38 90 Q22 92 22 72Z" fill="#E53935"/>
-            <!-- Arms -->
-            <ellipse cx="16" cy="100" rx="10" ry="18" fill="#1A1A1A" transform="rotate(-15 16 100)"/>
-            <ellipse cx="84" cy="95" rx="10" ry="18" fill="#1A1A1A" transform="rotate(15 84 95)"/>
-            <!-- Legs -->
-            <ellipse cx="35" cy="135" rx="12" ry="10" fill="#1A1A1A"/>
-            <ellipse cx="65" cy="135" rx="12" ry="10" fill="#1A1A1A"/>
-          </g>
-        </svg>
-      </div>
-      <h2 class="marvis-persona-greeting">Hi，我是 Marvis</h2>
-      <div class="marvis-persona-tags">
-        <span class="marvis-persona-tag">理智高效</span>
-        <span class="marvis-persona-tag">极简办公</span>
-        <span class="marvis-persona-tag">默默干活</span>
-      </div>
-    </div>
-    <div class="marvis-persona-body">
-      <div class="marvis-persona-section">
-        <div class="marvis-persona-section-title">👋 自我介绍</div>
-        <div class="marvis-persona-section-content">
-          老板，我是理智高效版 Marvis。我 24 小时在线，有问题随时来找我。
-        </div>
-      </div>
-      <div class="marvis-persona-section">
-        <div class="marvis-persona-section-title">📋 人设特征</div>
-        <div class="marvis-persona-section-content">
-          <dl>
-            <dt>性格关键词：理智高效</dt>
-            <dd>说话风格：不做多余寒暄，直奔问题核心，用最短路径帮你解决需求</dd>
-            <dt>适用场景：</dt>
-            <dd>适合办公需求处理：文档整理、信息查询、方案梳理等高效场景</dd>
-          </dl>
-        </div>
-      </div>
-      <button class="marvis-persona-edit" type="button">✏️ 人设调整</button>
-    </div>
-    <button class="marvis-persona-cta" id="marvisPersonaCta" type="button">设定我的Marvis</button>
-  </section>
-
-  <!-- Marvis UI JavaScript -->
-  <script>
-  (function() {
-    if (!document.body.dataset.theme || document.body.dataset.theme !== 'marvis') return;
-
-    const bottomNav = document.getElementById('marvisBottomNav');
-    const backdrop = document.getElementById('marvisBackdrop');
-    const workLog = document.getElementById('marvisWorkLog');
-    const workLogClose = document.getElementById('marvisWorkLogClose');
-    const personaPage = document.getElementById('marvisPersonaPage');
-    const personaBack = document.getElementById('marvisPersonaBack');
-    const personaCta = document.getElementById('marvisPersonaCta');
-    const navChat = document.getElementById('marvisNavChat');
-    const navTasks = document.getElementById('marvisNavTasks');
-    const navSkills = document.getElementById('marvisNavSkills');
-    const navProfile = document.getElementById('marvisNavProfile');
-
-    if (!bottomNav) return;
-
-    // Tab switching
-    const navItems = [navChat, navTasks, navSkills, navProfile];
-    function activateTab(item) {
-      navItems.forEach(n => { if (n) n.classList.remove('active'); });
-      if (item) item.classList.add('active');
-    }
-
-    if (navChat) navChat.addEventListener('click', function() {
-      activateTab(navChat);
-      closeWorkLog();
-      closePersonaPage();
-    });
-
-    if (navTasks) navTasks.addEventListener('click', function() {
-      activateTab(navTasks);
-      openWorkLog();
-    });
-
-    if (navSkills) navSkills.addEventListener('click', function() {
-      activateTab(navSkills);
-    });
-
-    if (navProfile) navProfile.addEventListener('click', function() {
-      activateTab(navProfile);
-      openPersonaPage();
-    });
-
-    // Work Log panel
-    function openWorkLog() {
-      if (!workLog) return;
-      workLog.hidden = false;
-      requestAnimationFrame(function() {
-        requestAnimationFrame(function() {
-          workLog.classList.add('open');
-          if (backdrop) { backdrop.classList.add('visible'); }
-        });
-      });
-    }
-
-    function closeWorkLog() {
-      if (!workLog) return;
-      workLog.classList.remove('open');
-      if (backdrop) backdrop.classList.remove('visible');
-      setTimeout(function() { workLog.hidden = true; }, 350);
-      activateTab(navChat);
-    }
-
-    if (workLogClose) workLogClose.addEventListener('click', closeWorkLog);
-
-    // Work Log tabs
-    var wlTabs = workLog ? workLog.querySelectorAll('.marvis-work-log-tab') : [];
-    wlTabs.forEach(function(tab) {
-      tab.addEventListener('click', function() {
-        wlTabs.forEach(function(t) { t.classList.remove('active'); });
-        tab.classList.add('active');
-      });
-    });
-
-    // Persona Page
-    function openPersonaPage() {
-      if (!personaPage) return;
-      personaPage.hidden = false;
-      requestAnimationFrame(function() {
-        requestAnimationFrame(function() {
-          personaPage.classList.add('open');
-        });
-      });
-    }
-
-    function closePersonaPage() {
-      if (!personaPage) return;
-      personaPage.classList.remove('open');
-      setTimeout(function() { personaPage.hidden = true; }, 300);
-      activateTab(navChat);
-    }
-
-    if (personaBack) personaBack.addEventListener('click', closePersonaPage);
-    if (personaCta) personaCta.addEventListener('click', closePersonaPage);
-
-    // Backdrop click closes work log
-    if (backdrop) backdrop.addEventListener('click', function() {
-      closeWorkLog();
-    });
-  })();
-  </script>
-"""
-
 
 def _live_page(agent_run_id: int, *, native_provider: str = "codex", theme: str = "") -> str:
     stream_path = f"/api/workers/{agent_run_id}/stream"

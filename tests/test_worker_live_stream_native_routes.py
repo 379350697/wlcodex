@@ -2793,8 +2793,10 @@ def test_native_codex_home_matches_remote_mobile_session_status_shape() -> None:
     assert 'id="projectPickerCancel"' in response
     assert '当前目录' in response
     assert '无项目' in response
-    assert '<span>工作区</span>' in response
-    assert '<span>工作树</span>' in response
+    assert "<strong>工作区</strong>" in response
+    assert "不展示未实现的工作树入口" in response
+    assert '<span>工作树</span>' not in response
+    assert "compose-mode-toggle" not in response
     assert ".search-wrap { position: relative; min-width: 0;" in response
     assert ".search-icon { position: absolute; left: 20px; top: 50%;" in response
     assert ".search-icon:before" in response
