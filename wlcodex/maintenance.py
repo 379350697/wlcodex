@@ -174,10 +174,7 @@ _ACTIVE_WORK_QUERIES: tuple[tuple[str, str], ...] = (
         "Relay task runs",
         """
         SELECT COUNT(*) FROM team_runs
-        WHERE status NOT IN (
-            'done', 'completed', 'failed', 'aborted', 'interrupted', 'archived',
-            'cancelled', 'superseded'
-        )
+        WHERE status IN ('queued', 'running', 'waiting_approval', 'paused')
         """,
     ),
     (
@@ -226,16 +223,6 @@ _ACTIVE_WORK_QUERIES: tuple[tuple[str, str], ...] = (
     (
         "backend requests",
         "SELECT COUNT(*) FROM backend_requests WHERE status = 'pending'",
-    ),
-    (
-        "native agent sessions",
-        """
-        SELECT COUNT(*) FROM native_agent_sessions
-        WHERE status NOT IN (
-            'done', 'completed', 'failed', 'error', 'aborted', 'interrupted',
-            'cancelled', 'superseded', 'idle'
-        )
-        """,
     ),
     (
         "workflow handoffs",

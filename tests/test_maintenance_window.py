@@ -61,6 +61,31 @@ def test_historical_native_sessions_do_not_block_maintenance_drain(tmp_path: Pat
     assert assert_maintenance_window_ready(ledger._conn).active_work == {}
 
 
+def test_blocked_relay_and_native_session_history_do_not_block_drain(tmp_path: Path) -> None:
+    from wlcodex.native_agents.session_store import NativeAgentSessionStore
+
+    ledger = _ledger(tmp_path)
+    relay = RelayStore(ledger)
+    task = relay.create_task(
+        title="Blocked historical task",
+        prompt="No background worker remains.",
+        workspace="/repo",
+        provider="codex",
+    )
+    ledger._conn.execute("UPDATE team_runs SET status = 'blocked' WHERE id = ?", (task.id,))
+    NativeAgentSessionStore(ledger).get_or_create_session(
+        provider="claude",
+        provider_engine="cli",
+        native_session_id="stale-native-agent",
+        status="running",
+    )
+
+    status = ledger.begin_maintenance_window()
+
+    assert status.active_work == {}
+    assert assert_maintenance_window_ready(ledger._conn).active_work == {}
+
+
 def test_native_probe_connection_failure_is_persisted_and_fail_closed(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path)
     _native_session(ledger, "unreachable-provider", status="running")
