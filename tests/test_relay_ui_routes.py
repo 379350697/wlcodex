@@ -1915,7 +1915,7 @@ async def test_relay_task_detail_keeps_natural_reply_with_json_snippet_in_chat(
 
 
 @pytest.mark.asyncio
-async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path) -> None:
+async def test_native_index_links_to_workflows_before_relay(tmp_path: Path) -> None:
     response, _service = await _request(
         tmp_path,
         "GET /native?token=secret HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
@@ -1925,15 +1925,15 @@ async def test_native_index_shows_relay_card_and_preserves_token(tmp_path: Path)
     assert "Codex" in response
     assert "Claude" in response
     assert "Antigravity" in response
-    assert "议会审核" in response
-    assert "Marvis 接力" in response
-    assert 'href="/native/workflows/relay?token=secret"' in response
-    assert 'data-native-entry="marvis-relay"' in response
-    assert "<span>工作流</span>" not in response
+    assert "议会审核" not in response
+    assert "Marvis 接力" not in response
+    assert 'href="/native/workflows?token=secret"' in response
+    assert 'data-native-entry="workflows"' in response
+    assert "<span>工作流</span>" in response
 
 
 @pytest.mark.asyncio
-async def test_workflow_directory_links_to_relay_council_and_dev_flow(tmp_path: Path) -> None:
+async def test_workflow_directory_links_to_relay_without_dead_entries(tmp_path: Path) -> None:
     response, _service = await _request(
         tmp_path,
         "GET /native/workflows?token=secret HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
@@ -1944,7 +1944,11 @@ async def test_workflow_directory_links_to_relay_council_and_dev_flow(tmp_path: 
     assert 'href="/native/workflows/relay?token=secret"' in response
     assert "议会审核" in response
     assert 'href="/council?token=secret"' in response
-    assert "Dev Flow" in response
+    # Unsupported areas are explained, but never exposed as actionable routes.
+    assert 'href="/native/workflows/dev' not in response
+    assert 'href="/native/workflows/skills' not in response
+    assert 'href="/native/workflows/profile' not in response
+    assert 'data-native-entry="dev-flow"' not in response
 
 
 @pytest.mark.asyncio
@@ -1979,14 +1983,17 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert 'data-marvis-relay-view="tasks"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-provenance">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260710-dialog-a11y">'
         in response
     )
     assert 'class="marvis-relay-bottom-nav"' in response
     assert 'class="marvis-relay-avatar marvis-relay-avatar-marvis"' in response
-    assert 'href="/native/workflows/relay/office?token=secret"' in response
     assert (
-        'href="/native/workflows/relay/chat?token=secret&amp;workspace=/Users/wl/projects/wlcodex"'
+        'href="/native/workflows/relay/inbox?token=secret&amp;workspace=%2FUsers%2Fwl%2Fprojects%2Fwlcodex"'
+        in response
+    )
+    assert (
+        'href="/native/workflows/relay/chat?token=secret&amp;workspace=%2FUsers%2Fwl%2Fprojects%2Fwlcodex"'
         in response
     )
     assert (
@@ -1998,9 +2005,8 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "请输入任务" not in response
     assert "任务历史" in response
     assert "新接力任务" not in response
-    assert "配置" not in response
-    assert '<a class="relay-secondary" href="/native/workflows/relay/config' not in response
-    assert 'href="/native/workflows/relay/config' not in response
+    assert 'data-marvis-nav="settings"' in response
+    assert 'href="/native/workflows/relay/config?token=secret&amp;workspace=/Users/wl/projects/wlcodex"' in response
     assert "新聊天" not in response
     assert "relay-create-panel" not in response
     assert "relay-create-modal" not in response
@@ -2011,11 +2017,13 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "发布大任务" not in response
     assert "暂无任务" not in response
     assert "relay-group" not in response
-    assert 'data-filter="running"' in response
-    assert 'data-filter="waiting_user"' in response
-    assert 'data-filter="blocked"' in response
-    assert 'data-filter="completed"' in response
-    assert 'data-filter="interrupted"' in response
+    # Status filters are server-rendered links; they no longer drive a stale
+    # client-side list filter.
+    assert 'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex&amp;status=running&amp;page=1"' in response
+    assert 'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex&amp;status=waiting_user&amp;page=1"' in response
+    assert 'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex&amp;status=blocked&amp;page=1"' in response
+    assert 'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex&amp;status=completed&amp;page=1"' in response
+    assert 'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex&amp;status=interrupted&amp;page=1"' in response
     assert "全部工作区" not in response
     assert 'data-workspace-value=""' not in response
     assert "wlcodex" in response
@@ -2051,7 +2059,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         "Host: test\r\nConnection: close\r\n\r\n",
         relay_service=service,
     )
-    assert 'href="/native/workflows/relay/chat?token=secret&amp;workspace=/repo"' in populated
+    assert 'href="/native/workflows/relay/chat?token=secret&amp;workspace=%2Frepo"' in populated
     assert "Default workspace relay" not in populated
     assert "Other workspace relay" not in populated
 
@@ -2135,8 +2143,8 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
     assert "padding-left" not in footer_block
     assert "最近活动 06-16 15:51" in polished
     assert "2026-06-16T07:51:57.510982123+00:00" not in polished
-    assert "最近接棒：" not in polished
-    assert "按完整五角色接力处理" not in polished
+    assert "最新交接：" in polished
+    assert "按完整五角色接力处理：先由架构工程师审查。" in polished
 
 
 @pytest.mark.asyncio
@@ -2183,23 +2191,22 @@ async def test_relay_surfaces_use_mobile_web_head_without_pwa_shell(tmp_path: Pa
     finally:
         await server.stop()
 
-    for response in (
-        list_response,
-        chat_response,
-        detail_response,
-        office_response,
-        construction_response,
-    ):
+    for response in (list_response, chat_response, detail_response):
         assert "HTTP/1.1 200 OK" in response
         assert (
-            '<meta name="viewport" content="width=device-width, initial-scale=1, '
-            'maximum-scale=1, user-scalable=no, viewport-fit=cover">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
             in response
         )
+        assert "maximum-scale=1" not in response
+        assert "user-scalable=no" not in response
         assert '<meta name="theme-color" content="#FAF8F5">' in response
         assert '<script src="/static/relay_mobile.js?v=20260701-mobile-web" defer></script>' in response
         assert "/manifest.webmanifest" not in response
         assert "serviceWorker.register" not in response
+
+    for response in (office_response, construction_response):
+        assert "HTTP/1.1 303 See Other" in response
+        assert "Location: /native/workflows/relay/config?token=secret" in response
 
 
 @pytest.mark.asyncio
@@ -2326,22 +2333,26 @@ async def test_marvis_relay_chat_home_is_the_only_new_task_entry(
     assert 'class="marvis-relay-composer"' in response
     assert 'action="/api/relay/tasks?token=secret"' in response
     assert 'class="marvis-relay-mode-strip"' in response
-    assert 'name="execution_mode" value="simple" checked' in response
+    assert 'name="execution_mode" value="standard" checked' in response
     assert 'name="execution_mode" value="plan_first"' in response
     assert 'name="execution_mode" value="goal"' in response
-    assert 'name="execution_mode" value="auto"' in response
+    assert 'name="execution_mode" value="simple"' not in response
+    assert 'name="execution_mode" value="auto"' not in response
     assert 'name="execution_mode" value="team"' not in response
-    assert 'type="hidden" name="allow_subagents" value="off"' in response
-    assert 'type="checkbox" name="allow_subagents" value="auto" checked' in response
-    assert "使用子代理" in response
-    assert "子代理关闭" not in response
+    assert 'name="allow_subagents"' not in response
+    assert "使用子代理" not in response
     assert 'select name="team_strategy"' not in response
     assert "团队策略" not in response
     assert '<input name="title" autocomplete="off" placeholder="请在此输入任务">' in response
     assert '<input type="hidden" name="prompt" value="">' in response
-    assert '<input type="hidden" name="execution_goal" value="">' in response
+    assert 'name="execution_goal" autocomplete="off" placeholder="可验证的业务目标"' in response
+    assert '<input type="hidden" name="execution_goal"' not in response
+    assert 'name="acceptance_criteria"' in response
     assert '<input type="hidden" name="workspace" value="/repo">' in response
-    assert 'data-marvis-nav="chat" aria-current="page"' in response
+    # The fixed Relay navigation only exposes Tasks and Settings.  Creating a
+    # task is an intentional transient surface, not a third navigation state.
+    assert 'data-marvis-nav="tasks" aria-current="page"' in response
+    assert 'data-marvis-nav="chat"' not in response
     assert 'href="/native/workflows/relay?token=secret&amp;workspace=/repo"' in response
     assert "新接力任务" not in response
     assert "relay-create-modal" not in response
@@ -2399,7 +2410,7 @@ async def test_relay_work_log_shows_subagent_dispatch_decision(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_marvis_relay_skills_and_profile_show_construction_pages(
+async def test_marvis_relay_skills_and_profile_redirect_to_settings(
     tmp_path: Path,
 ) -> None:
     skills_response, _ = await _request(
@@ -2413,126 +2424,26 @@ async def test_marvis_relay_skills_and_profile_show_construction_pages(
         "Host: test\r\nConnection: close\r\n\r\n",
     )
 
-    for response, active_nav in ((skills_response, "skills"), (profile_response, "profile")):
-        assert "HTTP/1.1 200 OK" in response
-        assert 'data-marvis-relay-view="construction"' in response
-        assert "正在建设中" in response
-        assert "/static/marvis/relay-under-construction.svg" in response
-        assert f'data-marvis-nav="{active_nav}" aria-current="page"' in response
-        assert 'href="/native/workflows/relay/skills?token=secret&amp;workspace=/repo"' in response
-        assert 'href="/native/workflows/relay/profile?token=secret&amp;workspace=/repo"' in response
-
-    asset_response, _ = await _request(
-        tmp_path,
-        "GET /static/marvis/relay-under-construction.svg HTTP/1.1\r\n"
-        "Host: test\r\nConnection: close\r\n\r\n",
-    )
-    assert "HTTP/1.1 200 OK" in asset_response
-    assert "Content-Type: image/svg+xml" in asset_response
-    assert "<svg" in asset_response
+    for response in (skills_response, profile_response):
+        assert "HTTP/1.1 303 See Other" in response
+        assert "Location: /native/workflows/relay/config?token=secret&workspace=/repo" in response
+        assert "正在建设中" not in response
 
 
 @pytest.mark.asyncio
-async def test_marvis_relay_office_page_uses_screenshot_assets_and_persona_modal(
+async def test_marvis_relay_office_legacy_url_redirects_to_settings_with_scope(
     tmp_path: Path,
 ) -> None:
     response, _service = await _request(
         tmp_path,
-        "GET /native/workflows/relay/office?token=secret HTTP/1.1\r\n"
+        "GET /native/workflows/relay/office?token=secret&workspace=%2Frepo HTTP/1.1\r\n"
         "Host: test\r\nConnection: close\r\n\r\n",
     )
 
-    assert "HTTP/1.1 200 OK" in response
-    assert 'data-marvis-relay-view="office"' in response
-    assert '<meta name="color-scheme" content="light only">' in response
-    assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-provenance">'
-        in response
-    )
-    assert "Marvis办公室" in response
-    assert 'href="/native/workflows/relay?token=secret"' in response
-    assert "/static/marvis/office-scene-roles-5.png?v=20260627-red-director" in response
-    assert response.count("data-marvis-office-role=") == 5
-    assert "/static/marvis/office-worker-cutout-" not in response
-    assert "/static/marvis/office-desk-empty-slot.png" not in response
-    assert "/static/marvis/office-desk-empty-hd.png" not in response
-    assert response.count("data-marvis-persona-open=") == 5
-    assert '"architect":{"role":"architect","display_name":"架构工程师"' in response
-    assert '"implementer":{"role":"implementer","display_name":"开发工程师"' in response
-    assert (
-        '"director":{"role":"director","display_name":"总工程师","title":"总工程师","provider"'
-        in response
-    )
-    assert (
-        '"architect":{"role":"architect","display_name":"架构工程师","title":"架构工程师","provider"'
-        in response
-    )
-    assert (
-        '"implementer":{"role":"implementer","display_name":"开发工程师","title":"开发工程师","provider"'
-        in response
-    )
-    assert (
-        '"tester":{"role":"tester","display_name":"测试工程师","title":"测试工程师","provider"'
-        in response
-    )
-    assert (
-        '"auditor":{"role":"auditor","display_name":"审核工程师","title":"审核工程师","provider"'
-        in response
-    )
-    assert re.search(r'"director":\{[^}]*"display_name":"总工程师"[^}]*"avatar":"marvis"', response)
-    assert re.search(
-        r'"architect":\{[^}]*"display_name":"架构工程师"[^}]*"avatar":"architect"', response
-    )
-    assert re.search(
-        r'"implementer":\{[^}]*"display_name":"开发工程师"[^}]*"avatar":"implementer"', response
-    )
-    assert re.search(r'"tester":\{[^}]*"display_name":"测试工程师"[^}]*"avatar":"tester"', response)
-    assert re.search(
-        r'"auditor":\{[^}]*"display_name":"审核工程师"[^}]*"avatar":"auditor"', response
-    )
-    assert "data-persona-name" in response
-    assert "Team Leader" not in response
-    for legacy_role_name in [
-        " ".join(("Computer", "Agent")),
-        " ".join(("File", "Agent")),
-        " ".join(("Browser", "Agent")),
-        " ".join(("Search", "Agent")),
-    ]:
-        assert legacy_role_name not in response
-    assert "设置大脑" in response
-    assert "设置大模型" not in response
-    assert "marvis-persona-model-panel" in response
-    assert 'data-provider-option="codex"' in response
-    assert 'data-provider-option="claude"' in response
-    assert 'data-provider-option="antigravity"' in response
-    assert "/api/relay/config${TOKEN_SUFFIX}" in response
-    assert "今日消耗Token" in response
-    assert "总消耗Token" in response
-    assert "今日节省Token" not in response
-    assert "☕" in response
-    assert "marvis-token-beans" not in response
-    legacy_avatar_slugs = [
-        "-".join(("app", "agent")),
-        "-".join(("computer", "agent")),
-        "-".join(("search", "agent")),
-        "-".join(("file", "agent")),
-        "-".join(("browser", "agent")),
-    ]
-    for legacy_avatar_slug in legacy_avatar_slugs:
-        assert legacy_avatar_slug not in response
-    avatar_assets = [
-        "persona-avatar-marvis.png",
-        "persona-avatar-architect.png",
-        "persona-avatar-implementer.png",
-        "persona-avatar-tester.png",
-        "persona-avatar-auditor.png",
-    ]
-    css = Path("wlcodex/live_stream/static/relay_marvis.css").read_text()
-    for legacy_avatar_slug in legacy_avatar_slugs:
-        assert legacy_avatar_slug not in css
-    for asset in avatar_assets:
-        assert Path("wlcodex/live_stream/static/marvis", asset).exists()
-        assert f"/static/marvis/{asset}" in css
+    assert "HTTP/1.1 303 See Other" in response
+    assert "Location: /native/workflows/relay/config?token=secret&workspace=/repo" in response
+    assert "data-marvis-relay-view=\"office\"" not in response
+    assert "Marvis办公室" not in response
 
 
 def test_marvis_relay_task_topbar_is_fixed_above_scroll_content() -> None:
@@ -2558,7 +2469,7 @@ def test_marvis_relay_task_topbar_is_fixed_above_scroll_content() -> None:
 
 
 @pytest.mark.asyncio
-async def test_marvis_relay_office_page_displays_today_token_usage(
+async def test_relay_token_stats_api_reports_today_and_all_time_by_agent(
     tmp_path: Path,
 ) -> None:
     server, service, _runtime_store = _server(tmp_path)
@@ -2610,12 +2521,6 @@ async def test_marvis_relay_office_page_displays_today_token_usage(
     ledger._conn.commit()
     await server.start()
     try:
-        response = await _read_response(
-            server.host,
-            server.port,
-            "GET /native/workflows/relay/office?token=secret HTTP/1.1\r\n"
-            "Host: test\r\nConnection: close\r\n\r\n",
-        )
         stats_response = await _read_response(
             server.host,
             server.port,
@@ -2625,47 +2530,23 @@ async def test_marvis_relay_office_page_displays_today_token_usage(
     finally:
         await server.stop()
 
-    assert 'data-token-consumed="2200"' in response
-    assert 'data-token-total="3000"' in response
-    assert 'type="button" class="marvis-office-token-card"' in response
-    assert 'data-marvis-token-details-open="today"' in response
-    assert 'data-marvis-token-details-open="total"' in response
-    assert "data-marvis-token-details-modal" in response
-    assert "Token明细" in response
-    assert "Codex" in response
-    assert "Claude" in response
-    assert "今日 1,500" in response
-    assert "总计 2,300" in response
-    assert "今日 700" in response
-    assert "2,200" in response
-    assert "3,000" in response
-    assert "data-token-local" not in response
-    assert "data-token-saved" not in response
-    assert "今日节省Token" not in response
-    assert '"consumed_tokens": 2200' in stats_response
-    assert '"total_consumed_tokens": 3000' in stats_response
-    assert '"agent": "codex"' in stats_response
-    assert '"today_tokens": 1500' in stats_response
-    assert '"total_tokens": 2300' in stats_response
-    assert '"agent": "claude"' in stats_response
-    assert '"today_tokens": 700' in stats_response
-    assert "local_tokens" not in stats_response
-    assert "saved_tokens" not in stats_response
-
-
-def test_marvis_relay_office_token_details_sheet_uses_fixed_modal_css() -> None:
-    css = Path("wlcodex/live_stream/static/relay_marvis.css").read_text()
-    selector_start = css.index("[data-marvis-token-details-modal]")
-    selector_block = css[selector_start : selector_start + 360]
-    assert "position: fixed" in selector_block
-    assert "bottom: 0" in selector_block
-    assert "z-index: 43" in selector_block
-    assert "var(--marvis-s25-phone-width)" in selector_block
-    assert "var(--marvis-relay-phone-width)" not in selector_block
+    assert "HTTP/1.1 200 OK" in stats_response
+    stats = json.loads(stats_response.split("\r\n\r\n", 1)[1])
+    assert stats["consumed_tokens"] == 2200
+    assert stats["total_consumed_tokens"] == 3000
+    agents = {agent["agent"]: agent for agent in stats["agents"]}
+    assert agents["codex"]["today_tokens"] == 1500
+    assert agents["codex"]["total_tokens"] == 2300
+    assert agents["codex"]["today_input_tokens"] == 1200
+    assert agents["codex"]["today_output_tokens"] == 300
+    assert agents["claude"]["today_tokens"] == 700
+    assert agents["claude"]["total_tokens"] == 700
+    assert "local_tokens" not in stats
+    assert "saved_tokens" not in stats
 
 
 @pytest.mark.asyncio
-async def test_marvis_relay_office_token_usage_includes_runtime_usage_by_agent_run(
+async def test_relay_task_detail_usage_is_task_scoped_and_uses_latest_runtime_turn(
     tmp_path: Path,
 ) -> None:
     server, service, runtime_store = _server(tmp_path)
@@ -2737,15 +2618,26 @@ async def test_marvis_relay_office_token_usage_includes_runtime_usage_by_agent_r
         },
         occurred_at=now,
     )
+    unrelated_task = service.create_task(
+        title="Unrelated usage relay",
+        prompt="must not leak into this task detail",
+        workspace="/other-repo",
+        provider="codex",
+    )
+    service._store._ledger.record_usage_event(
+        task_id=unrelated_task.id,
+        agent="codex",
+        role="director",
+        phase="dispatch",
+        request_kind="turn",
+        model="gpt-5",
+        source="exact",
+        total_tokens=900,
+        status="completed",
+    )
 
     await server.start()
     try:
-        response = await _read_response(
-            server.host,
-            server.port,
-            "GET /native/workflows/relay/office?token=secret HTTP/1.1\r\n"
-            "Host: test\r\nConnection: close\r\n\r\n",
-        )
         stats_response = await _read_response(
             server.host,
             server.port,
@@ -2761,65 +2653,20 @@ async def test_marvis_relay_office_token_usage_includes_runtime_usage_by_agent_r
     finally:
         await server.stop()
 
-    assert 'data-token-consumed="700"' in response
-    assert 'data-token-total="700"' in response
-    assert "Codex" in response
-    assert "Claude" in response
-    assert "今日 220" in response
-    assert "今日 480" in response
-    assert "缓存 400" in response
-    assert '"consumed_tokens": 700' in stats_response
-    assert '"total_consumed_tokens": 700' in stats_response
-    assert '"agent": "codex"' in stats_response
-    assert '"today_tokens": 220' in stats_response
-    assert '"agent": "claude"' in stats_response
-    assert '"today_tokens": 480' in stats_response
-    assert '"cached_input_tokens": 400' in stats_response
+    assert "HTTP/1.1 200 OK" in stats_response
+    stats = json.loads(stats_response.split("\r\n\r\n", 1)[1])
+    assert stats["consumed_tokens"] == 1600
+    assert stats["total_consumed_tokens"] == 1600
+    agents = {agent["agent"]: agent for agent in stats["agents"]}
+    # The two director events describe the same turn; the latest cumulative
+    # usage (220), rather than 110 + 220, is what the read model exposes.
+    assert agents["codex"]["today_tokens"] == 1120
+    assert agents["claude"]["today_tokens"] == 480
+    assert agents["claude"]["cached_input_tokens"] == 400
+    assert "HTTP/1.1 200 OK" in task_response
     assert 'data-token-total="700"' in task_response
+    assert 'data-token-total="1600"' not in task_response
     assert ">700 ☕<" in task_response
-
-
-@pytest.mark.asyncio
-async def test_marvis_relay_office_occupancy_follows_configured_roles(
-    tmp_path: Path,
-) -> None:
-    server, service, _runtime_store = _server(tmp_path)
-    service.config = lambda: {  # type: ignore[method-assign]
-        "configured_roles": [
-            {"role": "architect", "display_name": "架构工程师"},
-            {"role": "implementer", "display_name": "开发工程师"},
-        ],
-        "roles": [
-            {"role": "director", "display_name": "总工程师"},
-            {"role": "architect", "display_name": "架构工程师"},
-            {"role": "implementer", "display_name": "开发工程师"},
-            {"role": "tester", "display_name": "测试工程师"},
-            {"role": "auditor", "display_name": "审核工程师"},
-        ],
-        "providers": [],
-        "assignments": {"architect": "codex", "implementer": "claude"},
-    }
-    await server.start()
-    try:
-        response = await _read_response(
-            server.host,
-            server.port,
-            "GET /native/workflows/relay/office?token=secret HTTP/1.1\r\n"
-            "Host: test\r\nConnection: close\r\n\r\n",
-        )
-    finally:
-        await server.stop()
-
-    assert "HTTP/1.1 200 OK" in response
-    assert response.count("data-marvis-office-role=") == 2
-    assert 'data-marvis-office-role="architect"' in response
-    assert 'data-marvis-office-role="implementer"' in response
-    assert response.count("data-marvis-persona-open=") == 2
-    assert "/static/marvis/office-scene-roles-2.png?v=20260627-red-director" in response
-    assert "/static/marvis/office-worker-cutout-" not in response
-    assert "/static/marvis/office-desk-empty-slot.png" not in response
-    assert "/static/marvis/office-worker-cutout-3.png" not in response
-    assert "/static/marvis/office-desk-empty-hd.png" not in response
 
 
 @pytest.mark.asyncio
@@ -3002,7 +2849,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert 'data-marvis-relay-view="conversation"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert (
-        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260629-confirmation-provenance">'
+        '<link rel="stylesheet" href="/static/relay_marvis.css?v=20260710-dialog-a11y">'
         in response
     )
     assert 'class="marvis-relay-topbar"' in response
@@ -3011,7 +2858,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
         in response
     )
     assert 'class="marvis-relay-bottom-nav"' in response
-    assert 'href="/native/workflows/relay/office?token=secret"' in response
+    assert 'href="/native/workflows/relay/config?token=secret&amp;workspace=/repo"' in response
     assert 'data-marvis-open-log aria-label="工作日志"' in response
     assert 'class="marvis-work-log"' in response
     assert "工作日志" in response

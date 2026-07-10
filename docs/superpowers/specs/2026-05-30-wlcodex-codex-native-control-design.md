@@ -1,5 +1,8 @@
 # WLCodex Codex Native Control Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Status
 
 Drafted on 2026-05-30 after the user clarified that the office view must

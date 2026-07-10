@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from wlcodex.relay.models import RELAY_ROLE_IDS
+from wlcodex.relay.models import RELAY_ROLE_IDS, normalize_relay_execution_mode
 
 
 ROUND_TERMINAL_STATUSES = {
@@ -72,6 +72,16 @@ def _coerce_optional_int(value: Any) -> int | None:
         return None
 
 
+def _completion_event_key(runtime_event_id: int, agent_run_id: int | None) -> str:
+    """Build the immutable replay key for a completion projection."""
+
+    if agent_run_id is not None and int(agent_run_id) > 0:
+        return f"agent:{int(agent_run_id)}"
+    if int(runtime_event_id or 0) > 0:
+        return f"runtime:{int(runtime_event_id)}"
+    return ""
+
+
 def _clean_required_roles(value: Any) -> list[str]:
     if not isinstance(value, list | tuple):
         return []
@@ -95,10 +105,31 @@ class RelayLifecycleAttempt:
     completion_artifact_id: int | None = None
     error_artifact_id: int | None = None
     retry_count: int = 0
-    execution_mode: str = "simple"
+    execution_mode: str = "standard"
     team_strategy: str = "none"
     provider_mode: dict[str, Any] | None = None
     provider_child_activity: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class RelayCompletionEventClaim:
+    """Durable ownership of one provider completion projection.
+
+    The original round is retained for audit, but the replay key is the
+    immutable provider event or agent run.  A completion can advance a task to
+    the next round before its final claim write, so current-round identity is
+    unsafe for idempotency.
+    """
+
+    team_run_id: int
+    event_key: str
+    runtime_event_id: int
+    agent_run_id: int | None
+    role: str
+    claimed_round_id: int
+    acquired: bool
+    already_applied: bool = False
+    recovered: bool = False
 
 
 class RelayLifecycleStore:
@@ -250,7 +281,9 @@ class RelayLifecycleStore:
         self.set_round_execution(
             team_run_id,
             next_round,
-            execution_mode=str(current_execution.get("execution_mode") or "simple"),
+            execution_mode=normalize_relay_execution_mode(
+                current_execution.get("execution_mode")
+            ),
             execution_goal=str(current_execution.get("execution_goal") or ""),
             execution_strategy=dict(current_execution.get("execution_strategy") or {}),
             waiting_reason=str(current_execution.get("waiting_reason") or "none"),
@@ -265,13 +298,26 @@ class RelayLifecycleStore:
             team_run_id,
             next_round,
             "director",
-            execution_mode=str(current_execution.get("execution_mode") or "simple"),
+            execution_mode=normalize_relay_execution_mode(
+                current_execution.get("execution_mode")
+            ),
         )
         self.sync_legacy_projection(team_run_id)
         return next_round
 
     def current_round_id(self, team_run_id: int, *, fallback: int = 1) -> int:
         self.backfill_task(team_run_id)
+        return self._active_round_id(team_run_id, fallback=fallback)
+
+    def current_round_id_readonly(self, team_run_id: int, *, fallback: int = 1) -> int:
+        """Return the latest durable round without triggering legacy repair.
+
+        Detail pages and SSE snapshots must be projections only.  Lifecycle
+        repair remains available through :meth:`current_round_id` for explicit
+        workers and mutation paths, while this variant is safe for a request
+        that is merely rendering state.
+        """
+
         return self._active_round_id(team_run_id, fallback=fallback)
 
     def _active_round_id(self, team_run_id: int, *, fallback: int = 1) -> int:
@@ -360,13 +406,13 @@ class RelayLifecycleStore:
         team_run_id: int,
         round_id: int,
         *,
-        execution_mode: str = "simple",
+        execution_mode: str = "standard",
         execution_goal: str = "",
         execution_strategy: dict[str, Any] | None = None,
         waiting_reason: str = "none",
     ) -> None:
         self.ensure_round(team_run_id, round_id=round_id, trigger_kind="backfill")
-        mode = str(execution_mode or "simple").strip() or "simple"
+        mode = normalize_relay_execution_mode(execution_mode)
         self._conn.execute(
             """
             UPDATE relay_rounds
@@ -473,7 +519,7 @@ class RelayLifecycleStore:
         ).fetchone()
         if row is None:
             return {
-                "execution_mode": "simple",
+                "execution_mode": "standard",
                 "execution_goal": "",
                 "execution_strategy": {},
                 "waiting_reason": "none",
@@ -488,13 +534,14 @@ class RelayLifecycleStore:
                     "agent_run_id": None,
                     "turn_id": "",
                 },
+                "pending_approval_count": 0,
             }
         try:
             strategy = json.loads(str(row["execution_strategy_json"] or "{}"))
         except json.JSONDecodeError:
             strategy = {}
         return {
-            "execution_mode": str(row["execution_mode"] or "simple"),
+            "execution_mode": normalize_relay_execution_mode(row["execution_mode"]),
             "execution_goal": str(row["execution_goal"] or ""),
             "execution_strategy": strategy if isinstance(strategy, dict) else {},
             "waiting_reason": str(row["waiting_reason"] or "none"),
@@ -513,7 +560,820 @@ class RelayLifecycleStore:
                 ),
                 "turn_id": str(row["confirmation_turn_id"] or ""),
             },
+            # Relay owns its native provider confirmations directly instead
+            # of mirroring them into the unrelated legacy ``tasks`` table.
+            # There can be exactly one current confirmation per round, so this
+            # is the durable pending-count projection exposed to callers.
+            "pending_approval_count": (
+                1 if str(row["confirmation_source"] or "") else 0
+            ),
         }
+
+    def claim_provider_native_approval_action(
+        self,
+        team_run_id: int,
+        round_id: int,
+        *,
+        provider_request_id: str,
+        runtime_event_id: int,
+        action: str,
+    ) -> bool:
+        """Atomically reserve one native approval for an external action.
+
+        Provider resolution cannot participate in SQLite's transaction.  This
+        claim closes that gap: only the current confirmation can transition to
+        a short-lived ``provider_native_*`` state, so a stale button or a
+        concurrent supersede never sends a second provider action.
+        """
+
+        action = str(action or "").strip()
+        if action not in {"resolving", "superseding"}:
+            raise ValueError(f"unsupported native approval action: {action}")
+        request_id = str(provider_request_id or "").strip()
+        event_id = int(runtime_event_id or 0)
+        if not request_id or event_id <= 0:
+            return False
+        now = _now()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = self._conn.execute(
+                """
+                UPDATE relay_rounds
+                SET confirmation_source = ?, updated_at = ?
+                WHERE team_run_id = ?
+                  AND round_id = ?
+                  AND confirmation_source = 'provider_native_approval'
+                  AND confirmation_provider_request_id = ?
+                  AND confirmation_runtime_event_id = ?
+                """,
+                (
+                    f"provider_native_{action}",
+                    now,
+                    team_run_id,
+                    round_id,
+                    request_id,
+                    event_id,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0) == 1
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def restore_provider_native_approval_action(
+        self,
+        team_run_id: int,
+        round_id: int,
+        *,
+        provider_request_id: str,
+        runtime_event_id: int,
+        action: str,
+    ) -> bool:
+        """Return a failed provider action to the actionable approval state."""
+
+        action = str(action or "").strip()
+        request_id = str(provider_request_id or "").strip()
+        event_id = int(runtime_event_id or 0)
+        if action not in {"resolving", "superseding"} or not request_id or event_id <= 0:
+            return False
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = self._conn.execute(
+                """
+                UPDATE relay_rounds
+                SET confirmation_source = 'provider_native_approval', updated_at = ?
+                WHERE team_run_id = ?
+                  AND round_id = ?
+                  AND confirmation_source = ?
+                  AND confirmation_provider_request_id = ?
+                  AND confirmation_runtime_event_id = ?
+                """,
+                (
+                    _now(),
+                    team_run_id,
+                    round_id,
+                    f"provider_native_{action}",
+                    request_id,
+                    event_id,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0) == 1
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def replace_provider_native_approval(
+        self,
+        team_run_id: int,
+        round_id: int,
+        *,
+        role: str,
+        provider: str,
+        provider_request_id: str,
+        runtime_event_id: int,
+        native_session_id: str = "",
+        agent_run_id: int | None = None,
+        turn_id: str = "",
+        kind: str = "command_approval",
+        expected_previous_request_id: str = "",
+        expected_previous_runtime_event_id: int = 0,
+    ) -> dict[str, Any]:
+        """Set the sole current native approval and its Relay projections.
+
+        This is deliberately one ``BEGIN IMMEDIATE`` transaction.  The round,
+        latest role attempt, team-run projection, and legacy role-job
+        projection therefore cannot expose a half-replaced confirmation.
+        ``expected_previous_*`` protects the provider-cancel supersede saga
+        from overwriting a newer confirmation observed by another worker.
+        """
+
+        request_id = str(provider_request_id or "").strip()
+        event_id = int(runtime_event_id or 0)
+        if not request_id or event_id <= 0:
+            return {"applied": False, "reason": "missing_request_identity"}
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                """
+                SELECT confirmation_source, confirmation_kind, confirmation_role,
+                       confirmation_provider, confirmation_provider_request_id,
+                       confirmation_runtime_event_id, confirmation_native_session_id,
+                       confirmation_agent_run_id, confirmation_turn_id
+                FROM relay_rounds
+                WHERE team_run_id = ? AND round_id = ?
+                """,
+                (team_run_id, round_id),
+            ).fetchone()
+            if row is None:
+                self._conn.rollback()
+                return {"applied": False, "reason": "round_missing"}
+            previous = {
+                "source": str(row["confirmation_source"] or ""),
+                "kind": str(row["confirmation_kind"] or ""),
+                "role": str(row["confirmation_role"] or ""),
+                "provider": str(row["confirmation_provider"] or ""),
+                "provider_request_id": str(
+                    row["confirmation_provider_request_id"] or ""
+                ),
+                "runtime_event_id": int(row["confirmation_runtime_event_id"] or 0),
+                "native_session_id": str(row["confirmation_native_session_id"] or ""),
+                "agent_run_id": (
+                    int(row["confirmation_agent_run_id"])
+                    if row["confirmation_agent_run_id"] is not None
+                    else None
+                ),
+                "turn_id": str(row["confirmation_turn_id"] or ""),
+            }
+            if (
+                previous["source"] == "provider_native_approval"
+                and previous["provider_request_id"] == request_id
+                and previous["runtime_event_id"] == event_id
+            ):
+                self._conn.commit()
+                return {
+                    "applied": False,
+                    "duplicate": True,
+                    "previous": previous,
+                    "pending_approval_count": 1,
+                }
+            if previous["runtime_event_id"] > event_id:
+                self._conn.commit()
+                return {
+                    "applied": False,
+                    "stale": True,
+                    "previous": previous,
+                    "pending_approval_count": 1 if previous["source"] else 0,
+                }
+            if expected_previous_request_id and (
+                previous["provider_request_id"] != str(expected_previous_request_id)
+                or previous["runtime_event_id"]
+                != int(expected_previous_runtime_event_id or 0)
+                or previous["source"] != "provider_native_superseding"
+            ):
+                self._conn.commit()
+                return {
+                    "applied": False,
+                    "stale": True,
+                    "previous": previous,
+                    "pending_approval_count": 1 if previous["source"] else 0,
+                }
+            now = _now()
+            self._conn.execute(
+                """
+                UPDATE relay_rounds
+                SET status = 'waiting_user',
+                    closed_at = ?,
+                    waiting_reason = 'provider_approval',
+                    confirmation_source = 'provider_native_approval',
+                    confirmation_kind = ?,
+                    confirmation_role = ?,
+                    confirmation_provider = ?,
+                    confirmation_provider_request_id = ?,
+                    confirmation_runtime_event_id = ?,
+                    confirmation_native_session_id = ?,
+                    confirmation_agent_run_id = ?,
+                    confirmation_turn_id = ?,
+                    updated_at = ?
+                WHERE team_run_id = ? AND round_id = ?
+                """,
+                (
+                    now,
+                    str(kind or "command_approval"),
+                    str(role or "director"),
+                    str(provider or ""),
+                    request_id,
+                    event_id,
+                    str(native_session_id or ""),
+                    int(agent_run_id) if agent_run_id is not None else None,
+                    str(turn_id or ""),
+                    now,
+                    team_run_id,
+                    round_id,
+                ),
+            )
+            attempt = self._latest_attempt_row(team_run_id, round_id, role)
+            if attempt is None:
+                self._conn.execute(
+                    """
+                    INSERT INTO relay_role_attempts (
+                        team_run_id, round_id, role, attempt_no, status,
+                        provider, native_session_id, agent_run_id, turn_id,
+                        active_turn_id, created_at, updated_at, closed_at
+                    ) VALUES (?, ?, ?, 1, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        team_run_id,
+                        round_id,
+                        str(role or "director"),
+                        str(provider or ""),
+                        str(native_session_id or ""),
+                        int(agent_run_id) if agent_run_id is not None else None,
+                        str(turn_id or ""),
+                        str(turn_id or ""),
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE relay_role_attempts
+                    SET status = 'waiting', updated_at = ?, closed_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, int(attempt["id"])),
+                )
+            self._conn.execute(
+                "UPDATE team_runs SET status = ?, updated_at = ? WHERE id = ?",
+                ("waiting_user", now, team_run_id),
+            )
+            self._conn.execute(
+                """
+                UPDATE team_agent_jobs
+                SET status = ?, updated_at = ?
+                WHERE team_run_id = ? AND role = ?
+                """,
+                ("waiting", now, team_run_id, str(role or "director")),
+            )
+            self._conn.commit()
+            return {
+                "applied": True,
+                "previous": previous,
+                "pending_approval_count": 1,
+            }
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def finalize_provider_native_approval_action(
+        self,
+        team_run_id: int,
+        round_id: int,
+        *,
+        role: str,
+        provider_request_id: str,
+        runtime_event_id: int,
+        action: str,
+        decision: str,
+    ) -> bool:
+        """Commit a successful provider response with all Relay projections."""
+
+        if str(action or "") not in {"resolving"}:
+            raise ValueError(f"unsupported native approval finalization: {action}")
+        request_id = str(provider_request_id or "").strip()
+        event_id = int(runtime_event_id or 0)
+        if not request_id or event_id <= 0:
+            return False
+        interrupted = str(decision or "") == "cancel_plan"
+        next_round_status = "interrupted" if interrupted else "running"
+        next_role_status = "interrupted" if interrupted else "streaming"
+        now = _now()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = self._conn.execute(
+                """
+                UPDATE relay_rounds
+                SET status = ?,
+                    closed_at = ?,
+                    waiting_reason = 'none',
+                    confirmation_source = '',
+                    confirmation_kind = '',
+                    confirmation_role = '',
+                    confirmation_provider = '',
+                    confirmation_provider_request_id = '',
+                    confirmation_runtime_event_id = 0,
+                    confirmation_native_session_id = '',
+                    confirmation_agent_run_id = NULL,
+                    confirmation_turn_id = '',
+                    updated_at = ?
+                WHERE team_run_id = ?
+                  AND round_id = ?
+                  AND confirmation_source = 'provider_native_resolving'
+                  AND confirmation_provider_request_id = ?
+                  AND confirmation_runtime_event_id = ?
+                """,
+                (
+                    next_round_status,
+                    now if interrupted else None,
+                    now,
+                    team_run_id,
+                    round_id,
+                    request_id,
+                    event_id,
+                ),
+            )
+            if int(cur.rowcount or 0) != 1:
+                self._conn.commit()
+                return False
+            attempt = self._latest_attempt_row(team_run_id, round_id, role)
+            if attempt is not None:
+                self._conn.execute(
+                    """
+                    UPDATE relay_role_attempts
+                    SET status = ?, updated_at = ?, closed_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        next_role_status,
+                        now,
+                        now if interrupted else None,
+                        int(attempt["id"]),
+                    ),
+                )
+            self._conn.execute(
+                "UPDATE team_runs SET status = ?, updated_at = ? WHERE id = ?",
+                (next_round_status, now, team_run_id),
+            )
+            self._conn.execute(
+                """
+                UPDATE team_agent_jobs
+                SET status = ?, updated_at = ?
+                WHERE team_run_id = ? AND role = ?
+                """,
+                (next_role_status, now, team_run_id, str(role or "director")),
+            )
+            self._conn.commit()
+            return True
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def claim_completion_event_result(
+        self,
+        team_run_id: int,
+        round_id: int,
+        role: str,
+        runtime_event_id: int,
+        *,
+        agent_run_id: int | None = None,
+        lease_seconds: int = 900,
+    ) -> RelayCompletionEventClaim:
+        """Atomically claim one immutable completion identity.
+
+        ``relay_completion_claims`` used the mutable current round as part of
+        its primary key.  This table intentionally uses only an immutable
+        runtime event / agent run identity, with the original round stored as
+        audit metadata.
+        """
+
+        event_id = max(0, int(runtime_event_id or 0))
+        run_id = _coerce_optional_int(agent_run_id)
+        if run_id is not None and run_id <= 0:
+            run_id = None
+        event_key = _completion_event_key(event_id, run_id)
+        clean_role = str(role or "director")
+        claimed_round_id = max(1, int(round_id or 1))
+        if not event_key:
+            return RelayCompletionEventClaim(
+                team_run_id=team_run_id,
+                event_key="",
+                runtime_event_id=event_id,
+                agent_run_id=run_id,
+                role=clean_role,
+                claimed_round_id=claimed_round_id,
+                acquired=True,
+            )
+
+        now = _now()
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=max(1, int(lease_seconds)))
+        ).isoformat()
+        owns_transaction = not self._conn.in_transaction
+        if owns_transaction:
+            self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                """
+                SELECT *
+                FROM relay_completion_event_claims
+                WHERE team_run_id = ?
+                  AND (
+                    event_key = ?
+                    OR (? > 0 AND runtime_event_id = ?)
+                    OR (? IS NOT NULL AND ? > 0 AND agent_run_id = ?)
+                  )
+                ORDER BY CASE WHEN event_key = ? THEN 0 ELSE 1 END, claimed_at ASC
+                LIMIT 1
+                """,
+                (
+                    team_run_id,
+                    event_key,
+                    event_id,
+                    event_id,
+                    run_id,
+                    run_id,
+                    run_id,
+                    event_key,
+                ),
+            ).fetchone()
+            if row is None:
+                self._conn.execute(
+                    """
+                    INSERT INTO relay_completion_event_claims (
+                        team_run_id, event_key, runtime_event_id, agent_run_id,
+                        role, claimed_round_id, status, artifact_id, claimed_at,
+                        applied_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 'claimed', NULL, ?, NULL, ?)
+                    """,
+                    (
+                        team_run_id,
+                        event_key,
+                        event_id,
+                        run_id,
+                        clean_role,
+                        claimed_round_id,
+                        now,
+                        now,
+                    ),
+                )
+                result = RelayCompletionEventClaim(
+                    team_run_id=team_run_id,
+                    event_key=event_key,
+                    runtime_event_id=event_id,
+                    agent_run_id=run_id,
+                    role=clean_role,
+                    claimed_round_id=claimed_round_id,
+                    acquired=True,
+                )
+            else:
+                stored_key = str(row["event_key"] or event_key)
+                stored_event_id = max(0, int(row["runtime_event_id"] or 0))
+                stored_run_id = _coerce_optional_int(row["agent_run_id"])
+                stored_role = str(row["role"] or clean_role)
+                stored_round_id = max(1, int(row["claimed_round_id"] or claimed_round_id))
+                status = str(row["status"] or "claimed")
+                if status in {"applied", "ignored_stale"}:
+                    result = RelayCompletionEventClaim(
+                        team_run_id=team_run_id,
+                        event_key=stored_key,
+                        runtime_event_id=stored_event_id or event_id,
+                        agent_run_id=stored_run_id or run_id,
+                        role=stored_role,
+                        claimed_round_id=stored_round_id,
+                        acquired=False,
+                        already_applied=True,
+                    )
+                elif str(row["updated_at"] or "") >= cutoff:
+                    result = RelayCompletionEventClaim(
+                        team_run_id=team_run_id,
+                        event_key=stored_key,
+                        runtime_event_id=stored_event_id or event_id,
+                        agent_run_id=stored_run_id or run_id,
+                        role=stored_role,
+                        claimed_round_id=stored_round_id,
+                        acquired=False,
+                    )
+                else:
+                    # Preserve the original round/key/role.  Only fill a
+                    # missing agent run for a pre-migration seed row.
+                    self._conn.execute(
+                        """
+                        UPDATE relay_completion_event_claims
+                        SET runtime_event_id = CASE
+                                WHEN runtime_event_id > 0 THEN runtime_event_id
+                                ELSE ?
+                            END,
+                            agent_run_id = COALESCE(agent_run_id, ?),
+                            status = 'claimed',
+                            claimed_at = ?,
+                            updated_at = ?
+                        WHERE team_run_id = ? AND event_key = ?
+                        """,
+                        (event_id, run_id, now, now, team_run_id, stored_key),
+                    )
+                    result = RelayCompletionEventClaim(
+                        team_run_id=team_run_id,
+                        event_key=stored_key,
+                        runtime_event_id=stored_event_id or event_id,
+                        agent_run_id=stored_run_id or run_id,
+                        role=stored_role,
+                        claimed_round_id=stored_round_id,
+                        acquired=True,
+                        recovered=True,
+                    )
+            if owns_transaction:
+                self._conn.commit()
+            return result
+        except Exception:
+            if owns_transaction:
+                self._conn.rollback()
+            raise
+
+    def claim_completion_event(
+        self,
+        team_run_id: int,
+        round_id: int,
+        role: str,
+        runtime_event_id: int,
+        *,
+        agent_run_id: int | None = None,
+        lease_seconds: int = 900,
+    ) -> bool:
+        """Compatibility wrapper returning only whether this worker owns it."""
+
+        return self.claim_completion_event_result(
+            team_run_id,
+            round_id,
+            role,
+            runtime_event_id,
+            agent_run_id=agent_run_id,
+            lease_seconds=lease_seconds,
+        ).acquired
+
+    def mark_completion_event_applied(
+        self,
+        team_run_id: int,
+        round_id: int,
+        role: str,
+        runtime_event_id: int,
+        *,
+        agent_run_id: int | None = None,
+        artifact_id: int | None = None,
+    ) -> None:
+        """Finalize a completion claim after its domain projection is durable."""
+
+        del round_id, role
+        event_id = max(0, int(runtime_event_id or 0))
+        run_id = _coerce_optional_int(agent_run_id)
+        event_key = _completion_event_key(event_id, run_id)
+        if not event_key:
+            return
+        now = _now()
+        self._conn.execute(
+            """
+            UPDATE relay_completion_event_claims
+            SET status = 'applied',
+                artifact_id = COALESCE(?, artifact_id),
+                applied_at = ?,
+                updated_at = ?
+            WHERE team_run_id = ?
+              AND (
+                event_key = ?
+                OR (? > 0 AND runtime_event_id = ?)
+                OR (? IS NOT NULL AND ? > 0 AND agent_run_id = ?)
+              )
+            """,
+            (
+                artifact_id,
+                now,
+                now,
+                team_run_id,
+                event_key,
+                event_id,
+                event_id,
+                run_id,
+                run_id,
+                run_id,
+            ),
+        )
+        self._conn.commit()
+
+    def mark_completion_event_ignored_stale(
+        self,
+        team_run_id: int,
+        round_id: int,
+        role: str,
+        runtime_event_id: int,
+        *,
+        agent_run_id: int | None = None,
+    ) -> None:
+        """Finalize a late completion without applying it to a newer round.
+
+        This is intentionally distinct from ``applied``: the provider event
+        was observed and safely retired, but it did not produce a Relay domain
+        artifact because its originating attempt is no longer current.
+        """
+
+        del round_id, role
+        event_id = max(0, int(runtime_event_id or 0))
+        run_id = _coerce_optional_int(agent_run_id)
+        event_key = _completion_event_key(event_id, run_id)
+        if not event_key:
+            return
+        now = _now()
+        self._conn.execute(
+            """
+            UPDATE relay_completion_event_claims
+            SET status = 'ignored_stale',
+                applied_at = COALESCE(applied_at, ?),
+                updated_at = ?
+            WHERE team_run_id = ?
+              AND status = 'claimed'
+              AND (
+                event_key = ?
+                OR (? > 0 AND runtime_event_id = ?)
+                OR (? IS NOT NULL AND ? > 0 AND agent_run_id = ?)
+              )
+            """,
+            (
+                now,
+                now,
+                team_run_id,
+                event_key,
+                event_id,
+                event_id,
+                run_id,
+                run_id,
+                run_id,
+            ),
+        )
+        self._conn.commit()
+
+    def release_completion_event_claim(
+        self,
+        team_run_id: int,
+        round_id: int,
+        role: str,
+        runtime_event_id: int,
+        *,
+        agent_run_id: int | None = None,
+    ) -> None:
+        """Release an unprojectable event so a later durable delta can retry."""
+
+        del round_id, role
+        event_id = max(0, int(runtime_event_id or 0))
+        run_id = _coerce_optional_int(agent_run_id)
+        event_key = _completion_event_key(event_id, run_id)
+        if not event_key:
+            return
+        self._conn.execute(
+            """
+            DELETE FROM relay_completion_event_claims
+            WHERE team_run_id = ?
+              AND status = 'claimed'
+              AND (
+                event_key = ?
+                OR (? > 0 AND runtime_event_id = ?)
+                OR (? IS NOT NULL AND ? > 0 AND agent_run_id = ?)
+              )
+            """,
+            (
+                team_run_id,
+                event_key,
+                event_id,
+                event_id,
+                run_id,
+                run_id,
+                run_id,
+            ),
+        )
+        self._conn.commit()
+
+    def completion_event_applied(
+        self,
+        team_run_id: int,
+        round_id: int,
+        role: str,
+        runtime_event_id: int,
+        *,
+        agent_run_id: int | None = None,
+    ) -> bool:
+        del round_id, role
+        event_id = max(0, int(runtime_event_id or 0))
+        run_id = _coerce_optional_int(agent_run_id)
+        event_key = _completion_event_key(event_id, run_id)
+        if not event_key:
+            return False
+        row = self._conn.execute(
+            """
+            SELECT 1 FROM relay_completion_event_claims
+            WHERE team_run_id = ?
+              AND status = 'applied'
+              AND (
+                event_key = ?
+                OR (? > 0 AND runtime_event_id = ?)
+                OR (? IS NOT NULL AND ? > 0 AND agent_run_id = ?)
+              )
+            LIMIT 1
+            """,
+            (
+                team_run_id,
+                event_key,
+                event_id,
+                event_id,
+                run_id,
+                run_id,
+                run_id,
+            ),
+        ).fetchone()
+        return row is not None
+
+    def claim_queued_attempt_dispatch(
+        self,
+        team_run_id: int,
+        round_id: int,
+        role: str,
+        *,
+        recover_stale_claim: bool = False,
+    ) -> bool:
+        """Compare-and-set a queued Relay attempt before provider dispatch.
+
+        Pending-input leases guard the queue record; this second claim guards
+        the provider-facing side effect if a worker expires or crashes after
+        creating the follow-up round.  A recovery can retake ``dispatching``
+        only when no provider identity was ever persisted.
+        """
+
+        owns_transaction = not self._conn.in_transaction
+        if owns_transaction:
+            self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._latest_attempt_row(team_run_id, round_id, role)
+            if row is None:
+                if owns_transaction:
+                    self._conn.commit()
+                return False
+            status = str(row["status"] or "")
+            has_provider_identity = bool(
+                str(row["native_session_id"] or "").strip()
+                or _coerce_optional_int(row["agent_run_id"])
+            )
+            can_claim = status == "queued" or (
+                recover_stale_claim
+                and status == "dispatching"
+                and not has_provider_identity
+            )
+            if not can_claim:
+                if owns_transaction:
+                    self._conn.commit()
+                return False
+            now = _now()
+            updated = self._conn.execute(
+                """
+                UPDATE relay_role_attempts
+                SET status = 'dispatching', updated_at = ?
+                WHERE id = ?
+                  AND status = ?
+                """,
+                (now, int(row["id"]), status),
+            )
+            if owns_transaction:
+                self._conn.commit()
+            return int(updated.rowcount or 0) == 1
+        except Exception:
+            if owns_transaction:
+                self._conn.rollback()
+            raise
+
+    def attempt_has_provider_dispatch(
+        self,
+        team_run_id: int,
+        round_id: int,
+        role: str,
+    ) -> bool:
+        """Whether a provider dispatch is durably visible for an attempt."""
+
+        row = self._latest_attempt_row(team_run_id, round_id, role)
+        if row is None:
+            return False
+        if str(row["native_session_id"] or "").strip():
+            return True
+        return bool(_coerce_optional_int(row["agent_run_id"]))
 
     def ensure_attempt(
         self,
@@ -698,7 +1558,7 @@ class RelayLifecycleStore:
         round_id: int,
         role: str,
         *,
-        execution_mode: str = "simple",
+        execution_mode: str = "standard",
         team_strategy: str = "none",
         provider_mode: dict[str, Any] | None = None,
         provider_child_activity: dict[str, Any] | None = None,
@@ -725,7 +1585,7 @@ class RelayLifecycleStore:
             WHERE id = ?
             """,
             (
-                str(execution_mode or "simple") or "simple",
+                normalize_relay_execution_mode(execution_mode),
                 str(team_strategy or "none") or "none",
                 json.dumps(provider_mode or {}, ensure_ascii=False),
                 json.dumps(provider_child_activity or {}, ensure_ascii=False),
@@ -785,7 +1645,9 @@ class RelayLifecycleStore:
                     team_run_id,
                     round_id,
                     role,
-                    execution_mode=str(provider_mode.get("execution_mode") or "simple"),
+                    execution_mode=normalize_relay_execution_mode(
+                        provider_mode.get("execution_mode")
+                    ),
                     team_strategy=str(provider_mode.get("team_strategy") or "none"),
                     provider_mode=provider_mode,
                 )
@@ -823,7 +1685,9 @@ class RelayLifecycleStore:
                 team_run_id,
                 round_id,
                 role,
-                execution_mode=str(provider_mode.get("execution_mode") or "simple"),
+                execution_mode=normalize_relay_execution_mode(
+                    provider_mode.get("execution_mode")
+                ),
                 team_strategy=str(provider_mode.get("team_strategy") or "none"),
                 provider_mode=provider_mode,
             )
@@ -932,6 +1796,93 @@ class RelayLifecycleStore:
         if row is None:
             raise KeyError(f"unknown relay attempt: {team_run_id}/{round_id}/{role}")
         return self._attempt_from_row(row)
+
+    def attempt_for_completion_identity(
+        self,
+        team_run_id: int,
+        role: str,
+        *,
+        agent_run_id: int | None = None,
+        turn_id: str = "",
+    ) -> RelayLifecycleAttempt | None:
+        """Return the durable attempt that originated a provider completion.
+
+        ``team_agent_jobs`` is deliberately a current-round projection, so it
+        loses an old provider run as soon as the role is dispatched again.
+        Completion projection must instead bind to the immutable attempt row.
+        An agent run is authoritative; a turn is a legacy fallback for
+        providers that cannot report a run id.
+        """
+
+        run_id = _coerce_optional_int(agent_run_id)
+        clean_turn_id = str(turn_id or "").strip()
+        clean_role = str(role or "director")
+        if run_id is not None and run_id > 0:
+            row = self._conn.execute(
+                """
+                SELECT * FROM relay_role_attempts
+                WHERE team_run_id = ? AND role = ? AND agent_run_id = ?
+                ORDER BY CASE
+                            WHEN ? != ''
+                             AND (turn_id = ? OR active_turn_id = ?)
+                            THEN 0
+                            ELSE 1
+                         END,
+                         round_id DESC,
+                         attempt_no DESC
+                LIMIT 1
+                """,
+                (
+                    team_run_id,
+                    clean_role,
+                    run_id,
+                    clean_turn_id,
+                    clean_turn_id,
+                    clean_turn_id,
+                ),
+            ).fetchone()
+            if row is not None:
+                return self._attempt_from_row(row)
+        if not clean_turn_id:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT * FROM relay_role_attempts
+            WHERE team_run_id = ?
+              AND role = ?
+              AND (turn_id = ? OR active_turn_id = ?)
+            ORDER BY round_id DESC, attempt_no DESC
+            LIMIT 1
+            """,
+            (team_run_id, clean_role, clean_turn_id, clean_turn_id),
+        ).fetchone()
+        return self._attempt_from_row(row) if row is not None else None
+
+    def attempt_by_agent_run_id(
+        self,
+        agent_run_id: int,
+    ) -> RelayLifecycleAttempt | None:
+        """Find an originating Relay attempt without consulting job mirrors."""
+
+        run_id = _coerce_optional_int(agent_run_id)
+        if run_id is None or run_id <= 0:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT relay_role_attempts.*
+            FROM relay_role_attempts
+            JOIN team_runs ON team_runs.id = relay_role_attempts.team_run_id
+            WHERE team_runs.route = 'relay'
+              AND relay_role_attempts.agent_run_id = ?
+            ORDER BY relay_role_attempts.updated_at DESC,
+                     relay_role_attempts.round_id DESC,
+                     relay_role_attempts.attempt_no DESC,
+                     relay_role_attempts.id DESC
+            LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        return self._attempt_from_row(row) if row is not None else None
 
     def attempts_for_round(
         self,
@@ -1176,7 +2127,7 @@ class RelayLifecycleStore:
                 int(row["error_artifact_id"]) if row["error_artifact_id"] is not None else None
             ),
             retry_count=int(row["retry_count"] or 0),
-            execution_mode=str(row["execution_mode"] or "simple"),
+            execution_mode=normalize_relay_execution_mode(row["execution_mode"]),
             team_strategy=str(row["team_strategy"] or "none"),
             provider_mode=provider_mode if isinstance(provider_mode, dict) else {},
             provider_child_activity=(

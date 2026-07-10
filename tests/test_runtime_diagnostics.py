@@ -6,11 +6,9 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.slow
-
 from wlcodex.db import Ledger
+from wlcodex.models import TaskStatus
 from wlcodex.runtime_diagnostics import (
-    RuntimeAgentSummary,
     RuntimeStatus,
     RuntimeTrace,
     TimeoutExplanation,
@@ -20,12 +18,14 @@ from wlcodex.runtime_diagnostics import (
     build_runtime_status,
     build_runtime_trace,
     compute_timeout_explanation,
+    find_queued_handoffs_without_executor_activity,
     find_non_terminal_agent_runs,
     format_status_display,
     format_timeout_explanation,
     format_trace_display,
 )
 from wlcodex.runtime_event_store import RuntimeEventStore
+from wlcodex.runtime_projector import RuntimeProjector
 from wlcodex.runtime_events import (
     AggregateType,
     EventSource,
@@ -34,6 +34,9 @@ from wlcodex.runtime_events import (
     Visibility,
     now_iso,
 )
+
+
+pytestmark = pytest.mark.slow
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +81,163 @@ def test_startup_recovery_appends_projection_rebuilt_event(tmp_path: Path) -> No
     ).fetchall()
     event_types = [str(row["event_type"]) for row in all_rows]
     assert EventType.PROJECTION_REBUILT in event_types
+
+
+def test_startup_recovery_marks_unstarted_queued_handoff_needs_recovery(
+    tmp_path: Path,
+) -> None:
+    """A durable launch hand-off is paused, never dispatched a second time."""
+
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    projector = RuntimeProjector(ledger._conn, store=store)
+    store.add_projector(projector.apply)
+    conversation = ledger.create_conversation(
+        chat_id=1,
+        user_id=1,
+        title="Queued handoff",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    task = ledger.create_task(
+        workspace_alias="demo",
+        workspace_path=str(tmp_path),
+        title="Queued handoff",
+        codex_thread_id=None,
+        parent_task_id=None,
+        status=TaskStatus.RUNNING,
+    )
+    orchestration = ledger.create_orchestration_run(conversation.id, "Ship safely")
+    queued = store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_QUEUED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id="queued-1",
+        correlation_id="queued-handoff",
+        source=EventSource.CONTROLLER,
+        actor="controller",
+        visibility=Visibility.OPERATOR,
+        payload={"goal": "Ship safely"},
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+    ))
+    started = store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_STARTED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id=str(orchestration.id),
+        correlation_id="queued-handoff",
+        source=EventSource.ORCHESTRATOR,
+        actor="orchestrator",
+        visibility=Visibility.OPERATOR,
+        payload={"phase": "running_analysis"},
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+        orchestration_run_id=orchestration.id,
+        task_id=task.id,
+        causation_id=queued.id,
+    ))
+
+    recovered = append_startup_recovery_events(store, ledger)
+
+    assert recovered["needs_recovery_task_ids"] == [task.id]
+    persisted = ledger.get_task(task.id)
+    assert persisted.status == TaskStatus.PAUSED
+    assert persisted.last_phase == "needs_recovery"
+    assert persisted.last_error == "queued_handoff_without_executor_activity"
+    recovered_run = ledger.get_orchestration_run(orchestration.id)
+    assert recovered_run.status == "needs_user"
+    assert recovered_run.current_step == "needs_recovery"
+    runtime_status = build_runtime_status(store, conversation_id=conversation.id)
+    assert runtime_status.status == "needs_recovery"
+    assert runtime_status.phase == "needs_recovery"
+    row = ledger._conn.execute(
+        """
+        SELECT event_type, causation_id FROM runtime_events
+        WHERE task_id = ? AND event_type = ?
+        """,
+        (task.id, EventType.RUN_RECOVERY_REQUIRED),
+    ).fetchone()
+    assert row is not None
+    assert int(row["causation_id"]) == started.id
+
+
+def test_queued_handoff_with_executor_activity_is_not_recovery_candidate(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=1,
+        user_id=1,
+        title="Started executor",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    task = ledger.create_task(
+        workspace_alias="demo",
+        workspace_path=str(tmp_path),
+        title="Started executor",
+        codex_thread_id=None,
+        parent_task_id=None,
+        status=TaskStatus.RUNNING,
+    )
+    orchestration = ledger.create_orchestration_run(conversation.id, "Ship safely")
+    queued = store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_QUEUED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id="queued-2",
+        correlation_id="queued-handoff-activity",
+        source=EventSource.CONTROLLER,
+        actor="controller",
+        visibility=Visibility.OPERATOR,
+        payload={"goal": "Ship safely"},
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+    ))
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_STARTED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id=str(orchestration.id),
+        correlation_id="queued-handoff-activity",
+        source=EventSource.ORCHESTRATOR,
+        actor="orchestrator",
+        visibility=Visibility.OPERATOR,
+        payload={"phase": "running_analysis"},
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+        orchestration_run_id=orchestration.id,
+        task_id=task.id,
+        causation_id=queued.id,
+    ))
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_PHASE_CHANGED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id=str(orchestration.id),
+        correlation_id="queued-handoff-activity",
+        source=EventSource.ORCHESTRATOR,
+        actor="orchestrator",
+        visibility=Visibility.OPERATOR,
+        payload={
+            "phase": "running_analysis",
+            "handoff_activity": "executor_started",
+        },
+        occurred_at=now_iso(),
+        conversation_id=conversation.id,
+        orchestration_run_id=orchestration.id,
+        task_id=task.id,
+        causation_id=queued.id,
+    ))
+
+    assert find_queued_handoffs_without_executor_activity(
+        store,
+        active_task_ids=[task.id],
+    ) == []
 
 
 # ---------------------------------------------------------------------------

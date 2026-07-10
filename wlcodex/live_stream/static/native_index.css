@@ -145,3 +145,14 @@ h1 {
   50%  { opacity: 1;   transform: scale(1.1) translateY(-3%); }
   100% { opacity: 0.8; transform: scale(1)   translateY(2%);  }
 }
+
+@media (forced-colors: active) {
+  body::before {
+    display: none;
+  }
+
+  .provider,
+  .provider::before {
+    forced-color-adjust: auto;
+  }
+}

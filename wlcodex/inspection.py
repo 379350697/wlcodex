@@ -12,7 +12,6 @@ from wlcodex.db import Ledger
 if TYPE_CHECKING:
     from wlcodex.models import TaskEvent
     from wlcodex.runtime_event_store import RuntimeEventStore
-    from wlcodex.runtime_diagnostics import RuntimeTrace
 
 
 @dataclass

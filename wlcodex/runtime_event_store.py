@@ -12,11 +12,17 @@ import logging
 import sqlite3
 from dataclasses import dataclass, replace
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from wlcodex.runtime_events import (
+    AggregateType,
+    EventSource,
+    EventType,
     MAX_PAYLOAD_STRING_LENGTH,
     RuntimeEvent,
+    Visibility,
     redact_payload,
 )
 
@@ -40,6 +46,16 @@ class ProviderRawFrame:
     task_id: int | None = None
 
 
+@dataclass(frozen=True)
+class QueuedRunClaim:
+    """A durable lease over one legacy ``run.queued`` event."""
+
+    queued_event: RuntimeEvent
+    claim_event: RuntimeEvent
+    workspace_alias: str
+    lease_owner: str
+
+
 class RuntimeEventStore:
     """Store for ``runtime_events``.
 
@@ -50,10 +66,22 @@ class RuntimeEventStore:
     before their official turn id was known.
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        raw_frame_archive_dir: Path | None = None,
+    ) -> None:
         self._conn = conn
         self._conn.row_factory = sqlite3.Row
         self._projectors: list[Callable[[RuntimeEvent], None]] = []
+        if raw_frame_archive_dir is None:
+            # Import lazily so the retention CLI can depend on this store
+            # without a module-import cycle.
+            from wlcodex.runtime_raw_frame_retention import default_archive_dir
+
+            raw_frame_archive_dir = default_archive_dir(conn)
+        self._raw_frame_archive_dir = raw_frame_archive_dir
 
     def add_projector(self, projector: Callable[[RuntimeEvent], None]) -> None:
         """Register a post-append projector callback.
@@ -113,6 +141,387 @@ class RuntimeEventStore:
         self._notify_projectors(stored)
         return stored
 
+    # ------------------------------------------------------------------
+    # Workspace-scoped queued-run leases
+    # ------------------------------------------------------------------
+
+    def claim_next_queued_run_for_workspace(
+        self,
+        workspace_alias: str,
+        *,
+        lease_owner: str,
+        lease_seconds: int = 300,
+    ) -> QueuedRunClaim | None:
+        """Claim the oldest runnable queued event for one workspace.
+
+        A queue event is immutable, so claim/release/consume are companion
+        events linked by ``causation_id``.  The selection and claim insertion
+        share one ``BEGIN IMMEDIATE`` transaction: two free workers cannot
+        consume a task merely because it was earlier in another workspace's
+        global queue.  Expired claims are deliberately retriable.
+        """
+
+        workspace = str(workspace_alias or "").strip()
+        owner = str(lease_owner or "").strip()
+        if not workspace or not owner:
+            return None
+        seconds = max(1, int(lease_seconds or 300))
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        expires_at = (now + timedelta(seconds=seconds)).isoformat()
+        stored: RuntimeEvent | None = None
+        queued: RuntimeEvent | None = None
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT q.*
+                FROM runtime_events q
+                JOIN conversation_sessions c ON c.id = q.conversation_id
+                WHERE q.event_type = ?
+                  AND c.workspace_alias = ?
+                ORDER BY q.id ASC
+                """,
+                (EventType.RUN_QUEUED, workspace),
+            ).fetchall()
+            for row in rows:
+                candidate = _row_to_event(row)
+                if self._queued_run_is_consumed_locked(candidate):
+                    continue
+                latest = self._latest_queued_run_lease_event_locked(candidate.id)
+                if latest is not None and latest.event_type == EventType.RUN_QUEUED_CLAIMED:
+                    lease_expires_at = _queued_lease_expiry(latest.payload)
+                    if lease_expires_at is None or lease_expires_at > now:
+                        continue
+                queued = candidate
+                stored = self._append_locked(
+                    RuntimeEvent(
+                        schema_version=1,
+                        event_type=EventType.RUN_QUEUED_CLAIMED,
+                        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                        aggregate_id=f"queued-{candidate.id}",
+                        correlation_id=candidate.correlation_id,
+                        source=EventSource.CONTROLLER,
+                        actor="controller",
+                        visibility=Visibility.OPERATOR,
+                        payload={
+                            "queued_event_id": candidate.id,
+                            "workspace_alias": workspace,
+                            "lease_owner": owner,
+                            "lease_expires_at": expires_at,
+                        },
+                        occurred_at=now_text,
+                        conversation_id=candidate.conversation_id,
+                        causation_id=candidate.id,
+                    )
+                )
+                break
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        if stored is None or queued is None:
+            return None
+        self._notify_projectors(stored)
+        return QueuedRunClaim(
+            queued_event=queued,
+            claim_event=stored,
+            workspace_alias=workspace,
+            lease_owner=owner,
+        )
+
+    def release_queued_run_claim(
+        self,
+        claim: QueuedRunClaim,
+        *,
+        error: str,
+    ) -> RuntimeEvent | None:
+        """Release an owned claim after launch failed, allowing a retry."""
+
+        queued = claim.queued_event
+        stored: RuntimeEvent | None = None
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            latest = self._latest_queued_run_lease_event_locked(queued.id)
+            if (
+                latest is None
+                or latest.event_type != EventType.RUN_QUEUED_CLAIMED
+                or str(latest.payload.get("lease_owner") or "") != claim.lease_owner
+            ):
+                self._conn.commit()
+                return None
+            stored = self._append_locked(
+                RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.RUN_QUEUED_RELEASED,
+                    aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                    aggregate_id=f"queued-{queued.id}",
+                    correlation_id=queued.correlation_id,
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload={
+                        "queued_event_id": queued.id,
+                        "workspace_alias": claim.workspace_alias,
+                        "lease_owner": claim.lease_owner,
+                        "error": str(error or "queued launch failed")[:500],
+                    },
+                    occurred_at=datetime.now(timezone.utc).isoformat(),
+                    conversation_id=queued.conversation_id,
+                    causation_id=queued.id,
+                )
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        self._notify_projectors(stored)
+        return stored
+
+    def consume_queued_run_claim(
+        self,
+        claim: QueuedRunClaim,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> RuntimeEvent | None:
+        """Mark a successfully launched queue event consumed exactly once."""
+
+        queued = claim.queued_event
+        stored: RuntimeEvent | None = None
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            # ``run.started`` is a durable hand-off marker and is therefore
+            # enough for a *new* worker to skip an expired claim after a
+            # crash.  The owner that just recorded that marker still needs to
+            # append the explicit consumed audit event, though.  Checking the
+            # consumed marker itself here preserves that audit without making
+            # the normal start -> consume path look like a bookkeeping race.
+            already_consumed = self._conn.execute(
+                """
+                SELECT 1
+                FROM runtime_events
+                WHERE causation_id = ?
+                  AND event_type = ?
+                LIMIT 1
+                """,
+                (queued.id, EventType.RUN_QUEUED_CONSUMED),
+            ).fetchone()
+            if already_consumed is not None:
+                self._conn.commit()
+                return None
+            latest = self._latest_queued_run_lease_event_locked(queued.id)
+            if (
+                latest is None
+                or latest.event_type != EventType.RUN_QUEUED_CLAIMED
+                or str(latest.payload.get("lease_owner") or "") != claim.lease_owner
+            ):
+                self._conn.commit()
+                return None
+            event_payload = {
+                "queued_event_id": queued.id,
+                "workspace_alias": claim.workspace_alias,
+                "lease_owner": claim.lease_owner,
+            }
+            if payload:
+                event_payload.update(payload)
+            stored = self._append_locked(
+                RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.RUN_QUEUED_CONSUMED,
+                    aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                    aggregate_id=f"queued-{queued.id}",
+                    correlation_id=queued.correlation_id,
+                    source=EventSource.CONTROLLER,
+                    actor="controller",
+                    visibility=Visibility.OPERATOR,
+                    payload=event_payload,
+                    occurred_at=datetime.now(timezone.utc).isoformat(),
+                    conversation_id=queued.conversation_id,
+                    causation_id=queued.id,
+                )
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        self._notify_projectors(stored)
+        return stored
+
+    def mark_unconsumed_legacy_queued_runs_needing_recovery(
+        self,
+        *,
+        reason: str,
+        blocking_reason: str,
+        next_action: str,
+    ) -> list[RuntimeEvent]:
+        """Atomically stop legacy queues that this process cannot execute.
+
+        Formal Native/Relay web-only mode has no Telegram controller or its
+        execution backend.  Selection and the causal recovery marker share a
+        ``BEGIN IMMEDIATE`` transaction so overlapping startup processes
+        cannot each write a duplicate recovery event, or leave a selected
+        queue runnable after the marker is committed.  An orphaned legacy
+        queue is marked too: it has no workspace claim path and must not stay
+        silently invisible merely because its historical conversation row is
+        missing.  Recovery is a durable non-dispatch outcome; it is
+        deliberately not a synthetic claim.
+        """
+
+        stored: list[RuntimeEvent] = []
+        timestamp = datetime.now(timezone.utc).isoformat()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT q.*, c.workspace_alias, c.id AS matched_conversation_id
+                FROM runtime_events AS q
+                LEFT JOIN conversation_sessions AS c ON c.id = q.conversation_id
+                WHERE q.event_type = ?
+                  AND (c.legacy_compatible = 1 OR c.id IS NULL)
+                ORDER BY q.id ASC
+                """,
+                (EventType.RUN_QUEUED,),
+            ).fetchall()
+            for row in rows:
+                queued = _row_to_event(row)
+                if self._queued_run_is_consumed_locked(queued):
+                    continue
+                conversation_missing = row["matched_conversation_id"] is None
+                stored.append(self._append_locked(RuntimeEvent(
+                    schema_version=1,
+                    event_type=EventType.RUN_RECOVERY_REQUIRED,
+                    aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                    aggregate_id=f"legacy-queued-{queued.id}",
+                    correlation_id=(
+                        queued.correlation_id
+                        or f"legacy-queue-recovery-{queued.id}"
+                    ),
+                    source=EventSource.SYSTEM,
+                    actor="system",
+                    visibility=Visibility.USER,
+                    payload={
+                        "state": "needs_recovery",
+                        "recovery_state": "needs_recovery",
+                        "reason": str(reason),
+                        "blocking_reason": str(blocking_reason),
+                        "next_action": str(next_action),
+                        "queue_kind": (
+                            "legacy_telegram_orphaned"
+                            if conversation_missing else "legacy_telegram"
+                        ),
+                        "queued_event_id": queued.id,
+                        "workspace_alias": str(row["workspace_alias"] or ""),
+                        "conversation_missing": conversation_missing,
+                    },
+                    occurred_at=timestamp,
+                    conversation_id=queued.conversation_id,
+                    causation_id=queued.id,
+                )))
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        for event in stored:
+            self._notify_projectors(event)
+        return stored
+
+    def _append_locked(self, event: RuntimeEvent) -> RuntimeEvent:
+        """Append while the caller owns the current SQLite transaction."""
+
+        safe_payload = redact_payload(
+            event.payload, max_str_len=MAX_PAYLOAD_STRING_LENGTH
+        )
+        cur = self._conn.execute(
+            """
+            INSERT INTO runtime_events (
+                schema_version, event_type, aggregate_type, aggregate_id,
+                conversation_id, orchestration_run_id, agent_run_id, task_id,
+                correlation_id, causation_id, source, actor, visibility,
+                payload_json, occurred_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.schema_version,
+                event.event_type,
+                event.aggregate_type,
+                event.aggregate_id,
+                event.conversation_id,
+                event.orchestration_run_id,
+                event.agent_run_id,
+                event.task_id,
+                event.correlation_id,
+                event.causation_id,
+                event.source,
+                event.actor,
+                event.visibility,
+                json.dumps(safe_payload, ensure_ascii=False),
+                event.occurred_at,
+            ),
+        )
+        return replace(event, payload=safe_payload, id=int(cur.lastrowid))
+
+    def _queued_run_is_consumed_locked(self, queued: RuntimeEvent) -> bool:
+        exact = self._conn.execute(
+            """
+            SELECT 1
+            FROM runtime_events
+            WHERE causation_id = ?
+              AND event_type IN (?, ?, ?)
+            LIMIT 1
+            """,
+            (
+                queued.id,
+                EventType.RUN_QUEUED_CONSUMED,
+                EventType.RUN_STARTED,
+                EventType.RUN_RECOVERY_REQUIRED,
+            ),
+        ).fetchone()
+        if exact is not None:
+            return True
+        # Historical queue markers predate ``causation_id``.  Keep their
+        # existing single-conversation semantics during the rolling upgrade,
+        # but all new claims use the precise event id above.
+        legacy = self._conn.execute(
+            """
+            SELECT 1
+            FROM runtime_events
+            WHERE conversation_id = ?
+              AND id > ?
+              AND causation_id IS NULL
+              AND event_type IN (?, ?)
+            LIMIT 1
+            """,
+            (
+                queued.conversation_id,
+                queued.id,
+                EventType.RUN_QUEUED_CONSUMED,
+                EventType.RUN_STARTED,
+            ),
+        ).fetchone()
+        return legacy is not None
+
+    def _latest_queued_run_lease_event_locked(
+        self,
+        queued_event_id: int,
+    ) -> RuntimeEvent | None:
+        row = self._conn.execute(
+            """
+            SELECT *
+            FROM runtime_events
+            WHERE causation_id = ?
+              AND event_type IN (?, ?, ?)
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (
+                int(queued_event_id),
+                EventType.RUN_QUEUED_CLAIMED,
+                EventType.RUN_QUEUED_RELEASED,
+                EventType.RUN_QUEUED_CONSUMED,
+            ),
+        ).fetchone()
+        return _row_to_event(row) if row is not None else None
+
     def next_provider_raw_frame_sequence(
         self,
         *,
@@ -121,6 +530,25 @@ class RuntimeEventStore:
         native_session_id: str,
         native_turn_id: str,
     ) -> int:
+        cursor_sequence = 0
+        try:
+            cursor_row = self._conn.execute(
+                """
+                SELECT last_sequence
+                FROM provider_raw_frame_sequence_cursors
+                WHERE provider = ?
+                  AND provider_engine = ?
+                  AND native_session_id = ?
+                  AND native_turn_id = ?
+                """,
+                (provider, provider_engine, native_session_id, native_turn_id),
+            ).fetchone()
+            if cursor_row is not None:
+                cursor_sequence = int(cursor_row["last_sequence"])
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+
         row = self._conn.execute(
             """
             SELECT COALESCE(MAX(sequence), 0) AS max_sequence
@@ -132,9 +560,26 @@ class RuntimeEventStore:
             """,
             (provider, provider_engine, native_session_id, native_turn_id),
         ).fetchone()
-        if row is None:
-            return 1
-        return int(row["max_sequence"]) + 1
+        hot_sequence = int(row["max_sequence"]) if row is not None else 0
+        archive_sequence = 0
+        try:
+            archive_row = self._conn.execute(
+                """
+                SELECT COALESCE(MAX(sequence), 0) AS max_sequence
+                FROM provider_raw_frame_archive_index
+                WHERE provider = ?
+                  AND provider_engine = ?
+                  AND native_session_id = ?
+                  AND native_turn_id = ?
+                """,
+                (provider, provider_engine, native_session_id, native_turn_id),
+            ).fetchone()
+            if archive_row is not None:
+                archive_sequence = int(archive_row["max_sequence"])
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+        return max(cursor_sequence, hot_sequence, archive_sequence) + 1
 
     def append_provider_raw_frame(
         self,
@@ -152,6 +597,11 @@ class RuntimeEventStore:
         agent_run_id: int | None = None,
         task_id: int | None = None,
     ) -> ProviderRawFrame:
+        # Raw frames intentionally retain their diagnostic shape and length,
+        # but must never bypass the same credential redaction contract as
+        # runtime events.  A practically unbounded cap preserves the previous
+        # raw-frame behaviour while removing secrets before SQLite writes.
+        safe_payload = redact_payload(raw_payload, max_str_len=2**63 - 1)
         cur = self._conn.execute(
             """
             INSERT INTO provider_raw_frames (
@@ -169,7 +619,7 @@ class RuntimeEventStore:
                 native_turn_id,
                 sequence,
                 raw_kind,
-                json.dumps(raw_payload, ensure_ascii=False),
+                json.dumps(safe_payload, ensure_ascii=False),
                 occurred_at,
                 conversation_id,
                 orchestration_run_id,
@@ -177,6 +627,37 @@ class RuntimeEventStore:
                 task_id,
             ),
         )
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO provider_raw_frame_sequence_cursors (
+                    provider, provider_engine, native_session_id, native_turn_id,
+                    last_sequence, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider, provider_engine, native_session_id, native_turn_id)
+                DO UPDATE SET
+                    last_sequence = MAX(
+                        provider_raw_frame_sequence_cursors.last_sequence,
+                        excluded.last_sequence
+                    ),
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    provider,
+                    provider_engine,
+                    native_session_id,
+                    native_turn_id,
+                    sequence,
+                    occurred_at,
+                ),
+            )
+        except sqlite3.OperationalError as exc:
+            # Rolling upgrades may briefly run this code against a database
+            # whose Ledger migration has not installed retention tables yet.
+            # Preserve existing raw-frame ingestion rather than making it a
+            # service outage; the max-sequence fallback remains correct.
+            if "no such table" not in str(exc).lower():
+                raise
         self._conn.commit()
         return ProviderRawFrame(
             id=int(cur.lastrowid),
@@ -186,7 +667,7 @@ class RuntimeEventStore:
             native_turn_id=native_turn_id,
             sequence=sequence,
             raw_kind=raw_kind,
-            raw_payload=raw_payload,
+            raw_payload=safe_payload,
             occurred_at=occurred_at,
             conversation_id=conversation_id,
             orchestration_run_id=orchestration_run_id,
@@ -198,9 +679,18 @@ class RuntimeEventStore:
         row = self._conn.execute(
             "SELECT * FROM provider_raw_frames WHERE id = ?", (frame_id,)
         ).fetchone()
-        if row is None:
+        if row is not None:
+            return _row_to_provider_raw_frame(row)
+        from wlcodex.runtime_raw_frame_retention import read_archived_provider_raw_frame
+
+        archived = read_archived_provider_raw_frame(
+            self._conn,
+            frame_id,
+            archive_dir=self._raw_frame_archive_dir,
+        )
+        if archived is None:
             raise KeyError(f"unknown provider raw frame id: {frame_id}")
-        return _row_to_provider_raw_frame(row)
+        return _archive_record_to_provider_raw_frame(archived)
 
     def _notify_projectors(self, event: RuntimeEvent) -> None:
         for projector in list(self._projectors):
@@ -221,6 +711,40 @@ class RuntimeEventStore:
         if row is None:
             raise KeyError(f"unknown runtime event id: {event_id}")
         return _row_to_event(row)
+
+    def latest_approval_resolution(
+        self,
+        request_id: str,
+        *,
+        agent_run_id: int | None = None,
+    ) -> RuntimeEvent | None:
+        """Return the durable provider-resolution acknowledgement, if any.
+
+        Native provider responses are external side effects, while Relay's
+        round projection is SQLite state.  The acknowledgement event is the
+        bridge used by the lifecycle worker to finish a projection if the
+        process died after the provider accepted a response but before Relay
+        committed its final status.
+        """
+        clean_request_id = str(request_id or "").strip()
+        if not clean_request_id:
+            return None
+        clauses = ["event_type = ?", "aggregate_id = ?"]
+        params: list[object] = [EventType.APPROVAL_RESOLVED, clean_request_id]
+        if agent_run_id is not None:
+            clauses.append("agent_run_id = ?")
+            params.append(int(agent_run_id))
+        row = self._conn.execute(
+            f"""
+            SELECT *
+            FROM runtime_events
+            WHERE {' AND '.join(clauses)}
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        return _row_to_event(row) if row is not None else None
 
     # ------------------------------------------------------------------
     # List / query
@@ -510,8 +1034,10 @@ class RuntimeEventStore:
         """Return the current conversation state derived from runtime events.
 
         Looks at the latest state-affecting events (phase changes,
-        completions, state changes) for this conversation.  Returns
-        ``None`` when no conversation-starting event has been recorded.
+        completions, state changes, recovery requirements) for this
+        conversation.  A durable recovery requirement is itself a usable
+        state even when the historical conversation predates a
+        ``conversation.started`` event.
         """
         conversation_state_events = (
             "conversation.started",
@@ -520,6 +1046,7 @@ class RuntimeEventStore:
             "run.phase.changed",
             "run.completed",
             "run.failed",
+            "run.recovery.required",
             "run.cancelled",
             "verification.decision.recorded",
         )
@@ -563,6 +1090,11 @@ class RuntimeEventStore:
                 state = "passed" if has_pass else "failed"
             elif etype == "run.failed":
                 state = "failed"
+            elif etype == "run.recovery.required":
+                # Event type is the authoritative contract.  Do not let a
+                # malformed historical payload turn a recovery boundary into
+                # a state that routes new work automatically.
+                state = "needs_recovery"
             elif etype == "run.cancelled":
                 state = "aborted"
             elif etype == "verification.decision.recorded":
@@ -575,6 +1107,19 @@ class RuntimeEventStore:
 # ------------------------------------------------------------------
 # Row mapper
 # ------------------------------------------------------------------
+
+
+def _queued_lease_expiry(payload: dict[str, Any]) -> datetime | None:
+    raw = str(payload.get("lease_expires_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 def _row_to_event(row: sqlite3.Row) -> RuntimeEvent:
     return RuntimeEvent(
@@ -616,3 +1161,30 @@ def _row_to_provider_raw_frame(row: sqlite3.Row) -> ProviderRawFrame:
         agent_run_id=row["agent_run_id"],
         task_id=row["task_id"],
     )
+
+
+def _archive_record_to_provider_raw_frame(record: dict[str, Any]) -> ProviderRawFrame:
+    """Map validated archive JSON back to the hot-store lookup contract."""
+
+    raw_payload = record.get("raw_payload")
+    if not isinstance(raw_payload, dict):
+        raw_payload = {"value": raw_payload}
+    return ProviderRawFrame(
+        id=int(record["id"]),
+        provider=str(record["provider"]),
+        provider_engine=str(record["provider_engine"]),
+        native_session_id=str(record["native_session_id"]),
+        native_turn_id=str(record["native_turn_id"]),
+        sequence=int(record["sequence"]),
+        raw_kind=str(record["raw_kind"]),
+        raw_payload=raw_payload,
+        occurred_at=str(record["occurred_at"]),
+        conversation_id=_optional_int(record.get("conversation_id")),
+        orchestration_run_id=_optional_int(record.get("orchestration_run_id")),
+        agent_run_id=_optional_int(record.get("agent_run_id")),
+        task_id=_optional_int(record.get("task_id")),
+    )
+
+
+def _optional_int(value: Any) -> int | None:
+    return int(value) if value is not None else None

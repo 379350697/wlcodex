@@ -17,8 +17,8 @@ from wlcodex.runtime_events import (
     Visibility,
     now_iso,
 )
+from wlcodex.runtime_state import _ORCH_PHASE_TO_CONVERSATION_STATE
 from wlcodex.conversation_state_machine import (
-    RouteDecision,
     classify_intent,
     route_message,
     _IMMEDIATE_REVIEW_STATES,
@@ -69,13 +69,6 @@ def _event(
         agent_run_id=agent_run_id,
         task_id=task_id,
     )
-
-
-# ---------------------------------------------------------------------------
-# Phase-to-state mapping (imported from production)
-# ---------------------------------------------------------------------------
-
-from wlcodex.runtime_state import _ORCH_PHASE_TO_CONVERSATION_STATE
 
 
 # ===========================================================================

@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 from wlcodex.router import (
     ModeSwitchCommand,
     TerminalSubCommand,
@@ -51,6 +49,9 @@ from wlcodex.surfaces.product.router import (
     product_route_guard,
 )
 from wlcodex.surfaces.terminal.manager import TerminalSessionManager
+
+
+pytestmark = pytest.mark.integration
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -527,14 +528,20 @@ def test_approval_stale_duplicate_does_not_undo_resolution():
 
 def test_product_surface_does_not_import_terminal_module():
     """Product surface module must not import terminal surface internals."""
-    with pytest.raises(ImportError):
-        from wlcodex.surfaces.product import terminal  # noqa: F811
+    import inspect
+
+    from wlcodex.surfaces.product import renderer
+
+    assert "wlcodex.surfaces.terminal" not in inspect.getsource(renderer)
 
 
 def test_terminal_surface_does_not_import_product_module():
     """Terminal surface module must not import product surface internals."""
-    with pytest.raises(ImportError):
-        from wlcodex.surfaces.terminal import product  # noqa: F811
+    import inspect
+
+    from wlcodex.surfaces.terminal import manager
+
+    assert "wlcodex.surfaces.product" not in inspect.getsource(manager)
 
 
 def test_core_router_is_pure_function_without_surface_imports():

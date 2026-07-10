@@ -254,6 +254,16 @@ class ClaudeBackend:
                 last_activity_at = started_at
                 hard_timeout = self._config.request_timeout_seconds
                 idle_timeout = self._config.stream_idle_timeout_seconds
+                # A CLI process needs a distinct startup budget before its
+                # first frame.  Applying the between-frame idle limit from
+                # ``create_subprocess_exec`` made short configured idle values
+                # race interpreter/process startup and report a healthy stream
+                # as offline before its first byte arrived.
+                startup_timeout = self._config.startup_timeout_seconds
+                has_received_output = False
+                quiet_timeout = (
+                    idle_timeout if startup_timeout <= 0 else startup_timeout
+                )
                 reader_task = asyncio.create_task(proc.stdout.readline())
                 wait_task = asyncio.create_task(proc.wait())
                 process_exited = False
@@ -264,7 +274,12 @@ class ClaudeBackend:
                     if hard_timeout > 0 and now - started_at >= hard_timeout:
                         timeout_reason = "hard"
                         break
-                    if idle_timeout > 0 and now - last_activity_at >= idle_timeout:
+                    quiet_timeout = (
+                        idle_timeout
+                        if has_received_output or startup_timeout <= 0
+                        else startup_timeout
+                    )
+                    if quiet_timeout > 0 and now - last_activity_at >= quiet_timeout:
                         timeout_reason = "idle"
                         break
 
@@ -292,10 +307,10 @@ class ClaudeBackend:
                                 wait_timeout,
                                 max(0.0, hard_timeout - (now - started_at)),
                             )
-                        if idle_timeout > 0:
+                        if quiet_timeout > 0:
                             wait_timeout = min(
                                 wait_timeout,
-                                max(0.0, idle_timeout - (now - last_activity_at)),
+                                max(0.0, quiet_timeout - (now - last_activity_at)),
                             )
                         done, _pending = await asyncio.wait(
                             wait_items,
@@ -318,6 +333,7 @@ class ClaudeBackend:
                             stdout_eof = True
                             reader_task = None
                         else:
+                            has_received_output = True
                             last_activity_at = loop.time()
                             decoded = line.decode("utf-8", errors="replace")
                             parsed_events, assistant_text = parse_line(
@@ -354,11 +370,13 @@ class ClaudeBackend:
                 if timeout_reason:
                     await _kill_process(proc)
                     if timeout_reason == "idle":
+                        timeout_phase = "streaming" if has_received_output else "startup"
                         _emit_runtime_lifecycle(
                             self._runtime_source,
                             EventType.WATCHDOG_IDLE_TIMEOUT,
                             payload={
-                                "idle_seconds": self._config.stream_idle_timeout_seconds,
+                                "idle_seconds": quiet_timeout,
+                                "phase": timeout_phase,
                                 "elapsed_total_seconds": round(loop.time() - started_at, 3),
                             },
                         )
@@ -370,8 +388,8 @@ class ClaudeBackend:
                         yield AgentStreamEvent(
                             delta=(
                                 "Claude Code 运行超时："
-                                f"超过 {self._config.stream_idle_timeout_seconds:g} "
-                                "秒没有新的输出。"
+                                f"超过 {quiet_timeout:g} 秒"
+                                + ("尚未开始输出。" if timeout_phase == "startup" else "没有新的输出。")
                             ),
                             event_type="error",
                         )
@@ -901,6 +919,11 @@ def _process_has_exited(proc: asyncio.subprocess.Process) -> bool:
         return True
     pid = getattr(proc, "pid", None)
     if not pid:
+        return False
+    # ``/proc`` is Linux-specific.  Treating its absence as an exited child
+    # makes every healthy subprocess look like a zombie on macOS, which then
+    # starves the streaming reader until the hard watchdog fires.
+    if not Path("/proc").is_dir():
         return False
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")

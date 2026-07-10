@@ -1,5 +1,8 @@
 # WLCodex Native Agent Providers Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Status
 
 Drafted on 2026-06-01 after the user confirmed that WLCodex should extend the

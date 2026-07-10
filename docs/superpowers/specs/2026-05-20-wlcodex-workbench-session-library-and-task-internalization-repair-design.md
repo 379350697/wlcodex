@@ -1,5 +1,8 @@
 # WLCodex Workbench Session Library And Task Internalization Repair Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Status
 
 This spec is a repair addendum to:

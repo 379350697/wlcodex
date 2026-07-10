@@ -34,6 +34,15 @@ from wlcodex.models import (
     UsageEvent,
     WorkbenchCarryover,
 )
+from wlcodex.maintenance import (
+    MaintenanceWindowStatus,
+    assert_submissions_open as _assert_submissions_open,
+    begin_maintenance_window as _begin_maintenance_window,
+    cancel_maintenance_window as _cancel_maintenance_window,
+    ensure_maintenance_schema,
+    maintenance_window_status,
+)
+from wlcodex.runtime_raw_frame_retention import RETENTION_SCHEMA_SQL
 from wlcodex.team_memory import InstinctMemory
 
 
@@ -185,6 +194,7 @@ class Ledger:
                 codex_thread_id TEXT NOT NULL DEFAULT '',
                 codex_thread_policy TEXT NOT NULL DEFAULT '',
                 claude_session_id TEXT NOT NULL DEFAULT '',
+                legacy_compatible INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 archived_at TEXT
@@ -481,6 +491,100 @@ class Ledger:
             CREATE INDEX IF NOT EXISTS idx_relay_attempts_agent_run
                 ON relay_role_attempts(agent_run_id, active_turn_id);
 
+            -- A durable, crash-safe claim for provider completion events.
+            -- Lifecycle reconciliation is a background mutation and must be
+            -- restart-safe: an event may be observed repeatedly, but its
+            -- artifact/projection may only be applied once.
+            CREATE TABLE IF NOT EXISTS relay_completion_claims (
+                team_run_id INTEGER NOT NULL,
+                round_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                runtime_event_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'claimed',
+                artifact_id INTEGER,
+                claimed_at TEXT NOT NULL,
+                applied_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(team_run_id, round_id, role, runtime_event_id),
+                FOREIGN KEY(team_run_id) REFERENCES team_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_completion_claims_status
+                ON relay_completion_claims(status, updated_at);
+
+            -- ``relay_completion_claims`` predates runtime replay and keys
+            -- a claim by the mutable current round.  Keep it for historical
+            -- audit compatibility, but make all new projection claims use a
+            -- stable event/agent-run identity.  A completion can advance the
+            -- task into another round before its final claim write, so round
+            -- identity must never be used to decide whether to replay it.
+            CREATE TABLE IF NOT EXISTS relay_completion_event_claims (
+                team_run_id INTEGER NOT NULL,
+                event_key TEXT NOT NULL,
+                runtime_event_id INTEGER NOT NULL DEFAULT 0,
+                agent_run_id INTEGER,
+                role TEXT NOT NULL,
+                claimed_round_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'claimed',
+                artifact_id INTEGER,
+                claimed_at TEXT NOT NULL,
+                applied_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(team_run_id, event_key),
+                FOREIGN KEY(team_run_id) REFERENCES team_runs(id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_completion_event_claims_runtime
+                ON relay_completion_event_claims(team_run_id, runtime_event_id)
+                WHERE runtime_event_id > 0;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_completion_event_claims_agent
+                ON relay_completion_event_claims(team_run_id, agent_run_id)
+                WHERE agent_run_id IS NOT NULL AND agent_run_id > 0;
+            CREATE INDEX IF NOT EXISTS idx_relay_completion_event_claims_status
+                ON relay_completion_event_claims(status, updated_at);
+
+            -- Goal-mode completion is grounded in durable acceptance attempts,
+            -- never a model's free-form claim.  Each row binds independent
+            -- evidence to one concrete implementation artifact/run and keeps
+            -- the normalized declaration plus the actual controlled execution.
+            CREATE TABLE IF NOT EXISTS relay_goal_acceptance_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_run_id INTEGER NOT NULL,
+                round_id INTEGER NOT NULL,
+                implementation_artifact_id INTEGER,
+                implementation_run_id INTEGER,
+                verifier_artifact_id INTEGER,
+                verifier_role TEXT NOT NULL,
+                attempt_no INTEGER NOT NULL,
+                test_declaration_json TEXT NOT NULL DEFAULT '{}',
+                test_execution_json TEXT NOT NULL DEFAULT '{}',
+                exit_code INTEGER,
+                status TEXT NOT NULL DEFAULT 'not_run',
+                evidence_status TEXT NOT NULL DEFAULT 'not_run',
+                reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(team_run_id) REFERENCES team_runs(id),
+                UNIQUE(
+                    team_run_id,
+                    round_id,
+                    implementation_artifact_id,
+                    verifier_role,
+                    attempt_no
+                )
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_goal_acceptance_task_round
+                ON relay_goal_acceptance_records(team_run_id, round_id, id);
+            CREATE INDEX IF NOT EXISTS idx_relay_goal_acceptance_run
+                ON relay_goal_acceptance_records(
+                    team_run_id,
+                    round_id,
+                    implementation_run_id,
+                    verifier_role,
+                    id
+                );
+
             CREATE TABLE IF NOT EXISTS relay_pending_inputs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 team_run_id INTEGER NOT NULL,
@@ -499,6 +603,80 @@ class Ledger:
 
             CREATE INDEX IF NOT EXISTS idx_relay_pending_inputs_task_status
                 ON relay_pending_inputs(team_run_id, status, queued_after_round_id, id);
+
+            -- A pending follow-up is consumed only after its workspace has
+            -- been claimed.  The lease is deliberately separate from the
+            -- input record so historical inputs remain replayable and a
+            -- crashed worker can be retried after its lease expires.
+            CREATE TABLE IF NOT EXISTS relay_workspace_queue_leases (
+                pending_input_id INTEGER PRIMARY KEY,
+                team_run_id INTEGER NOT NULL,
+                workspace TEXT NOT NULL,
+                lease_owner TEXT NOT NULL DEFAULT '',
+                lease_expires_at TEXT NOT NULL DEFAULT '',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(pending_input_id) REFERENCES relay_pending_inputs(id),
+                FOREIGN KEY(team_run_id) REFERENCES team_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_workspace_queue_leases_claim
+                ON relay_workspace_queue_leases(workspace, lease_expires_at, pending_input_id);
+
+            -- One workspace may have only one provider-facing follow-up in
+            -- flight.  The per-input lease above remains the retry/audit
+            -- record; this separate workspace key is the concurrency fence
+            -- that makes the guarantee hold across different Relay tasks.
+            CREATE TABLE IF NOT EXISTS relay_workspace_queue_locks (
+                workspace TEXT PRIMARY KEY,
+                pending_input_id INTEGER NOT NULL UNIQUE,
+                team_run_id INTEGER NOT NULL,
+                lease_owner TEXT NOT NULL DEFAULT '',
+                lease_expires_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(pending_input_id) REFERENCES relay_pending_inputs(id),
+                FOREIGN KEY(team_run_id) REFERENCES team_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_workspace_queue_locks_expiry
+                ON relay_workspace_queue_locks(lease_expires_at, workspace);
+
+            -- Archiving is a view preference, not a lifecycle transition.
+            -- It hides a finished or stale Relay task from the default inbox
+            -- while retaining every task, event, artifact and timeline row.
+            CREATE TABLE IF NOT EXISTS relay_task_archives (
+                team_run_id INTEGER PRIMARY KEY,
+                archived_at TEXT NOT NULL,
+                archived_by TEXT NOT NULL DEFAULT 'user',
+                reason TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(team_run_id) REFERENCES team_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_task_archives_archived_at
+                ON relay_task_archives(archived_at DESC, team_run_id);
+
+            -- Durable mutation idempotency keeps a network retry from
+            -- creating duplicate tasks, inputs or role controls.  A key is
+            -- scoped by its mutation name and request fingerprint so an
+            -- accidental key reuse is rejected instead of replayed blindly.
+            CREATE TABLE IF NOT EXISTS relay_mutation_idempotency (
+                idempotency_key TEXT PRIMARY KEY,
+                operation TEXT NOT NULL,
+                task_id INTEGER,
+                request_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'in_progress',
+                response_status INTEGER,
+                response_json TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES team_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_mutation_idempotency_status
+                ON relay_mutation_idempotency(status, updated_at);
 
             CREATE TABLE IF NOT EXISTS team_assignments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -556,6 +734,8 @@ class Ledger:
                 ON team_context_packets(agent_job_id, id);
             CREATE INDEX IF NOT EXISTS idx_team_artifacts_team
                 ON team_artifacts(team_run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_team_artifacts_team_created
+                ON team_artifacts(team_run_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_team_skill_activations_job
                 ON team_skill_activations(agent_job_id, id);
             CREATE INDEX IF NOT EXISTS idx_team_observations_team
@@ -694,6 +874,16 @@ class Ledger:
             """
         )
 
+        # Raw provider frames are the only replay payload governed by the
+        # retention policy.  These idempotent tables make archive writes
+        # discoverable before a hot row is removed and preserve sequence
+        # continuity after the hot table has been pruned.
+        self._conn.executescript(RETENTION_SCHEMA_SQL)
+        # The maintenance singleton is deliberately separate from ordinary
+        # settings: it is a durable operator gate that freezes submissions
+        # before the raw-frame archive / SQLite swap window begins.
+        ensure_maintenance_schema(self._conn)
+
         # Guarded column upgrades for legacy databases that already have
         # a tasks table but lack columns added after the initial schema.
         self._add_column_if_missing(
@@ -765,6 +955,24 @@ class Ledger:
             "conversation_sessions", "claude_session_id",
             "claude_session_id TEXT NOT NULL DEFAULT ''",
         )
+        self._add_column_if_missing(
+            "conversation_sessions", "legacy_compatible",
+            "legacy_compatible INTEGER NOT NULL DEFAULT 0",
+        )
+        legacy_marker = self._conn.execute(
+            "SELECT 1 FROM schema_meta WHERE key = 'legacy_conversations_marked'"
+        ).fetchone()
+        if legacy_marker is None:
+            # Rows present at this migration boundary are the old Telegram
+            # Workbench contract.  Preserve them; conversations created after
+            # this release deliberately default to the new Native/Relay entry.
+            self._conn.execute(
+                "UPDATE conversation_sessions SET legacy_compatible = 1"
+            )
+            self._conn.execute(
+                "INSERT INTO schema_meta (key, value) VALUES (?, ?)",
+                ("legacy_conversations_marked", "1"),
+            )
         self._add_column_if_missing(
             "native_codex_sessions", "activity_at",
             "activity_at TEXT NOT NULL DEFAULT ''",
@@ -854,6 +1062,38 @@ class Ledger:
             "relay_role_attempts", "provider_child_activity_json",
             "provider_child_activity_json TEXT NOT NULL DEFAULT '{}'",
         )
+        # Seed the immutable completion-identity table before a replaying
+        # worker sees an old, already-applied round-scoped claim.  Runtime
+        # event ids are globally durable; when available, use their agent-run
+        # id as the primary replay identity as well.
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO relay_completion_event_claims (
+                team_run_id, event_key, runtime_event_id, agent_run_id, role,
+                claimed_round_id, status, artifact_id, claimed_at, applied_at,
+                updated_at
+            )
+            SELECT legacy.team_run_id,
+                   CASE
+                       WHEN COALESCE(runtime.agent_run_id, 0) > 0
+                           THEN 'agent:' || runtime.agent_run_id
+                       ELSE 'runtime:' || legacy.runtime_event_id
+                   END,
+                   legacy.runtime_event_id,
+                   runtime.agent_run_id,
+                   legacy.role,
+                   legacy.round_id,
+                   legacy.status,
+                   legacy.artifact_id,
+                   legacy.claimed_at,
+                   legacy.applied_at,
+                   legacy.updated_at
+            FROM relay_completion_claims AS legacy
+            LEFT JOIN runtime_events AS runtime
+                ON runtime.id = legacy.runtime_event_id
+            WHERE legacy.runtime_event_id > 0
+            """
+        )
         # codex_request_id values are scoped to a task/thread by the app-server.
         # Older databases had a global unique index, which incorrectly dropped
         # approvals when different tasks reused ids like "0" or "1".
@@ -876,7 +1116,7 @@ class Ledger:
         # Record schema version
         self._conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
-            ("schema_version", "5"),
+            ("schema_version", "7"),
         )
 
         self._conn.commit()
@@ -1228,6 +1468,28 @@ class Ledger:
         )
         self._conn.commit()
 
+    # --- Maintenance window ---
+
+    def maintenance_window_status(self) -> MaintenanceWindowStatus:
+        """Read the global submission gate and current drain state."""
+
+        return maintenance_window_status(self._conn)
+
+    def begin_maintenance_window(self, *, operator_note: str = "") -> MaintenanceWindowStatus:
+        """Freeze new user submissions and report work still draining."""
+
+        return _begin_maintenance_window(self._conn, operator_note=operator_note)
+
+    def cancel_maintenance_window(self) -> MaintenanceWindowStatus:
+        """Cancel a maintenance attempt and re-open normal submissions."""
+
+        return _cancel_maintenance_window(self._conn)
+
+    def assert_submissions_open(self) -> None:
+        """Raise before a user-originated execution reservation is created."""
+
+        _assert_submissions_open(self._conn)
+
     # --- Column upgrade helpers ---
 
     def _table_columns(self, table: str) -> set[str]:
@@ -1500,16 +1762,28 @@ class Ledger:
         title: str,
         mode: str,
         workspace_alias: str,
+        *,
+        legacy_compatible: bool = False,
     ) -> ConversationSession:
         now = _now()
         cur = self._conn.execute(
             """
             INSERT INTO conversation_sessions (
-                chat_id, user_id, title, mode, workspace_alias, created_at, updated_at
+                chat_id, user_id, title, mode, workspace_alias, legacy_compatible,
+                created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (chat_id, user_id, title, mode, workspace_alias, now, now),
+            (
+                chat_id,
+                user_id,
+                title,
+                mode,
+                workspace_alias,
+                int(legacy_compatible),
+                now,
+                now,
+            ),
         )
         self._conn.commit()
         return self.get_conversation(int(cur.lastrowid))
@@ -2913,6 +3187,7 @@ def _conversation(row: sqlite3.Row) -> ConversationSession:
         codex_thread_id=str(row["codex_thread_id"] or ""),
         codex_thread_policy=str(row["codex_thread_policy"] or ""),
         claude_session_id=str(row["claude_session_id"] or ""),
+        legacy_compatible=bool(row["legacy_compatible"]),
     )
 
 

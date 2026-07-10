@@ -1,5 +1,8 @@
 # WLCodex Task Liveness And Safe Queue Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 > Superseded for product UX: the 2026-05-20 Remote Workbench repair keeps
 > locking/queueing internal and removes task semantics from normal user paths.
 > Queue, blocker, task id, `/continue`, and `/steer` language below is legacy

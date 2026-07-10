@@ -1,5 +1,8 @@
 # Code Quality Review — Task 9: Documentation And Config Alignment
 
+> **SUPERSEDED — historical review only.** It is not a current release result;
+> use [the current semantic contract](../../product-semantics.md) and current tests.
+
 > Superseded on 2026-05-21 by the Remote Workbench deep repair documentation
 > cleanup. This review was written before `/new` copy changed from the old
 > task-led label to the current Workbench-first label. Current product docs and

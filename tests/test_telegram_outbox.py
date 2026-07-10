@@ -51,8 +51,6 @@ def _run(coro):
 
 def test_raw_send_raises_on_failure_does_not_record_events(tmp_path: Path) -> None:
     """_raw_send_message must raise on error, not catch and return SEND_FAILED."""
-    from wlcodex.runtime_events import EventType
-
     class FailingBot:
         async def send_message(self, **kwargs):
             from telegram.error import TimedOut
@@ -209,7 +207,7 @@ def test_callback_answer_failure_records_event_does_not_raise(tmp_path: Path) ->
 
     handlers, ledger, store = _make_handlers(tmp_path)
     # Create a conversation so events have a conversation_id
-    conv = ledger.create_conversation(
+    _ = ledger.create_conversation(
         chat_id=1, user_id=456, title="test",
         mode="chief_engineer", workspace_alias="test",
     )
@@ -240,8 +238,6 @@ def test_callback_edit_failure_is_recorded_when_edit_crashes(tmp_path: Path) -> 
     escapes edit_telegram's internal error handling, triggering the
     _safe_callback_edit except path.
     """
-    from wlcodex.runtime_events import EventType
-
     class FailingEditQuery:
         data = "approval:test"
         id = "cb-3"
@@ -257,7 +253,7 @@ def test_callback_edit_failure_is_recorded_when_edit_crashes(tmp_path: Path) -> 
     handlers, ledger, store = _make_handlers(
         tmp_path, bot=SimpleNamespace()  # no send_message, no edit_message_text
     )
-    conv = ledger.create_conversation(
+    _ = ledger.create_conversation(
         chat_id=1, user_id=456, title="test",
         mode="chief_engineer", workspace_alias="test",
     )
@@ -313,7 +309,7 @@ def test_process_queued_runs_skips_when_workspace_busy(tmp_path: Path) -> None:
     ws = WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)
     service = TaskService(ledger, workspaces=[ws])
     # Reserve a task so workspace is busy
-    task = service.reserve_task("demo", "blocking task")
+    service.reserve_task("demo", "blocking task")
 
     from wlcodex.controller import CommandController
     controller = CommandController(
@@ -369,6 +365,14 @@ def test_process_queued_runs_consumes_queued_event(tmp_path: Path) -> None:
         conversation_id=conv.id,
     ))
 
+    class RunnerSpy:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def start_chief_engineer(self, **kwargs: object) -> None:
+            self.calls.append(kwargs)
+
+    runner = RunnerSpy()
     from wlcodex.controller import CommandController
     controller = CommandController(
         task_service=service,
@@ -376,6 +380,7 @@ def test_process_queued_runs_consumes_queued_event(tmp_path: Path) -> None:
         inspector=SimpleNamespace(),
         ledger=ledger,
         runtime_event_store=store,
+        orchestration_runner=runner,
     )
 
     _run(
@@ -384,7 +389,149 @@ def test_process_queued_runs_consumes_queued_event(tmp_path: Path) -> None:
 
     events = store.list_by_conversation(conv.id)
     consumed = [e for e in events if e.event_type == EventType.RUN_QUEUED_CONSUMED]
-    assert len(consumed) >= 1
+    assert len(consumed) == 1
+    assert len(runner.calls) == 1
+
+
+def test_process_queued_runs_claims_only_the_requested_workspace(tmp_path: Path) -> None:
+    """A free workspace must never consume an older queue event from another one."""
+    from wlcodex.config import WorkspaceConfig
+    from wlcodex.controller import CommandController
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import (
+        AggregateType,
+        EventSource,
+        EventType,
+        RuntimeEvent,
+        Visibility,
+        now_iso,
+    )
+    from wlcodex.task_service import TaskService
+
+    class RunnerSpy:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def start_chief_engineer(self, **kwargs: object) -> None:
+            self.calls.append(kwargs)
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    service = TaskService(
+        ledger,
+        workspaces=[
+            WorkspaceConfig(alias="alpha", path=tmp_path / "alpha", allow_write=True),
+            WorkspaceConfig(alias="beta", path=tmp_path / "beta", allow_write=True),
+        ],
+    )
+    beta = ledger.create_conversation(
+        chat_id=1, user_id=1, title="beta", mode="chief_engineer", workspace_alias="beta",
+    )
+    alpha = ledger.create_conversation(
+        chat_id=1, user_id=1, title="alpha", mode="chief_engineer", workspace_alias="alpha",
+    )
+    for conv, goal in ((beta, "beta first"), (alpha, "alpha second")):
+        store.append(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.RUN_QUEUED,
+            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+            aggregate_id=f"queued-{conv.id}",
+            correlation_id=f"queue-{conv.id}",
+            source=EventSource.CONTROLLER,
+            actor="user",
+            visibility=Visibility.OPERATOR,
+            payload={"goal": goal, "conversation_id": conv.id},
+            occurred_at=now_iso(),
+            conversation_id=conv.id,
+        ))
+    runner = RunnerSpy()
+    controller = CommandController(
+        task_service=service,
+        backend=SimpleNamespace(),
+        inspector=SimpleNamespace(),
+        ledger=ledger,
+        runtime_event_store=store,
+        orchestration_runner=runner,
+    )
+
+    _run(controller.process_queued_runs("alpha"))
+
+    assert [call["conversation"].id for call in runner.calls] == [alpha.id]
+    alpha_events = store.list_by_conversation(alpha.id)
+    beta_events = store.list_by_conversation(beta.id)
+    assert [event.event_type for event in alpha_events].count(EventType.RUN_QUEUED_CONSUMED) == 1
+    assert EventType.RUN_QUEUED_CONSUMED not in [event.event_type for event in beta_events]
+
+
+def test_process_queued_runs_releases_failed_launch_for_retry(tmp_path: Path) -> None:
+    """A reserve/start failure releases the workspace lease instead of dropping the queue."""
+    from wlcodex.config import WorkspaceConfig
+    from wlcodex.controller import CommandController
+    from wlcodex.db import Ledger
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import (
+        AggregateType,
+        EventSource,
+        EventType,
+        RuntimeEvent,
+        Visibility,
+        now_iso,
+    )
+    from wlcodex.task_service import TaskService
+
+    class FlakyRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def start_chief_engineer(self, **kwargs: object) -> None:
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise RuntimeError("runner unavailable")
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    service = TaskService(
+        ledger,
+        workspaces=[WorkspaceConfig(alias="demo", path=tmp_path, allow_write=True)],
+    )
+    conv = ledger.create_conversation(
+        chat_id=1, user_id=1, title="queued", mode="chief_engineer", workspace_alias="demo",
+    )
+    store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_QUEUED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id=f"queued-{conv.id}",
+        correlation_id="retry-queue",
+        source=EventSource.CONTROLLER,
+        actor="user",
+        visibility=Visibility.OPERATOR,
+        payload={"goal": "retry this", "conversation_id": conv.id},
+        occurred_at=now_iso(),
+        conversation_id=conv.id,
+    ))
+    runner = FlakyRunner()
+    controller = CommandController(
+        task_service=service,
+        backend=SimpleNamespace(),
+        inspector=SimpleNamespace(),
+        ledger=ledger,
+        runtime_event_store=store,
+        orchestration_runner=runner,
+    )
+
+    _run(controller.process_queued_runs("demo"))
+    first_events = store.list_by_conversation(conv.id)
+    assert EventType.RUN_QUEUED_CONSUMED not in [event.event_type for event in first_events]
+    assert EventType.RUN_QUEUED_RELEASED in [event.event_type for event in first_events]
+
+    _run(controller.process_queued_runs("demo"))
+    retry_events = store.list_by_conversation(conv.id)
+    assert [event.event_type for event in retry_events].count(EventType.RUN_QUEUED_CONSUMED) == 1
+    assert len(runner.calls) == 2
 
 
 # ===========================================================================

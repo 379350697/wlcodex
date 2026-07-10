@@ -164,6 +164,7 @@ async def test_callback_router_appends_callback_received_event(tmp_path: Path) -
         title="runtime",
         mode="chief_engineer",
         workspace_alias="demo",
+        legacy_compatible=True,
     )
 
     class Query:
@@ -212,10 +213,18 @@ async def test_health_delivery_timeout_is_eventized(tmp_path: Path) -> None:
         async def reply_text(self, *_args: object, **_kwargs: object) -> object:
             raise AssertionError("health must use send_telegram")
 
-    handlers, _ledger, store = _handlers(
+    handlers, ledger, store = _handlers(
         tmp_path,
         controller=Controller(),
         bot=Bot(),
+    )
+    ledger.create_conversation(
+        chat_id=123,
+        user_id=456,
+        title="runtime",
+        mode="chief_engineer",
+        workspace_alias="demo",
+        legacy_compatible=True,
     )
     update = SimpleNamespace(
         update_id=2,
@@ -258,6 +267,7 @@ async def test_command_update_receipt_causes_delivery_event(tmp_path: Path) -> N
         title="runtime",
         mode="chief_engineer",
         workspace_alias="demo",
+        legacy_compatible=True,
     )
     update = SimpleNamespace(
         update_id=3,

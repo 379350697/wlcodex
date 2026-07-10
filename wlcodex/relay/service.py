@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 from typing import Any
+from uuid import uuid4
 
 from wlcodex.live_stream.models import stream_event_from_runtime
 from wlcodex.relay.context import build_role_context_packet
@@ -13,6 +15,7 @@ from wlcodex.relay.display import (
 )
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.events import RelayEvent, RelayEventBus
+from wlcodex.relay.goal_acceptance import ControlledGoalTestExecutor
 from wlcodex.relay.graph import (
     MarvisRelayState,
     RelayInterrupt,
@@ -26,8 +29,19 @@ from wlcodex.relay.guardrails import (
     RoleGuardrailAction,
     guardrail_role_envelope,
 )
-from wlcodex.relay.models import HandoffPacket, RelayPendingInput, RelayTask, RelayTaskDetail
-from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
+from wlcodex.relay.models import (
+    RELAY_ROLE_DISPLAY_NAMES,
+    RELAY_ROLE_IDS,
+    HandoffPacket,
+    RelayPendingInput,
+    RelayPendingInputClaim,
+    RelayTask,
+    RelayTaskDetail,
+    RoleContextPacket,
+    normalize_acceptance_criteria,
+    normalize_goal_acceptance_declaration,
+    normalize_relay_execution_mode,
+)
 from wlcodex.relay.store import RELAY_ASSIGNMENT_PREFIX
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import (
@@ -214,10 +228,9 @@ def _relay_images_for_role(artifacts: list[dict[str, Any]], role: str) -> list[d
 
 
 def _clean_execution_mode(value: str) -> str:
-    mode = str(value or "simple").strip()
-    if mode == "team":
-        return "auto"
-    return mode if mode in {"simple", "plan_first", "goal", "auto"} else "simple"
+    """Map legacy execution labels to the public Relay contract."""
+
+    return normalize_relay_execution_mode(value)
 
 
 def _clean_team_strategy(value: str) -> str:
@@ -302,7 +315,9 @@ def _provider_mode_for_attempt(
     role: str,
     round_execution: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    execution_mode = _clean_execution_mode(str(round_execution.get("execution_mode") or "simple"))
+    execution_mode = _clean_execution_mode(
+        str(round_execution.get("execution_mode") or "standard")
+    )
     strategy = round_execution.get("execution_strategy")
     if not isinstance(strategy, dict):
         strategy = {}
@@ -334,7 +349,95 @@ def _provider_mode_for_attempt(
     elif execution_mode == "goal":
         metadata["provider_mode"] = "prompt_goal_contract"
         metadata["fallback"] = True
+        metadata["execution_goal"] = str(round_execution.get("execution_goal") or "")
+        metadata["acceptance_criteria"] = normalize_acceptance_criteria(
+            strategy.get("acceptance_criteria")
+        )
     return kwargs, metadata
+
+
+def _packet_with_execution_contract(
+    packet: RoleContextPacket,
+    round_execution: dict[str, Any],
+) -> RoleContextPacket:
+    """Attach the durable mode contract to the prompt without changing context.py.
+
+    ``context.py`` deliberately remains the generic role-context builder.  The
+    mode is task lifecycle policy, so it is layered here at dispatch time and
+    is also persisted in the context packet for auditability.
+    """
+
+    execution = round_execution if isinstance(round_execution, dict) else {}
+    mode = normalize_relay_execution_mode(execution.get("execution_mode"))
+    goal = str(execution.get("execution_goal") or "").strip()
+    strategy = execution.get("execution_strategy")
+    strategy = strategy if isinstance(strategy, dict) else {}
+    criteria = normalize_acceptance_criteria(strategy.get("acceptance_criteria"))
+    constraints = list(packet.constraints)
+    expected_output = dict(packet.expected_output_envelope)
+    expected_output["execution_contract"] = {
+        "mode": mode,
+        "goal": goal,
+        "acceptance_criteria": criteria,
+    }
+    if mode == "plan_first":
+        constraints.append(
+            "This is plan-first execution: no implementation may begin until an architecture plan has explicit user approval."
+        )
+        if packet.role == "architect":
+            constraints.append(
+                "Return an architecture_plan that can be reviewed and approved before handing off implementation."
+            )
+    elif mode == "goal":
+        constraints.append(
+            "This is goal acceptance execution. Completion requires implementation evidence and independent test or audit evidence for every stated acceptance criterion."
+        )
+        if goal:
+            constraints.append(f"Goal: {goal}")
+        if criteria:
+            constraints.append("Acceptance criteria: " + "; ".join(criteria))
+        if packet.role in {"tester", "auditor"}:
+            expected_output["goal_acceptance"] = {
+                "implementation_run_id": "positive integer for the implementation report being verified",
+                "test": {
+                    "kind": "pytest | unittest | npm_test | pnpm_test",
+                    "args": ["approved structured arguments only"],
+                    "script": "test | test:e2e (npm/pnpm only)",
+                },
+            }
+            constraints.append(
+                "For goal acceptance, return a structured goal_acceptance object that binds this verifier evidence to the concrete implementation_run_id. Do not emit a command string, shell syntax, redirects, or arbitrary argv."
+            )
+            if packet.role == "tester":
+                constraints.append(
+                    "A tester must declare one approved controlled test. A passed report is rejected if that actual test is not run and passed."
+                )
+            else:
+                constraints.append(
+                    "An auditor may omit test only for independent audit evidence, but must still bind to the current implementation run and supply concrete evidence_refs."
+                )
+    return replace(
+        packet,
+        current_goal=goal or packet.current_goal,
+        constraints=constraints,
+        expected_output_envelope=expected_output,
+    )
+
+
+def _requires_plan_approval(
+    round_execution: dict[str, Any],
+    *,
+    role: str,
+    artifact_type: str,
+    status: str,
+) -> bool:
+    return (
+        normalize_relay_execution_mode(round_execution.get("execution_mode"))
+        == "plan_first"
+        and role == "architect"
+        and artifact_type == "architecture_plan"
+        and status == "passed"
+    )
 
 
 def _relay_confirmation_source_label(source: str, provider: str = "") -> str:
@@ -425,14 +528,21 @@ class RelayService:
         configured_roles: tuple[str, ...] | None = None,
         role_skills: dict[str, tuple[str, ...]] | None = None,
         role_capabilities: dict[str, tuple[str, ...]] | None = None,
+        goal_test_executor: Any | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
         self._default_provider = default_provider
         self._events = events or RelayEventBus(store)
+        self._goal_test_executor = goal_test_executor or ControlledGoalTestExecutor()
         self._handled_runtime_completion_ids: set[int] = set()
         self._runtime_projection_cursors: dict[int, int] = {}
         self._runtime_tasks: set[asyncio.Task[Any]] = set()
+        # A provider approval is an external side effect.  Serialize the
+        # local service path as well as using lifecycle-store compare-and-set
+        # claims, so duplicate runtime frames cannot race each other between
+        # reading the current confirmation and resolving it at the provider.
+        self._approval_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._role_provider_defaults = self._normalize_assignments(
             role_provider_defaults or {},
             allow_partial=True,
@@ -450,6 +560,14 @@ class RelayService:
             for role, items in (role_capabilities or {}).items()
         }
 
+    def _approval_lock(self, task_id: int, round_id: int) -> asyncio.Lock:
+        key = (int(task_id), int(round_id))
+        lock = self._approval_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._approval_locks[key] = lock
+        return lock
+
     def create_task(
         self,
         *,
@@ -460,19 +578,30 @@ class RelayService:
         role_providers: dict[str, str] | None = None,
         images: list[dict[str, Any]] | None = None,
         files: list[dict[str, Any]] | None = None,
-        execution_mode: str = "simple",
+        execution_mode: str = "standard",
         execution_goal: str = "",
+        acceptance_criteria: list[str] | tuple[str, ...] | None = None,
         allow_subagents: str = "auto",
         team_strategy: str = "none",
     ) -> RelayTask:
+        self._store.assert_submissions_open()
         clean_images = _relay_clean_image_attachments(images)
         clean_files = _relay_clean_text_file_attachments(files)
         clean_execution_mode = _clean_execution_mode(execution_mode)
+        clean_execution_goal = str(execution_goal or "").strip()
+        clean_acceptance_criteria = normalize_acceptance_criteria(acceptance_criteria)
+        if clean_execution_mode == "goal" and not clean_execution_goal:
+            raise ValueError("goal execution_mode requires execution_goal")
+        if clean_execution_mode == "goal" and not clean_acceptance_criteria:
+            raise ValueError("goal execution_mode requires acceptance_criteria")
         clean_team_strategy = _clean_team_strategy(team_strategy)
         execution_strategy = _subagent_execution_strategy(
             allow_subagents=allow_subagents,
             legacy_team_strategy=clean_team_strategy,
         )
+        if clean_acceptance_criteria:
+            execution_strategy["acceptance_criteria"] = clean_acceptance_criteria
+        execution_strategy["execution_contract_version"] = 1
         base_provider = provider or self._default_provider
         assignments = (
             self._normalize_assignments(role_providers)
@@ -490,7 +619,7 @@ class RelayService:
             task.id,
             1,
             execution_mode=clean_execution_mode,
-            execution_goal=str(execution_goal or ""),
+            execution_goal=clean_execution_goal,
             execution_strategy=execution_strategy,
         )
         if clean_images or clean_files:
@@ -549,6 +678,14 @@ class RelayService:
     def list_tasks(self, **kwargs: Any):
         return self._store.list_tasks(**kwargs)
 
+    def list_tasks_readonly(self, **kwargs: Any):
+        return self._store.list_tasks_readonly(**kwargs)
+
+    def list_tasks_page_readonly(self, **kwargs: Any):
+        """Serve a paginated Relay presentation without lifecycle writes."""
+
+        return self._store.list_tasks_page_readonly(**kwargs)
+
     def today_token_stats(self) -> dict[str, Any]:
         if hasattr(self._store, "today_token_stats"):
             return self._store.today_token_stats()
@@ -606,6 +743,11 @@ class RelayService:
     def get_task(self, task_id: int) -> RelayTaskDetail:
         return self._store.get_task_detail(task_id)
 
+    def get_task_readonly(self, task_id: int) -> RelayTaskDetail:
+        """Pure presentation detail for GET, refresh and SSE snapshots."""
+
+        return self._store.get_task_detail_readonly(task_id)
+
     def build_marvis_relay_state(
         self,
         task_id: int,
@@ -657,17 +799,38 @@ class RelayService:
             payload["relay_transition"] = transition.to_json_dict()
         return payload
 
-    async def ensure_task_lifecycle_current(
+    async def reconcile_task_lifecycle(
         self,
         task_id: int,
         runtime_store: RuntimeEventStore | None = None,
     ) -> bool:
+        """Explicit background mutation boundary for runtime reconciliation.
+
+        Request handlers must use ``get_task_readonly``.  A worker may invoke
+        this method after claiming its work; completion-event claims below make
+        replay across a service restart idempotent.
+        """
+
+        # Reconciliation is a mutation worker, not a GET repair path.  Once a
+        # maintenance drain freezes submissions it must not manufacture a new
+        # follow-up round or provider dispatch from an otherwise harmless
+        # replay scan.
+        try:
+            self._store.assert_submissions_open()
+        except RuntimeError:
+            return False
         self._store.lifecycle.backfill_task(task_id)
         self._store.lifecycle.sync_legacy_projection(task_id)
         runtime_store = runtime_store or RuntimeEventStore(self._store._ledger._conn)
         round_id = self._store.current_round_id(task_id)
+        changed = self._recover_inflight_provider_native_approval(
+            task_id,
+            round_id,
+            runtime_store,
+        )
+        changed = (await self._recover_pending_input_transitions(task_id)) or changed
+        round_id = self._store.current_round_id(task_id)
         attempts = self._store.lifecycle.attempts_for_round(task_id, round_id)
-        changed = False
         for role, attempt in attempts.items():
             if not attempt.agent_run_id:
                 continue
@@ -694,6 +857,198 @@ class RelayService:
         self._store.lifecycle.sync_legacy_projection(task_id)
         return changed
 
+    async def _recover_pending_input_transitions(self, task_id: int) -> bool:
+        """Resume only queue items with a durable transition marker.
+
+        A plain pending input may belong to the currently active turn and must
+        not be consumed by reconciliation.  Marked inputs are different: a
+        prior worker already committed its follow-up intent, so replaying that
+        one marker is safe after lease expiry or process restart.
+        """
+
+        try:
+            self._store.assert_submissions_open()
+        except RuntimeError:
+            return False
+        detail = self._store.get_task_detail_readonly(task_id)
+        workspace = str(detail.task.workspace or "").strip() or f"relay-task:{task_id}"
+        changed = False
+        for pending in self._store.list_pending_inputs(task_id, status="pending"):
+            if self._store.pending_input_transition_artifact(task_id, pending.id) is None:
+                continue
+            claim = self._store.claim_pending_input_for_workspace(
+                workspace,
+                lease_owner=f"relay-recover:{uuid4().hex}",
+                task_id=task_id,
+                pending_input_id=pending.id,
+            )
+            if claim is None:
+                continue
+            try:
+                consumed = await self._consume_claimed_pending_input(
+                    claim,
+                    dispatch_next=True,
+                )
+            except Exception:
+                self._store.release_pending_input_claim(
+                    claim,
+                    error="follow-up recovery failed",
+                )
+                raise
+            changed = changed or consumed is not None
+        return changed
+
+    def _recover_inflight_provider_native_approval(
+        self,
+        task_id: int,
+        round_id: int,
+        runtime_store: RuntimeEventStore,
+    ) -> bool:
+        """Finish a provider approval saga after a process crash.
+
+        Resolving a native approval necessarily crosses a provider/SQLite
+        boundary.  The provider controller persists ``approval.resolved``
+        before returning success.  If the process dies after that durable
+        acknowledgement but before Relay finalizes its own projection, the
+        lifecycle worker can safely complete the compare-and-set transaction
+        without re-sending a potentially non-idempotent provider action.
+
+        The same rule covers approval supersession: once the old request has
+        a durable cancel acknowledgement, replace the temporary
+        ``provider_native_superseding`` record with the newest provider
+        approval observed for that agent turn.  If no acknowledgement exists,
+        leave the claim intact rather than guessing whether the remote action
+        succeeded and accidentally authorizing or duplicating work.
+        """
+        execution = self._store.lifecycle.round_execution(task_id, round_id)
+        confirmation = execution.get("confirmation")
+        if not isinstance(confirmation, dict):
+            return False
+        source = str(confirmation.get("source") or "")
+        if source not in {
+            "provider_native_resolving",
+            "provider_native_superseding",
+        }:
+            return False
+        request_id = str(confirmation.get("provider_request_id") or "").strip()
+        event_id = int(confirmation.get("runtime_event_id") or 0)
+        agent_run_id = confirmation.get("agent_run_id")
+        if not request_id or event_id <= 0:
+            return False
+        resolution = runtime_store.latest_approval_resolution(
+            request_id,
+            agent_run_id=(int(agent_run_id) if agent_run_id is not None else None),
+        )
+        if resolution is None:
+            return False
+        role = str(confirmation.get("role") or "director")
+        if source == "provider_native_resolving":
+            resolution_payload = dict(getattr(resolution, "payload", {}) or {})
+            normalized = str(resolution_payload.get("decision") or "").strip().lower()
+            decision = "cancel_plan" if normalized in {"cancel", "abort"} else "continue"
+            finalized = self._store.lifecycle.finalize_provider_native_approval_action(
+                task_id,
+                round_id,
+                role=role,
+                provider_request_id=request_id,
+                runtime_event_id=event_id,
+                action="resolving",
+                decision=decision,
+            )
+            if not finalized:
+                return False
+            self._events.emit(
+                task_id,
+                "approval.recovered",
+                role=role,
+                payload={
+                    "round_id": round_id,
+                    "provider_request_id": request_id,
+                    "resolution_runtime_event_id": int(getattr(resolution, "id", 0) or 0),
+                    "decision": decision,
+                },
+            )
+            return True
+
+        if agent_run_id is None:
+            return False
+        newer_requests = [
+            event
+            for event in runtime_store.list_by_agent_run_after(
+                int(agent_run_id),
+                after_id=event_id,
+                limit=500,
+            )
+            if _runtime_event_type(event) == EventType.APPROVAL_REQUESTED
+            and _runtime_event_matches_turn(
+                event,
+                str(confirmation.get("turn_id") or ""),
+            )
+        ]
+        if not newer_requests:
+            return False
+        replacement_event = newer_requests[-1]
+        replacement_payload = dict(getattr(replacement_event, "payload", {}) or {})
+        replacement_request_id = str(
+            replacement_payload.get("codexRequestId")
+            or replacement_payload.get("request_id")
+            or replacement_payload.get("id")
+            or getattr(replacement_event, "aggregate_id", "")
+            or ""
+        ).strip()
+        replacement_event_id = int(getattr(replacement_event, "id", 0) or 0)
+        if not replacement_request_id or replacement_event_id <= event_id:
+            return False
+        raw_source = getattr(replacement_event, "source", "") or ""
+        provider_name = str(getattr(raw_source, "value", "") or raw_source or "")
+        provider_name = provider_name or str(confirmation.get("provider") or "")
+        replacement = self._store.lifecycle.replace_provider_native_approval(
+            task_id,
+            round_id,
+            role=role,
+            provider=provider_name,
+            provider_request_id=replacement_request_id,
+            runtime_event_id=replacement_event_id,
+            native_session_id=str(confirmation.get("native_session_id") or ""),
+            agent_run_id=int(agent_run_id),
+            turn_id=(
+                _runtime_event_turn_id(replacement_event)
+                or str(confirmation.get("turn_id") or "")
+            ),
+            kind=_provider_approval_confirmation_kind(
+                str(replacement_payload.get("kind") or "command")
+            ),
+            expected_previous_request_id=request_id,
+            expected_previous_runtime_event_id=event_id,
+        )
+        if not bool(replacement.get("applied")):
+            return False
+        self._events.emit(
+            task_id,
+            "approval.superseded",
+            role=role,
+            payload={
+                "round_id": round_id,
+                "provider_request_id": request_id,
+                "replacement_request_id": replacement_request_id,
+                "pending_approval_count": int(
+                    replacement.get("pending_approval_count") or 1
+                ),
+                "recovered": True,
+                "resolution_runtime_event_id": int(getattr(resolution, "id", 0) or 0),
+            },
+        )
+        return True
+
+    async def ensure_task_lifecycle_current(
+        self,
+        task_id: int,
+        runtime_store: RuntimeEventStore | None = None,
+    ) -> bool:
+        """Compatibility alias for older workers; new callers use reconcile."""
+
+        return await self.reconcile_task_lifecycle(task_id, runtime_store)
+
     def events_for_task(self, task_id: int, *, after: int = 0) -> list[RelayEvent]:
         return self._events.list_events(task_id, after=after)
 
@@ -717,9 +1072,21 @@ class RelayService:
         return self._store.find_role_by_agent_run_id(agent_run_id)
 
     async def resume_role(self, task_id: int, role: str, *, force: bool = False) -> None:
+        self._store.assert_submissions_open()
         if role not in RELAY_ROLE_IDS:
             raise ValueError(f"unknown relay role: {role}")
         detail = self._store.get_task_detail(task_id)
+        round_id = int(getattr(detail, "current_round_id", 1) or 1)
+        execution = self._store.lifecycle.round_execution(task_id, round_id)
+        confirmation = execution.get("confirmation")
+        if (
+            isinstance(confirmation, dict)
+            and str(confirmation.get("source") or "")
+            in {"provider_native_resolving", "provider_native_superseding"}
+        ):
+            raise ValueError(
+                "native approval recovery is pending; wait for the lifecycle worker"
+            )
         job = next((candidate for candidate in detail.role_jobs if candidate.role == role), None)
         if job is None:
             raise ValueError(f"unknown relay role: {role}")
@@ -776,16 +1143,19 @@ class RelayService:
         if prefer_continue and job is not None and job.provider == provider_name:
             existing_native_session_id = str(job.native_session_id or "").strip()
 
-        packet = build_role_context_packet(
-            task=detail.task,
-            role=role,
-            board=detail.board,
-            handoffs=self._store.handoffs_for_role(task_id, role),
-            artifacts=detail.artifacts,
+        round_execution = self._store.lifecycle.round_execution(task_id, round_id)
+        packet = _packet_with_execution_contract(
+            build_role_context_packet(
+                task=detail.task,
+                role=role,
+                board=detail.board,
+                handoffs=self._store.handoffs_for_role(task_id, role),
+                artifacts=detail.artifacts,
+            ),
+            round_execution,
         )
         context_record = self._store.save_context_packet(task_id, role, packet)
         images = _relay_images_for_role(detail.artifacts, role)
-        round_execution = self._store.lifecycle.round_execution(task_id, round_id)
         mode_kwargs, provider_mode = _provider_mode_for_attempt(
             provider_name=provider_name,
             role=role,
@@ -794,7 +1164,7 @@ class RelayService:
         self._store.lifecycle.set_round_execution(
             task_id,
             round_id,
-            execution_mode=str(round_execution.get("execution_mode") or "simple"),
+            execution_mode=str(round_execution.get("execution_mode") or "standard"),
             execution_goal=str(round_execution.get("execution_goal") or ""),
             execution_strategy=_merge_subagent_decision_into_strategy(
                 round_execution.get("execution_strategy")
@@ -1074,6 +1444,13 @@ class RelayService:
             **envelope.to_json_dict(),
             "round_id": round_id,
         }
+        # The provider never gets to choose the implementation run that later
+        # verification will trust.  It is captured from the already-persisted
+        # role job that produced this envelope.
+        if role == "implementer" and envelope.artifact_type == "implementation_report":
+            implementation_run_id = _positive_int(confirmation_agent_run_id)
+            if implementation_run_id is not None:
+                envelope_payload["implementation_run_id"] = implementation_run_id
         if runtime_event_id > 0:
             envelope_payload["runtime_event_id"] = runtime_event_id
         display_text = humanize_role_envelope(envelope_payload)
@@ -1098,6 +1475,83 @@ class RelayService:
             },
             summary=envelope.summary,
         )
+        round_execution = self._store.lifecycle.round_execution(task_id, round_id)
+        if _requires_plan_approval(
+            round_execution,
+            role=role,
+            artifact_type=envelope.artifact_type,
+            status=envelope.status,
+        ):
+            # A plan-first task has a real approval boundary even if the model
+            # optimistically supplied a handoff_to implementer.  The approval
+            # action below is the only path that queues the implementation.
+            self._store.lifecycle.set_round_execution(
+                task_id,
+                round_id,
+                execution_mode=str(round_execution.get("execution_mode") or "standard"),
+                execution_goal=str(round_execution.get("execution_goal") or ""),
+                execution_strategy=(
+                    round_execution.get("execution_strategy")
+                    if isinstance(round_execution.get("execution_strategy"), dict)
+                    else {}
+                ),
+                waiting_reason="plan_approval",
+            )
+            self._store.lifecycle.set_round_confirmation(
+                task_id,
+                round_id,
+                source="relay_prompt_fallback",
+                kind="plan_approval",
+                role=role,
+                provider=confirmation_provider,
+                runtime_event_id=int(runtime_event_id or 0),
+                native_session_id=confirmation_native_session_id,
+                agent_run_id=(
+                    int(confirmation_agent_run_id)
+                    if confirmation_agent_run_id is not None
+                    else None
+                ),
+                turn_id=confirmation_turn_id,
+            )
+            self._store.update_role_status(task_id, role, "waiting")
+            self._store.update_task_status(task_id, "waiting_user")
+            self._events.emit(
+                task_id,
+                "role.status",
+                role=role,
+                payload={"status": "waiting", "round_id": round_id},
+            )
+            self._events.emit(
+                task_id,
+                "task.waiting_user",
+                role=role,
+                payload={
+                    "role": role,
+                    "round_id": round_id,
+                    "waiting_reason": "plan_approval",
+                    "artifact_type": "architecture_plan",
+                    "artifact_id": int(getattr(saved_artifact, "id", 0) or 0),
+                    "summary": envelope.summary,
+                    "open_questions": envelope.open_questions,
+                },
+            )
+            return result
+        goal_acceptance_error = await self._record_goal_acceptance_for_output(
+            task_id=task_id,
+            role=role,
+            envelope=envelope,
+            raw_payload=result.payload,
+            saved_artifact=saved_artifact,
+            round_id=round_id,
+        )
+        if goal_acceptance_error:
+            self._block_role_with_error(
+                task_id,
+                role,
+                goal_acceptance_error,
+                output=output,
+            )
+            return result
         role_status = "passed" if envelope.status == "passed" else envelope.status
         if envelope.status == "waiting" and envelope.handoff_to:
             role_status = "passed"
@@ -1481,6 +1935,38 @@ class RelayService:
             return result
 
         round_id = self._store.current_round_id(task_id)
+        execution = self._store.lifecycle.round_execution(task_id, round_id)
+        execution_mode = normalize_relay_execution_mode(execution.get("execution_mode"))
+        if execution_mode == "plan_first" and decision["route"] not in {
+            "waiting_user",
+            "blocked",
+        }:
+            if decision["route"] == "director_only" or "architect" not in decision["required_roles"]:
+                self._block_role_with_error(
+                    task_id,
+                    role,
+                    "plan_first routing_decision must include architect before implementation",
+                    output=output,
+                )
+                return result
+        if execution_mode == "goal":
+            strategy = execution.get("execution_strategy")
+            goal_criteria = normalize_acceptance_criteria(
+                strategy.get("acceptance_criteria") if isinstance(strategy, dict) else []
+            )
+            route_criteria = normalize_acceptance_criteria(decision.get("acceptance_criteria"))
+            missing_goal_criteria = [
+                criterion for criterion in goal_criteria if criterion not in route_criteria
+            ]
+            if missing_goal_criteria:
+                self._block_role_with_error(
+                    task_id,
+                    role,
+                    "goal routing_decision omitted acceptance criteria: "
+                    + "; ".join(missing_goal_criteria),
+                    output=output,
+                )
+                return result
         current_job = next((job for job in detail.role_jobs if job.role == role), None)
         confirmation_provider = str(getattr(current_job, "provider", "") or "")
         confirmation_native_session_id = str(
@@ -1753,6 +2239,254 @@ class RelayService:
             "requires_user_approval": bool(payload.get("requires_user_approval")),
         }, ""
 
+    @staticmethod
+    def _current_goal_implementation_artifact(
+        detail: RelayTaskDetail,
+        *,
+        round_id: int,
+    ) -> dict[str, Any] | None:
+        """Return the one implementation state that this round can complete on.
+
+        A rework can produce several implementation reports in one round.  A
+        verifier of an earlier report must not complete the task after a newer
+        implementation is available, so the latest passed report with a
+        service-captured run id is the only eligible binding target.
+        """
+
+        candidates = [
+            artifact
+            for artifact in detail.artifacts
+            if (_coerce_round_id(artifact.get("round_id")) or 1) == int(round_id)
+            and str(artifact.get("relay_role") or artifact.get("role") or "")
+            == "implementer"
+            and str(artifact.get("artifact_type") or "") == "implementation_report"
+            and str(artifact.get("status") or "") == "passed"
+            and _clean_string_list(artifact.get("evidence_refs"))
+            and _positive_int(artifact.get("implementation_run_id")) is not None
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda artifact: _positive_int(artifact.get("id")) or 0)
+
+    @staticmethod
+    def _goal_not_run_execution(reason: str) -> dict[str, Any]:
+        now = now_iso()
+        return {
+            "executed": False,
+            "status": "not_run",
+            "argv": [],
+            "started_at": now,
+            "finished_at": now,
+            "timed_out": False,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "reason": str(reason or "approved test was not run"),
+        }
+
+    def _persist_goal_acceptance_record(
+        self,
+        *,
+        task_id: int,
+        round_id: int,
+        implementation_artifact: dict[str, Any] | None,
+        implementation_run_id: int | None,
+        verifier_artifact: Any,
+        verifier_role: str,
+        declaration: dict[str, Any],
+        execution: dict[str, Any],
+        status: str,
+        evidence_status: str,
+        reason: str,
+    ) -> Any:
+        exit_code = execution.get("exit_code") if isinstance(execution, dict) else None
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+            exit_code = None
+        record = self._store.record_goal_acceptance(
+            task_id,
+            round_id=round_id,
+            implementation_artifact_id=(
+                _positive_int(implementation_artifact.get("id"))
+                if implementation_artifact is not None
+                else None
+            ),
+            implementation_run_id=implementation_run_id,
+            verifier_artifact_id=_positive_int(getattr(verifier_artifact, "id", None)),
+            verifier_role=verifier_role,
+            test_declaration=declaration,
+            test_execution=execution,
+            exit_code=exit_code,
+            status=status,
+            evidence_status=evidence_status,
+            reason=reason,
+        )
+        self._store.annotate_goal_acceptance_artifact(
+            task_id,
+            int(getattr(verifier_artifact, "id", 0) or 0),
+            record,
+        )
+        self._events.emit(
+            task_id,
+            "goal.acceptance.recorded",
+            role=verifier_role,
+            payload=record.to_dict(),
+        )
+        return record
+
+    async def _record_goal_acceptance_for_output(
+        self,
+        *,
+        task_id: int,
+        role: str,
+        envelope: Any,
+        raw_payload: dict[str, Any],
+        saved_artifact: Any,
+        round_id: int,
+    ) -> str:
+        """Run and persist goal verification before a verifier can pass.
+
+        This intentionally consumes only the parsed envelope's raw structured
+        ``goal_acceptance`` object.  The provider output is never converted to
+        a shell command, and every result (including an unsafe declaration) is
+        retained as a ``not_run`` attempt for recovery and audit.
+        """
+
+        execution_contract = self._store.lifecycle.round_execution(task_id, round_id)
+        if normalize_relay_execution_mode(execution_contract.get("execution_mode")) != "goal":
+            return ""
+        expected_artifact_type = {
+            "tester": "test_report",
+            "auditor": "audit_report",
+        }.get(role)
+        if not expected_artifact_type or envelope.artifact_type != expected_artifact_type:
+            return ""
+
+        declaration, declaration_error = normalize_goal_acceptance_declaration(
+            raw_payload.get("goal_acceptance")
+        )
+        detail = self._store.get_task_detail_readonly(task_id)
+        implementation = self._current_goal_implementation_artifact(
+            detail,
+            round_id=round_id,
+        )
+        implementation_run_id = _positive_int(declaration.get("implementation_run_id"))
+        if declaration_error:
+            reason = f"goal acceptance declaration rejected: {declaration_error}"
+            self._persist_goal_acceptance_record(
+                task_id=task_id,
+                round_id=round_id,
+                implementation_artifact=None,
+                implementation_run_id=None,
+                verifier_artifact=saved_artifact,
+                verifier_role=role,
+                declaration={},
+                execution=self._goal_not_run_execution(reason),
+                status="not_run",
+                evidence_status="not_run",
+                reason=reason,
+            )
+            return reason if envelope.status == "passed" else ""
+
+        expected_run_id = (
+            _positive_int(implementation.get("implementation_run_id"))
+            if implementation is not None
+            else None
+        )
+        if implementation is None or implementation_run_id != expected_run_id:
+            reason = (
+                "goal acceptance implementation_run_id does not match the latest "
+                "passed implementation run in the current round"
+            )
+            self._persist_goal_acceptance_record(
+                task_id=task_id,
+                round_id=round_id,
+                implementation_artifact=None,
+                implementation_run_id=implementation_run_id,
+                verifier_artifact=saved_artifact,
+                verifier_role=role,
+                declaration=declaration,
+                execution=self._goal_not_run_execution(reason),
+                status="not_run",
+                evidence_status="not_run",
+                reason=reason,
+            )
+            return reason if envelope.status == "passed" else ""
+
+        test_declaration = declaration.get("test")
+        if role == "tester" and not isinstance(test_declaration, dict):
+            reason = "goal acceptance tester must declare an approved controlled test"
+            self._persist_goal_acceptance_record(
+                task_id=task_id,
+                round_id=round_id,
+                implementation_artifact=implementation,
+                implementation_run_id=implementation_run_id,
+                verifier_artifact=saved_artifact,
+                verifier_role=role,
+                declaration=declaration,
+                execution=self._goal_not_run_execution(reason),
+                status="not_run",
+                evidence_status="not_run",
+                reason=reason,
+            )
+            return reason if envelope.status == "passed" else ""
+
+        if isinstance(test_declaration, dict):
+            try:
+                test_execution = await self._goal_test_executor.execute(
+                    workspace=detail.task.workspace,
+                    declaration=declaration,
+                )
+            except Exception as exc:  # pragma: no cover - defensive provider boundary
+                test_execution = self._goal_not_run_execution(
+                    f"approved goal test executor failed to start: {exc}"
+                )
+        else:
+            test_execution = self._goal_not_run_execution(
+                "independent audit evidence has no declared test"
+            )
+        test_status = str(test_execution.get("status") or "not_run")
+        if test_status not in {"passed", "failed", "not_run"}:
+            test_status = "not_run"
+            test_execution = self._goal_not_run_execution(
+                "approved goal test executor returned an invalid status"
+            )
+        has_independent_evidence = bool(_clean_string_list(envelope.evidence_refs))
+        if envelope.status != "passed" or not has_independent_evidence:
+            evidence_status = "failed"
+        elif role == "tester":
+            evidence_status = test_status
+        elif test_status == "failed":
+            evidence_status = "failed"
+        elif test_status == "passed":
+            evidence_status = "passed"
+        else:
+            # A test-less auditor can supply independent audit evidence, but
+            # only after the binding above has succeeded.
+            evidence_status = "passed"
+        reason = str(test_execution.get("reason") or "")
+        if not has_independent_evidence and not reason:
+            reason = "goal acceptance verifier evidence_refs are required"
+        if envelope.status != "passed" and not reason:
+            reason = f"{role} report status is {envelope.status}"
+        self._persist_goal_acceptance_record(
+            task_id=task_id,
+            round_id=round_id,
+            implementation_artifact=implementation,
+            implementation_run_id=implementation_run_id,
+            verifier_artifact=saved_artifact,
+            verifier_role=role,
+            declaration=declaration,
+            execution=test_execution,
+            status=test_status,
+            evidence_status=evidence_status,
+            reason=reason,
+        )
+        if envelope.status != "passed" or evidence_status == "passed":
+            return ""
+        if test_status == "failed":
+            return f"goal acceptance controlled test failed: {reason or 'test failed'}"
+        return f"goal acceptance controlled test was not run: {reason or 'test was not run'}"
+
     def _final_summary_completion_error(self, detail: RelayTaskDetail) -> str:
         decision = detail.routing_decision or {}
         route = str(decision.get("route") or "")
@@ -1765,7 +2499,19 @@ class RelayService:
             detail.task.id,
             int(detail.current_round_id or 1),
         )
-        if str(execution.get("execution_mode") or "simple") == "goal":
+        if normalize_relay_execution_mode(execution.get("execution_mode")) == "goal":
+            strategy = execution.get("execution_strategy")
+            criteria = normalize_acceptance_criteria(
+                strategy.get("acceptance_criteria") if isinstance(strategy, dict) else []
+            )
+            # Legacy goal records remain readable, but cannot claim completion
+            # until an explicit acceptance contract is supplied through a new
+            # task or a recovery/update flow.
+            if not criteria:
+                return (
+                    "goal mode final_summary before acceptance evidence completed: "
+                    "acceptance_criteria"
+                )
             missing_goal_roles: list[str] = []
             if "implementer" not in completed_roles:
                 missing_goal_roles.append("implementer")
@@ -1779,6 +2525,96 @@ class RelayService:
                     for role in missing_goal_roles
                 )
                 return f"goal mode final_summary before acceptance evidence completed: {labels}"
+            round_id = int(detail.current_round_id or 1)
+            implementation = self._current_goal_implementation_artifact(
+                detail,
+                round_id=round_id,
+            )
+            if implementation is None:
+                return (
+                    "goal mode final_summary before acceptance evidence completed: "
+                    "current implementation run evidence"
+                )
+            implementation_artifact_id = _positive_int(implementation.get("id"))
+            implementation_run_id = _positive_int(implementation.get("implementation_run_id"))
+            if implementation_artifact_id is None or implementation_run_id is None:
+                return (
+                    "goal mode final_summary before acceptance evidence completed: "
+                    "current implementation run identity"
+                )
+
+            # Only the latest verifier attempt for this exact implementation
+            # artifact/run may satisfy completion.  A retry that fails must
+            # therefore supersede an earlier pass until it is retried again.
+            latest_records: dict[str, Any] = {}
+            for record in detail.goal_acceptance_records:
+                if (
+                    int(record.round_id) != round_id
+                    or record.implementation_artifact_id != implementation_artifact_id
+                    or record.implementation_run_id != implementation_run_id
+                    or record.verifier_role not in {"tester", "auditor"}
+                ):
+                    continue
+                prior = latest_records.get(record.verifier_role)
+                if prior is None or int(record.id) > int(prior.id):
+                    latest_records[record.verifier_role] = record
+            artifacts_by_id = {
+                artifact_id: artifact
+                for artifact in detail.artifacts
+                if (_coerce_round_id(artifact.get("round_id")) or 1) == round_id
+                if (artifact_id := _positive_int(artifact.get("id"))) is not None
+            }
+            accepted_verifiers: set[str] = set()
+            for verifier_role, record in latest_records.items():
+                if str(record.evidence_status) != "passed":
+                    continue
+                verifier = artifacts_by_id.get(_positive_int(record.verifier_artifact_id))
+                if verifier is None:
+                    continue
+                expected_artifact_type = (
+                    "test_report" if verifier_role == "tester" else "audit_report"
+                )
+                if (
+                    str(verifier.get("relay_role") or verifier.get("role") or "")
+                    != verifier_role
+                    or str(verifier.get("artifact_type") or "") != expected_artifact_type
+                    or str(verifier.get("status") or "") != "passed"
+                    or not _clean_string_list(verifier.get("evidence_refs"))
+                ):
+                    continue
+                test_execution = (
+                    record.test_execution if isinstance(record.test_execution, dict) else {}
+                )
+                test_declaration = (
+                    record.test_declaration
+                    if isinstance(record.test_declaration, dict)
+                    else {}
+                )
+                if verifier_role == "tester":
+                    if (
+                        str(record.status) != "passed"
+                        or test_execution.get("executed") is not True
+                        or test_execution.get("exit_code") != 0
+                        or "test" not in test_declaration
+                    ):
+                        continue
+                elif str(record.status) == "passed":
+                    if (
+                        test_execution.get("executed") is not True
+                        or test_execution.get("exit_code") != 0
+                    ):
+                        continue
+                elif str(record.status) == "not_run":
+                    if test_execution.get("executed") or "test" in test_declaration:
+                        continue
+                else:
+                    continue
+                accepted_verifiers.add(verifier_role)
+            if not accepted_verifiers:
+                return (
+                    "goal mode final_summary before independent acceptance evidence completed: "
+                    "run-bound controlled test or audit record"
+                )
         if route == "director_only":
             return ""
         required_roles = _clean_required_roles(decision.get("required_roles"))
@@ -2068,12 +2904,15 @@ class RelayService:
         if not (can_continue and job.native_session_id):
             return False
 
-        packet = build_role_context_packet(
-            task=detail.task,
-            role=role,
-            board=detail.board,
-            handoffs=self._store.handoffs_for_role(task_id, role),
-            artifacts=detail.artifacts,
+        packet = _packet_with_execution_contract(
+            build_role_context_packet(
+                task=detail.task,
+                role=role,
+                board=detail.board,
+                handoffs=self._store.handoffs_for_role(task_id, role),
+                artifacts=detail.artifacts,
+            ),
+            self._store.lifecycle.round_execution(task_id, round_id),
         )
         self._store.save_artifact(
             task_id,
@@ -2174,12 +3013,15 @@ class RelayService:
         if not (can_continue and job.native_session_id):
             return False
 
-        packet = build_role_context_packet(
-            task=detail.task,
-            role=role,
-            board=detail.board,
-            handoffs=self._store.handoffs_for_role(task_id, role),
-            artifacts=detail.artifacts,
+        packet = _packet_with_execution_contract(
+            build_role_context_packet(
+                task=detail.task,
+                role=role,
+                board=detail.board,
+                handoffs=self._store.handoffs_for_role(task_id, role),
+                artifacts=detail.artifacts,
+            ),
+            self._store.lifecycle.round_execution(task_id, round_id),
         )
         self._store.save_artifact(
             task_id,
@@ -2250,6 +3092,181 @@ class RelayService:
         )
         return True
 
+    def _claim_runtime_completion_projection(
+        self,
+        task_id: int,
+        role: str,
+        runtime_event_id: int,
+        *,
+        agent_run_id: int | None = None,
+        turn_id: str = "",
+    ) -> tuple[int, bool, bool, bool]:
+        """Return ``(round_id, acquired, applied, recovered)`` for one event."""
+
+        current_round_id = self._store.current_round_id_readonly(task_id)
+        origin = None
+        if _positive_int(agent_run_id) is not None or str(turn_id or "").strip():
+            origin = self._store.lifecycle.attempt_for_completion_identity(
+                task_id,
+                role,
+                agent_run_id=agent_run_id,
+                turn_id=turn_id,
+            )
+            if origin is None:
+                # Runtime processing always supplies an agent run.  If the
+                # immutable attempt is gone or cannot be matched, treating
+                # the event as a current-round completion would let an old
+                # provider response mutate a different task phase.
+                return current_round_id, False, True, False
+        round_id = origin.round_id if origin is not None else current_round_id
+        claim = self._store.lifecycle.claim_completion_event_result(
+            task_id,
+            round_id,
+            role,
+            runtime_event_id,
+            agent_run_id=agent_run_id,
+        )
+        if origin is not None:
+            try:
+                latest = self._store.lifecycle.latest_attempt(
+                    task_id,
+                    current_round_id,
+                    role,
+                )
+            except KeyError:
+                latest = None
+            origin_is_current = (
+                origin.round_id == current_round_id
+                and origin.status not in {"superseded", "passed", "failed", "interrupted"}
+                and latest is not None
+                and latest.attempt_no == origin.attempt_no
+                and latest.agent_run_id == origin.agent_run_id
+            )
+            if not origin_is_current:
+                if claim.already_applied:
+                    return (
+                        claim.claimed_round_id,
+                        claim.acquired,
+                        claim.already_applied,
+                        claim.recovered,
+                    )
+                if self._completion_artifact_id(
+                    task_id,
+                    role,
+                    runtime_event_id,
+                    agent_run_id=agent_run_id,
+                ) is not None:
+                    # A prior worker reached the durable artifact boundary
+                    # before it died.  It is safe to finalize that original
+                    # claim even though the artifact advanced the task.
+                    return (
+                        claim.claimed_round_id,
+                        claim.acquired,
+                        False,
+                        claim.recovered or claim.acquired,
+                    )
+                if claim.acquired:
+                    self._store.lifecycle.mark_completion_event_ignored_stale(
+                        task_id,
+                        round_id,
+                        role,
+                        runtime_event_id,
+                        agent_run_id=agent_run_id,
+                    )
+                return claim.claimed_round_id, False, True, claim.recovered
+        return (
+            claim.claimed_round_id,
+            claim.acquired,
+            claim.already_applied,
+            claim.recovered,
+        )
+
+    def _finish_runtime_completion_projection(
+        self,
+        task_id: int,
+        round_id: int,
+        role: str,
+        runtime_event_id: int,
+        *,
+        agent_run_id: int | None = None,
+    ) -> None:
+        artifact_id = self._completion_artifact_id(
+            task_id,
+            role,
+            runtime_event_id,
+            agent_run_id=agent_run_id,
+        )
+        self._store.lifecycle.mark_completion_event_applied(
+            task_id,
+            round_id,
+            role,
+            runtime_event_id,
+            agent_run_id=agent_run_id,
+            artifact_id=artifact_id,
+        )
+        if runtime_event_id > 0:
+            self._handled_runtime_completion_ids.add(runtime_event_id)
+
+    def _completion_artifact_id(
+        self,
+        task_id: int,
+        role: str,
+        runtime_event_id: int,
+        *,
+        agent_run_id: int | None = None,
+    ) -> int | None:
+        """Find the durable artifact recorded for a claimed runtime event."""
+
+        event_id = int(runtime_event_id or 0)
+        run_id = _positive_int(agent_run_id) or 0
+        if event_id <= 0 and run_id <= 0:
+            return None
+        attempt = self._store.lifecycle.attempt_for_completion_identity(
+            task_id,
+            role,
+            agent_run_id=agent_run_id,
+        )
+        if attempt is not None and attempt.completion_artifact_id is not None:
+            if event_id <= 0 or attempt.completion_event_id == event_id:
+                return attempt.completion_artifact_id
+        # A provider run also appears in dispatch metadata.  It is not a
+        # completion side effect, so only an exact runtime event may match an
+        # artifact scan below.  The lifecycle link above handles event-less
+        # native-session recovery without accidentally accepting a dispatch.
+        if event_id <= 0:
+            return None
+        try:
+            artifacts = self._store.get_task_detail_readonly(task_id).artifacts
+        except KeyError:
+            return None
+        for artifact in reversed(artifacts):
+            artifact_event_id = int(artifact.get("runtime_event_id") or 0)
+            if artifact_event_id != event_id:
+                continue
+            artifact_role = str(artifact.get("relay_role") or artifact.get("role") or "")
+            if artifact_role != role:
+                continue
+            artifact_id = int(artifact.get("id") or 0)
+            return artifact_id or None
+        return None
+
+    def _release_runtime_completion_projection(
+        self,
+        task_id: int,
+        round_id: int,
+        role: str,
+        runtime_event_id: int,
+        *,
+        agent_run_id: int | None = None,
+    ) -> None:
+        self._store.lifecycle.release_completion_event_claim(
+            task_id,
+            round_id,
+            role,
+            runtime_event_id,
+            agent_run_id=agent_run_id,
+        )
+
     async def handle_role_completion_event(
         self,
         task_id: int,
@@ -2257,8 +3274,39 @@ class RelayService:
         *,
         runtime_event_id: int,
         output: str,
+        agent_run_id: int | None = None,
+        turn_id: str = "",
     ):
-        detail = self._store.get_task_detail(task_id)
+        if runtime_event_id > 0 and runtime_event_id in self._handled_runtime_completion_ids:
+            return None
+        claim_round_id, acquired, already_applied, recovered = self._claim_runtime_completion_projection(
+            task_id,
+            role,
+            runtime_event_id,
+            agent_run_id=agent_run_id,
+            turn_id=turn_id,
+        )
+        if already_applied or not acquired:
+            return None
+        if recovered and self._completion_artifact_id(
+            task_id,
+            role,
+            runtime_event_id,
+            agent_run_id=agent_run_id,
+        ) is not None:
+            # A process died after writing the domain artifact (which may have
+            # advanced the current round) but before finalizing its claim.
+            # The artifact is the durable side-effect boundary: finish without
+            # calling model/output logic again.
+            self._finish_runtime_completion_projection(
+                task_id,
+                claim_round_id,
+                role,
+                runtime_event_id,
+                agent_run_id=agent_run_id,
+            )
+            return None
+        detail = self._store.get_task_detail_readonly(task_id)
         current_job = next((job for job in detail.role_jobs if job.role == role), None)
         if current_job is not None and current_job.status in {
             "passed",
@@ -2266,17 +3314,38 @@ class RelayService:
             "failed",
             "interrupted",
         }:
+            self._finish_runtime_completion_projection(
+                task_id,
+                claim_round_id,
+                role,
+                runtime_event_id,
+                agent_run_id=agent_run_id,
+            )
             return None
-        if runtime_event_id > 0 and runtime_event_id in self._handled_runtime_completion_ids:
-            return None
-        if runtime_event_id > 0:
-            self._handled_runtime_completion_ids.add(runtime_event_id)
-        return await self.handle_role_output(
+        try:
+            result = await self.handle_role_output(
+                task_id,
+                role,
+                output,
+                runtime_event_id=runtime_event_id,
+            )
+        except Exception:
+            self._release_runtime_completion_projection(
+                task_id,
+                claim_round_id,
+                role,
+                runtime_event_id,
+                agent_run_id=agent_run_id,
+            )
+            raise
+        self._finish_runtime_completion_projection(
             task_id,
+            claim_round_id,
             role,
-            output,
-            runtime_event_id=runtime_event_id,
+            runtime_event_id,
+            agent_run_id=agent_run_id,
         )
+        return result
 
     async def _apply_native_completion_output(
         self,
@@ -2288,17 +3357,64 @@ class RelayService:
         agent_run_id: int | None = None,
         completed_event: Any | None = None,
     ) -> bool:
+        completion_turn_id = (
+            _runtime_event_turn_id(completed_event)
+            if completed_event is not None
+            else ""
+        )
         text = output.strip()
         if not text:
             if completed_event is not None and _is_agent_run_completed_event(completed_event):
-                self._mark_native_agent_run_failed(
-                    agent_run_id,
-                    "native provider completed without assistant output",
-                )
-                self._block_role_with_error(
+                round_id, acquired, already_applied, recovered = self._claim_runtime_completion_projection(
                     task_id,
                     role,
-                    "native provider completed without assistant output",
+                    runtime_event_id,
+                    agent_run_id=agent_run_id,
+                    turn_id=completion_turn_id,
+                )
+                if already_applied:
+                    return True
+                if not acquired:
+                    return False
+                if recovered and self._completion_artifact_id(
+                    task_id,
+                    role,
+                    runtime_event_id,
+                    agent_run_id=agent_run_id,
+                ) is not None:
+                    self._finish_runtime_completion_projection(
+                        task_id,
+                        round_id,
+                        role,
+                        runtime_event_id,
+                        agent_run_id=agent_run_id,
+                    )
+                    return True
+                try:
+                    self._mark_native_agent_run_failed(
+                        agent_run_id,
+                        "native provider completed without assistant output",
+                    )
+                    self._block_role_with_error(
+                        task_id,
+                        role,
+                        "native provider completed without assistant output",
+                    )
+                except Exception:
+                    self._release_runtime_completion_projection(
+                        task_id,
+                        round_id,
+                        role,
+                        runtime_event_id,
+                        agent_run_id=agent_run_id,
+                    )
+                    raise
+                self._finish_runtime_completion_projection(
+                    task_id,
+                    round_id,
+                    role,
+                    runtime_event_id,
+                    agent_run_id=agent_run_id,
                 )
                 return True
             return False
@@ -2307,10 +3423,96 @@ class RelayService:
             not parse_result.ok
             and self._should_accept_plain_followup_response(task_id, role)
         ):
-            self._mark_native_agent_run_done(agent_run_id, text)
-            invalid_artifact = None
-            if _looks_like_relay_protocol_attempt(text):
-                invalid_artifact = self._record_invalid_semantic_artifact(
+            round_id, acquired, already_applied, recovered = self._claim_runtime_completion_projection(
+                task_id,
+                role,
+                runtime_event_id,
+                agent_run_id=agent_run_id,
+                turn_id=completion_turn_id,
+            )
+            if already_applied:
+                return True
+            if not acquired:
+                return False
+            if recovered and self._completion_artifact_id(
+                task_id,
+                role,
+                runtime_event_id,
+                agent_run_id=agent_run_id,
+            ) is not None:
+                self._finish_runtime_completion_projection(
+                    task_id,
+                    round_id,
+                    role,
+                    runtime_event_id,
+                    agent_run_id=agent_run_id,
+                )
+                return True
+            try:
+                self._mark_native_agent_run_done(agent_run_id, text)
+                invalid_artifact = None
+                if _looks_like_relay_protocol_attempt(text):
+                    invalid_artifact = self._record_invalid_semantic_artifact(
+                        task_id,
+                        role,
+                        error=parse_result.error or "invalid role envelope",
+                        output=text,
+                        runtime_event_id=runtime_event_id,
+                        agent_run_id=agent_run_id,
+                        completed_event=completed_event,
+                    )
+                await self._handle_plain_followup_response(
+                    task_id,
+                    role,
+                    runtime_event_id=runtime_event_id,
+                    text=text,
+                    semantic_invalid=invalid_artifact is not None,
+                )
+            except Exception:
+                self._release_runtime_completion_projection(
+                    task_id,
+                    round_id,
+                    role,
+                    runtime_event_id,
+                    agent_run_id=agent_run_id,
+                )
+                raise
+            self._finish_runtime_completion_projection(
+                task_id,
+                round_id,
+                role,
+                runtime_event_id,
+                agent_run_id=agent_run_id,
+            )
+            return True
+        if not parse_result.ok and _looks_like_relay_protocol_attempt(text):
+            round_id, acquired, already_applied, recovered = self._claim_runtime_completion_projection(
+                task_id,
+                role,
+                runtime_event_id,
+                agent_run_id=agent_run_id,
+                turn_id=completion_turn_id,
+            )
+            if already_applied:
+                return True
+            if not acquired:
+                return False
+            if recovered and self._completion_artifact_id(
+                task_id,
+                role,
+                runtime_event_id,
+                agent_run_id=agent_run_id,
+            ) is not None:
+                self._finish_runtime_completion_projection(
+                    task_id,
+                    round_id,
+                    role,
+                    runtime_event_id,
+                    agent_run_id=agent_run_id,
+                )
+                return True
+            try:
+                self._record_invalid_semantic_artifact(
                     task_id,
                     role,
                     error=parse_result.error or "invalid role envelope",
@@ -2319,37 +3521,42 @@ class RelayService:
                     agent_run_id=agent_run_id,
                     completed_event=completed_event,
                 )
-            await self._handle_plain_followup_response(
+                if await self._retry_role_envelope_format(
+                    task_id,
+                    role,
+                    error=parse_result.error or "invalid role envelope",
+                    output=text,
+                ):
+                    self._finish_runtime_completion_projection(
+                        task_id,
+                        round_id,
+                        role,
+                        runtime_event_id,
+                        agent_run_id=agent_run_id,
+                    )
+                    return True
+                self._mark_native_agent_run_done(agent_run_id, text)
+                self._block_role_with_error(
+                    task_id,
+                    role,
+                    parse_result.error or "invalid role envelope",
+                    output=text,
+                )
+            except Exception:
+                self._release_runtime_completion_projection(
+                    task_id,
+                    round_id,
+                    role,
+                    runtime_event_id,
+                    agent_run_id=agent_run_id,
+                )
+                raise
+            self._finish_runtime_completion_projection(
                 task_id,
+                round_id,
                 role,
-                runtime_event_id=runtime_event_id,
-                text=text,
-                semantic_invalid=invalid_artifact is not None,
-            )
-            return True
-        if not parse_result.ok and _looks_like_relay_protocol_attempt(text):
-            self._record_invalid_semantic_artifact(
-                task_id,
-                role,
-                error=parse_result.error or "invalid role envelope",
-                output=text,
-                runtime_event_id=runtime_event_id,
+                runtime_event_id,
                 agent_run_id=agent_run_id,
-                completed_event=completed_event,
-            )
-            if await self._retry_role_envelope_format(
-                task_id,
-                role,
-                error=parse_result.error or "invalid role envelope",
-                output=text,
-            ):
-                return True
-            self._mark_native_agent_run_done(agent_run_id, text)
-            self._block_role_with_error(
-                task_id,
-                role,
-                parse_result.error or "invalid role envelope",
-                output=text,
             )
             return True
         if not parse_result.ok:
@@ -2361,6 +3568,8 @@ class RelayService:
                 role,
                 runtime_event_id=runtime_event_id,
                 output=text,
+                agent_run_id=agent_run_id,
+                turn_id=completion_turn_id,
             )
             return True
         except Exception as exc:
@@ -2421,6 +3630,7 @@ class RelayService:
         images: list[dict[str, Any]] | None = None,
         files: list[dict[str, Any]] | None = None,
     ) -> RelayPendingInput:
+        self._store.assert_submissions_open()
         clean_images = _relay_clean_image_attachments(images)
         clean_files = _relay_clean_text_file_attachments(files)
         pending = self._store.queue_pending_input(
@@ -2445,6 +3655,7 @@ class RelayService:
         images: list[dict[str, Any]] | None = None,
         files: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        self._store.assert_submissions_open()
         detail = self._store.get_task_detail(task_id)
         task_status = str(getattr(detail.task, "status", "") or "")
         current_round_id = int(detail.current_round_id or self._store.current_round_id(task_id))
@@ -2475,6 +3686,7 @@ class RelayService:
         task_id: int,
         pending_input_id: int,
     ) -> RelayPendingInput:
+        self._store.assert_submissions_open()
         steered, _payload = await self._steer_active_attempt(task_id, pending_input_id)
         return steered
 
@@ -2483,6 +3695,7 @@ class RelayService:
         task_id: int,
         pending_input_id: int,
     ) -> dict[str, Any]:
+        self._store.assert_submissions_open()
         _steered, payload = await self._steer_active_attempt(task_id, pending_input_id)
         return payload
 
@@ -2614,6 +3827,12 @@ class RelayService:
                 confirmation=confirmation,
                 comment=comment,
             )
+        if (
+            isinstance(confirmation, dict)
+            and str(confirmation.get("source") or "")
+            in {"provider_native_resolving", "provider_native_superseding"}
+        ):
+            raise ValueError("native approval action is already in progress")
         if decision == "cancel_plan":
             self._store.lifecycle.clear_round_confirmation(task_id, round_id)
             self._store.update_task_status(task_id, "interrupted")
@@ -2816,31 +4035,46 @@ class RelayService:
         if not bool(getattr(capabilities, "can_resolve_approval", False)):
             raise ValueError(f"provider {provider_name} cannot resolve native approvals")
         response = _approval_response_for_round_decision(decision)
-        await provider.resolve_approval(request_id, response)
-
-        execution = self._store.lifecycle.round_execution(task_id, round_id)
-        self._store.lifecycle.set_round_execution(
-            task_id,
-            round_id,
-            execution_mode=str(execution.get("execution_mode") or "simple"),
-            execution_goal=str(execution.get("execution_goal") or ""),
-            execution_strategy=execution.get("execution_strategy")
-            if isinstance(execution.get("execution_strategy"), dict)
-            else {},
-            waiting_reason="none",
-        )
-        self._store.lifecycle.clear_round_confirmation(task_id, round_id)
+        runtime_event_id = int(confirmation.get("runtime_event_id") or 0)
+        async with self._approval_lock(task_id, round_id):
+            claimed = self._store.lifecycle.claim_provider_native_approval_action(
+                task_id,
+                round_id,
+                provider_request_id=request_id,
+                runtime_event_id=runtime_event_id,
+                action="resolving",
+            )
+            if not claimed:
+                raise ValueError("native approval was superseded or already resolved")
+            try:
+                await provider.resolve_approval(request_id, response)
+            except Exception:
+                self._store.lifecycle.restore_provider_native_approval_action(
+                    task_id,
+                    round_id,
+                    provider_request_id=request_id,
+                    runtime_event_id=runtime_event_id,
+                    action="resolving",
+                )
+                raise
+            finalized = self._store.lifecycle.finalize_provider_native_approval_action(
+                task_id,
+                round_id,
+                role=role,
+                provider_request_id=request_id,
+                runtime_event_id=runtime_event_id,
+                action="resolving",
+                decision=decision,
+            )
+            if not finalized:
+                raise ValueError("native approval changed before its resolution was committed")
         if decision == "cancel_plan":
-            self._store.update_role_status(task_id, role, "interrupted")
-            self._store.update_task_status(task_id, "interrupted")
             transition = transition_from_round_control(
                 decision=decision,
                 role=role,
                 round_id=round_id,
             )
         else:
-            self._store.update_role_status(task_id, role, "streaming")
-            self._store.update_task_status(task_id, "running")
             transition = RelayTransition(
                 update={
                     "round_id": int(round_id),
@@ -2896,10 +4130,123 @@ class RelayService:
         *,
         dispatch_next: bool = True,
     ) -> RelayPendingInput | None:
-        pending = self._store.first_pending_input_after_round(task_id, round_id)
-        if pending is None:
+        # A completion may occur while a maintenance drain starts.  The queue
+        # consumer is a submission path too: never create a follow-up round or
+        # provider dispatch after the durable freeze gate closes.
+        try:
+            self._store.assert_submissions_open()
+        except RuntimeError:
             return None
-        detail = self._store.get_task_detail(task_id)
+        detail = self._store.get_task_detail_readonly(task_id)
+        workspace = str(detail.task.workspace or "").strip() or f"relay-task:{task_id}"
+        claim = self._store.claim_pending_input_for_workspace(
+            workspace,
+            lease_owner=f"relay-pending:{uuid4().hex}",
+            task_id=task_id,
+            queued_through_round_id=round_id,
+        )
+        if claim is None:
+            return None
+        try:
+            return await self._consume_claimed_pending_input(
+                claim,
+                dispatch_next=dispatch_next,
+                source_round_id=round_id,
+            )
+        except Exception:
+            self._store.release_pending_input_claim(claim, error="follow-up projection failed")
+            raise
+
+    async def _consume_claimed_pending_input(
+        self,
+        claim: RelayPendingInputClaim,
+        *,
+        dispatch_next: bool,
+        source_round_id: int | None = None,
+    ) -> RelayPendingInput | None:
+        """Project one owned queue item without duplicating its round/dispatch.
+
+        The transition artifact is written before the next round and becomes
+        the crash-recovery anchor.  A retry resumes the same target round and
+        sees its persisted dispatch metadata before it ever calls a provider.
+        """
+
+        pending = claim.pending_input
+        task_id = pending.task_id
+        try:
+            self._store.assert_submissions_open()
+        except RuntimeError:
+            self._store.release_pending_input_claim(claim, error="maintenance freeze")
+            return None
+
+        transition = self._store.pending_input_transition_artifact(task_id, pending.id)
+        if transition is not None:
+            source_round_id = max(
+                1,
+                _coerce_round_id(transition.get("source_round_id"))
+                or _coerce_round_id(source_round_id)
+                or _coerce_round_id(pending.queued_after_round_id)
+                or 1,
+            )
+        else:
+            # ``queued_after_round_id`` is the earliest round after which an
+            # input may run, not a promise that it is the next one.  Several
+            # messages can be queued while one turn is active; after the
+            # first becomes round N+1, the next terminal consumer must bind
+            # the remaining older message to round N+1 rather than leaving it
+            # permanently behind its original source round.
+            source_round_id = max(
+                1,
+                _coerce_round_id(source_round_id)
+                or _coerce_round_id(pending.queued_after_round_id)
+                or 1,
+            )
+        current_round_id = self._store.current_round_id(task_id)
+        if transition is None:
+            if current_round_id != source_round_id:
+                self._store.release_pending_input_claim(
+                    claim,
+                    error="source round is no longer current",
+                )
+                return None
+            saved_transition = self._store.save_artifact(
+                task_id,
+                "",
+                "pending_input_transition",
+                {
+                    "pending_input_id": pending.id,
+                    "source_round_id": source_round_id,
+                    "round_id": source_round_id,
+                    "workspace": claim.workspace,
+                },
+                summary="Queued user input claimed for follow-up",
+            )
+            transition = {"id": saved_transition.id, **saved_transition.payload}
+        transition_id = int(transition.get("id") or 0)
+        if transition_id <= 0:
+            self._store.release_pending_input_claim(claim, error="transition marker missing id")
+            return None
+        next_round_id = self._store.followup_round_for_transition_artifact(
+            task_id,
+            transition_id,
+        )
+        if next_round_id is None:
+            if self._store.current_round_id(task_id) != source_round_id:
+                self._store.release_pending_input_claim(
+                    claim,
+                    error="transition target was superseded",
+                )
+                return None
+            try:
+                self._store.assert_submissions_open()
+            except RuntimeError:
+                self._store.release_pending_input_claim(claim, error="maintenance freeze")
+                return None
+            next_round_id = self._store.start_followup_round(
+                task_id,
+                trigger_artifact_id=transition_id,
+            )
+
         attachments = pending.attachments or {}
         clean_images = _relay_clean_image_attachments(attachments.get("images"))
         clean_files = _relay_clean_text_file_attachments(attachments.get("files"))
@@ -2908,50 +4255,100 @@ class RelayService:
             images=clean_images,
             files=clean_files,
         )
-        next_round_id = self._store.start_followup_round(task_id)
-        board = detail.board
-        self._store.save_artifact(
-            task_id,
-            "director",
-            "relay_board",
-            {
-                **board.to_json_dict(),
-                "round_id": next_round_id,
-                "latest_user_input": prompt_text,
-                "current_dispatch": "director",
-                "next_step": "director review queued user input",
-                "pending_input_id": pending.id,
-            },
-            summary="Queued user input routed to director",
-        )
-        self._store.update_role_status(task_id, "director", "queued")
-        refreshed = self._store.get_task_detail(task_id)
-        packet = build_role_context_packet(
-            task=refreshed.task,
-            role="director",
-            board=refreshed.board,
-            handoffs=self._store.handoffs_for_role(task_id, "director"),
-            artifacts=refreshed.artifacts,
-        )
-        context_record = self._store.save_context_packet(task_id, "director", packet)
-        followup = self._store.save_artifact(
-            task_id,
-            "director",
-            "user_followup",
-            {
-                "text": pending.text,
-                "target_role": "director",
-                "context_packet_id": int(getattr(context_record, "id", 0) or 0),
-                "round_id": next_round_id,
-                "pending_input_id": pending.id,
-                "input_disposition": "consumed",
-                **_relay_attachment_payload(images=clean_images, files=clean_files),
-            },
-            summary=pending.text,
-        )
-        consumed = self._store.mark_pending_input_consumed(
-            task_id,
-            pending.id,
+        followup = self._store.pending_input_followup_artifact(task_id, pending.id)
+        context_id = 0
+        if followup is None:
+            detail = self._store.get_task_detail(task_id)
+            board = detail.board
+            self._store.save_artifact(
+                task_id,
+                "director",
+                "relay_board",
+                {
+                    **board.to_json_dict(),
+                    "round_id": next_round_id,
+                    "latest_user_input": prompt_text,
+                    "current_dispatch": "director",
+                    "next_step": "director review queued user input",
+                    "pending_input_id": pending.id,
+                },
+                summary="Queued user input routed to director",
+            )
+            self._store.update_role_status(task_id, "director", "queued")
+            refreshed = self._store.get_task_detail(task_id)
+            packet = _packet_with_execution_contract(
+                build_role_context_packet(
+                    task=refreshed.task,
+                    role="director",
+                    board=refreshed.board,
+                    handoffs=self._store.handoffs_for_role(task_id, "director"),
+                    artifacts=refreshed.artifacts,
+                ),
+                self._store.lifecycle.round_execution(task_id, next_round_id),
+            )
+            context_record = self._store.save_context_packet(task_id, "director", packet)
+            context_id = int(getattr(context_record, "id", 0) or 0)
+            saved_followup = self._store.save_artifact(
+                task_id,
+                "director",
+                "user_followup",
+                {
+                    "text": pending.text,
+                    "target_role": "director",
+                    "context_packet_id": context_id,
+                    "round_id": next_round_id,
+                    "pending_input_id": pending.id,
+                    "input_disposition": "consumed",
+                    **_relay_attachment_payload(images=clean_images, files=clean_files),
+                },
+                summary=pending.text,
+            )
+            followup = {"id": saved_followup.id, **saved_followup.payload}
+        else:
+            context_id = int(followup.get("context_packet_id") or 0)
+
+        if dispatch_next:
+            try:
+                self._store.assert_submissions_open()
+            except RuntimeError:
+                self._store.release_pending_input_claim(claim, error="maintenance freeze")
+                return None
+            if not self._store.lifecycle.attempt_has_provider_dispatch(
+                task_id,
+                next_round_id,
+                "director",
+            ):
+                dispatch_claimed = self._store.lifecycle.claim_queued_attempt_dispatch(
+                    task_id,
+                    next_round_id,
+                    "director",
+                    recover_stale_claim=True,
+                )
+                if dispatch_claimed:
+                    renewed = self._store.renew_pending_input_claim(claim)
+                    if renewed is None:
+                        return None
+                    claim = renewed
+                    await self.dispatch_role(task_id, "director", prefer_continue=False)
+                else:
+                    attempt = self._store.lifecycle.latest_attempt(
+                        task_id,
+                        next_round_id,
+                        "director",
+                    )
+                    if attempt.status in {"queued", "dispatching"}:
+                        self._store.release_pending_input_claim(
+                            claim,
+                            error="provider dispatch is still claimed",
+                        )
+                        return None
+
+        renewed = self._store.renew_pending_input_claim(claim)
+        if renewed is None:
+            return None
+        claim = renewed
+        consumed = self._store.consume_pending_input_claim(
+            claim,
             consumed_round_id=next_round_id,
         )
         self._events.emit(
@@ -2963,8 +4360,8 @@ class RelayService:
                 "text": pending.text,
                 "target_role": "director",
                 **_relay_attachment_payload(images=clean_images, files=clean_files),
-                "artifact_id": int(getattr(followup, "id", 0) or 0),
-                "context_packet_id": int(getattr(context_record, "id", 0) or 0),
+                "artifact_id": int(followup.get("id") or 0),
+                "context_packet_id": context_id,
                 "round_id": next_round_id,
                 "pending_input_id": pending.id,
             },
@@ -2986,8 +4383,6 @@ class RelayService:
             role="user",
             payload=consumed.to_dict(),
         )
-        if dispatch_next:
-            await self.dispatch_role(task_id, "director", prefer_continue=False)
         return consumed
 
     async def add_user_message(
@@ -2998,6 +4393,7 @@ class RelayService:
         images: list[dict[str, Any]] | None = None,
         files: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        self._store.assert_submissions_open()
         detail = self._store.get_task_detail(task_id)
         clean_images = _relay_clean_image_attachments(images)
         clean_files = _relay_clean_text_file_attachments(files)
@@ -3023,12 +4419,15 @@ class RelayService:
         )
         self._store.update_role_status(task_id, "director", "queued")
         refreshed = self._store.get_task_detail(task_id)
-        packet = build_role_context_packet(
-            task=refreshed.task,
-            role="director",
-            board=refreshed.board,
-            handoffs=self._store.handoffs_for_role(task_id, "director"),
-            artifacts=refreshed.artifacts,
+        packet = _packet_with_execution_contract(
+            build_role_context_packet(
+                task=refreshed.task,
+                role="director",
+                board=refreshed.board,
+                handoffs=self._store.handoffs_for_role(task_id, "director"),
+                artifacts=refreshed.artifacts,
+            ),
+            self._store.lifecycle.round_execution(task_id, round_id),
         )
         context_record = self._store.save_context_packet(
             task_id,
@@ -3225,7 +4624,7 @@ class RelayService:
             return None
         self._project_native_event(runtime_event, task_id=task_id, role=role)
         if str(getattr(runtime_event, "event_type", "") or "") == "approval.requested":
-            self._handle_provider_approval_requested(
+            await self._handle_provider_approval_requested(
                 task_id,
                 role,
                 runtime_event,
@@ -3274,7 +4673,7 @@ class RelayService:
         )
         return None
 
-    def _handle_provider_approval_requested(
+    async def _handle_provider_approval_requested(
         self,
         task_id: int,
         role: str,
@@ -3305,36 +4704,131 @@ class RelayService:
             getattr(job, "active_turn_id", "") or getattr(job, "turn_id", "") or ""
         )
         native_session_id = str(getattr(job, "native_session_id", "") or "")
+        if not request_id or runtime_event_id <= 0:
+            return
         confirmation_label = _relay_confirmation_source_label(
             "provider_native_approval",
             provider_name,
         )
-        execution = self._store.lifecycle.round_execution(task_id, current_round)
-        self._store.lifecycle.set_round_execution(
-            task_id,
-            current_round,
-            execution_mode=str(execution.get("execution_mode") or "simple"),
-            execution_goal=str(execution.get("execution_goal") or ""),
-            execution_strategy=execution.get("execution_strategy")
-            if isinstance(execution.get("execution_strategy"), dict)
-            else {},
-            waiting_reason="provider_approval",
-        )
-        self._store.lifecycle.set_round_confirmation(
-            task_id,
-            current_round,
-            source="provider_native_approval",
-            kind=kind,
-            role=role,
-            provider=provider_name,
-            provider_request_id=request_id,
-            runtime_event_id=runtime_event_id,
-            native_session_id=native_session_id,
-            agent_run_id=agent_run_id,
-            turn_id=turn_id,
-        )
-        self._store.update_role_status(task_id, role, "waiting")
-        self._store.update_task_status(task_id, "waiting_user")
+        async with self._approval_lock(task_id, current_round):
+            execution = self._store.lifecycle.round_execution(task_id, current_round)
+            previous = execution.get("confirmation")
+            if not isinstance(previous, dict):
+                previous = {}
+            previous_source = str(previous.get("source") or "")
+            previous_request_id = str(previous.get("provider_request_id") or "")
+            previous_event_id = int(previous.get("runtime_event_id") or 0)
+            if (
+                previous_source == "provider_native_approval"
+                and previous_request_id == request_id
+                and previous_event_id == runtime_event_id
+            ):
+                return
+            if previous_source in {
+                "provider_native_resolving",
+                "provider_native_superseding",
+            }:
+                # A sibling worker is already performing the provider-side
+                # action.  Its compare-and-set finalization is authoritative.
+                return
+            if previous_event_id > runtime_event_id:
+                return
+
+            # A newer native request makes the older one invalid.  Reserve
+            # the old confirmation before asking its provider to cancel so a
+            # button press cannot race this supersede into a double decision.
+            if (
+                previous_source == "provider_native_approval"
+                and previous_request_id
+                and previous_event_id > 0
+            ):
+                claimed = self._store.lifecycle.claim_provider_native_approval_action(
+                    task_id,
+                    current_round,
+                    provider_request_id=previous_request_id,
+                    runtime_event_id=previous_event_id,
+                    action="superseding",
+                )
+                if not claimed:
+                    return
+                previous_provider_name = str(previous.get("provider") or "").strip()
+                try:
+                    previous_provider = self._registry.get(previous_provider_name)
+                    previous_capabilities = previous_provider.capabilities()
+                    if not bool(
+                        getattr(previous_capabilities, "can_resolve_approval", False)
+                    ):
+                        raise ValueError(
+                            f"provider {previous_provider_name} cannot cancel native approvals"
+                        )
+                    await previous_provider.resolve_approval(
+                        previous_request_id,
+                        {"action": "cancel"},
+                    )
+                except Exception as exc:
+                    self._store.lifecycle.restore_provider_native_approval_action(
+                        task_id,
+                        current_round,
+                        provider_request_id=previous_request_id,
+                        runtime_event_id=previous_event_id,
+                        action="superseding",
+                    )
+                    self._events.emit(
+                        task_id,
+                        "approval.supersede_failed",
+                        role=role,
+                        payload={
+                            "round_id": current_round,
+                            "provider_request_id": previous_request_id,
+                            "replacement_request_id": request_id,
+                            "error": str(exc),
+                        },
+                    )
+                    return
+                replacement = self._store.lifecycle.replace_provider_native_approval(
+                    task_id,
+                    current_round,
+                    role=role,
+                    provider=provider_name,
+                    provider_request_id=request_id,
+                    runtime_event_id=runtime_event_id,
+                    native_session_id=native_session_id,
+                    agent_run_id=agent_run_id,
+                    turn_id=turn_id,
+                    kind=kind,
+                    expected_previous_request_id=previous_request_id,
+                    expected_previous_runtime_event_id=previous_event_id,
+                )
+                if not bool(replacement.get("applied")):
+                    return
+                self._events.emit(
+                    task_id,
+                    "approval.superseded",
+                    role=role,
+                    payload={
+                        "round_id": current_round,
+                        "provider_request_id": previous_request_id,
+                        "replacement_request_id": request_id,
+                        "pending_approval_count": int(
+                            replacement.get("pending_approval_count") or 1
+                        ),
+                    },
+                )
+            else:
+                replacement = self._store.lifecycle.replace_provider_native_approval(
+                    task_id,
+                    current_round,
+                    role=role,
+                    provider=provider_name,
+                    provider_request_id=request_id,
+                    runtime_event_id=runtime_event_id,
+                    native_session_id=native_session_id,
+                    agent_run_id=agent_run_id,
+                    turn_id=turn_id,
+                    kind=kind,
+                )
+                if not bool(replacement.get("applied")):
+                    return
         summary = str(payload.get("summary") or payload.get("reason") or "Provider approval required")
         self._events.emit(
             task_id,
@@ -3358,6 +4852,7 @@ class RelayService:
                 "agent_run_id": agent_run_id,
                 "turn_id": turn_id,
                 "provider": provider_name,
+                "pending_approval_count": 1,
             },
         )
 
@@ -3404,10 +4899,6 @@ class RelayService:
         text: str,
         semantic_invalid: bool = False,
     ):
-        if runtime_event_id > 0 and runtime_event_id in self._handled_runtime_completion_ids:
-            return None
-        if runtime_event_id > 0:
-            self._handled_runtime_completion_ids.add(runtime_event_id)
         clean_text = _plain_followup_visible_text(text.strip())
         round_id = self._store.current_round_id(task_id)
         final_role_status = "waiting" if semantic_invalid else "passed"
@@ -3864,6 +5355,13 @@ class RelayService:
             fallback_round = 1
         if agent_run_id is None:
             return fallback_round
+        attempt = self._store.lifecycle.attempt_for_completion_identity(
+            task_id,
+            role,
+            agent_run_id=agent_run_id,
+        )
+        if attempt is not None:
+            return attempt.round_id
         try:
             artifacts = self._store.get_task_detail(task_id).artifacts
         except Exception:
@@ -4374,6 +5872,18 @@ def _coerce_round_id(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return round_id if round_id > 0 else 0
+
+
+def _positive_int(value: Any) -> int | None:
+    """Accept a persisted positive integer while excluding bool coercion."""
+
+    if isinstance(value, bool):
+        return None
+    try:
+        candidate = int(value)
+    except (TypeError, ValueError):
+        return None
+    return candidate if candidate > 0 else None
 
 
 def _role_envelope_retry_prompt(

@@ -18,6 +18,7 @@ INTERNAL_RELAY_ARTIFACT_TYPES = (
     "role_artifact_invalid",
     "role_resume",
     "user_attachments",
+    "pending_input_transition",
     "user_followup",
     "followup_response",
 )

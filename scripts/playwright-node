@@ -30,4 +30,10 @@ if [[ -z "${playwright_node_modules}" ]]; then
 fi
 
 export NODE_PATH="${playwright_node_modules}${NODE_PATH:+:${NODE_PATH}}"
-exec node "$@"
+# Node normally searches ``$PWD/node_modules`` before NODE_PATH.  That makes
+# an explicitly configured installation silently lose to a repo-local one,
+# which is both surprising and breaks isolated CI/browser fixtures.  The
+# preload only pins the Playwright package itself; its transitive dependencies
+# continue resolving from the selected installation in the ordinary way.
+export WLCODEX_RESOLVED_PLAYWRIGHT_NODE_MODULES="${playwright_node_modules}"
+exec node --require "${script_dir}/playwright-node-resolver.cjs" "$@"

@@ -77,8 +77,9 @@
   --btn-active-press:        rgba(147,197,253,0.16);
 
   /* Button sizing */
+  --control-touch-target: 44px;
   --btn-height-sm:   38px;
-  --btn-height-md:   44px;
+  --btn-height-md:   var(--control-touch-target);
   --btn-height-lg:   52px;
   --btn-radius-sm:   var(--radius-sm);
   --btn-radius-md:   var(--radius-md);
@@ -209,7 +210,7 @@ body {
 /* ── Buttons ──────────────────────────────────────────── */
 
 button {
-  min-height: 44px;
+  min-height: var(--control-touch-target);
   border: 0;
   border-radius: var(--radius-md);
   padding: 8px 14px;
@@ -280,6 +281,7 @@ button.loading::after {
 input, textarea, select {
   width: 100%;
   min-width: 0;
+  min-height: var(--control-touch-target);
   border: 1px solid var(--border-input);
   border-radius: var(--radius-sm);
   background: var(--bg-input);
@@ -300,6 +302,22 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-muted);
   padding: 24px 0;
   text-align: center;
+}
+
+/* A transcript should never yank a reader away from earlier evidence. */
+.new-messages-notice {
+  position: fixed;
+  right: 16px;
+  bottom: calc(var(--control-touch-target) + 28px);
+  z-index: 20;
+  min-width: var(--control-touch-target);
+  min-height: var(--control-touch-target);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  padding: 0 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
 /* ── Focus Visible ────────────────────────────────────── */
@@ -330,5 +348,21 @@ input:focus, textarea:focus, select:focus {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── High Contrast ───────────────────────────────────── */
+
+@media (forced-colors: active) {
+  *, *::before, *::after {
+    forced-color-adjust: auto;
+  }
+
+  button,
+  input,
+  textarea,
+  select,
+  .circle {
+    border: 1px solid CanvasText;
   }
 }

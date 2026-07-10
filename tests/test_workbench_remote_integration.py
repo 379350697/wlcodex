@@ -32,8 +32,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 from wlcodex.workbench.models import (
     ExecutionMode,
     ViewMode,
@@ -65,7 +63,6 @@ from wlcodex.runtime_events import (
     now_iso,
 )
 from wlcodex.runtime_state import (
-    WorkbenchRuntimeState,
     replay_workbench_events,
 )
 
@@ -77,6 +74,9 @@ from wlcodex.router import (
     SettingsCommand,
     parse_command,
 )
+
+
+pytestmark = pytest.mark.integration
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -948,7 +948,7 @@ class TestClosedLoop4_ClaudeOnlyWithVerify:
         if not has_verify:
             has_verify = "让审计工程师验收" in resp.text
         assert has_verify, (
-            f"Verify affordance missing in Claude-only Onsite→Cockpit path"
+            "Verify affordance missing in Claude-only Onsite→Cockpit path"
         )
 
 

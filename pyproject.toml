@@ -23,6 +23,7 @@ antigravity-sdk = [
 
 [project.scripts]
 wlcodex = "wlcodex.main:main"
+wlcodex-retain-raw-frames = "wlcodex.runtime_raw_frame_retention:main"
 
 [tool.ruff]
 line-length = 100
@@ -31,7 +32,7 @@ target-version = "py312"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-m 'not slow and not integration and not live'"
+addopts = "-m 'not slow and not live'"
 markers = [
   "slow: slower behavioral tests excluded from the default fast test run",
   "integration: cross-component or subprocess integration tests",

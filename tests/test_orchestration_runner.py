@@ -4,8 +4,6 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 from wlcodex.agent_backend import AgentRequest, AgentStreamEvent
 from wlcodex.codex_backend import FakeCodexBackend
 from wlcodex.config import WorkspaceConfig
@@ -20,6 +18,9 @@ from wlcodex.runtime_events import (
 )
 from wlcodex.orchestration_runner import OrchestrationRunner
 from wlcodex.task_service import TaskService
+
+
+pytestmark = pytest.mark.integration
 
 
 class RecordingRenderer:
@@ -292,7 +293,7 @@ def _build_runtime(tmp_path: Path) -> tuple[
 async def test_controller_starts_staged_auto_collecting_context(
     tmp_path: Path,
 ) -> None:
-    """Staged /auto starts collecting_context via Codex, not eager runner."""
+    """Legacy /auto persists route selection before starting any provider."""
     ledger, service, backend, renderer, _workspace = _build_runtime(tmp_path)
     runner = NeverFinishingRunner()
     controller = CommandController(
@@ -314,24 +315,21 @@ async def test_controller_starts_staged_auto_collecting_context(
         timeout=0.05,
     )
 
-    # Staged /auto renders via interaction_renderer (not via runner)
-    assert response.already_rendered is True
-    # The runner is NOT called — staged-auto doesn't use start_chief_engineer
+    assert response.already_rendered is False
+    assert "请选择执行路线" in response.text
+    # No runner or provider may start before the user's explicit route choice.
     assert len(runner.calls) == 0
 
-    # Orchestration run should be created in collecting_context, running
+    # The durable run is waiting on a route choice, not falsely marked running.
     orch_runs = ledger.list_orchestration_runs(1)
     assert len(orch_runs) == 1
-    assert orch_runs[0].current_step == "collecting_context"
-    assert orch_runs[0].status == OrchestrationStatus.RUNNING
+    assert orch_runs[0].current_step == "route_select"
+    assert orch_runs[0].status == OrchestrationStatus.NEEDS_USER
 
-    # A codex analysis agent run should be created
+    # No Codex analysis agent exists until the route selection callback.
     agent_runs = ledger.list_agent_runs(1)
-    assert len(agent_runs) == 1
-    assert agent_runs[0].agent == "codex"
-    assert agent_runs[0].role == "auto_analysis"
-
-    assert any(event.event_type == "run_started" for event in renderer.events)
+    assert agent_runs == []
+    assert not any(event.event_type == "run_started" for event in renderer.events)
 
     for task in runner.tasks:
         task.cancel()

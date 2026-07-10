@@ -15,20 +15,23 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 from wlcodex.agent_backend import AgentRequest, AgentResult, AgentStreamEvent
+from wlcodex.auto_workflow import AUTO_ROUTE_DIAGNOSE
 from wlcodex.codex_backend import FakeCodexBackend
 from wlcodex.config import WorkspaceConfig
 from wlcodex.controller import CommandController
-from wlcodex.conversation_callback import VERIFY, ConversationCallback, decode_conversation_callback
+from wlcodex.conversation_callback import (
+    VERIFY,
+    ConversationCallback,
+    decode_conversation_callback,
+)
 from wlcodex.db import Ledger
 from wlcodex.inspection import TaskInspector
-from wlcodex.interaction.events import InteractionEvent
 from wlcodex.models import ConversationMode, TaskStatus
-from wlcodex.orchestrator import OrchestrationProgress
-from wlcodex.runtime_events import RuntimeEvent
 from wlcodex.task_service import TaskService
+
+
+pytestmark = pytest.mark.integration
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +133,15 @@ def has_verify_button(response_text: str, buttons: list[list[dict[str, str]]]) -
     return "让审计工程师验收" in response_text
 
 
+async def select_diagnose_route(ctrl: CommandController, chat_id: int):
+    """Advance a legacy /auto workbench through its explicit route choice."""
+    conversation = ctrl._ledger.get_active_conversation(chat_id)
+    assert conversation is not None
+    return await ctrl.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_ROUTE_DIAGNOSE)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test: Codex-only never enqueues Claude
 # ---------------------------------------------------------------------------
@@ -156,8 +168,7 @@ async def test_codex_direct_never_calls_claude(tmp_path: Path) -> None:
     assert len(ctrl._backend.turns) >= 1, (
         f"Codex backend turns={ctrl._backend.turns}, expected at least 1 turn"
     )
-    # Spec L190-192: "这次只交给 Codex，不会调用 Claude 修改代码。"
-    assert "只交给 Codex" in resp.text or "不会调用 Claude" in resp.text, (
+    assert "只交给 GPT 开发工程师" in resp.text or "不会调用其他开发工程师" in resp.text, (
         f"Codex-only response missing spec label. text={resp.text!r}"
     )
 
@@ -174,8 +185,7 @@ async def test_codex_direct_command_labels_mode(tmp_path: Path) -> None:
         {"chat_id": 42, "user_id": 1},
     )
 
-    # Spec L190-192: "这次只交给 Codex，不会调用 Claude 修改代码。"
-    assert "只交给 Codex" in resp.text or "不会调用 Claude" in resp.text, (
+    assert "只交给 GPT 开发工程师" in resp.text or "不会调用其他开发工程师" in resp.text, (
         f"Codex-only response missing spec label. text={resp.text!r}"
     )
 
@@ -288,9 +298,8 @@ async def test_conversation_text_defaults_to_codex_only(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_starts_staged_context_collection(tmp_path: Path) -> None:
-    """``/auto <prompt>`` starts staged context collection (read-only Codex),
-    NOT an eager Codex->Claude->Codex pipeline. No Claude must be started."""
+async def test_auto_mode_requires_explicit_route_selection(tmp_path: Path) -> None:
+    """``/auto`` waits for an explicit route instead of silently dispatching."""
     claude = FakeClaudeBackend(enabled=True)
     runner = FakeOrchestrationRunner()
     ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
@@ -303,21 +312,17 @@ async def test_auto_mode_starts_staged_context_collection(tmp_path: Path) -> Non
     )
     # Claude must not be invoked
     assert len(claude.send_calls) == 0
-    # Must start collecting_context orchestration run
+    # A legacy /auto run is waiting for a user route; no role has begun yet.
     convos = ctrl._ledger.list_conversations_by_chat(42)
     assert convos, "Expected a conversation"
     assert convos[0].mode == ConversationMode.CHIEF_ENGINEER.value
     runs = ctrl._ledger.list_orchestration_runs(convos[0].id, limit=1)
     assert len(runs) == 1
-    assert runs[0].current_step == "collecting_context"
-    assert runs[0].status == "running"
-    # Agent run must be codex read-only analysis, not implementation
+    assert runs[0].current_step == "route_select"
+    assert runs[0].status == "needs_user"
     agent_runs = ctrl._ledger.list_agent_runs(convos[0].id, limit=5)
-    assert any(run.role == "auto_analysis" for run in agent_runs), (
-        f"Expected auto_analysis agent run, got roles: {[run.role for run in agent_runs]}"
-    )
-    # Response must indicate Codex analysis stage
-    assert "补充" in response.text or "最终方案" in response.text or "分析" in response.text
+    assert agent_runs == []
+    assert "请选择执行路线" in response.text
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +337,7 @@ async def test_claude_direct_conversation_mode_is_claude_direct(tmp_path: Path) 
     ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
 
     await ctrl.handle("/claude 改个标题", {"chat_id": 42, "user_id": 1})
-    resp = await ctrl.handle("/status", {"chat_id": 42, "user_id": 1})
+    await ctrl.handle("/status", {"chat_id": 42, "user_id": 1})
 
     # Must NOT show chief_engineer mode for this conversation.
     convos = ctrl._ledger.list_conversations_by_chat(42)
@@ -534,7 +539,8 @@ async def test_auto_starts_staged_codex_analysis_in_workbench(tmp_path: Path) ->
     assert codex_thread_id
     mark_active_task_done(ctrl, 42)
 
-    response = await ctrl.handle("/auto 按刚才结论执行修复", ctx)
+    await ctrl.handle("/auto 按刚才结论执行修复", ctx)
+    await select_diagnose_route(ctrl, 42)
 
     # Must NOT call start_chief_engineer (old eager pipeline)
     assert len(runner.starts) == 0
@@ -594,7 +600,8 @@ async def test_auto_starts_context_collection_without_claude(tmp_path: Path) -> 
     runner = FakeOrchestrationRunner()
     ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
 
-    response = await ctrl.handle("/auto 查登录偶发失败", {"chat_id": 77, "user_id": 88})
+    await ctrl.handle("/auto 查登录偶发失败", {"chat_id": 77, "user_id": 88})
+    response = await select_diagnose_route(ctrl, 77)
 
     # Must NOT start the eager orchestrator
     assert len(runner.starts) == 0, (
@@ -635,8 +642,9 @@ async def test_auto_context_supplement_stays_in_collecting(tmp_path: Path) -> No
 
     # Start /auto first
     await ctrl.handle("/auto 查 cloud deploy 是否生效", {"chat_id": 99, "user_id": 100})
+    await select_diagnose_route(ctrl, 99)
     # Then send plain text as context supplement
-    response = await ctrl.handle_conversation_text(
+    await ctrl.handle_conversation_text(
         "补充：只看 lightfeev2，不要执行修改",
         {"chat_id": 99, "user_id": 100},
     )
@@ -658,6 +666,7 @@ async def test_auto_does_not_auto_start_claude_until_button(tmp_path: Path) -> N
     ctrl = build_controller(tmp_path, claude=claude, orchestrator=runner)
 
     await ctrl.handle("/auto 查一下结构", {"chat_id": 101, "user_id": 102})
+    await select_diagnose_route(ctrl, 101)
     await ctrl.handle_conversation_text("补充：重点看死代码", {"chat_id": 101, "user_id": 102})
 
     # No Claude run should exist at this point
@@ -676,9 +685,10 @@ async def test_codex_and_claude_direct_are_unaffected(tmp_path: Path) -> None:
     # /codex should still work normally — use /new to get a clean workbench
     await ctrl.handle("/new", {"chat_id": 200, "user_id": 1})
     resp = await ctrl.handle("/codex 分析代码", {"chat_id": 200, "user_id": 1})
-    assert "只交给 Codex" in resp.text or "不会调用 Claude" in resp.text
+    assert "只交给 GPT 开发工程师" in resp.text or "不会调用其他开发工程师" in resp.text
+    mark_active_task_done(ctrl, 200)
 
     # /claude should still work normally — fresh workbench
     await ctrl.handle("/new", {"chat_id": 201, "user_id": 1})
     resp2 = await ctrl.handle("/claude 改个文件", {"chat_id": 201, "user_id": 1})
-    assert "Claude" in resp2.text or resp2.already_rendered
+    assert "DeepSeek 开发工程师" in resp2.text or resp2.already_rendered

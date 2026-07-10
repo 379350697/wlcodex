@@ -22,3 +22,7 @@ wlcodex_*_probe.txt
 chrome-profile-*/
 scripts/run_mock_server.py
 skills-lock.json
+node_modules/
+test-results/
+playwright-report/
+blob-report/

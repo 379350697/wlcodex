@@ -1,5 +1,8 @@
 # Spec Compliance Review — Repair Task 3: Agent Session Library Projection
 
+> **SUPERSEDED — historical review only.** It is not a current release result;
+> use [the current semantic contract](../../product-semantics.md) and current tests.
+
 **Reviewer**: Spec Compliance Reviewer (independent)
 **Date**: 2026-05-20
 **Verdict**: **PASS**

@@ -1,5 +1,11 @@
 from wlcodex.interaction.buttons import natural_completion_buttons
 from wlcodex.interaction.errors import classify_user_error
+from wlcodex.interaction.events import InteractionEvent
+from wlcodex.interaction.profiles import (
+    LegacyProfile,
+    NaturalChatProfile,
+    profile_from_name,
+)
 
 
 def test_natural_completion_buttons_are_small_and_deterministic() -> None:
@@ -43,14 +49,6 @@ def test_classify_user_error_hides_internal_exception_details() -> None:
 
     assert "ConnectionError" not in text
     assert "认证" in text or "登录" in text
-
-
-from wlcodex.interaction.events import InteractionEvent
-from wlcodex.interaction.profiles import (
-    LegacyProfile,
-    NaturalChatProfile,
-    profile_from_name,
-)
 
 
 def test_profile_factory_accepts_known_profiles() -> None:

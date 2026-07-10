@@ -1,5 +1,8 @@
 # Final Gate — WLCodex Workbench Session Library And Task Internalization Repair
 
+> **SUPERSEDED — historical review only.** It is not a current release result;
+> use [the current semantic contract](../../product-semantics.md) and current tests.
+
 **Date**: 2026-05-20
 **Reviewer**: Closed-Loop Verification Agent (fifth pass — continuation lifecycle closure)
 

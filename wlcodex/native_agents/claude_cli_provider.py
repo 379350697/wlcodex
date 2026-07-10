@@ -125,6 +125,20 @@ class ClaudeCliLocalProvider:
             limit=limit,
         )
 
+    async def list_cached_sessions(self, limit: int = 50) -> list[NativeAgentSession]:
+        """Return the persisted Native view without importing local history.
+
+        The local import path can create/update sessions, so it belongs to an
+        explicit sync/background worker rather than a page refresh or SSE
+        hello snapshot.
+        """
+
+        return self._session_store.list_recent(
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            limit=limit,
+        )
+
     async def list_models(self) -> list[dict[str, Any]]:
         model = _engine_config_value(self._engine, "model")
         if not model:
@@ -196,6 +210,12 @@ class ClaudeCliLocalProvider:
     async def read_session(self, native_session_id: str) -> dict[str, Any]:
         session = self._lookup_session(native_session_id, import_local=True)
         session = self._sync_local_transcript(session)
+        return {"thread": session.to_json_dict(), "turns": []}
+
+    async def peek_session(self, native_session_id: str) -> dict[str, Any]:
+        """Read the persisted view without importing or projecting history."""
+
+        session = self._lookup_session(native_session_id, import_local=False)
         return {"thread": session.to_json_dict(), "turns": []}
 
     async def attach_session(self, native_session_id: str) -> NativeAgentControlResult:

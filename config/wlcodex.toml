@@ -15,6 +15,13 @@ sandbox = "danger-full-access"
 sqlite_path = "runtime/wlcodex.sqlite3"
 task_log_dir = "runtime/tasks"
 
+[runtime_retention]
+hot_retention_days = 7
+archive_retention_days = 90
+interval_seconds = 21600
+batch_size = 250
+scheduled_apply_enabled = false
+
 [display]
 status_update_min_interval_seconds = 2
 tail_lines = 40

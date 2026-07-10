@@ -1,5 +1,8 @@
 # WLCodex Adaptive Engineering Team Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Status
 
 Drafted on 2026-05-25 from the approved multi-agent direction. Updated with

@@ -7,8 +7,6 @@ import subprocess
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 from wlcodex.agent_backend import AgentStreamEvent
 from wlcodex.codex_backend import BackendEvent, FakeCodexBackend
 from wlcodex.config import WorkspaceConfig
@@ -17,7 +15,7 @@ from wlcodex.claude_permissions import ClaudePermissionState
 from wlcodex.conversation_state_machine import BUSY_APPEND, BUSY_INTERRUPT
 from wlcodex.db import Ledger
 from wlcodex.inspection import TaskInspector
-from wlcodex.models import AgentRunStatus, OrchestrationStatus, TaskStatus
+from wlcodex.models import AgentRunStatus, TaskStatus
 from wlcodex.orchestration_runner import OrchestrationRunner
 from wlcodex.task_service import TaskService
 from wlcodex.team_memory import InstinctMemory
@@ -30,6 +28,9 @@ from wlcodex.runtime_events import (
     Visibility,
     now_iso,
 )
+
+
+pytestmark = pytest.mark.integration
 
 
 def _attach_runtime_runner(
@@ -909,7 +910,7 @@ async def test_new_conversation_command(ctrl: CommandController) -> None:
 async def test_codex_direct_creates_task(ctrl: CommandController) -> None:
     response = await ctrl.handle("/codex 分析 router.py", {"chat_id": 200, "user_id": 300})
 
-    assert "只交给 Codex" in response.text
+    assert "只交给 GPT 开发工程师" in response.text
     tasks = ctrl._service.list_tasks()
     assert len(tasks) >= 1
 
@@ -1050,7 +1051,7 @@ async def test_busy_append_steers_current_codex_turn(
 
     response = await ctrl.handle_workspace_busy_callback(BUSY_APPEND, active.id)
 
-    assert "已发给当前 Codex" in response.text
+    assert "已发给当前 GPT 开发工程师" in response.text
     assert ctrl._backend.steers[-1] == ("thread-1", "turn-1", "新插话")
 
 
@@ -1078,7 +1079,7 @@ async def test_busy_interrupt_aborts_current_and_runs_pending_codex(
 
     response = await ctrl.handle_workspace_busy_callback(BUSY_INTERRUPT, active.id)
 
-    assert "只交给 Codex" in response.text
+    assert "只交给 GPT 开发工程师" in response.text
     assert ctrl._service.get_task(task.id).status == TaskStatus.ABORTED
     assert ("thread-2", "turn-2") in ctrl._backend._interrupts
     assert ctrl._backend.turns[-1][1] == "最新任务"
@@ -1218,7 +1219,8 @@ async def test_trace_command_uses_runtime_inspector(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_auto_mode_reports_claude_needed(ctrl: CommandController) -> None:
     response = await ctrl.handle("/auto 修复登录 bug", {"chat_id": 1, "user_id": 2})
-    assert "诊断工程师" in response.text
+    assert "请选择执行路线" in response.text
+    assert "诊断：先查问题" in response.text
 
 
 @pytest.mark.asyncio
@@ -1505,7 +1507,7 @@ async def test_status_team_summary_uses_latest_job_per_role(
 
     response = await ctrl.handle("/status", {"chat_id": 100, "user_id": 200})
 
-    assert "开发工程师：codex_gpt / 运行中" in response.text
+    assert "开发工程师：运行中" in response.text
     assert "开发工程师：claude_deepseek / 已失败" not in response.text
     assert response.text.count("开发工程师：") == 1
 
@@ -1836,7 +1838,7 @@ async def test_claude_command_records_claude_direct_run(ctrl_with_claude: Comman
 async def test_staged_auto_does_not_call_eager_runner(
     tmp_path: Path,
 ) -> None:
-    """Staged /auto starts Codex analysis directly, NOT via orchestration runner."""
+    """Legacy /auto asks for an explicit route before any runner starts."""
 
     class RunnerSpy:
         def __init__(self) -> None:
@@ -1871,18 +1873,19 @@ async def test_staged_auto_does_not_call_eager_runner(
         {"chat_id": 100, "user_id": 200},
     )
 
-    # Must NOT call start_chief_engineer — staged auto uses direct Codex analysis
+    # Must NOT call start_chief_engineer before the user selects a route.
     assert len(runner.calls) == 0, (
         f"staged /auto should not call start_chief_engineer, got {len(runner.calls)} calls"
     )
     # Claude must not be started
     assert len(claude.calls) == 0
-    # Orchestration run must be in collecting_context
+    # The route choice is durable and does not pretend analysis has begun.
     active = ledger.get_active_conversation(100)
     runs = ledger.list_orchestration_runs(active.id, limit=1)
-    assert runs[0].current_step == "collecting_context"
+    assert runs[0].current_step == "route_select"
+    assert "请选择执行路线" in response.text
     assert response.already_rendered is False
-    assert ("分析" in response.text or "最终方案" in response.text or "Codex" in response.text)
+    assert "GPT 执行" in response.text
 
 
 @pytest.mark.asyncio
@@ -2108,9 +2111,7 @@ async def test_conversation_text_event_keeps_only_safe_preview(
 async def test_staged_auto_starts_without_orchestration_runner(
     tmp_path: Path,
 ) -> None:
-    """Staged /auto starts Codex context collection even without an orchestration
-    runner. It no longer requires OrchestrationRunner because it uses direct
-    Codex analysis, not the eager pipeline."""
+    """Legacy /auto records a route choice without starting an old pipeline."""
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
     backend = FakeCodexBackend()
@@ -2155,15 +2156,14 @@ async def test_staged_auto_starts_without_orchestration_runner(
         {"chat_id": 100, "user_id": 200},
     )
 
-    # Staged /auto works without orchestration runner — starts collecting_context
-    assert "分析" in response.text or "最终方案" in response.text or "Codex" in response.text
+    assert "请选择执行路线" in response.text
     assert len(claude.calls) == 0
 
-    # Orchestration run must be in collecting_context
+    # The route must remain selected until the user explicitly chooses it.
     active = ledger.get_active_conversation(100)
     runs = ledger.list_orchestration_runs(active.id, limit=1)
     assert len(runs) == 1
-    assert runs[0].current_step == "collecting_context"
+    assert runs[0].current_step == "route_select"
 
 
 @pytest.mark.asyncio
@@ -2188,7 +2188,6 @@ async def test_conversation_text_uses_packet_render(ctrl_with_claude: CommandCon
 async def test_orchestrator_uses_send_codex_prompt(ctrl_with_claude: CommandController) -> None:
     """ChiefEngineerOrchestrator must use send_codex_prompt, not echo."""
     from wlcodex.orchestrator import ChiefEngineerOrchestrator
-    from wlcodex.context_packets import ContextBudget
 
     orch = ChiefEngineerOrchestrator(
         ctrl_with_claude._backend,
@@ -2200,34 +2199,32 @@ async def test_orchestrator_uses_send_codex_prompt(ctrl_with_claude: CommandCont
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_starts_staged_context_collection(ctrl_with_claude: CommandController) -> None:
-    """Handle /auto must start collecting_context, not an eager pipeline."""
+async def test_auto_mode_starts_in_route_selection(ctrl_with_claude: CommandController) -> None:
+    """Handle /auto must not claim context collection before a route choice."""
     response = await ctrl_with_claude.handle(
         "/auto 修复登录 bug",
         {"chat_id": 100, "user_id": 200},
     )
-    # Staged /auto starts Codex analysis, not an eager pipeline
-    assert "最终方案" in response.text or "分析" in response.text or "Codex" in response.text
+    assert "请选择执行路线" in response.text
     # Claude must not be started
     assert len(ctrl_with_claude._claude.calls) == 0
     active = ctrl_with_claude._ledger.get_active_conversation(100)
     assert active is not None
     orch_runs = ctrl_with_claude._ledger.list_orchestration_runs(active.id, limit=1)
-    assert orch_runs[0].current_step == "collecting_context"
+    assert orch_runs[0].current_step == "route_select"
 
 
 @pytest.mark.asyncio
 async def test_auto_mode_staged_hides_english_model_snippets(
     ctrl_with_claude: CommandController,
 ) -> None:
-    """Staged /auto response mentions context collection, not English model output."""
+    """Legacy /auto route selection never leaks a provider response."""
     response = await ctrl_with_claude.handle(
         "/auto 修复登录 bug",
         {"chat_id": 100, "user_id": 200},
     )
 
-    # Staged /auto starts collecting context, not the eager pipeline
-    assert "分析" in response.text or "最终方案" in response.text or "Codex" in response.text
+    assert "请选择执行路线" in response.text
     assert "Analysis complete" not in response.text
     assert "Fake Claude implementation result" not in response.text
 
@@ -2275,16 +2272,22 @@ async def test_staged_auto_records_ledger_on_context_collection(tmp_path: Path) 
         {"chat_id": 100, "user_id": 200},
     )
 
-    assert response.already_rendered
-    await _drain_runtime_runner(ctrl)
     active = ledger.get_active_conversation(100)
     assert active is not None
+    from wlcodex.auto_workflow import AUTO_ROUTE_DIAGNOSE
+    from wlcodex.conversation_callback import ConversationCallback
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(active.id, AUTO_ROUTE_DIAGNOSE)
+    )
+    assert "诊断工程师开始分析" in response.text
+    await _drain_runtime_runner(ctrl)
     assert "Auto" in active.conversation_summary or "修改" in active.conversation_summary
 
     # Staged /auto does NOT start Claude automatically
     assert active.active_claude_run_id is None
 
-    # Should have one codex analysis agent run for collecting_context
+    # The explicitly selected diagnosis route starts one Codex analysis run.
     agent_runs = ledger.list_agent_runs(active.id)
     assert len(agent_runs) == 1
     assert agent_runs[0].agent == "codex"
@@ -2296,25 +2299,20 @@ async def test_staged_auto_records_ledger_on_context_collection(tmp_path: Path) 
     assert orch_runs[0].current_step == "collecting_context"
     assert orch_runs[0].status == "running"
 
-    # A run_started event should have been rendered
-    started_events = [
-        event for event in renderer.events
-        if getattr(event, "event_type", "") == "run_started"
-    ]
-    assert started_events
+    # The selected route starts exactly one real provider turn; legacy chat
+    # rendering is not used as lifecycle truth.
+    assert backend.turns
 
 
 @pytest.mark.asyncio
 async def test_staged_auto_start_does_not_offer_final_plan_while_analysis_runs(tmp_path: Path) -> None:
-    """The final-plan gate must not be clickable until the initial Codex
-    context-collection task has actually finished."""
+    """Route selection must not render a fictional running analysis."""
     workspace = tmp_path / "workspace"
     _init_git_workspace(workspace)
 
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
     backend = FakeCodexBackend()
-    store = RuntimeEventStore(ledger._conn)
     service = TaskService(ledger, (
         WorkspaceConfig("wlcodex", workspace, True),
     ))
@@ -2336,18 +2334,20 @@ async def test_staged_auto_start_does_not_offer_final_plan_while_analysis_runs(t
         {"chat_id": 100, "user_id": 200},
     )
 
-    assert response.already_rendered
+    assert response.already_rendered is False
     started_events = [
         event for event in renderer.events
         if getattr(event, "event_type", "") == "run_started"
     ]
     labels = [
         button["text"]
-        for row in (getattr(started_events[0], "buttons", None) or [])
+        for event in started_events
+        for row in (getattr(event, "buttons", None) or [])
         for button in row
     ]
+    assert started_events == []
     assert "生成最终方案" not in labels
-    assert "查看状态" in labels
+    assert "查看状态" not in labels
 
 
 @pytest.mark.asyncio
@@ -2363,7 +2363,6 @@ async def test_auto_final_plan_callback_hides_final_plan_gate_while_generating(
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
     backend = FakeCodexBackend()
-    store = RuntimeEventStore(ledger._conn)
     service = TaskService(ledger, (
         WorkspaceConfig("wlcodex", workspace, True),
     ))
@@ -2421,7 +2420,6 @@ async def test_auto_final_plan_callback_rejects_duplicate_while_generating(
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
     backend = FakeCodexBackend()
-    store = RuntimeEventStore(ledger._conn)
     service = TaskService(ledger, (
         WorkspaceConfig("wlcodex", workspace, True),
     ))
@@ -2486,7 +2484,6 @@ async def test_auto_final_plan_offers_claude_and_codex_implementers(
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
     backend = FakeCodexBackend()
-    store = RuntimeEventStore(ledger._conn)
     service = TaskService(ledger, (
         WorkspaceConfig("wlcodex", workspace, True),
     ))
@@ -2539,7 +2536,6 @@ async def test_auto_mode_creates_architect_team_run_and_context_packet(
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
     backend = FakeCodexBackend()
-    store = RuntimeEventStore(ledger._conn)
     service = TaskService(ledger, (
         WorkspaceConfig("wlcodex", workspace, True),
     ))
@@ -2662,7 +2658,12 @@ async def test_auto_feature_route_creates_architect_context_before_final_handoff
 async def test_auto_feature_route_e2e_reaches_auditor_gate(
     ctrl_with_claude: CommandController,
 ) -> None:
-    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE, AUTO_CODEX_VERIFY, AUTO_SEND_TO_CLAUDE
+    from wlcodex.auto_workflow import (
+        AUTO_CLAUDE_DONE,
+        AUTO_CODEX_VERIFY,
+        AUTO_ROUTE_DESIGN,
+        AUTO_SEND_TO_CLAUDE,
+    )
     from wlcodex.conversation_callback import ConversationCallback
     from wlcodex.router import AutoModeCommand
 
@@ -2672,6 +2673,9 @@ async def test_auto_feature_route_e2e_reaches_auditor_gate(
     )
     ledger = ctrl_with_claude._ledger
     conversation = ledger.get_active_conversation(123)
+    await ctrl_with_claude.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_ROUTE_DESIGN)
+    )
     orch_run = ctrl_with_claude._latest_active_auto_run(conversation.id)
     team_run = ledger.get_team_run_for_orchestration(orch_run.id)
     first_job = ledger.list_team_agent_jobs(team_run.id)[0]
@@ -2740,7 +2744,12 @@ async def test_auto_feature_route_e2e_reaches_auditor_gate(
 async def test_auto_bug_route_e2e_reaches_auditor_gate(
     ctrl_with_claude: CommandController,
 ) -> None:
-    from wlcodex.auto_workflow import AUTO_CLAUDE_DONE, AUTO_CODEX_VERIFY, AUTO_SEND_TO_CLAUDE
+    from wlcodex.auto_workflow import (
+        AUTO_CLAUDE_DONE,
+        AUTO_CODEX_VERIFY,
+        AUTO_ROUTE_DIAGNOSE,
+        AUTO_SEND_TO_CLAUDE,
+    )
     from wlcodex.conversation_callback import ConversationCallback
     from wlcodex.router import AutoModeCommand
 
@@ -2750,6 +2759,9 @@ async def test_auto_bug_route_e2e_reaches_auditor_gate(
     )
     ledger = ctrl_with_claude._ledger
     conversation = ledger.get_active_conversation(123)
+    await ctrl_with_claude.handle_conversation_callback(
+        ConversationCallback(conversation.id, AUTO_ROUTE_DIAGNOSE)
+    )
     orch_run = ctrl_with_claude._latest_active_auto_run(conversation.id)
     team_run = ledger.get_team_run_for_orchestration(orch_run.id)
     first_job = ledger.list_team_agent_jobs(team_run.id)[0]
@@ -2818,6 +2830,8 @@ async def test_auto_bug_route_e2e_reaches_auditor_gate(
 async def test_auto_mode_marks_team_failed_when_codex_start_fails(
     tmp_path: Path,
 ) -> None:
+    from wlcodex.auto_workflow import AUTO_ROUTE_DIAGNOSE
+    from wlcodex.conversation_callback import ConversationCallback
     from wlcodex.router import AutoModeCommand
 
     class FailingStartController(CommandController):
@@ -2848,6 +2862,9 @@ async def test_auto_mode_marks_team_failed_when_codex_start_fails(
 
     convo = ledger.get_active_conversation(123)
     assert convo is not None
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(convo.id, AUTO_ROUTE_DIAGNOSE)
+    )
     orch_run = ledger.list_orchestration_runs(convo.id, limit=1)[0]
     team_run = ledger.get_team_run_for_orchestration(orch_run.id)
     assert team_run is not None
@@ -2865,6 +2882,8 @@ async def test_auto_mode_marks_team_failed_when_codex_start_fails(
 async def test_auto_mode_marks_team_failed_when_context_packet_build_fails(
     tmp_path: Path,
 ) -> None:
+    from wlcodex.auto_workflow import AUTO_ROUTE_DIAGNOSE
+    from wlcodex.conversation_callback import ConversationCallback
     from wlcodex.router import AutoModeCommand
 
     class FailingPacketController(CommandController):
@@ -2895,6 +2914,9 @@ async def test_auto_mode_marks_team_failed_when_context_packet_build_fails(
 
     convo = ledger.get_active_conversation(123)
     assert convo is not None
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(convo.id, AUTO_ROUTE_DIAGNOSE)
+    )
     orch_run = ledger.list_orchestration_runs(convo.id, limit=1)[0]
     team_run = ledger.get_team_run_for_orchestration(orch_run.id)
     assert team_run is not None
@@ -4379,7 +4401,11 @@ async def test_auto_send_repair_to_claude_completed_run_refreshes_stale_button(
     assert "当前阶段是 任务完成，不能返工" not in response.text
     actions = _callback_actions(response.buttons or [])
     assert AUTO_SEND_REPAIR_TO_CLAUDE not in actions
-    assert {TEAM_VIEW_STATUS, TEAM_VIEW_ARTIFACTS}.issubset(actions)
+    # A legacy run without a persisted team run can only expose its durable
+    # status; it must not invent team evidence links.
+    assert TEAM_VIEW_STATUS not in actions
+    assert TEAM_VIEW_ARTIFACTS not in actions
+    assert "auto_view_status" in actions
 
 
 @pytest.mark.asyncio
@@ -5854,7 +5880,15 @@ async def test_staged_auto_binds_codex_thread_to_task(tmp_path: Path) -> None:
         {"chat_id": 100, "user_id": 200},
     )
 
-    assert response.already_rendered
+    active = ledger.get_active_conversation(100)
+    assert active is not None
+    from wlcodex.auto_workflow import AUTO_ROUTE_DIAGNOSE
+    from wlcodex.conversation_callback import ConversationCallback
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(active.id, AUTO_ROUTE_DIAGNOSE)
+    )
+    assert "诊断工程师开始分析" in response.text
     await _drain_runtime_runner(ctrl)
     active = ledger.get_active_conversation(100)
     assert active is not None
@@ -5908,10 +5942,16 @@ async def test_staged_auto_collecting_context_no_claude_called(tmp_path: Path) -
         {"chat_id": 100, "user_id": 200},
     )
 
-    assert response.already_rendered
-    await _drain_runtime_runner(ctrl)
     active = ledger.get_active_conversation(100)
     assert active is not None
+    from wlcodex.auto_workflow import AUTO_ROUTE_DIAGNOSE
+    from wlcodex.conversation_callback import ConversationCallback
+
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(active.id, AUTO_ROUTE_DIAGNOSE)
+    )
+    assert "诊断工程师开始分析" in response.text
+    await _drain_runtime_runner(ctrl)
 
     # Staged /auto does NOT call Claude — only Codex
     # The StreamingClaudeError would fail if called, but it shouldn't be called
@@ -6306,6 +6346,8 @@ async def test_orchestrator_exception_marks_runs_as_failed(tmp_path: Path) -> No
     from wlcodex.task_service import TaskService
     from wlcodex.config import WorkspaceConfig
     from wlcodex.models import OrchestrationStatus, AgentRunStatus
+    from wlcodex.auto_workflow import AUTO_ROUTE_DIAGNOSE
+    from wlcodex.conversation_callback import ConversationCallback
 
     ledger = Ledger.open(tmp_path / "db.sqlite3")
     ledger.migrate()
@@ -6340,6 +6382,11 @@ async def test_orchestrator_exception_marks_runs_as_failed(tmp_path: Path) -> No
         "/auto 修复崩溃 bug",
         {"chat_id": 100, "user_id": 200},
     )
+    active = ledger.get_active_conversation(100)
+    assert active is not None
+    response = await ctrl.handle_conversation_callback(
+        ConversationCallback(active.id, AUTO_ROUTE_DIAGNOSE)
+    )
 
     # When Codex fails, we get an error response (not text_delta rendered)
     assert "错误" in response.text or "失败" in response.text or "异常" in response.text or "crash" in response.text.lower()
@@ -6347,6 +6394,7 @@ async def test_orchestrator_exception_marks_runs_as_failed(tmp_path: Path) -> No
 
     # Verify orchestration run is marked as failed (not left running)
     active = ledger.get_active_conversation(100)
+    assert active is not None
     orch_runs = ledger.list_orchestration_runs(active.id)
     assert len(orch_runs) >= 1
     assert orch_runs[0].status == OrchestrationStatus.FAILED.value

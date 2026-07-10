@@ -1,0 +1,44 @@
+name: quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest and ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install development dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Run default quality gate
+        run: python -m pytest -q -m "not slow and not live"
+      - name: Run Ruff
+        run: python -m ruff check .
+
+  browser-e2e:
+    name: browser E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Python test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Install browser test dependencies
+        run: npm ci
+      - name: Install Chromium
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Run browser E2E
+        run: npm run test:e2e

@@ -790,7 +790,22 @@ class NativeTimelineStore:
         ).fetchone()
         return int(row["latest_sequence"] if row is not None else 0)
 
-    def latest_turn_run_state(self, provider: str, native_thread_id: str) -> dict[str, Any]:
+    def latest_turn_run_state(
+        self,
+        provider: str,
+        native_thread_id: str,
+        *,
+        repair: bool = False,
+    ) -> dict[str, Any]:
+        """Return the latest turn state without changing the timeline by default.
+
+        A terminal provider event can reveal that a legacy lifecycle item was
+        never projected, or that a late completed message supersedes one.  The
+        observable state is still derivable from the event stream, but repairing
+        the materialized timeline writes rows.  HTTP reads and their first SSE
+        snapshot therefore use the default read-only mode; a separately owned
+        lifecycle worker opts into ``repair=True``.
+        """
         provider_key = _normalize_provider(provider)
         thread_id = str(native_thread_id or "").strip()
         placeholders = ",".join("?" for _ in _NATIVE_TURN_STATE_EVENT_TYPES)
@@ -842,23 +857,25 @@ class NativeTimelineStore:
                         thread_id,
                         turn_key,
                     ):
-                        self._suppress_failed_lifecycle_for_completed_turn(
-                            provider_key,
-                            thread_id,
-                            turn_key,
-                        )
+                        if repair:
+                            self._suppress_failed_lifecycle_for_completed_turn(
+                                provider_key,
+                                thread_id,
+                                turn_key,
+                            )
                         return {"active": False, "status": "idle", "active_turn_id": ""}
-                    self._ensure_failed_lifecycle_item(
-                        provider=provider_key,
-                        native_thread_id=thread_id,
-                        turn_key=turn_key,
-                        payload=payload,
-                        event_type=event_type,
-                        runtime_event_id=int(row["id"]),
-                        occurred_at=str(row["occurred_at"] or now_iso()),
-                        agent_run_id=row["agent_run_id"],
-                        conversation_id=row["conversation_id"],
-                    )
+                    if repair:
+                        self._ensure_failed_lifecycle_item(
+                            provider=provider_key,
+                            native_thread_id=thread_id,
+                            turn_key=turn_key,
+                            payload=payload,
+                            event_type=event_type,
+                            runtime_event_id=int(row["id"]),
+                            occurred_at=str(row["occurred_at"] or now_iso()),
+                            agent_run_id=row["agent_run_id"],
+                            conversation_id=row["conversation_id"],
+                        )
                 return {
                     "active": False,
                     "status": status,

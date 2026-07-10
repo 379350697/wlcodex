@@ -21,6 +21,20 @@ task_log_dir = "runtime/tasks"
 # Default: ~/.local/state/wlcodex/worktrees
 # worktree_root = "/home/wl/.local/state/wlcodex/worktrees"
 
+[runtime_retention]
+# Recent raw provider frames stay in SQLite for operational replay.  Older
+# frames move to gzip JSONL only through the explicit maintenance CLI:
+#   wlcodex-retain-raw-frames --config config/wlcodex.toml dry-run
+#   wlcodex-retain-raw-frames --config config/wlcodex.toml apply
+hot_retention_days = 7
+archive_retention_days = 90
+interval_seconds = 21600
+batch_size = 250
+# Keep false until the initial historical archive has been run and verified in
+# a maintenance window.  Enabling this starts the background 6-hour worker.
+scheduled_apply_enabled = false
+# archive_dir defaults to runtime/provider-raw-frame-archives
+
 [display]
 status_update_min_interval_seconds = 2
 tail_lines = 40

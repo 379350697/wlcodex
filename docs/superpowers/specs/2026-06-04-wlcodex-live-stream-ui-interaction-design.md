@@ -1,5 +1,8 @@
 # WLCodex Live Stream UI Interaction Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 > Review date: 2026-06-04
 > Scope: interaction quality, visual feedback, and typography improvements for all live stream frontend pages served by `wlcodex/live_stream/server.py`.
 

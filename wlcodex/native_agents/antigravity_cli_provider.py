@@ -327,6 +327,16 @@ class AntigravityCliLocalProvider:
         )
         return _hide_linked_local_duplicates(sessions)
 
+    async def list_cached_sessions(self, limit: int = 50) -> list[NativeAgentSession]:
+        """Return the persisted Native view without importing local history."""
+
+        sessions = self._session_store.list_recent(
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            limit=limit,
+        )
+        return _hide_linked_local_duplicates(sessions)
+
     async def list_models(self) -> list[dict[str, Any]]:
         return antigravity_model_catalog(default_model=self._runner_default_model())
 
@@ -401,6 +411,12 @@ class AntigravityCliLocalProvider:
     async def read_session(self, native_session_id: str) -> dict[str, Any]:
         session = self._lookup_session(native_session_id, import_local=True)
         session = self._sync_local_transcript(session)
+        return {"thread": session.to_json_dict(), "turns": self._runtime_turns(session)}
+
+    async def peek_session(self, native_session_id: str) -> dict[str, Any]:
+        """Read the persisted view without importing or projecting history."""
+
+        session = self._lookup_session(native_session_id, import_local=False)
         return {"thread": session.to_json_dict(), "turns": self._runtime_turns(session)}
 
     async def attach_session(self, native_session_id: str) -> NativeAgentControlResult:

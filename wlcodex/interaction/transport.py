@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
 
 Buttons = list[list[dict[str, str]]] | None
 SendFn = Callable[[int, str, Buttons], Awaitable[int]]

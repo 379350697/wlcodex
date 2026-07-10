@@ -79,7 +79,7 @@ def test_claude_send_uses_sanitized_env() -> None:
     from wlcodex.claude_backend import ClaudeBackend, ClaudeConfig, _sanitized_env
 
     config = ClaudeConfig(enabled=False)
-    backend = ClaudeBackend(config)
+    ClaudeBackend(config)
 
     # The env used for a real subprocess must be sanitized.
     env = _sanitized_env()

@@ -69,6 +69,7 @@ def test_relay_statuses_and_artifact_types_match_design_spec() -> None:
         "role_artifact_invalid",
         "role_resume",
         "user_attachments",
+        "pending_input_transition",
         "user_followup",
         "followup_response",
     )

@@ -1,471 +1,135 @@
 # WLCodex
 
-WLCodex is a remote workbench for phone-driven software engineering. One local
-machine runs the work. The phone shows two views of the same live workbench:
-**Cockpit** (驾驶舱) for concise progress and decisions, and **Onsite** (现场)
-for raw terminal-style live control.
+WLCodex 是把本机开发会话和长任务编排安全地带到手机/浏览器的产品。它不再把
+Telegram Workbench 当作主产品：**Native 是直接会话的真相，Relay 是长任务与
+编排的真相，Telegram 只保留历史兼容入口。**
 
-## Documentation Map
+## 当前产品与导航
 
-| Area | Start here | Use when |
-|------|------------|----------|
-| End-to-end manual | `docs/manual-aet-e2e.md` | Running or checking the adaptive engineering team flow |
-| Protocol notes | `docs/protocol/codex-app-server-spike.md` | Reviewing Codex app-server protocol experiments |
-| Smoke checks | `docs/smoke/` | Replaying focused manual checks for interaction modes |
-| Design specs | `docs/superpowers/specs/` | Reading approved feature designs before implementation |
-| Implementation plans | `docs/superpowers/plans/` | Executing task-by-task plans with agentic workers |
-| Reviews and reports | `docs/superpowers/reviews/`, `docs/superpowers/reports/` | Checking review findings, acceptance notes, and analysis artifacts |
+从 PWA 或网页开始的固定路径是：
 
-## Remote Workbench
+```text
+/native  →  /native/workflows  →  /native/workflows/relay  →  task detail
+```
 
-**Plain text default**: Codex read-only analysis.
-
-Send a plain text message for read-only Codex analysis, answers, review, and
-planning. Use `/auto` only when you explicitly want the full Codex analysis →
-Claude implementation → Codex verification workflow. The Cockpit shows progress,
-asks for decisions, and summarizes results. The Onsite shows live agent output
-when you need raw visibility.
-
-### Product terminology
-
-| Internal concept | User-facing (Chinese) | User-facing (English) |
+| Surface | 用户任务 | 真相来源 |
 |---|---|---|
-| Workbench | 工作台 | Remote Workbench |
-| Cockpit view | 驾驶舱 | Cockpit |
-| Onsite view | 现场 | Onsite / Live Worksite |
-| Auto orchestrated | /auto：Codex -> Claude -> Codex | Explicit engineer workflow |
-| Codex-only mode | 只问 Codex | Ask Codex only |
-| Claude-only mode | 只叫 Claude | Ask Claude only |
-| Open Onsite | 接管现场 | Open live worksite |
-| Leave Onsite | 回驾驶舱 | Return to Cockpit |
-| Codex verify after Claude | 让 Codex 验收 | Let Codex verify |
+| Native (`/native`) | 查看、恢复和继续直接 provider 会话 | 真实 Native session；同步失败时明确展示缓存、时间和恢复指引 |
+| Workflows (`/native/workflows`) | 选择已实现的工作流 | Native 工作流目录 |
+| Relay (`/native/workflows/relay`) | 创建长任务、跟踪协作、处理阻塞、查看验收证据 | Relay task 与其已持久化 artifact/run |
+| Telegram | 已有历史 conversation 的恢复、回调和会话兼容 | 仅 `legacy_compatible` 记录；新工作跳转 Native/Relay |
 
-**Execution modes** (who does the work — separate from which view you use):
+Relay 首页只承诺“任务”和“设置”。Skills、Profile、Dev Flow 和工作树等未完成
+能力不应作为产品入口；旧 URL 只做兼容说明或跳转。
 
-| Mode | Trigger | Behavior |
-|------|---------|----------|
-| Plain text | no slash command | Codex read-only analysis |
-| Auto orchestrated | `/auto <prompt>` | Codex → Claude → Codex |
-| Codex-only | `/codex <prompt>` | Codex only, no Claude |
-| Claude-only | `/claude <prompt>` | Claude only, no automatic Codex analysis or verification |
+当前用户可见语义、状态机、动作和无障碍合同见
+[当前产品语义合同](docs/product-semantics.md)。它优先于所有历史设计和 review。
 
-**Documentation-only tasks** should keep the write scope limited to
-`README.md` or files under `docs/`. Do not touch `wlcodex/`, `tests/`,
-`runtime/`, configuration files, or generated artifacts unless the task
-explicitly expands beyond documentation. Before handing the result back, verify
-the scope with:
+## Relay 执行方式
 
-```bash
-git diff --name-only
-git diff -- README.md docs/
-```
+Relay 只提供三种有业务语义的模式：
 
-Codex-only sends the prompt directly to Codex without Claude or /auto gates.
-Claude-only is for direct hands-on implementation; Cockpit will offer a
-"让 Codex 验收" action after Claude-only work completes.
+- **标准执行**：创建前显示执行合同，系统自动选择角色与子代理。
+- **先计划**：架构/执行计划得到用户确认后才进入实现。
+- **目标验收**：必须填写目标和验收条件；完成需要一个具体 implementation run
+  和实际执行过的独立测试或审计证据。
 
-After any direct run finishes, the next plain text message returns to read-only
-Codex analysis. `/codex` and `/claude` remain direct single-agent paths; only
-`/auto` starts the full orchestrated workflow.
+历史 `simple`、`auto` 数据读取时映射为“标准执行”。不再暴露无实际含义的
+“使用子代理”手工开关。
 
-`/new` is the Workbench session boundary. Until the next `/new`, Codex turns
-reuse the same Codex thread and Claude Code turns resume the same Claude session
-when the backend exposes a session id. This lets `/auto` execute from the
-context established by earlier plain-text analysis in the same Workbench.
+每张任务卡、列表、详情和 SSE 初始快照使用同一个只读 `presentation`：
+`state`、`freshness`、`current_actor`、`blocking_reason`、`next_action` 与
+`allowed_actions`。详情 GET、页面刷新和 SSE 首帧不会 reconcile 生命周期、创建
+artifact 或 dispatch；这些变更由带幂等 claim 的后台 worker 完成。
 
-**Views** (how you see and steer the work):
+## Telegram 历史兼容
 
-| View | Purpose | Shows | Hides |
-|------|---------|-------|-------|
-| Cockpit 驾驶舱 | Concise progress and decisions | Workbench title, execution mode, phase, agent, progress, approvals, result summary | Raw JSON, session IDs, long stdout, full diffs by default |
-| Onsite 现场 | Raw live worksite control | Live agent output, recent frames, tail controls, direct input | Cockpit summaries |
+Telegram 不再获得新任务功能。已有持久化 `legacy_compatible` conversation 仍可
+按原有恢复、回调和会话路径处理；危险动作仍遵守实际后端状态。新的 Telegram
+对话、`/new`、plain text、`/auto`、`/codex` 和 `/claude` 不创建旧主状态，而是
+提供 Native/Relay 入口。`/native` 与 `/relay` 是跳转命令；每个 Telegram 按钮
+只能序列化为 URL 或 callback，不能同时携带两种动作。
 
-Both views share the same workbench. Switching views does not restart work.
-Leaving the Onsite does not stop the underlying agent.
+## 数据保留与维护
 
-## Interaction
+只治理 `provider_raw_frames`：SQLite 热库默认保留 7 天，脱敏、版本化 gzip JSONL
+归档保留 90 天，摘要、`runtime_events`、Native timeline 和 task artifact 保留。
+归档可按 frame ID 回查，并且 archive 写入、校验、登记后才会删除热库行。
+
+运行配置：
 
 ```toml
-[interaction]
-profile = "natural"
-streaming_enabled = true
-show_footer = false
-edit_min_interval_seconds = 1.0
+[runtime_retention]
+hot_retention_days = 7
+archive_retention_days = 90
+interval_seconds = 21600
+scheduled_apply_enabled = false
 ```
 
-`natural` is the recommended interaction style for the Cockpit view: plain text
-starts or continues a conversation, Telegram shows typing while work starts, and
-model deltas stream into one edited message. This does not double model tokens
-because it forwards deltas from the same Codex/Claude run.
+首次大历史迁移必须在维护窗口中完成；不要在 GET、启动恢复或普通后台请求中做。
+即使误把 `scheduled_apply_enabled` 设为 `true`，scheduler 在维护窗口 `apply` 成功且
+archive `verify` 通过、持久化首迁完成标记前也只会拒绝运行，不会开始清理历史库。
+完整的 dry-run、apply、verify、compact、`VACUUM INTO`、原子交换和回滚流程见
+[Raw frame 维护手册](docs/operations/raw-frame-retention.md)。
 
-`legacy` uses task-card style rendering for operator workflows.
-
-`cockpit` is reserved for richer Cockpit view rendering; currently behaves like
-`legacy`.
-
-## Worker Live Stream
-
-Worker Live Stream is the local HTTP/SSE surface for native-style per-worker
-real-time output. It is disabled by default and independent from Telegram.
-
-```toml
-[live_stream]
-enabled = false
-host = "127.0.0.1"
-port = 18731
-access_token_env = "WLCODEX_LIVE_STREAM_TOKEN"
-allow_unauthenticated_loopback = true
-
-[codex_native]
-enabled = false
-transport = "daemon"
-# sock_path = "/Users/wl/.codex/app-server-control/app-server-control.sock"
-# Legacy compatibility only; can split sessions from Codex desktop:
-# transport = "app-server"
-# listen_endpoint = "ws://127.0.0.1:18742"
-```
-
-When enabled, WLCodex starts a loopback-only server and exposes:
-
-| URL | Purpose |
-|-----|---------|
-| `/health` | Local health check |
-| `/workers/<agent_run_id>/live` | Phone-friendly live page for one worker |
-| `/api/workers/<agent_run_id>/events?after=<event_id>` | Snapshot/reconnect cursor |
-| `/api/workers/<agent_run_id>/stream` | Server-Sent Events stream |
-| `/native/codex` | `Codex干活的` official Codex IDE session station |
-| `/api/native/codex/sessions` | Official Codex session list |
-
-The stream forwards the same persisted runtime events that power the workbench.
-It does not create another model run and does not add model tokens. Phone access
-must use `WLCODEX_LIVE_STREAM_TOKEN` when exposed through a tunnel. The first
-release rejects non-loopback bind hosts; use an authenticated tunnel to reach it
-from a phone.
-
-### Native Cloudflare Tunnel
-
-The named tunnel for `native.yjxjj.xyz` should run through HTTP/2. QUIC has
-caused public `/native/codex` loads to stall for tens of seconds while the
-loopback service stayed fast.
-
-On macOS, run this after local deployments that touch tunnel or launchd setup:
+## 本地运行
 
 ```bash
-scripts/ensure-native-cloudflared-http2
-```
-
-The script writes and reloads
-`~/Library/LaunchAgents/com.wlcodex.cloudflared-native-yjxjj.plist` with:
-
-```bash
-/opt/homebrew/bin/cloudflared tunnel --protocol http2 --edge-ip-version 4 --config ~/.cloudflared/config.yml run wlcodex-native-18731
-```
-
-To verify the current machine without changing anything:
-
-```bash
-scripts/ensure-native-cloudflared-http2 --check
-```
-
-## Safety rules
-
-- Private Telegram chat only
-- Allowlisted Telegram user IDs only
-- New work uses fresh Codex threads by default
-- History resumes only by explicit selection
-- Telegram status cards are never fed back into Codex context
-- SQLite is a local ledger, not automatic model memory
-- One active write task per workspace
-- App-server binds to loopback only (127.0.0.1)
-- Onsite frames are redacted before Telegram delivery (tokens, keys, secrets)
-
-## Task Liveness
-
-Paused tasks still hold the workspace write slot — they count as "active write tasks"
-and block new reservations on the same workspace. This is intentional: a
-paused task has an open Codex thread that may resume.
-
-The `TaskWatchdog` runs inside the `EventBridge` event pump (every
-`watchdog_interval_seconds`, default 60 s). It scans all active tasks and:
-
-- Marks a task `task_timeout` when it has been stuck in RUNNING / QUEUED /
-  WAITING_APPROVAL beyond its configured threshold (`max_running_seconds`,
-  `max_queued_seconds`, `max_waiting_approval_seconds`).
-- Marks a task `backend_dead` when the backend has been unhealthy for longer
-  than `backend_dead_grace_seconds` — releasing the workspace slot.
-
-On startup, `main.py` pauses any task that was RUNNING, QUEUED, or
-WAITING_APPROVAL during the previous run, then sends recovery notifications to
-the Telegram chat so the user can continue or abort each one.
-
-## Recovery
-
-On daemon restart, WLCodex replays runtime events, rebuilds the active workbench
-state, and restores Cockpit and Onsite cursors. Live sessions are reattached when
-the transport supports it. Missing local processes are marked as orphaned.
-Cockpit remains usable even if Onsite reattach fails.
-
-## Local setup
-
-```bash
-# Create venv and install
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
-
-# Configure
 cp config/wlcodex.example.toml config/wlcodex.toml
-# Edit config/wlcodex.toml:
-#   - Set allowed_user_ids to your Telegram user ID
-#   - Verify workspace paths
 
-# Set bot token
-export WLCODEX_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
-
-# Run fast default tests
-# Use the fast default run for routine verification before broader acceptance checks.
-.venv/bin/python -m pytest -q
-
-# Profile the full test suite with native pytest output
-bash scripts/pytest-profile 50
-
-# Run all tests, including marked slow/integration/live tests
-.venv/bin/python -m pytest -m "" -q
-
-# Run lint
-.venv/bin/python -m ruff check .
-
-# Run Playwright without using npx or network package resolution
-scripts/playwright --version
-scripts/playwright-node -e "console.log(require.resolve('playwright'))"
-
-# Start bot (requires codex CLI on PATH)
+# 填好 Telegram allowlist、工作区和本地运行参数后启动。
 .venv/bin/wlcodex --config config/wlcodex.toml
-
-# Or with fake backend for testing
-.venv/bin/wlcodex --config config/wlcodex.toml --fake-backend
 ```
 
-The Playwright helpers first use `WLCODEX_PLAYWRIGHT_NODE_MODULES` when set,
-then `./node_modules`, then the shared Codex tool install at
-`~/.codex/tools/playwright/node_modules`. This keeps local browser automation
-available in restricted-network sessions where `npx playwright` would otherwise
-try to download from npm.
+Native live stream 配置保持 loopback；公网访问仍沿用既有 tunnel 和认证配置。
+本次版本**不改变**公网 token/cookie/认证传递方式，也**不改变** Native 完全访问
+权限策略。
 
-## Telegram Commands
+## 测试与 CI
 
-### Daily menu
-
-| Command | Label | Purpose |
-|---------|-------|---------|
-| `/new` | 新工作台 | Start a fresh workbench |
-| `/status` | 状态 | Show active workbench |
-| `/terminal` | 接管现场 | Open Onsite live worksite |
-| `/diff` | 变更 | Inspect file changes |
-| `/settings` | 设置 | Route, model, permissions, workspace |
-| `/help` | 帮助 | Compact guide |
-
-### Primary commands
-
-| Command | Description |
-|---------|-------------|
-| `/start` / `/help` | Show help |
-| `/health` | Backend health check |
-| plain text | Continue the active workbench with read-only Codex analysis |
-| `/new [title]` | Start a fresh workbench |
-| `/codex <prompt>` | Codex-only direct work |
-| `/claude <prompt>` | Claude-only direct implementation |
-| `/auto <prompt>` | Full Codex → Claude → Codex orchestration |
-| `/status` | Show active workbench status |
-| `/switch <workspace>` | Switch the active workspace |
-| `/model [name]` | Show or set the preferred model |
-| `/verify` | Ask Codex to verify the latest implementation evidence |
-| `/sessions` | List historical agent sessions for the active workbench |
-| `/stop` | Stop the current active conversation |
-
-### View switching
-
-| Command | Description |
-|---------|-------------|
-| `/terminal` | Open Onsite view; auto-selects the active agent when a session exists |
-| `/terminal claude` | Open Onsite with Claude agent |
-| `/terminal codex` | Open Onsite with Codex agent |
-| `/terminal tail` | Resume Onsite push / show latest output |
-| `/terminal pause` | Pause Onsite push, keep session alive |
-| `/terminal detach` | Leave Onsite view, keep session alive |
-| `/product` | Return to Cockpit view |
-| `/mode` | Show current view mode |
-
-- Cockpit (驾驶舱) is the default view. It renders structured status and
-  approval cards for a phone-friendly experience.
-- Onsite (现场) opens a raw live worksite view. Text sent in Onsite routes
-  directly to the selected agent.
-- View switches do not create new conversations. The workbench stays the same
-  across Cockpit and Onsite.
-- Leaving the Onsite stops Telegram output delivery but does not abort the
-  underlying agent session.
-- Opening the Onsite when no session exists shows a start card with options to
-  start a session or return to Cockpit.
-- Onsite availability depends on operator configuration.
-
-### Legacy diagnostics
-
-Legacy commands remain available only for diagnostics and low-level inspection.
-They are hidden from the daily menu and are not part of the normal Workbench
-journey:
-
-| Command | Description |
-|---------|-------------|
-| `/task <workspace> <prompt>` | Start a raw Codex task |
-| `/task <id>` | Show raw task details |
-| `/tasks` | List active raw tasks |
-| `/continue <id> <prompt>` | Resume a historical task thread |
-| `/steer <id> <prompt>` | Steer the active turn |
-| `/tail <id>` | Show recent local log lines |
-| `/events <id>` | Show SQLite event log |
-| `/diff <id>` | Show recent file changes |
-| `/files <id>` | Show touched file list |
-| `/pause <id>` | Pause a running task |
-| `/abort <id>` | Abort a running task |
-| `/archive <id>` | Archive a completed task |
-| `/fork <id> <prompt>` | Fork a task to a new thread |
-| `/claude_mode` | Set Claude permission mode |
-
-## Manual smoke test
-
-1. Start the bot: `.venv/bin/wlcodex --config config/wlcodex.toml`
-2. In private Telegram chat with the bot:
-   - Send `/health` → Should report backend status
-   - Send `/new 真人 smoke` → Should create a fresh workbench
-   - Send `请用中文只回复：wlcodex telegram live ok`
-   - Observe a Workbench-first response, not a raw diagnostic card
-   - Send `/status` → Should show the active workbench status
-   - Send `/sessions` → Should list historical agent sessions for the workbench
-
-Use `/codex <prompt>`, `/claude <prompt>`, or `/auto <prompt>` only when you
-want to force a specific execution mode. Plain text uses read-only Codex
-analysis; only `/auto` enters the orchestrated workflow.
-
-### Human smoke pass criteria
-
-Use this as the real product acceptance smoke for the current `natural`
-interaction profile:
-
-1. Config has `[interaction] profile = "natural"` and `streaming_enabled = true`.
-2. A plain text message starts or continues a workbench without a mechanical
-   textual ACK such as "正在处理你的消息，请稍候".
-3. Telegram shows typing while the run is being prepared.
-4. Visible model output streams into one edited message instead of a sequence of
-   duplicate status cards.
-5. The normal reply body does not expose task ids, thread ids, session IDs,
-   workspace locks, queue positions, or token counters. Operator details remain
-   limited to explicit diagnostic commands.
-6. Completion shows a compact action row. `查看 diff` appears when the workspace
-   really has a git diff, including changes made by Claude Code.
-7. `/codex <prompt>` runs Codex-only and does not call Claude.
-8. `/claude <prompt>` runs Claude-only and does not trigger automatic Codex
-   analysis or verification. Completion should offer a "让 Codex 验收" action.
-9. `/auto <prompt>` runs the full Codex → Claude → Codex chain. A passing run
-   records all phases in SQLite.
-10. If Claude fails during `/auto`, the orchestration stops as `failed`; Codex
-    verification must not continue after the Claude stream error.
-11. Approval requests appear as explicit approval cards with buttons, not as
-    mixed natural-chat text.
-12. `/terminal` with no active session shows a start card (options to start a
-    session or return to Cockpit), never a dead-end error.
-13. Text sent in Onsite view routes to the live agent session, not the Cockpit
-    controller.
-14. Switching between Cockpit and Onsite preserves the workbench — work does not
-    restart and the active run is not lost.
-15. `/help` uses "驾驶舱", "接管现场", and "/auto：Codex -> Claude -> Codex"; it
-    does not expose configuration keys like `terminal.enabled`.
-
-The human smoke is considered passed only when the visible Telegram behavior and
-the ledger state both match the criteria above. A green unit test run alone is
-not enough evidence for this smoke.
-
-## Live Telegram Smoke (Real Acceptance)
-
-The primary human smoke is Workbench-first, as above. The automated live pytest
-gate should be treated as a product evidence gate when it exercises `/new`,
-plain text, `/terminal`, `/product`, `/claude`, the "让 Codex 验收" action,
-`/codex`, and `/sessions` without exposing internal ids.
-
-Set the environment:
+默认 pytest 门禁是 `not slow and not live`，**不排除 integration**：
 
 ```bash
-export WLCODEX_TELEGRAM_BOT_TOKEN=...
-export WLCODEX_TELEGRAM_ALLOWED_USER_ID=...
-export WLCODEX_RUN_TELEGRAM_LIVE=1
-.venv/bin/python -m pytest tests/test_live_telegram_smoke.py -q
-```
-
-This preflight does not require `chat_id` or diagnostic ids. Start WLCodex with
-the same config. From the authorized private Telegram chat, send this product
-sequence:
-
-```text
-/health
-/new 真人历史现场 smoke
-请用中文只回复：wlcodex telegram live ok
-/terminal
-/product
-/claude Reply exactly with: claude only ok
-点击：让 Codex 验收
-/codex Reply exactly with: codex only ok
-/sessions
-```
-
-Then run:
-
-```bash
-.venv/bin/python -m pytest tests/test_live_telegram_smoke.py -q
-```
-
-`WLCODEX_TELEGRAM_CHAT_ID` is optional. When unset, the smoke test accepts any
-private chat created by the allowlisted Telegram user and verifies the actual
-`telegram_chat_id` recorded in SQLite.
-
-### Legacy Diagnostic Smoke
-
-Legacy `/task` smoke is an operator diagnostic for the app-server ledger. It is
-not the default user journey and must not be used as product release evidence.
-It is intentionally manual; the automated live smoke follows Workbench runtime
-events and agent session refs instead of legacy task ids.
-
-```text
-/task <workspace> Create file wlcodex_approval_probe.txt with text approval-ok. If permission is requested, wait for my Telegram approval.
-```
-
-1. Observe the Telegram approval card.
-2. Click Approve once.
-3. Observe task status returning to running or done.
-4. Verify the file exists.
-
-## systemd
-
-Copy `deploy/systemd/wlcodex.service.example` to a user service. It reads
-the private environment file from `/home/wl/.config/wlcodex/env`:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now wlcodex.service
-```
-
-## Real app-server integration
-
-Real Codex app-server integration tests require:
-```bash
-WLCODEX_RUN_CODEX_INTEGRATION=1 .venv/bin/python -m pytest -m "" tests/test_real_app_server_integration.py -q
-```
-
-## Final Acceptance
-
-```bash
+# 默认质量门禁（包含 integration，排除 slow/live）
 .venv/bin/python -m pytest -q
-.venv/bin/python -m pytest -m "" -q
+
+# 明确显示同一选择器，适合 CI 或人工复现
+.venv/bin/python -m pytest -q -m "not slow and not live"
+
+# 全量本地测试（包括标记测试；live 仍需要其环境变量/凭据）
+.venv/bin/python -m pytest -q -m ""
+
+# 静态检查
 .venv/bin/python -m ruff check .
-WLCODEX_RUN_CODEX_INTEGRATION=1 .venv/bin/python -m pytest -m "" tests/test_real_app_server_integration.py -q
-WLCODEX_RUN_TELEGRAM_LIVE=1 .venv/bin/python -m pytest -m "" tests/test_live_telegram_smoke.py -q
 ```
 
-Fake backend tests are unit-test helpers and NOT smoke evidence.
+GitHub Actions 执行前两项质量门禁。浏览器、真实 Native/Relay、SSE 断线和历史
+Telegram 兼容流还需要在发布前维护窗口中做真实烟测，不能只依赖单元测试。
+
+## 发布维护窗口
+
+一次发布不等于一次冒险。维护窗口按以下门槛推进：
+
+1. 执行 `wlcodex-retain-raw-frames maintenance-begin` 暂停新提交，用
+   `maintenance-status` 确认活跃任务、Native turn、待审批项和历史兼容流程均已
+   排空；未排空就执行 `maintenance-cancel` 取消。
+2. 备份 SQLite 与 raw-frame archive，预检磁盘，执行 retention dry-run/apply/
+   verify，任何 manifest 或完整性失败都不切换。
+3. `apply` 会在同一维护窗口中重新校验 archive；只有成功 `verify` 后才写入允许
+   后续 scheduler 运行的首迁完成标记。用 `VACUUM INTO` 生成新库并完成 `integrity_check` 后，在同一文件系统中原子
+   交换；运行迁移与应用发布。
+4. 启动 `com.wlcodex.formal`，以 GET 验证本地和公网 health，再冒烟 Native、
+   Relay task 与一条历史 Telegram 兼容流。
+5. 任何 archive、数据库完整性或烟测失败，都用发布前 SQLite/archive 快照和
+   上一版服务回滚。
+
+操作细节与证据清单在
+[Raw frame 维护手册](docs/operations/raw-frame-retention.md)。
+
+## 文档状态
+
+`docs/superpowers/` 下的按日期设计、计划、review 与报告均为历史审计材料，已
+**superseded**，不再表达现行产品事实。请从
+[历史文档说明](docs/superpowers/README.md) 进入，或直接阅读当前语义合同。

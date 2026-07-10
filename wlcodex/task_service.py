@@ -109,6 +109,18 @@ class TaskService:
                 f"workspace {workspace_alias} is busy with task #{current.id}"
             )
 
+    def _assert_submission_allowed(self) -> None:
+        """Keep new work out while an operator drains a maintenance window.
+
+        ``TaskService`` remains usable with the small fake ledgers in older
+        integrations, while every real ``Ledger`` enforces the durable global
+        maintenance gate before a user-originated reservation is persisted.
+        """
+
+        assert_open = getattr(self._ledger, "assert_submissions_open", None)
+        if callable(assert_open):
+            assert_open()
+
     # --- Waiting-slot queue ---
 
     def reserve_waiting_task(
@@ -125,6 +137,7 @@ class TaskService:
         write lock.  The full prompt is stored in a task_waiting_slot_created
         event for later retrieval when the task is promoted.
         """
+        self._assert_submission_allowed()
         workspace = self.ensure_workspace_writable(workspace_alias)
         task = self._ledger.create_task(
             workspace_alias=workspace.alias,
@@ -153,6 +166,7 @@ class TaskService:
 
     def promote_waiting_task(self, task_id: int) -> tuple[Task, str]:
         """Promote a waiting_slot task to queued. Returns (task, prompt)."""
+        self._assert_submission_allowed()
         task = self._ledger.get_task(task_id)
         if task.status != TaskStatus.WAITING_SLOT:
             raise InvalidTransition(
@@ -202,6 +216,7 @@ class TaskService:
         Records force_parallel_started event and marks the task.
         The original workspace lock remains in place for subsequent /task calls.
         """
+        self._assert_submission_allowed()
         task = self._ledger.get_task(task_id)
         if task.status != TaskStatus.WAITING_SLOT:
             raise InvalidTransition(
@@ -432,6 +447,7 @@ class TaskService:
         parent_task_id: int | None = None,
     ) -> Task:
         """Create a queued task reservation without a codex thread yet."""
+        self._assert_submission_allowed()
         workspace = self.ensure_workspace_writable(workspace_alias)
         self.ensure_workspace_available(workspace_alias)
         task = self._ledger.create_task(
@@ -464,6 +480,7 @@ class TaskService:
         telegram_chat_id: int | None = None,
         parent_task_id: int | None = None,
     ) -> Task:
+        self._assert_submission_allowed()
         workspace = self.get_workspace(workspace_alias)
         self.ensure_workspace_available(workspace_alias)
         task = self._ledger.create_task(

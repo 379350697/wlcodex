@@ -1,5 +1,8 @@
 # Code Quality Review — Task 2: Cockpit Menu And Help UX
 
+> **SUPERSEDED — historical review only.** It is not a current release result;
+> use [the current semantic contract](../../product-semantics.md) and current tests.
+
 **Reviewer:** Code Quality Reviewer
 **Date:** 2026-05-20
 **Verdict: PASS**

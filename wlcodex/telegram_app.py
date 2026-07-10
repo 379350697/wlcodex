@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import asyncio
+import inspect
 import logging
+import os
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,6 +25,10 @@ from wlcodex.execution_scheduler import RunIntent
 from wlcodex.interaction.profiles import profile_from_name
 from wlcodex.interaction.renderer import InteractionRenderer
 from wlcodex.interaction.transport import TelegramTransport
+from wlcodex.presentation_contract import (
+    task_status_label,
+    telegram_compatibility_presentation,
+)
 from wlcodex.runtime_events import safe_text_preview
 from wlcodex.streaming import StreamingRenderer
 from wlcodex.telegram_digest import sanitize_telegram_user_text
@@ -53,6 +58,29 @@ def _is_message_not_modified_error(exc: Exception) -> bool:
 def _trim_workbench_title(title: object, limit: int = 28) -> str:
     text = str(title or "未命名工作台").strip() or "未命名工作台"
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _telegram_button(button: dict[str, str]) -> dict[str, str]:
+    """Serialize one button using exactly one Telegram action kind.
+
+    A URL button is a navigation affordance; a callback button is a mutation
+    affordance.  Telegram accepts both fields in its Python API, but doing so
+    makes the user-visible action ambiguous and has previously caused links to
+    be silently treated as callbacks.
+    """
+    text = str(button.get("text") or "").strip()
+    callback_data = str(button.get("callback_data") or "").strip()
+    url = str(button.get("url") or "").strip()
+    if not text or bool(callback_data) == bool(url):
+        raise ValueError("Telegram button requires text and exactly one of url/callback_data")
+    if url:
+        return {"text": text, "url": url}
+    return {"text": text, "callback_data": callback_data}
+
+
+def _telegram_keyboard(buttons: list[list[dict[str, str]]]) -> list[list[dict[str, str]]]:
+    """Validate button models before handing them to the Telegram SDK."""
+    return [[_telegram_button(button) for button in row] for row in buttons]
 
 
 # Sentinel returned when a Telegram send fails due to a network error.
@@ -137,6 +165,181 @@ class WlCodexHandlers:
                 allowed=False,
             )
         return ok
+
+    @staticmethod
+    def _conversation_is_legacy_compatible(conversation: object) -> bool:
+        """Read the persisted compatibility bit without guessing from time.
+
+        Every production ``ConversationSession`` has ``legacy_compatible``.
+        A missing attribute is only accepted for a pre-migration adapter: it
+        already supplied an existing conversation, so treating it as legacy
+        preserves recovery rather than allowing Telegram to create new state.
+        """
+        marker = getattr(conversation, "legacy_compatible", None)
+        return True if marker is None else bool(marker)
+
+    def _has_legacy_compatible_conversation(
+        self, chat_id: int, *, include_archived: bool = False
+    ) -> bool:
+        """Whether this chat owns an in-flight pre-migration conversation.
+
+        Telegram is deliberately no longer a creation surface.  The flag is
+        stored on the conversation rather than inferred from its date so an
+        imported or restored historical conversation retains its guarantees.
+        """
+        getter = getattr(self._ledger, "get_active_conversation", None)
+        # Small test/adaptor ledgers predate the persisted flag and are used
+        # only to replay an already-created historical flow.  The production
+        # Ledger always exposes the getter, where absence is treated as new
+        # traffic and therefore redirected.
+        if getter is None:
+            return True
+        try:
+            active = getter(chat_id)
+        except Exception:
+            logger.debug("Could not inspect Telegram legacy compatibility", exc_info=True)
+            return False
+        if active is not None:
+            return self._conversation_is_legacy_compatible(active)
+
+        # A user may have archived every historical conversation.  Recovery
+        # callbacks must still work, but only when no active non-legacy
+        # conversation exists for this chat.
+        if not include_archived:
+            return False
+        lister = getattr(self._ledger, "list_conversations_by_chat", None)
+        if not callable(lister):
+            return False
+        try:
+            conversations = lister(chat_id, include_archived=True)
+        except Exception:
+            logger.debug("Could not inspect Telegram legacy history", exc_info=True)
+            return False
+        return any(
+            self._conversation_is_legacy_compatible(conversation)
+            for conversation in conversations
+        )
+
+    def _primary_surface_base_url(self) -> str:
+        """Return the public app origin without changing its auth contract."""
+        return (
+            os.environ.get("WLCODEX_PUBLIC_WEB_URL")
+            or os.environ.get("WLCODEX_PUBLIC_BASE_URL")
+            or "https://native.yjxjj.xyz"
+        ).rstrip("/")
+
+    def _primary_surface_url(self, surface: str) -> str:
+        origin = self._primary_surface_base_url()
+        if surface == "native":
+            return f"{origin}/native"
+        if surface == "relay":
+            return f"{origin}/native/workflows/relay"
+        raise ValueError(f"unknown primary surface: {surface}")
+
+    @staticmethod
+    def _telegram_compatibility_hint(
+        *,
+        legacy_compatible: bool,
+        next_action: str,
+        allowed_actions: list[str],
+    ) -> str:
+        """Render Telegram's bridge notice from the common presentation view.
+
+        The projection is deliberately constructed from constants only.  In
+        particular it does not inspect or reconcile a legacy conversation, so
+        redirects and callback responses cannot create/update state merely to
+        describe it.
+        """
+
+        presentation = telegram_compatibility_presentation(
+            legacy_compatible=legacy_compatible,
+            next_action=next_action,
+            allowed_actions=allowed_actions,
+        )
+        freshness = presentation["freshness"]
+        source = str(freshness.get("source") or "telegram_redirect")
+        source_label = {
+            "telegram_legacy": "Telegram 历史兼容",
+            "telegram_redirect": "Telegram 跳转入口",
+        }.get(source, source)
+        reason = str(freshness.get("reason") or presentation["blocking_reason"])
+        state_label = task_status_label(str(presentation["state"]))
+        next_action_label = str(presentation["next_action"])
+        return "\n\n".join(
+            (
+                f"兼容状态：{state_label}（{source_label}）",
+                f"原因：{reason}",
+                f"下一步：{next_action_label}",
+            )
+        )
+
+    async def _redirect_to_primary_surface(self, chat_id: int) -> None:
+        """Tell non-legacy Telegram traffic where new work now starts."""
+        hint = self._telegram_compatibility_hint(
+            legacy_compatible=False,
+            next_action="打开 Native 开始直接会话，或打开 Relay 创建任务。",
+            allowed_actions=["open_native", "open_relay"],
+        )
+        await self.send_telegram(
+            chat_id,
+            "Telegram 现仅保留历史会话兼容。新会话请从 Native 直接开始；"
+            "需要计划、多人协作或验收时，请使用 Relay。"
+            + hint,
+            buttons=[
+                [{"text": "打开 Native", "url": self._primary_surface_url("native")}],
+                [{"text": "打开 Relay", "url": self._primary_surface_url("relay")}],
+            ],
+        )
+
+    async def _send_surface_jump(self, chat_id: int, surface: str) -> None:
+        labels = {"native": "Native", "relay": "Relay"}
+        label = labels[surface]
+        hint = self._telegram_compatibility_hint(
+            legacy_compatible=False,
+            next_action=f"打开 {label}。",
+            allowed_actions=[f"open_{surface}"],
+        )
+        await self.send_telegram(
+            chat_id,
+            f"已为你打开 {label}。Telegram 仅继续服务历史兼容会话。" + hint,
+            buttons=[[{"text": f"打开 {label}", "url": self._primary_surface_url(surface)}]],
+        )
+
+    async def _redirect_to_relay_verification(self, chat_id: int) -> None:
+        """Keep legacy verification truthful instead of fabricating acceptance."""
+        hint = self._telegram_compatibility_hint(
+            legacy_compatible=True,
+            next_action="在 Relay 打开对应任务，并执行绑定 implementation run 的目标验收。",
+            allowed_actions=["open_relay"],
+        )
+        await self.send_telegram(
+            chat_id,
+            "历史 Telegram 会话不能完成验收：这里不会绑定 implementation run，"
+            "也不会执行声明的测试。请在 Relay 打开对应任务后发起目标验收。"
+            + hint,
+            buttons=[[{"text": "在 Relay 验收", "url": self._primary_surface_url("relay")}]],
+        )
+
+    async def _require_legacy_conversation(
+        self, chat_id: int, *, include_archived: bool = False
+    ) -> bool:
+        """Allow a Telegram mutation only for a persisted legacy flow."""
+        if self._has_legacy_compatible_conversation(
+            chat_id, include_archived=include_archived
+        ):
+            return True
+        await self._redirect_to_primary_surface(chat_id)
+        return False
+
+    async def _require_legacy_update(
+        self, update: Update, *, include_archived: bool = False
+    ) -> bool:
+        chat = update.effective_chat
+        if chat is None:
+            return False
+        return await self._require_legacy_conversation(
+            chat.id, include_archived=include_archived
+        )
 
     def _append_telegram_command_received_event(
         self, update: Update, text: str
@@ -382,9 +585,10 @@ class WlCodexHandlers:
         the outbox; the raw send fn raises on failure so the outbox can retry.
         """
         text = sanitize_telegram_user_text(text)
+        normalized_buttons = _telegram_keyboard(buttons) if buttons else None
         if self._outbox is not None:
             self._outbox.enqueue_send(
-                chat_id, text, buttons,
+                chat_id, text, normalized_buttons,
                 send_fn=self._raw_send_message,
                 edit_fn=self._raw_edit_message,
                 correlation_id="outbox-send",
@@ -393,7 +597,7 @@ class WlCodexHandlers:
 
         # Direct path (no outbox): call raw API and record delivery events.
         try:
-            msg_id = await self._raw_send_message(chat_id, text, buttons)
+            msg_id = await self._raw_send_message(chat_id, text, normalized_buttons)
             self._append_telegram_delivery_event(
                 "telegram.message.sent",
                 chat_id=chat_id, text=text, message_id=msg_id,
@@ -427,9 +631,9 @@ class WlCodexHandlers:
         reply_markup = None
         if buttons:
             keyboard = [
-                [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
+                [InlineKeyboardButton(**b)
                  for b in row]
-                for row in buttons
+                for row in _telegram_keyboard(buttons)
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -448,9 +652,10 @@ class WlCodexHandlers:
         the outbox; the raw edit fn raises on failure so the outbox can retry.
         """
         text = sanitize_telegram_user_text(text)
+        normalized_buttons = _telegram_keyboard(buttons) if buttons else None
         if self._outbox is not None:
             self._outbox.enqueue_edit(
-                chat_id, message_id, text, buttons,
+                chat_id, message_id, text, normalized_buttons,
                 edit_fn=self._raw_edit_message,
                 correlation_id="outbox-edit",
             )
@@ -458,7 +663,7 @@ class WlCodexHandlers:
 
         # Direct path (no outbox): call raw API and record delivery events.
         try:
-            await self._raw_edit_message(chat_id, message_id, text, buttons)
+            await self._raw_edit_message(chat_id, message_id, text, normalized_buttons)
             self._append_telegram_delivery_event(
                 "telegram.message.edited",
                 chat_id=chat_id, text=text, message_id=message_id,
@@ -480,7 +685,7 @@ class WlCodexHandlers:
             # Non-retryable error → try fallback send
             logger.debug("Failed to edit message %d, sending new one", message_id)
             await self._fallback_send_on_edit_failure(
-                chat_id, message_id, text, buttons,
+                chat_id, message_id, text, normalized_buttons,
             )
 
     async def _raw_edit_message(
@@ -499,9 +704,9 @@ class WlCodexHandlers:
         reply_markup = None
         if buttons:
             keyboard = [
-                [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
+                [InlineKeyboardButton(**b)
                  for b in row]
-                for row in buttons
+                for row in _telegram_keyboard(buttons)
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -521,9 +726,9 @@ class WlCodexHandlers:
         reply_markup = None
         if buttons:
             keyboard = [
-                [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
+                [InlineKeyboardButton(**b)
                  for b in row]
-                for row in buttons
+                for row in _telegram_keyboard(buttons)
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -678,6 +883,8 @@ class WlCodexHandlers:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         profile_name = getattr(
             getattr(self._config, "interaction", None), "profile", "legacy"
         )
@@ -690,6 +897,8 @@ class WlCodexHandlers:
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         profile_name = getattr(
             getattr(self._config, "interaction", None), "profile", "legacy"
         )
@@ -701,6 +910,8 @@ class WlCodexHandlers:
 
     async def settings_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update):
             return
         text, buttons = self._settings_card()
         await self.send_telegram(
@@ -733,6 +944,8 @@ class WlCodexHandlers:
     async def task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         text = update.effective_message.text
         ctx = {"chat_id": update.effective_chat.id, "user_id": update.effective_user.id}
         response = await self._controller.handle(text, ctx)
@@ -744,6 +957,8 @@ class WlCodexHandlers:
     async def tasks_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
@@ -752,11 +967,15 @@ class WlCodexHandlers:
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         response = await self._controller.handle("/status", _ctx(update))
         await self.send_telegram(update.effective_chat.id, response.text)
 
     async def continue_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update):
             return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
@@ -766,6 +985,8 @@ class WlCodexHandlers:
     async def steer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
@@ -773,6 +994,8 @@ class WlCodexHandlers:
 
     async def tail(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update):
             return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
@@ -782,6 +1005,8 @@ class WlCodexHandlers:
     async def events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
@@ -789,6 +1014,8 @@ class WlCodexHandlers:
 
     async def diff(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update):
             return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
@@ -798,6 +1025,8 @@ class WlCodexHandlers:
     async def files(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
@@ -805,6 +1034,8 @@ class WlCodexHandlers:
 
     async def pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update):
             return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
@@ -814,6 +1045,8 @@ class WlCodexHandlers:
     async def abort(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
@@ -821,6 +1054,8 @@ class WlCodexHandlers:
 
     async def archive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update):
             return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
@@ -830,6 +1065,8 @@ class WlCodexHandlers:
     async def fork(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
@@ -837,6 +1074,8 @@ class WlCodexHandlers:
 
     async def codex_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update):
             return
         chat_id = update.effective_chat.id
 
@@ -861,6 +1100,8 @@ class WlCodexHandlers:
     async def health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         response = await self._controller.handle("/health", _ctx(update))
         await self.send_telegram(update.effective_chat.id, response.text)
 
@@ -868,6 +1109,8 @@ class WlCodexHandlers:
 
     async def carry(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update, include_archived=True):
             return
         chat_id = update.effective_chat.id
         typing_task = await self._start_typing(chat_id)
@@ -885,6 +1128,8 @@ class WlCodexHandlers:
 
     async def workbenches(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update, include_archived=True):
             return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
@@ -907,6 +1152,8 @@ class WlCodexHandlers:
     async def workspaces(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
         )
@@ -920,6 +1167,8 @@ class WlCodexHandlers:
 
     async def mode_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update):
             return
         text = update.effective_message.text
         chat_id = update.effective_chat.id
@@ -964,12 +1213,16 @@ class WlCodexHandlers:
     async def product_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
+        if not await self._require_legacy_update(update):
+            return
         from wlcodex.router import ModeSwitchCommand
         command = ModeSwitchCommand(mode="product")
         await self._apply_mode_switch(update, command)
 
     async def terminal_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_update(update):
             return
         text = update.effective_message.text
         chat_id = update.effective_chat.id
@@ -1633,7 +1886,7 @@ class WlCodexHandlers:
                 )
                 if (
                     busy_handler is not None
-                    and asyncio.iscoroutinefunction(busy_handler)
+                    and inspect.iscoroutinefunction(busy_handler)
                 ):
                     agent = str(getattr(session_ref, "agent", "") or "现场")
                     agent_label = {
@@ -1920,15 +2173,28 @@ class WlCodexHandlers:
     async def new_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
-        response = await self._controller.handle(
-            update.effective_message.text, _ctx(update)
-        )
-        await self.send_telegram(update.effective_chat.id, response.text)
+        # `/new` used to archive/create a Workbench conversation.  It must not
+        # mutate a historical flow merely because the user opened a new task.
+        await self._redirect_to_primary_surface(update.effective_chat.id)
+
+    async def native_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Open the direct-session surface without touching Telegram state."""
+        if not self._guard(update):
+            return
+        await self._send_surface_jump(update.effective_chat.id, "native")
+
+    async def relay_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Open the task-orchestration surface without touching Telegram state."""
+        if not self._guard(update):
+            return
+        await self._send_surface_jump(update.effective_chat.id, "relay")
 
     async def codex_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
             return
         chat_id = update.effective_chat.id
+        if not await self._require_legacy_conversation(chat_id):
+            return
         typing_task = await self._start_typing(chat_id)
         try:
             response = await self._controller.handle(
@@ -1945,6 +2211,8 @@ class WlCodexHandlers:
         if not self._guard(update):
             return
         chat_id = update.effective_chat.id
+        if not await self._require_legacy_conversation(chat_id):
+            return
         typing_task = await self._start_typing(chat_id)
         try:
             response = await self._controller.handle(
@@ -1975,6 +2243,8 @@ class WlCodexHandlers:
         if not self._guard(update):
             return
         chat_id = update.effective_chat.id
+        if not await self._require_legacy_conversation(chat_id):
+            return
 
         interaction = getattr(self._config, "interaction", None)
         profile_name = getattr(interaction, "profile", "legacy")
@@ -2015,23 +2285,24 @@ class WlCodexHandlers:
         if not self._guard(update):
             return
         chat_id = update.effective_chat.id
-        typing_task = await self._start_typing(chat_id)
-        try:
-            response = await self._controller.handle(
-                update.effective_message.text, _ctx(update)
-            )
-        finally:
-            typing_task.cancel()
-        await self.send_telegram(chat_id, response.text)
+        if not await self._require_legacy_conversation(chat_id):
+            return
+        # The old controller builds a best-effort packet and explicitly does
+        # not run tests.  It must not be presented as a completed acceptance.
+        await self._redirect_to_relay_verification(chat_id)
 
     async def stop_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_conversation(update.effective_chat.id):
             return
         response = await self._controller.handle("/stop", _ctx(update))
         await self.send_telegram(update.effective_chat.id, response.text)
 
     async def switch_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_conversation(update.effective_chat.id):
             return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
@@ -2040,6 +2311,8 @@ class WlCodexHandlers:
 
     async def model_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_conversation(update.effective_chat.id):
             return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
@@ -2050,6 +2323,8 @@ class WlCodexHandlers:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         if not self._guard(update):
+            return
+        if not await self._require_legacy_conversation(update.effective_chat.id):
             return
         response = await self._controller.handle(
             update.effective_message.text, _ctx(update)
@@ -2067,6 +2342,9 @@ class WlCodexHandlers:
             return
         text = update.effective_message.text
         chat_id = update.effective_chat.id
+
+        if not await self._require_legacy_conversation(chat_id):
+            return
 
         # Check active surface mode so terminal input never calls product orchestrator
         active_mode = self._get_active_surface_mode(chat_id)
@@ -2136,6 +2414,13 @@ class WlCodexHandlers:
 
         if not self._guard(update):
             await self._safe_callback_answer(query, "未授权。")
+            return
+
+        chat = update.effective_chat
+        if chat is None or not await self._require_legacy_conversation(
+            chat.id, include_archived=True
+        ):
+            await self._safe_callback_answer(query, "请从 Native 或 Relay 继续。")
             return
 
         data = query.data or ""
@@ -2230,6 +2515,11 @@ class WlCodexHandlers:
         callback = decode_conversation_callback(data)
         if callback is None:
             await self._safe_callback_answer(query, "无效的对话回调数据。")
+            return
+
+        if callback.action in {"verify", "auto_codex_verify"}:
+            await self._safe_callback_answer(query, "请在 Relay 执行绑定验收。")
+            await self._redirect_to_relay_verification(update.effective_chat.id)
             return
 
         if callback.action in {
@@ -2551,6 +2841,8 @@ def build_application(
     application.add_handler(CommandHandler("terminal", handlers.terminal_cmd))
 
     # New conversation commands
+    application.add_handler(CommandHandler("native", handlers.native_cmd))
+    application.add_handler(CommandHandler("relay", handlers.relay_cmd))
     application.add_handler(CommandHandler("new", handlers.new_cmd))
     application.add_handler(CommandHandler("codex", handlers.codex_cmd))
     application.add_handler(CommandHandler("claude", handlers.claude_cmd))

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from wlcodex.runtime_events import EventType
 from wlcodex.claude_stream_parser import ClaudeStreamEvent, parse_line

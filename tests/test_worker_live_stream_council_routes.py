@@ -170,7 +170,7 @@ async def test_council_seat_config_page_lists_five_roles(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_native_root_links_to_council_pages(tmp_path: Path) -> None:
+async def test_native_root_hides_legacy_council_entry(tmp_path: Path) -> None:
     response, _provider = await _request_council(
         tmp_path,
         "GET /native HTTP/1.1\r\n"
@@ -178,8 +178,8 @@ async def test_native_root_links_to_council_pages(tmp_path: Path) -> None:
     )
 
     assert "HTTP/1.1 200 OK" in response
-    assert "/council" in response
-    assert "议会审核" in response
+    assert "/council" not in response
+    assert "议会审核" not in response
     assert "/council/seats" not in response
     assert "席位配置" not in response
 

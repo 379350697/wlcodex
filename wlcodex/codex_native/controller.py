@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -39,32 +40,203 @@ class _StaleActiveTurnMismatch(Exception):
 # Keep this race inside the controller so callers do not need a manual prompt path.
 _ROLLOUT_NOT_READY_RETRY_DELAYS = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
 
-_FALLBACK_CODEX_MODEL_CATALOG: tuple[dict[str, Any], ...] = (
-    {
-        "id": "gpt-5.5",
-        "model": "gpt-5.5",
-        "displayName": "GPT-5.5",
-        "description": "Default Codex model",
-        "hidden": False,
-        "isDefault": True,
-        "inputModalities": ["text", "image"],
-        "supportedReasoningEfforts": [
-            {"reasoningEffort": "medium", "description": "Balanced"},
-            {"reasoningEffort": "high", "description": "Deep"},
-            {"reasoningEffort": "xhigh", "description": "Very deep"},
-        ],
-        "defaultReasoningEffort": "xhigh",
-        "serviceTiers": [
-            {"id": "auto", "name": "Auto", "description": "Default"},
-            {"id": "fast", "name": "Fast", "description": "Lower latency"},
-        ],
-        "defaultServiceTier": "auto",
-    },
-)
+def build_native_session_presentation(
+    detail: dict[str, Any],
+    *,
+    sync_error: str = "",
+) -> dict[str, Any]:
+    """Build a read-only, user-facing Native session state projection.
+
+    The controller deliberately does not persist this view.  HTTP handlers can
+    attach it to a live detail, a cache fallback, or an SSE snapshot without a
+    read action changing session lifecycle state.
+    """
+
+    thread = detail.get("thread")
+    if not isinstance(thread, dict):
+        thread = {}
+    source = str(detail.get("native_session_source") or "daemon").strip().lower()
+    if not source:
+        source = "daemon"
+    pending = bool(detail.get("native_sync_pending"))
+    error = str(sync_error or detail.get("native_sync_error") or "").strip()
+    freshness_stale = source not in {"daemon", "app-server", "live", "native"}
+    freshness_stale = freshness_stale or pending or bool(error)
+    updated_at = _thread_activity_at(thread) or _detail_activity_at(detail)
+    freshness_reason = _native_freshness_reason(
+        source=source,
+        pending=pending,
+        error=error,
+    )
+    state = _native_presentation_state(detail, freshness_stale=freshness_stale)
+    blocking_reason = _native_blocking_reason(
+        thread,
+        state=state,
+        freshness_reason=freshness_reason,
+    )
+    current_actor = _native_presentation_actor(detail, state=state)
+    next_action, next_action_detail, allowed_actions = _native_presentation_actions(
+        state=state,
+        freshness_stale=freshness_stale,
+        has_sync_error=bool(error),
+    )
+    return {
+        "state": state,
+        "freshness": {
+            "source": source,
+            "updated_at": updated_at,
+            # ``is_stale`` is the shared presentation contract used by Relay.
+            # Retain ``stale`` as a compatibility alias for existing Native
+            # clients until they have consumed the unified field.
+            "is_stale": freshness_stale,
+            "stale": freshness_stale,
+            "reason": freshness_reason,
+        },
+        "current_actor": current_actor,
+        "blocking_reason": blocking_reason,
+        "next_action": next_action,
+        # Native used an object here before the cross-surface presentation
+        # contract existed.  Keep its stable action identifier available, but
+        # make ``next_action`` itself the same user-facing text type as Relay.
+        "next_action_detail": next_action_detail,
+        "allowed_actions": allowed_actions,
+    }
 
 
-def _fallback_codex_model_catalog() -> list[dict[str, Any]]:
-    return [json.loads(json.dumps(model)) for model in _FALLBACK_CODEX_MODEL_CATALOG]
+def _native_presentation_state(
+    detail: dict[str, Any],
+    *,
+    freshness_stale: bool,
+) -> str:
+    latest_turn = _latest_turn(_turns(detail))
+    # A provider can keep a turn technically active while it is paused on an
+    # approval request.  Treating every active turn as ``running`` hides the
+    # only meaningful user action (resolve the approval), so waiting states
+    # take precedence over the generic active-turn shortcut.
+    statuses = [
+        _string_value(latest_turn or {}, "status"),
+        _thread_status(detail),
+    ]
+    normalized_statuses = {
+        status.strip().lower().replace("-", "_").replace(" ", "_")
+        for status in statuses
+        if status.strip()
+    }
+    if normalized_statuses & {
+        "waiting_approval",
+        "waitingonapproval",
+        "waiting_on_approval",
+        "approval_required",
+        "approvalrequired",
+        "requires_approval",
+    }:
+        return "waiting_approval"
+    if normalized_statuses & {
+        "waiting_user",
+        "waitinguser",
+        "waiting_for_user",
+        "input_required",
+        "inputrequired",
+    }:
+        return "waiting_user"
+    if _active_turn_id(detail):
+        return "running"
+    status = next(iter(normalized_statuses), "")
+    if status in {"running", "active", "in_progress", "inprogress", "streaming", "pending"}:
+        return "running"
+    if status == "idle":
+        return "waiting_user"
+    if status in {"blocked", "paused"}:
+        return "blocked"
+    if status in {"completed", "complete", "done", "finished"}:
+        return "completed"
+    if status in {"interrupted", "aborted", "cancelled", "canceled"}:
+        return "interrupted"
+    if status in {"failed", "error"}:
+        return "failed"
+    return "stale" if freshness_stale or not status or status == "unknown" else "blocked"
+
+
+def _native_freshness_reason(*, source: str, pending: bool, error: str) -> str:
+    if error:
+        return error
+    if pending:
+        return "正在后台同步最新会话状态"
+    if source == "cache":
+        return "展示的是缓存快照"
+    if source == "stub":
+        return "尚未取得原生会话快照"
+    return ""
+
+
+def _native_blocking_reason(
+    thread: dict[str, Any],
+    *,
+    state: str,
+    freshness_reason: str,
+) -> str:
+    if freshness_reason and state == "stale":
+        return freshness_reason
+    for key in ("blocking_reason", "blockingReason", "error", "errorMessage"):
+        value = _string_value(thread, key)
+        if value:
+            return value
+    if state == "blocked":
+        return "会话已阻塞，等待继续或恢复"
+    if state == "failed":
+        return "会话执行失败"
+    return ""
+
+
+def _native_presentation_actor(
+    detail: dict[str, Any],
+    *,
+    state: str,
+) -> dict[str, str]:
+    """Return the common Relay/Native actor shape without inventing activity."""
+
+    if state not in {"running", "waiting_approval"}:
+        return {"role": "", "label": "", "status": ""}
+    provider = str(detail.get("native_provider") or "codex").strip().lower()
+    labels = {
+        "codex": "Codex",
+        "claude": "Claude",
+        "antigravity": "Antigravity",
+    }
+    return {
+        "role": "native",
+        "label": labels.get(provider, provider or "Native"),
+        "status": "waiting" if state == "waiting_approval" else "streaming",
+    }
+
+
+def _native_presentation_actions(
+    *,
+    state: str,
+    freshness_stale: bool,
+    has_sync_error: bool,
+) -> tuple[str, dict[str, str], list[str]]:
+    if freshness_stale:
+        action_id = "retry_sync" if has_sync_error else "wait_for_sync"
+        label = "重新同步" if has_sync_error else "等待同步"
+        return label, {"id": action_id, "label": label}, ["refresh"]
+    if state == "running":
+        label = "等待运行完成"
+        return label, {"id": "wait", "label": label}, ["refresh", "interrupt"]
+    if state == "waiting_approval":
+        label = "处理审批"
+        return label, {"id": "resolve_approval", "label": label}, [
+            "refresh",
+            "resolve_approval",
+        ]
+    if state == "waiting_user":
+        label = "继续会话"
+        return label, {"id": "continue", "label": label}, ["refresh", "continue"]
+    if state in {"blocked", "failed"}:
+        label = "继续或恢复会话"
+        return label, {"id": "continue", "label": label}, ["refresh", "continue"]
+    label = "继续会话"
+    return label, {"id": "continue", "label": label}, ["refresh", "continue"]
 
 
 class _NativeClient(Protocol):
@@ -212,11 +384,17 @@ class CodexNativeController:
         }
 
     async def list_models(self) -> list[dict[str, Any]]:
-        try:
-            models = await self._client.list_models()
-        except FileNotFoundError:
-            return _fallback_codex_model_catalog()
-        return models or _fallback_codex_model_catalog()
+        """Return only the model catalog actually supplied by Codex.
+
+        A missing binary or failed app-server request must remain visible to
+        the Native surface.  Returning a remembered catalog here made an
+        offline provider look usable and could cause the user to select a
+        model which the configured Codex binary did not offer.  The HTTP UI
+        already renders the request failure as an unavailable model setting,
+        which is the truthful recovery state.
+        """
+
+        return await self._client.list_models()
 
     async def start_session(
         self,
@@ -301,6 +479,22 @@ class CodexNativeController:
         _augment_detail_with_native_status(detail)
         await self._augment_detail_with_live_rate_limits(detail)
         self._project_detail(native_thread_id, detail)
+        return detail
+
+    async def peek_session(self, native_thread_id: str) -> dict[str, Any]:
+        """Read a live Native session without changing local projections.
+
+        HTTP GET and SSE snapshot handlers must use this method rather than
+        ``read_session``.  The latter intentionally projects history for
+        command/control flows and therefore is not read-only.
+        """
+
+        native_thread_id = native_thread_id.strip()
+        if not native_thread_id:
+            raise ValueError("native_thread_id is required")
+        detail = deepcopy(await self._client.read_session(native_thread_id))
+        _augment_detail_with_native_status(detail)
+        await self._augment_detail_with_live_rate_limits(detail)
         return detail
 
     async def attach_session(self, native_thread_id: str) -> NativeCodexControlResult:

@@ -1,5 +1,8 @@
 # WLCodex Lightweight Event-Sourced Agent Platform Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Decision
 
 Build WLCodex into a personal-use, lightweight event-sourced agent platform.

@@ -1,6 +1,5 @@
 """Tests for wlcodex.surfaces.terminal.redaction — secret scrubbing."""
 
-import pytest
 
 from wlcodex.surfaces.terminal.redaction import redact_terminal_text, redact_and_cap_frame
 

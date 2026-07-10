@@ -12,8 +12,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.slow
-
 from wlcodex.db import Ledger
 from wlcodex.runtime_events import (
     AggregateType,
@@ -25,6 +23,9 @@ from wlcodex.runtime_events import (
 )
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_projector import RuntimeProjector
+
+
+pytestmark = pytest.mark.slow
 
 
 # ---------------------------------------------------------------------------

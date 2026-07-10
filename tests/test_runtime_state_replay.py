@@ -7,7 +7,6 @@ accumulation.
 
 from __future__ import annotations
 
-import pytest
 
 from wlcodex.runtime_events import (
     AggregateType,
@@ -21,10 +20,6 @@ from wlcodex.runtime_state import (
     _AGENT_TERMINAL_STATES,
     _APPROVAL_TERMINAL_STATES,
     _ORCHESTRATION_TERMINAL_STATES,
-    RuntimeAgentState,
-    RuntimeApprovalState,
-    RuntimeOrchestrationState,
-    RuntimeStateSnapshot,
     replay_events,
 )
 
@@ -295,6 +290,74 @@ class TestOrchestrationLifecycle:
         assert orch is not None
         assert orch.status == "cancelled"
         assert orch.is_terminal
+
+    def test_recovery_required_keeps_orchestration_user_recoverable(self):
+        events = [
+            _event(
+                EventType.RUN_STARTED,
+                AggregateType.ORCHESTRATION_RUN,
+                "orch-recovery",
+                orchestration_run_id=31,
+                event_id=1,
+            ),
+            _event(
+                EventType.RUN_RECOVERY_REQUIRED,
+                AggregateType.ORCHESTRATION_RUN,
+                "orch-recovery",
+                orchestration_run_id=31,
+                payload={"reason": "queued_handoff_without_executor_activity"},
+                event_id=2,
+            ),
+        ]
+
+        snap = replay_events(events)
+
+        orch = snap.orchestration("orch-recovery")
+        assert orch is not None
+        assert orch.status == "needs_user"
+        assert orch.current_phase == "needs_recovery"
+        assert orch.failure_reason == "queued_handoff_without_executor_activity"
+
+    def test_legacy_queue_recovery_projects_to_existing_conversation(self):
+        events = [
+            _event(
+                EventType.CONVERSATION_STARTED,
+                AggregateType.CONVERSATION,
+                "conv-legacy-queue",
+                conversation_id=77,
+                payload={
+                    "chat_id": 77,
+                    "title": "Historical Telegram queue",
+                    "mode": "chief_engineer",
+                    "workspace_alias": "demo",
+                },
+                event_id=1,
+            ),
+            _event(
+                EventType.RUN_RECOVERY_REQUIRED,
+                AggregateType.ORCHESTRATION_RUN,
+                "legacy-queued-903",
+                conversation_id=77,
+                source=EventSource.SYSTEM,
+                actor="system",
+                visibility=Visibility.USER,
+                payload={
+                    "reason": "legacy_telegram_queue_unavailable_in_web_only_mode",
+                    "state": "needs_recovery",
+                },
+                event_id=2,
+            ),
+        ]
+
+        snap = replay_events(events)
+
+        conversation = snap.conversation("conv-legacy-queue")
+        assert conversation is not None
+        assert conversation.state == "needs_recovery"
+        orch = snap.orchestration("legacy-queued-903")
+        assert orch is not None
+        assert orch.status == "needs_user"
+        assert orch.current_phase == "needs_recovery"
 
     def test_retry_flow(self):
         events = [

@@ -164,6 +164,7 @@ from wlcodex.status import (
     render_current_workspace,
 )
 from wlcodex.models import ConversationMode
+from wlcodex.maintenance import MaintenanceWindowError
 from wlcodex.status import render_health_card
 from wlcodex.task_service import TaskService
 from wlcodex.auto_digest_llm import (
@@ -1034,6 +1035,51 @@ class CommandController:
             return task
         return self._service.get_task(lease.hidden_task_id)
 
+    def _maintenance_submission_block(self) -> ControllerResponse | None:
+        """Translate the durable maintenance gate into a user-safe response."""
+
+        if self._ledger is None:
+            return None
+        assert_open = getattr(self._ledger, "assert_submissions_open", None)
+        if not callable(assert_open):
+            return None
+        try:
+            assert_open()
+        except MaintenanceWindowError:
+            return ControllerResponse(
+                "系统正在维护窗口中排空已有任务，暂不接收新提交。"
+                "现有任务可继续结束或中断；维护取消后会自动恢复提交。"
+            )
+        return None
+
+    def _maintenance_dispatch_frozen(self) -> bool:
+        """Return whether an operator has frozen new queued dispatches.
+
+        Existing provider turns are allowed to reach their terminal state
+        during a maintenance drain.  A dormant ``run.queued`` marker is
+        different: claiming it would create new task/orchestration rows after
+        the operator has taken the quiescence snapshot.  Check the durable
+        ledger gate before the consumer even creates its short-lived queue
+        lease.  ``TaskService.reserve_task`` repeats the same gate just before
+        a task row is created, which closes the check-to-reserve race.
+        """
+
+        if self._ledger is None:
+            return False
+        status_for_window = getattr(self._ledger, "maintenance_window_status", None)
+        if not callable(status_for_window):
+            return False
+        try:
+            return bool(status_for_window().submissions_frozen)
+        except Exception:
+            # A failed read must not cause a background queue to start during
+            # a safety-critical maintenance boundary.
+            logger.warning(
+                "run.queued consumer: maintenance gate unavailable; skipping dispatch",
+                exc_info=True,
+            )
+            return True
+
     async def handle(
         self, text: str, telegram_context: dict[str, Any] | None = None
     ) -> ControllerResponse:
@@ -1043,6 +1089,20 @@ class CommandController:
             command = parse_command(text)
         except ParseError as exc:
             return ControllerResponse(str(exc))
+
+        if isinstance(
+            command,
+            (
+                NewConversationCommand,
+                CodexDirectCommand,
+                ClaudeDirectCommand,
+                AutoModeCommand,
+                VerifyCommand,
+            ),
+        ):
+            blocked = self._maintenance_submission_block()
+            if blocked is not None:
+                return blocked
 
         try:
             if self._legacy_diagnostics.can_handle(command):
@@ -1329,6 +1389,19 @@ class CommandController:
         chat_id = telegram_context.get("chat_id", 0) if telegram_context else 0
         user_id = telegram_context.get("user_id", 0) if telegram_context else 0
 
+        # Diagnostic reads remain available during maintenance.  All other
+        # plain text can create or extend a run, so stop it before it reaches
+        # the legacy conversation state machine.
+        intent = classify_intent(text)
+        if intent == "diagnostic":
+            try:
+                return await self.handle(text, telegram_context)
+            except Exception:
+                return ControllerResponse("命令处理出错，请重试。")
+        blocked = self._maintenance_submission_block()
+        if blocked is not None:
+            return blocked
+
         # --- Lightweight greeting: fast path ---
         if _is_lightweight_greeting(text):
             active = self._ledger.get_active_conversation(chat_id)
@@ -1347,14 +1420,6 @@ class CommandController:
                 ),
             )
             return ControllerResponse("你好！直接说需要我看什么就行。")
-
-        # --- Route diagnostic commands to the existing command parser ---
-        intent = classify_intent(text)
-        if intent == "diagnostic":
-            try:
-                return await self.handle(text, telegram_context)
-            except Exception:
-                return ControllerResponse("命令处理出错，请重试。")
 
         # --- Consume pending carryover: next non-command text creates target ---
         pending = self._ledger.get_latest_prepared_carryover(chat_id)
@@ -2922,22 +2987,38 @@ class CommandController:
                     "matched_signals": ["user_button"],
                 },
             )
-            context_packet = self._build_team_context_packet_for_job(
-                team_run=team_run,
-                agent_job=first_job,
-                role=first_role,
-                model_profile=first_model_profile,
-                resume_state="staged auto route selected by user",
-                output_schema=first_output_schema,
-            )
-            codex_prompt = context_packet.render()
-            self._ledger.record_team_context_packet(
-                team_run_id=team_run.id,
-                agent_job_id=first_job.id,
-                packet_json=context_packet.as_json(),
-                prompt_text=codex_prompt,
-                prompt_tokens=approx_tokens(codex_prompt),
-            )
+            try:
+                context_packet = self._build_team_context_packet_for_job(
+                    team_run=team_run,
+                    agent_job=first_job,
+                    role=first_role,
+                    model_profile=first_model_profile,
+                    resume_state="staged auto route selected by user",
+                    output_schema=first_output_schema,
+                )
+                codex_prompt = context_packet.render()
+                self._ledger.record_team_context_packet(
+                    team_run_id=team_run.id,
+                    agent_job_id=first_job.id,
+                    packet_json=context_packet.as_json(),
+                    prompt_text=codex_prompt,
+                    prompt_tokens=approx_tokens(codex_prompt),
+                )
+            except Exception as exc:
+                self._service.fail_task(task.id, str(exc))
+                self._ledger.update_agent_run_status(
+                    agent_run.id,
+                    "failed",
+                    completion_summary=str(exc)[:2000],
+                )
+                self._ledger.update_orchestration_run(
+                    orch_run.id,
+                    status="failed",
+                    last_codex_analysis=str(exc),
+                )
+                self._ledger.update_team_run_status(team_run.id, "failed")
+                self._ledger.update_team_agent_job_status(first_job.id, "failed")
+                return ControllerResponse(classify_user_error(exc))
 
         self._ledger.update_orchestration_run(
             orch_run.id,
@@ -5861,6 +5942,24 @@ class CommandController:
         except KeyError:
             return ControllerResponse("对话不存在或已被删除。")
 
+        read_or_drain_actions = {
+            STATUS,
+            DIFF,
+            AUTO_VIEW_STATUS,
+            AUTO_VIEW_DIFF,
+            TEAM_VIEW_STATUS,
+            TEAM_VIEW_ARTIFACTS,
+            AUTO_CANCEL,
+            AUTO_INTERRUPT_CLAUDE,
+            CARRY_SHOW,
+            CARRY_CANCEL,
+            CONTINUE,
+        }
+        if callback.action not in read_or_drain_actions:
+            blocked = self._maintenance_submission_block()
+            if blocked is not None:
+                return blocked
+
         # --- Staged-auto callback actions ---
         if callback.action == AUTO_ROUTE_DIAGNOSE:
             return await self._handle_auto_route_analysis(callback, route_kind="bug")
@@ -6020,6 +6119,10 @@ class CommandController:
             convo = self._ledger.get_conversation(conversation_id)
         except KeyError:
             return ControllerResponse("对话不存在或已被删除。")
+        if action not in {BUSY_INTERRUPT, BUSY_CANCEL}:
+            blocked = self._maintenance_submission_block()
+            if blocked is not None:
+                return blocked
         workspace_alias = str(
             getattr(convo, "workspace_alias", "") or self._default_workspace
         )
@@ -6198,92 +6301,85 @@ class CommandController:
         return ControllerResponse("未知的操作。")
 
     async def process_queued_runs(self, workspace_alias: str) -> None:
-        """Consume unconsumed ``run.queued`` events when workspace is free.
+        """Launch one claimed ``run.queued`` event for its own workspace.
 
-        Called by EventBridge after drain_workspace detects the workspace
-        is no longer blocked.  Finds queued runs that haven't been started
-        yet and launches them through the chief-engineer loop.
+        Queue selection is owned by :class:`RuntimeEventStore`: it joins the
+        queue event to its conversation workspace and appends a durable lease
+        before this method allocates any execution state.  A failed reserve or
+        launch releases that lease; only a successful chief-engineer start is
+        marked consumed.
         """
         if self._store is None or self._ledger is None:
             return
 
-        # Check if workspace is actually free.
+        if self._maintenance_dispatch_frozen():
+            logger.info(
+                "run.queued consumer: maintenance window is active; skipping %s",
+                workspace_alias,
+            )
+            return
+
         blocker = self._service.blocker_for_workspace(workspace_alias)
         if blocker is not None:
             return
-
-        # Find unconsumed run.queued events: those without a later
-        # run.started or run.queued.consumed for the same conversation.
-        rows = self._store._conn.execute(
-            """
-            SELECT q.id AS queued_id, q.payload_json, q.conversation_id, q.correlation_id
-            FROM runtime_events q
-            WHERE q.event_type = 'run.queued'
-              AND NOT EXISTS (
-                SELECT 1 FROM runtime_events c
-                WHERE c.conversation_id = q.conversation_id
-                  AND c.id > q.id
-                  AND c.event_type IN ('run.queued.consumed', 'run.started')
-              )
-            ORDER BY q.id ASC
-            LIMIT 1
-            """
-        ).fetchall()
-
-        for row in rows:
-            try:
-                payload = json.loads(str(row["payload_json"]))
-            except Exception:
-                payload = {}
-            conversation_id = int(row["conversation_id"]) if row["conversation_id"] else 0
-            goal = str(payload.get("goal", "") or payload.get("text_preview", ""))
+        claim_next = getattr(self._store, "claim_next_queued_run_for_workspace", None)
+        release_claim = getattr(self._store, "release_queued_run_claim", None)
+        consume_claim = getattr(self._store, "consume_queued_run_claim", None)
+        if not all(callable(method) for method in (claim_next, release_claim, consume_claim)):
+            logger.warning("run.queued consumer: runtime store lacks workspace lease support")
+            return
+        claim = claim_next(
+            workspace_alias,
+            lease_owner=self._new_correlation_id(),
+        )
+        if claim is None:
+            return
+        queued_event = claim.queued_event
+        try:
+            payload = dict(queued_event.payload or {})
+            conversation_id = int(queued_event.conversation_id or 0)
+            goal = str(payload.get("goal", "") or payload.get("text_preview", "")).strip()
             if not goal or not conversation_id:
-                continue
-
-            # Emit consumed marker first to prevent double-processing.
-            self._emit_event(RuntimeEvent(
-                schema_version=1,
-                event_type=EventType.RUN_QUEUED_CONSUMED,
-                aggregate_type=AggregateType.ORCHESTRATION_RUN,
-                aggregate_id=f"queued-{conversation_id}",
-                correlation_id=self._new_correlation_id(),
-                source=EventSource.CONTROLLER,
-                actor="controller",
-                visibility=Visibility.OPERATOR,
-                payload={
-                    "conversation_id": conversation_id,
-                    "workspace_alias": workspace_alias,
-                    "goal_preview": goal[:200],
-                },
-                occurred_at=now_iso(),
-                conversation_id=conversation_id,
-            ))
-
-            # Get the conversation and start the chief-engineer loop.
-            try:
-                conv = self._ledger.get_conversation(conversation_id)
-            except KeyError:
-                logger.warning("Queued conversation %d not found", conversation_id)
-                continue
-
-            # Check if orchestrator is available.
-            if self._orchestration_runner is None:
-                logger.warning(
-                    "run.queued consumer: orchestrator not available for conv %d",
-                    conversation_id,
+                raise ValueError("queued event is missing a conversation or goal")
+            conv = self._ledger.get_conversation(conversation_id)
+            if conv.workspace_alias != workspace_alias:
+                raise ValueError(
+                    f"queued event workspace {conv.workspace_alias!r} does not match {workspace_alias!r}"
                 )
-                continue
+            if self._orchestration_runner is None:
+                raise RuntimeError("orchestrator not available")
+            workspace_path = str(self._service.get_workspace(conv.workspace_alias).path)
 
+            # Reserve the workspace before creating orchestration rows.  A
+            # failed reservation has no partial run and is immediately
+            # retriable once the real blocker releases the workspace.
+            task = self._reserve_execution_lease(
+                conversation_id=conv.id,
+                workspace_alias=conv.workspace_alias,
+                prompt=goal,
+                telegram_chat_id=conv.chat_id,
+                purpose="queued_chief_engineer",
+            )
+        except Exception as exc:
+            logger.warning("run.queued consumer: launch preflight failed: %s", exc)
+            release_claim(claim, error=str(exc))
+            return
+
+        orch_run = None
+        codex_analysis_run = None
+        chief_engineer_started = False
+        try:
             cid = self._new_correlation_id()
-
             orch_run = self._ledger.create_orchestration_run(
-                conversation_id=conv.id, goal=goal,
+                conversation_id=conv.id,
+                goal=goal,
             )
             codex_analysis_run = self._ledger.create_agent_run(
-                conversation_id=conv.id, agent="codex", role="analysis",
+                conversation_id=conv.id,
+                agent="codex",
+                role="analysis",
             )
             self._ledger.update_agent_run_status(codex_analysis_run.id, "running")
-
             self._emit_event(RuntimeEvent(
                 schema_version=1,
                 event_type=EventType.RUN_REQUESTED,
@@ -6293,26 +6389,21 @@ class CommandController:
                 source=EventSource.CONTROLLER,
                 actor="controller",
                 visibility=Visibility.OPERATOR,
-                payload={"goal": goal, "from": "run_queued_consumer"},
+                payload={
+                    "goal": goal,
+                    "from": "run_queued_consumer",
+                    "queued_event_id": queued_event.id,
+                },
                 occurred_at=now_iso(),
                 conversation_id=conv.id,
                 orchestration_run_id=orch_run.id,
+                task_id=task.id,
+                causation_id=queued_event.id,
             ))
-
-            workspace_path = str(
-                self._service.get_workspace(conv.workspace_alias).path
-            )
-            task = self._reserve_execution_lease(
-                conversation_id=conv.id,
-                workspace_alias=conv.workspace_alias,
-                prompt=goal,
-                telegram_chat_id=conv.chat_id,
-                purpose="queued_chief_engineer",
-            )
-
             logger.info(
                 "run.queued consumer: starting chief-engineer for conv %d, goal=%s",
-                conversation_id, goal[:80],
+                conversation_id,
+                goal[:80],
             )
             self._orchestration_runner.start_chief_engineer(
                 prompt=goal,
@@ -6333,7 +6424,77 @@ class CommandController:
                 ),
                 claude_session_id=getattr(conv, "claude_session_id", "") or "",
                 correlation_id=cid,
+                # ``OrchestrationRunner`` records ``run.started`` before it
+                # yields to the background task.  Linking that marker to the
+                # queue event closes the start-success/consume crash window:
+                # a restarted worker treats this item as handed off rather
+                # than launching a second chief-engineer run.
+                causation_id=queued_event.id,
             )
+            chief_engineer_started = True
+            consumed = consume_claim(
+                claim,
+                payload={
+                    "conversation_id": conv.id,
+                    "goal_preview": goal[:200],
+                    "orchestration_run_id": orch_run.id,
+                    "task_id": task.id,
+                },
+            )
+            if consumed is None:
+                # The chief-engineer loop has already been handed a real
+                # execution lease.  Never turn a post-start bookkeeping race
+                # into a second launch; keep the claim for operator recovery.
+                logger.error(
+                    "run.queued consumer: started conv %d but could not consume queue event %d",
+                    conversation_id,
+                    queued_event.id,
+                )
+                return
+        except Exception as exc:
+            logger.exception("run.queued consumer: launch failed for conv %d", conversation_id)
+            if chief_engineer_started:
+                # Same boundary as the ``None`` case above: provider work is
+                # now live, so releasing the queue would permit a duplicate.
+                return
+            if codex_analysis_run is not None:
+                try:
+                    self._ledger.update_agent_run_status(
+                        codex_analysis_run.id,
+                        "failed",
+                        completion_summary=str(exc)[:500],
+                    )
+                except Exception:
+                    logger.debug("could not mark queued analysis run failed", exc_info=True)
+            if orch_run is not None:
+                try:
+                    self._ledger.update_orchestration_run(orch_run.id, status="failed")
+                except Exception:
+                    logger.debug("could not mark queued orchestration failed", exc_info=True)
+            try:
+                self._service.fail_task(task.id, str(exc))
+            except Exception:
+                logger.debug("could not release queued execution task", exc_info=True)
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.RUN_FAILED,
+                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                aggregate_id=str(getattr(orch_run, "id", "queued")),
+                correlation_id=queued_event.correlation_id,
+                source=EventSource.CONTROLLER,
+                actor="controller",
+                visibility=Visibility.OPERATOR,
+                payload={
+                    "queued_event_id": queued_event.id,
+                    "error": str(exc)[:500],
+                },
+                occurred_at=now_iso(),
+                conversation_id=conv.id,
+                orchestration_run_id=getattr(orch_run, "id", None),
+                task_id=task.id,
+                causation_id=queued_event.id,
+            ))
+            release_claim(claim, error=str(exc))
 
 def _trim_result_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:

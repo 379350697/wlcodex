@@ -4,15 +4,15 @@ import subprocess
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 from wlcodex.orchestrator import (
     ChiefEngineerOrchestrator,
     OrchestrationProgress,
-    OrchestrationResult,
     VerificationDecision,
     _analysis_says_no_implementation_needed,
 )
+
+
+pytestmark = pytest.mark.integration
 
 
 class FakeCodexForOrch:
@@ -408,7 +408,7 @@ async def test_orchestrator_stops_if_codex_analysis_edits_code(tmp_path) -> None
     )
 
     assert result.status == "failed"
-    assert "Codex 总工程师轮期间工作区出现非授权实现文件变更" in (
+    assert "总工程师轮期间工作区出现非授权实现文件变更" in (
         result.verification_summary
     )
     assert claude.prompts == []

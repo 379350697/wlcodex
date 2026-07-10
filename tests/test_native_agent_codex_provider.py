@@ -67,6 +67,12 @@ class FakeCodexController:
             status="started",
         )
 
+    async def peek_session(self, native_session_id: str):
+        return {
+            "native_session_source": "daemon",
+            "thread": {"id": native_session_id, "status": "active"},
+        }
+
     async def resolve_approval(self, request_id: str, body: dict):
         return {"codex_request_id": request_id, "status": "resolved", "body": body}
 
@@ -123,4 +129,16 @@ async def test_codex_provider_keeps_approval_result_shape() -> None:
         "codex_request_id": "req-1",
         "status": "resolved",
         "body": {"decision": "approved"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_exposes_read_only_session_peek() -> None:
+    provider = CodexAppServerProvider(FakeCodexController())
+
+    detail = await provider.peek_session("thread-peek")
+
+    assert detail == {
+        "native_session_source": "daemon",
+        "thread": {"id": "thread-peek", "status": "active"},
     }

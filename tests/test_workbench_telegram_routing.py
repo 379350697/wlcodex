@@ -47,7 +47,11 @@ def _make_handlers(*, controller=None, ledger=None, config=None,
 
     if ledger is None:
         ledger = MagicMock()
-        ledger.get_active_conversation = MagicMock(return_value=None)
+        # This helper exercises the historical Telegram surface.  New traffic
+        # is covered by the compatibility-contract tests and must be redirected.
+        ledger.get_active_conversation = MagicMock(
+            return_value=SimpleNamespace(id=1, legacy_compatible=True)
+        )
         ledger.record_telegram_update = MagicMock()
         ledger.list_tasks = MagicMock(return_value=[])
 
@@ -253,7 +257,7 @@ async def test_onsite_text_prompts_busy_choices_not_controller():
     call_args = controller.handle_terminal_workspace_busy.call_args
     assert call_args.args[0].id == 55
     assert call_args.args[1] == "继续修失败测试"
-    assert call_args.kwargs["agent_label"] == "Claude"
+    assert call_args.kwargs["agent_label"] == "DeepSeek 开发工程师"
 
     # Controller must NOT be called
     controller.handle.assert_not_called()
@@ -290,6 +294,7 @@ async def test_onsite_text_uses_runtime_event_mode_without_falling_to_product(
         title="真人历史现场 smoke 2",
         mode="chief_engineer",
         workspace_alias="wlcodex",
+        legacy_compatible=True,
     )
     store.append(RuntimeEvent(
         schema_version=1,
@@ -375,7 +380,7 @@ async def test_onsite_text_uses_runtime_event_mode_without_falling_to_product(
     call_args = controller.handle_terminal_workspace_busy.call_args
     assert call_args.args[0].id == conversation.id
     assert call_args.args[1] == "为什么你没有反馈回来，是wlcodex的问题吗"
-    assert call_args.kwargs["agent_label"] == "Codex"
+    assert call_args.kwargs["agent_label"] == "GPT 开发工程师"
     controller.handle.assert_not_called()
     controller.handle_conversation_text.assert_not_called()
 
@@ -607,7 +612,7 @@ async def test_settings_command_sends_settings_card():
     combined = " ".join(sent_texts)
 
     # Must contain settings-relevant language
-    settings_terms = ["设置", "流程", "Codex", "Claude", "模型", "权限", "工作区"]
+    settings_terms = ["设置", "工程师", "开发", "审计", "驾驶舱"]
     found = [term for term in settings_terms if term in combined]
     assert len(found) >= 2, (
         f"Settings card missing expected terms. Found: {found}. Text: {combined[:500]}"
@@ -839,8 +844,10 @@ async def test_settings_callback_all_buttons_route_to_controller():
 
         await handlers.callback_router(cb_update, None)
 
-        # Controller must have been called (not rejected with "无效的设置回调数据。")
-        controller.handle.assert_called_once()
+        # The engineer-model picker has its own renderer; all other legacy
+        # settings buttons route through the command controller.
+        if not btn.callback_data.startswith("settings:engineer_models"):
+            controller.handle.assert_called_once()
 
         # Verify the answer was not an error
         answer_calls = query.answer.call_args_list

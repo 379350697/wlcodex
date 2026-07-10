@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 
-from wlcodex.codex_native.controller import CodexNativeController
+from wlcodex.codex_native.controller import (
+    CodexNativeController,
+    build_native_session_presentation,
+)
 from wlcodex.codex_native.models import (
     NativeCodexControlResult,
     NativeCodexSession,
@@ -1607,19 +1610,124 @@ async def test_controller_lists_native_models(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_controller_falls_back_when_model_catalog_file_is_missing(
+async def test_controller_does_not_invent_a_model_when_catalog_is_unavailable(
     tmp_path: Path,
 ) -> None:
     controller, client, _session_store, _runtime_store = _controller(tmp_path)
     client.list_models_error = FileNotFoundError("model catalog")
 
-    models = await controller.list_models()
-
+    with pytest.raises(FileNotFoundError, match="model catalog"):
+        await controller.list_models()
     assert client.calls == [("list_models",)]
-    assert models[0]["model"] == "gpt-5.5"
-    assert models[0]["displayName"] == "GPT-5.5"
-    assert models[0]["isDefault"] is True
-    assert "FileNotFoundError" not in json.dumps(models)
+
+
+def test_native_session_presentation_marks_cached_unknown_snapshot_stale() -> None:
+    presentation = build_native_session_presentation(
+        {
+            "native_session_source": "cache",
+            "native_sync_pending": True,
+            "native_sync_error": "codex binary is unavailable",
+            "thread": {
+                "id": "thread-cache",
+                "status": "unknown",
+                "updated_at": "2026-07-10T10:00:00+00:00",
+            },
+        }
+    )
+
+    assert presentation == {
+        "state": "stale",
+        "freshness": {
+            "source": "cache",
+            "updated_at": "2026-07-10T10:00:00+00:00",
+            "is_stale": True,
+            "stale": True,
+            "reason": "codex binary is unavailable",
+        },
+        "current_actor": {"role": "", "label": "", "status": ""},
+        "blocking_reason": "codex binary is unavailable",
+        "next_action": "重新同步",
+        "next_action_detail": {"id": "retry_sync", "label": "重新同步"},
+        "allowed_actions": ["refresh"],
+    }
+
+
+def test_native_session_presentation_keeps_live_running_state_and_actions() -> None:
+    presentation = build_native_session_presentation(
+        {
+            "native_session_source": "daemon",
+            "native_sync_pending": False,
+            "thread": {
+                "id": "thread-live",
+                "status": "active",
+                "updatedAt": "2026-07-10T11:00:00+00:00",
+            },
+        }
+    )
+
+    assert presentation == {
+        "state": "running",
+        "freshness": {
+            "source": "daemon",
+            "updated_at": "2026-07-10T11:00:00+00:00",
+            "is_stale": False,
+            "stale": False,
+            "reason": "",
+        },
+        "current_actor": {
+            "role": "native",
+            "label": "Codex",
+            "status": "streaming",
+        },
+        "blocking_reason": "",
+        "next_action": "等待运行完成",
+        "next_action_detail": {"id": "wait", "label": "等待运行完成"},
+        "allowed_actions": ["refresh", "interrupt"],
+    }
+
+
+def test_native_session_presentation_prioritizes_waiting_approval_over_active_turn() -> None:
+    presentation = build_native_session_presentation(
+        {
+            "native_provider": "codex",
+            "native_session_source": "daemon",
+            "thread": {
+                "id": "thread-approval",
+                "status": "waitingOnApproval",
+                "updatedAt": "2026-07-10T11:30:00+00:00",
+            },
+            "turns": [
+                {
+                    "id": "turn-approval",
+                    "status": "waitingOnApproval",
+                    "updatedAt": "2026-07-10T11:30:00+00:00",
+                }
+            ],
+        }
+    )
+
+    assert presentation["state"] == "waiting_approval"
+    assert presentation["current_actor"] == {
+        "role": "native",
+        "label": "Codex",
+        "status": "waiting",
+    }
+    assert presentation["next_action"] == "处理审批"
+    assert presentation["allowed_actions"] == ["refresh", "resolve_approval"]
+
+
+@pytest.mark.asyncio
+async def test_controller_peek_session_is_read_only(tmp_path: Path) -> None:
+    controller, client, session_store, _runtime_store = _controller(tmp_path)
+
+    detail = await controller.peek_session("thread-1")
+
+    assert detail["thread"]["id"] == "thread-1"
+    assert session_store.list_recent(limit=10) == []
+    assert client.calls == [
+        ("read_session", "thread-1"),
+        ("get_account_rate_limits",),
+    ]
 
 
 @pytest.mark.asyncio

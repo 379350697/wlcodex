@@ -27,7 +27,7 @@ def render_timeline_v2_template(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(title)}</title>
   <style>
-    :root {{ color-scheme: dark; --bg: #050507; --panel: #101116; --line: #2a2d38; --text: #f4f4f5; --muted: #9ca3af; --accent: #88a2ff; }}
+    :root {{ color-scheme: dark; --bg: #050507; --panel: #101116; --line: #454b5c; --text: #f8fafc; --muted: #c3cad5; --accent: #adc8ff; }}
     * {{ box-sizing: border-box; }}
     body {{ margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
     main {{ width: min(760px, 100%); margin: 0 auto; padding: 18px 14px 92px; }}
@@ -42,11 +42,17 @@ def render_timeline_v2_template(
     .item-role {{ display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }}
     .composer {{ position: fixed; left: 0; right: 0; bottom: 0; z-index: 3; padding: 10px 12px 14px; background: rgba(5, 5, 7, .96); border-top: 1px solid var(--line); }}
     .composer-inner {{ display: grid; grid-template-columns: 1fr auto; gap: 8px; width: min(760px, 100%); margin: 0 auto; }}
-    textarea {{ min-height: 42px; max-height: 120px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: #11131a; color: var(--text); font: inherit; }}
-    button {{ border: 1px solid #3b456b; border-radius: 8px; padding: 0 16px; background: #1e2746; color: var(--text); font-weight: 700; }}
+    textarea {{ min-height: 44px; max-height: 120px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: #11131a; color: var(--text); font: inherit; }}
+    button {{ min-height: 44px; border: 1px solid #7088c7; border-radius: 8px; padding: 0 16px; background: #25345f; color: var(--text); font-weight: 700; }}
     button:disabled {{ opacity: .55; }}
     .empty {{ color: var(--muted); padding: 24px 2px; }}
     .status {{ margin-top: 6px; color: var(--muted); font-size: 12px; }}
+    :focus-visible {{ outline: 3px solid var(--accent); outline-offset: 3px; }}
+    .sr-only {{ position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }}
+    @media (forced-colors: active) {{
+      * {{ forced-color-adjust: auto; }}
+      .item, textarea, button {{ border: 1px solid CanvasText; }}
+    }}
   </style>
 </head>
 <body data-native-template="timeline-v2">
@@ -55,15 +61,16 @@ def render_timeline_v2_template(
       <h1>{escape(title)}</h1>
       <div class="meta">只读 timeline 投影；发送后等待 timeline 确认</div>
     </header>
-    <section id="timeline" class="timeline" aria-live="polite"></section>
+    <section id="timeline" class="timeline" role="log" aria-live="off" aria-relevant="additions text"></section>
     <div id="empty" class="empty">暂无 timeline 消息</div>
   </main>
   <form id="composer" class="composer">
     <div class="composer-inner">
+      <label class="sr-only" for="prompt">继续 {escape(provider_label)} 会话</label>
       <textarea id="prompt" placeholder="继续 {escape(provider_label)} 会话"></textarea>
       <button id="send" type="submit">发送</button>
     </div>
-    <div id="status" class="status"></div>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
   </form>
   <script>
     const PROVIDER = {provider_json};
@@ -140,6 +147,12 @@ def render_timeline_v2_template(
       itemNodes.set(key, record);
       return record;
     }}
+    function shouldAutoScroll() {{
+      return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 96;
+    }}
+    function scrollToBottom() {{
+      window.scrollTo({{top: document.documentElement.scrollHeight, behavior: "auto"}});
+    }}
     function renderTimelineEvent(event) {{
       if (!event || !event.kind) return;
       if (event.id) latestEventId = Math.max(latestEventId, Number(event.id || 0));
@@ -147,6 +160,7 @@ def render_timeline_v2_template(
       if (renderedEvents.has(key)) return;
       const text = eventText(event);
       if (!text.trim()) return;
+      const followTail = shouldAutoScroll();
       const role = roleFor(event);
       const record = ensureItemNode(event, role);
       if (event.kind === "text_delta") {{
@@ -155,7 +169,9 @@ def render_timeline_v2_template(
         record.body.textContent = text;
       }}
       renderedEvents.add(key);
-      window.scrollTo(0, document.body.scrollHeight);
+      if (followTail) scrollToBottom();
+      else status.textContent = "有新消息";
+      if (event.kind === "message_completed") status.textContent = "回复已完成";
     }}
     async function pollTimeline() {{
       if (!nativeThreadId) return;
@@ -198,6 +214,15 @@ def render_timeline_v2_template(
       }} finally {{
         sendEl.disabled = false;
       }}
+    }});
+    document.addEventListener("visibilitychange", () => {{
+      if (document.hidden) {{
+        if (source) source.close();
+        source = null;
+        return;
+      }}
+      pollTimeline().catch(() => {{}});
+      openTimelineStream();
     }});
     initialEvents.forEach(renderTimelineEvent);
     openTimelineStream();

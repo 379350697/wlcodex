@@ -17,6 +17,9 @@ from typing import Any, Protocol
 
 NativeMessageHandler = Callable[[dict[str, Any]], Awaitable[None]]
 _DEFAULT_CONTROL_SOCKET = Path("~/.codex/app-server-control/app-server-control.sock")
+_MACOS_CHATGPT_APP_CODEX_BINARY = Path(
+    "/Applications/ChatGPT.app/Contents/Resources/codex"
+)
 _MACOS_CODEX_APP_BINARY = Path("/Applications/Codex.app/Contents/Resources/codex")
 _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _OP_CONTINUATION = 0x0
@@ -43,8 +46,13 @@ def _resolve_codex_binary(binary: str) -> str:
     resolved = shutil.which(value)
     if resolved:
         return resolved
-    if value == "codex" and _MACOS_CODEX_APP_BINARY.exists():
-        return str(_MACOS_CODEX_APP_BINARY)
+    if value == "codex":
+        for app_binary in (
+            _MACOS_CHATGPT_APP_CODEX_BINARY,
+            _MACOS_CODEX_APP_BINARY,
+        ):
+            if app_binary.exists():
+                return str(app_binary)
     return value
 
 
@@ -318,6 +326,7 @@ class CodexAppServerWebSocketTransport:
         self._process: asyncio.subprocess.Process | None = None
         self._websocket: Any = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._resolved_binary = ""
 
     async def start(
         self,
@@ -327,7 +336,8 @@ class CodexAppServerWebSocketTransport:
             raise RuntimeError("Codex app-server transport is already started")
 
         if self.spawn_process:
-            args = [_resolve_codex_binary(self.binary), "app-server"]
+            self._resolved_binary = _resolve_codex_binary(self.binary)
+            args = [self._resolved_binary, "app-server"]
             if self.remote_control:
                 args.append("--remote-control")
             args.extend(["--listen", self.listen_endpoint])
@@ -381,6 +391,7 @@ class CodexAppServerWebSocketTransport:
             "transport": "app-server",
             "source": "app-server",
             "binary": self.binary,
+            "resolved_binary": self._resolved_binary or _resolve_codex_binary(self.binary),
             "endpoint": self.connect_endpoint,
             "listen_endpoint": self.listen_endpoint,
             "framing": "websocket-json",

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +30,7 @@ from wlcodex.orchestration_runner import OrchestrationRunner
 from wlcodex.recovery_notifications import notify_recovery_paused_tasks
 from wlcodex.relay.service import RelayNativeRunWatchdog, RelayRuntimeEventProjector
 from wlcodex.runtime_diagnostics import (
+    append_web_only_legacy_queue_recovery_events,
     append_startup_recovery_events,
     append_recovery_events,
     find_non_terminal_agent_runs,
@@ -506,6 +508,25 @@ def _should_run_web_entry_only(
     )
 
 
+def _mark_legacy_queues_for_web_only(
+    *,
+    web_entry_only: bool,
+    runtime_store: RuntimeEventStore,
+) -> int:
+    """Persist, rather than strand, legacy Telegram queues in web-only mode.
+
+    The formal tokenless process intentionally has no Telegram controller or
+    backend.  It must not attempt to dispatch a historical ``run.queued``
+    entry; it records an explicit recovery state instead.  Telegram-enabled
+    startup never calls this path, so its normal workspace lease consumer
+    remains the only owner of new queue dispatch.
+    """
+
+    if not web_entry_only:
+        return 0
+    return len(append_web_only_legacy_queue_recovery_events(runtime_store))
+
+
 async def _run_relay_watchdog_loop(
     relay_watchdog: object,
     *,
@@ -532,18 +553,100 @@ async def _run_relay_runtime_projector_loop(
         await asyncio.sleep(poll_interval_seconds)
 
 
+def _run_configured_runtime_retention_once(config: object) -> object:
+    """Run one retention pass on a dedicated SQLite connection.
+
+    This intentionally opens the connection inside the scheduler worker thread;
+    the main event loop's runtime-store connection must never cross threads.
+    It is called only after the configured interval, never during startup.
+    """
+
+    from wlcodex.runtime_raw_frame_retention import (
+        RuntimeRawFrameRetention,
+        RuntimeRetentionPolicy,
+        apply_retention_schema,
+        initial_retention_migration_verified,
+    )
+    from wlcodex.maintenance import maintenance_window_status
+
+    storage = getattr(config, "storage")
+    retention_config = getattr(config, "runtime_retention")
+    ledger = Ledger.open(storage.sqlite_path)
+    try:
+        apply_retention_schema(ledger._conn)
+        if not initial_retention_migration_verified(ledger._conn):
+            logger.warning(
+                "Provider raw-frame retention scheduler skipped: initial migration has not "
+                "completed a verified maintenance apply; run maintenance-begin, apply, and "
+                "verify first"
+            )
+            return {
+                "applied": False,
+                "reason": "initial_migration_not_verified",
+            }
+        if maintenance_window_status(
+            ledger._conn, include_active_work=False
+        ).submissions_frozen:
+            logger.info(
+                "Provider raw-frame retention scheduler skipped while a maintenance window "
+                "is active"
+            )
+            return {
+                "applied": False,
+                "reason": "maintenance_window_active",
+            }
+        store = RuntimeEventStore(
+            ledger._conn,
+            raw_frame_archive_dir=retention_config.archive_dir,
+        )
+        retention = RuntimeRawFrameRetention(
+            store,
+            RuntimeRetentionPolicy(
+                archive_dir=retention_config.archive_dir,
+                hot_retention_days=retention_config.hot_retention_days,
+                archive_retention_days=retention_config.archive_retention_days,
+                interval_seconds=retention_config.interval_seconds,
+                batch_size=retention_config.batch_size,
+            ),
+        )
+        return retention.run(apply=True)
+    finally:
+        ledger._conn.close()
+
+
+async def _run_runtime_raw_frame_retention_loop(
+    run_once: Callable[[], object],
+    *,
+    interval_seconds: float,
+) -> None:
+    """Apply retention periodically without blocking request/event-loop work."""
+
+    while True:
+        # Never run during application startup: initial historical migration is
+        # a deliberate maintenance CLI action, not an incidental side effect.
+        await asyncio.sleep(interval_seconds)
+        try:
+            result = await asyncio.to_thread(run_once)
+            logger.info("Provider raw-frame retention completed: %s", result)
+        except Exception as exc:
+            logger.warning("Provider raw-frame retention failed: %s", exc)
+
+
 async def _run_web_entry_only(
     live_stream_components: SimpleNamespace,
     *,
     relay_watchdog: object | None = None,
     relay_runtime_projector: object | None = None,
+    runtime_retention_run_once: Callable[[], object] | None = None,
     watchdog_interval_seconds: int = 60,
     runtime_projector_interval_seconds: float = 1.0,
+    runtime_retention_interval_seconds: float = 6 * 60 * 60,
 ) -> None:
     """Run the formal native web entry without Telegram polling."""
     live_stream_server = live_stream_components.server
     relay_watchdog_task: asyncio.Task[None] | None = None
     relay_runtime_projector_task: asyncio.Task[None] | None = None
+    runtime_retention_task: asyncio.Task[None] | None = None
     logger.info("WLCodex starting in web entry mode. Telegram polling disabled.")
     try:
         await live_stream_server.start()
@@ -563,6 +666,14 @@ async def _run_web_entry_only(
                 ),
                 name="relay-runtime-projector",
             )
+        if runtime_retention_run_once is not None:
+            runtime_retention_task = asyncio.create_task(
+                _run_runtime_raw_frame_retention_loop(
+                    runtime_retention_run_once,
+                    interval_seconds=runtime_retention_interval_seconds,
+                ),
+                name="provider-raw-frame-retention",
+            )
         logger.info(
             "Worker live stream listening at http://%s:%s",
             live_stream_server.host,
@@ -581,6 +692,12 @@ async def _run_web_entry_only(
             relay_runtime_projector_task.cancel()
             try:
                 await relay_runtime_projector_task
+            except asyncio.CancelledError:
+                pass
+        if runtime_retention_task is not None:
+            runtime_retention_task.cancel()
+            try:
+                await runtime_retention_task
             except asyncio.CancelledError:
                 pass
         await live_stream_server.stop()
@@ -615,7 +732,19 @@ def main() -> None:
     ledger.migrate()
 
     # Runtime event store — append-only source of truth
-    runtime_store = RuntimeEventStore(ledger._conn)
+    runtime_store = RuntimeEventStore(
+        ledger._conn,
+        raw_frame_archive_dir=config.runtime_retention.archive_dir,
+    )
+    runtime_retention_run_once: Callable[[], object] | None = None
+    if config.runtime_retention.scheduled_apply_enabled:
+        def runtime_retention_run_once() -> object:
+            return _run_configured_runtime_retention_once(config)
+
+        logger.info(
+            "Provider raw-frame retention scheduler enabled: every %ss",
+            config.runtime_retention.interval_seconds,
+        )
 
     # Runtime projector — updates compatibility tables from runtime events
     runtime_projector = RuntimeProjector(ledger._conn, store=runtime_store)
@@ -644,38 +773,11 @@ def main() -> None:
         if relay_service is not None
         else None
     )
-    if _should_run_web_entry_only(
-        config,
-        token=token,
-        live_stream_components=live_stream_components,
-    ):
-        logger.warning(
-            "Telegram token env variable %s is missing; running formal web entry only",
-            config.telegram.bot_token_env,
-        )
-        assert live_stream_components is not None
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(
-                _run_web_entry_only(
-                    live_stream_components,
-                    relay_watchdog=relay_watchdog,
-                    relay_runtime_projector=relay_runtime_projector,
-                    watchdog_interval_seconds=config.task.watchdog_interval_seconds,
-                )
-            )
-        except KeyboardInterrupt:
-            logger.info("Shutting down.")
-        finally:
-            loop.close()
-        return
 
-    # Telegram delivery outbox — isolates network failures from orchestration
-    from wlcodex.telegram_outbox import TelegramOutbox
-    telegram_outbox = TelegramOutbox(store=runtime_store)
-
-    paused_ids: list[int] = []
+    # Startup recovery belongs to the shared runtime, not the Telegram
+    # delivery surface.  In particular, formal Native/Relay-only deployments
+    # must also turn a durable queued hand-off with no executor activity into
+    # an explicit recovery state before the web server starts accepting work.
     try:
         recovery = append_startup_recovery_events(runtime_store, ledger)
         if any(recovery.values()):
@@ -688,7 +790,8 @@ def main() -> None:
     except Exception as exc:
         logger.warning("Runtime startup recovery failed (non-fatal): %s", exc)
 
-    # Runtime recovery: find and mark orphaned agent runs
+    # Runtime recovery: find and mark orphaned agent runs.  This is likewise
+    # shared by Telegram and formal Native/Relay-only deployments.
     try:
         orphaned_ids = find_non_terminal_agent_runs(runtime_store)
         if orphaned_ids:
@@ -702,6 +805,62 @@ def main() -> None:
             )
     except Exception as exc:
         logger.warning("Runtime recovery scan failed (non-fatal): %s", exc)
+
+    web_entry_only = _should_run_web_entry_only(
+        config,
+        token=token,
+        live_stream_components=live_stream_components,
+    )
+    if web_entry_only:
+        try:
+            queue_recovery_count = _mark_legacy_queues_for_web_only(
+                web_entry_only=True,
+                runtime_store=runtime_store,
+            )
+            if queue_recovery_count:
+                logger.warning(
+                    "Formal web-only startup marked %d legacy Telegram queue item(s) "
+                    "as needs_recovery; no Telegram dispatch was attempted",
+                    queue_recovery_count,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Formal web-only legacy queue recovery failed (non-fatal): %s",
+                exc,
+            )
+
+    if web_entry_only:
+        logger.warning(
+            "Telegram token env variable %s is missing; running formal web entry only",
+            config.telegram.bot_token_env,
+        )
+        assert live_stream_components is not None
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                _run_web_entry_only(
+                    live_stream_components,
+                    relay_watchdog=relay_watchdog,
+                    relay_runtime_projector=relay_runtime_projector,
+                    runtime_retention_run_once=runtime_retention_run_once,
+                    watchdog_interval_seconds=config.task.watchdog_interval_seconds,
+                    runtime_retention_interval_seconds=(
+                        config.runtime_retention.interval_seconds
+                    ),
+                )
+            )
+        except KeyboardInterrupt:
+            logger.info("Shutting down.")
+        finally:
+            loop.close()
+        return
+
+    # Telegram delivery outbox — isolates network failures from orchestration
+    from wlcodex.telegram_outbox import TelegramOutbox
+    telegram_outbox = TelegramOutbox(store=runtime_store)
+
+    paused_ids: list[int] = []
 
     config.storage.task_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1006,6 +1165,7 @@ def main() -> None:
     async def _run() -> None:
         pump_task = asyncio.create_task(event_bridge.run(), name="event-pump")
         relay_runtime_projector_task: asyncio.Task[None] | None = None
+        runtime_retention_task: asyncio.Task[None] | None = None
         if relay_runtime_projector is not None:
             relay_runtime_projector_task = asyncio.create_task(
                 _run_relay_runtime_projector_loop(
@@ -1013,6 +1173,14 @@ def main() -> None:
                     poll_interval_seconds=1.0,
                 ),
                 name="relay-runtime-projector",
+            )
+        if runtime_retention_run_once is not None:
+            runtime_retention_task = asyncio.create_task(
+                _run_runtime_raw_frame_retention_loop(
+                    runtime_retention_run_once,
+                    interval_seconds=config.runtime_retention.interval_seconds,
+                ),
+                name="provider-raw-frame-retention",
             )
         # Outbox delivery task — processes queued Telegram sends/edits with retry.
         async def _process_outbox() -> None:
@@ -1096,6 +1264,12 @@ def main() -> None:
                 relay_runtime_projector_task.cancel()
                 try:
                     await relay_runtime_projector_task
+                except asyncio.CancelledError:
+                    pass
+            if runtime_retention_task is not None:
+                runtime_retention_task.cancel()
+                try:
+                    await runtime_retention_task
                 except asyncio.CancelledError:
                     pass
             # 2b. Stop outbox processor

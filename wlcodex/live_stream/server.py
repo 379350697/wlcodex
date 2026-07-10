@@ -10,7 +10,6 @@ import secrets
 import shlex
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,7 @@ from wlcodex.claude_permissions import (
     CLAUDE_PERMISSION_MODE_ORDER,
     normalize_claude_permission_mode,
 )
+from wlcodex.codex_native.controller import build_native_session_presentation
 from wlcodex.council import (
     CouncilConfig,
     CouncilReviewPacket,
@@ -46,6 +46,46 @@ from wlcodex.live_stream.collapse import (
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.live_stream.native_templates.registry import render_native_template
+from wlcodex.live_stream.presentation import (
+    activity_label as _relay_activity_label,
+    presentation_state_filter as _relay_presentation_state_filter,
+    role_label as _relay_role_label,
+    role_status_label as _relay_role_status_label,
+    status_class_name as _relay_status_class_name,
+    summary_presentation as _relay_summary_presentation,
+    summary_presentation_state as _relay_summary_presentation_state,
+    task_status_label as _relay_task_status_label,
+)
+from wlcodex.live_stream.relay_navigation import (
+    marvis_relay_bottom_nav as _marvis_relay_bottom_nav,
+    marvis_relay_topbar as _marvis_relay_topbar,
+    relay_chat_href as _relay_chat_href,
+    relay_inbox_href as _relay_inbox_href,
+    relay_settings_href as _relay_settings_href,
+    relay_task_events_suffix as _relay_task_events_suffix,
+    relay_task_list_href as _relay_task_list_href,
+    relay_task_view_href as _relay_task_view_href,
+    relay_workspace_href as _relay_workspace_href,
+)
+from wlcodex.live_stream.relay_composer import (
+    _marvis_relay_attachment_script,
+    _marvis_relay_attachment_sheet_html,
+    _marvis_relay_task_composer,
+    _marvis_relay_workspace_dock,
+)
+from wlcodex.live_stream.routing import (
+    agent_id_from_path as _agent_id_from_path,
+    native_login_provider_from_path as _native_login_provider_from_path,
+    native_messages_route_from_path as _native_messages_route_from_path,
+    native_page_provider_from_path as _native_page_provider_from_path,
+    native_provider_route_parts as _native_provider_route_parts,
+    native_timeline_route_from_path as _native_timeline_route_from_path,
+    normalize_relay_api_path as _normalize_relay_api_path,
+    optional_nonempty_string as _optional_nonempty_string,
+    relay_task_api_parts as _relay_task_api_parts,
+    relay_task_id_from_ui_path as _relay_task_id_from_ui_path,
+    safe_int as _safe_int,
+)
 from wlcodex.native_timeline import (
     NativeTimelineEvent,
     NativeTimelineItem,
@@ -56,6 +96,7 @@ from wlcodex.native_turn_semantics import (
     turn_semantics_json,
 )
 from wlcodex.jsonrpc import JsonRpcError, JsonRpcTimeout
+from wlcodex.maintenance import MaintenanceWindowError, assert_submissions_open
 from wlcodex.relay.display import (
     dict_looks_like_role_envelope as relay_dict_looks_like_role_envelope,
 )
@@ -74,11 +115,17 @@ from wlcodex.relay.display import (
     text_needs_chinese_fallback,
 )
 from wlcodex.relay.envelopes import parse_role_envelope
+from wlcodex.relay.graph import build_marvis_relay_state
 from wlcodex.relay.marvis_interaction import (
     project_relay_event_to_marvis_typed_event,
     project_relay_rows_to_marvis_typed_events,
 )
-from wlcodex.relay.models import RELAY_ROLE_DISPLAY_NAMES, RELAY_ROLE_IDS
+from wlcodex.relay.mutations import (
+    MutationStore,
+    RelayMutationClaim,
+    RelayMutationStore,
+)
+from wlcodex.relay.models import RELAY_ROLE_IDS
 from wlcodex.relay.work_log_projection import (
     RawWorkLogEntry,
     compress_work_log_entries,
@@ -200,9 +247,8 @@ _STATIC_CSS_BUNDLES = {
         "components.css",
     ),
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260629-confirmation-provenance"
+_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260710-dialog-a11y"
 _RELAY_MOBILE_JS_HREF = "/static/relay_mobile.js?v=20260701-mobile-web"
-_RELAY_ACTIVITY_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
@@ -214,12 +260,13 @@ _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest"
 
 def _relay_mobile_web_head(title: str) -> str:
     return f"""  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light only">
   <meta name="theme-color" content="#FAF8F5">
   <title>{escape(title)}</title>
   <link rel="stylesheet" href="/static/base.css">
   <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
+  <script src="/static/surface_runtime.js?v=20260710-semantic-closure" defer></script>
   <script src="{_RELAY_MOBILE_JS_HREF}" defer></script>"""
 
 # Inline SVG icons — 24×24 viewBox, currentColor, Lucide-style (stroke-width 2)
@@ -393,7 +440,125 @@ class WorkerLiveStreamServer:
         self._council_runs: dict[str, dict[str, Any]] = {}
         self._council_run_tasks: set[asyncio.Task[None]] = set()
         self._relay_dispatch_tasks: set[asyncio.Task[None]] = set()
+        self._relay_lifecycle_task: asyncio.Task[None] | None = None
         self._login_tickets: dict[str, float] = {}
+
+    def _maintenance_submission_error(self) -> str | None:
+        """Return a public error when the global maintenance gate is closed.
+
+        Native sessions are provider-owned and therefore do not necessarily
+        create a Relay task row.  Consult the runtime store's shared SQLite
+        connection here so Native, Relay and Telegram all obey one durable
+        submission freeze.
+        """
+
+        store = getattr(self._hub, "_store", None)
+        conn = getattr(store, "_conn", None)
+        if conn is None:
+            return None
+        try:
+            assert_submissions_open(conn)
+        except MaintenanceWindowError as exc:
+            return str(exc)
+        return None
+
+    async def _reject_if_maintenance_frozen(self, writer: asyncio.StreamWriter) -> bool:
+        error = self._maintenance_submission_error()
+        if error is None:
+            return False
+        await self._send_json(
+            writer,
+            423,
+            {
+                "error": error,
+                "code": "maintenance_submissions_frozen",
+                "retryable": True,
+            },
+        )
+        return True
+
+    def _mutation_store(self) -> MutationStore:
+        """Return the shared durable mutation ledger for Native and Relay.
+
+        ``WorkerLiveStreamHub`` is constructed around the runtime store, whose
+        SQLite connection is migrated together with the rest of WLCodex.  A
+        Native provider session is not a Relay task, but both need the same
+        replay protection at the HTTP boundary.
+        """
+
+        store = getattr(self._hub, "_store", None)
+        conn = getattr(store, "_conn", None)
+        if conn is None:
+            raise RuntimeError("runtime mutation ledger is unavailable")
+        return MutationStore.from_connection(conn)
+
+    async def _begin_native_mutation(
+        self,
+        writer: asyncio.StreamWriter,
+        *,
+        headers: dict[str, str],
+        operation: str,
+        payload: dict[str, Any],
+    ) -> tuple[MutationStore, RelayMutationClaim | None] | None:
+        """Claim one idempotent Native operation or send its replay/conflict.
+
+        Empty keys preserve the historical programmatic API.  Every current
+        Native UI mutation supplies a key, so retries after a transport loss
+        replay the first durable response rather than start a second turn.
+        """
+
+        mutation_store = self._mutation_store()
+        try:
+            claim = mutation_store.claim(
+                key=headers.get("idempotency-key", ""),
+                operation=operation,
+                task_id=None,
+                payload=payload,
+            )
+        except ValueError as exc:
+            await self._send_json(writer, 400, {"error": str(exc)})
+            return None
+        if claim is None:
+            return mutation_store, None
+        if claim.is_replay:
+            await self._send_json(
+                writer,
+                int(claim.response_status or 200),
+                dict(claim.response_payload or {}),
+            )
+            return None
+        if not claim.should_execute:
+            await self._send_json(
+                writer,
+                409,
+                {
+                    "error": claim.error or "mutation is already in progress",
+                    "retryable": claim.status == "in_progress",
+                },
+            )
+            return None
+        return mutation_store, claim
+
+    async def _finish_native_mutation(
+        self,
+        writer: asyncio.StreamWriter,
+        mutation: tuple[MutationStore, RelayMutationClaim | None],
+        *,
+        status: int,
+        payload: dict[str, Any],
+    ) -> None:
+        mutation_store, claim = mutation
+        if claim is not None:
+            mutation_store.complete(claim.key, status=status, payload=payload)
+        await self._send_json(writer, status, payload)
+
+    @staticmethod
+    def _abandon_native_mutation(
+        mutation: tuple[MutationStore, RelayMutationClaim | None],
+    ) -> None:
+        mutation_store, claim = mutation
+        if claim is not None:
+            mutation_store.abandon(claim.key)
 
     async def start(self) -> None:
         if self._server is not None:
@@ -406,6 +571,7 @@ class WorkerLiveStreamServer:
         socket = self._server.sockets[0]
         self.port = int(socket.getsockname()[1])
         self._schedule_native_startup_warmup()
+        self._schedule_relay_lifecycle_worker()
 
     async def stop(self) -> None:
         if self._server is None:
@@ -419,6 +585,11 @@ class WorkerLiveStreamServer:
         )
         tasks.extend(task for task in self._council_run_tasks if task is not asyncio.current_task())
         tasks.extend(task for task in self._relay_dispatch_tasks if task is not asyncio.current_task())
+        if (
+            self._relay_lifecycle_task is not None
+            and self._relay_lifecycle_task is not asyncio.current_task()
+        ):
+            tasks.append(self._relay_lifecycle_task)
         for task in tasks:
             task.cancel()
         if tasks:
@@ -629,6 +800,7 @@ class WorkerLiveStreamServer:
             if parsed.path in (
                 "/native/workflows",
                 "/native/workflows/relay",
+                "/native/workflows/relay/inbox",
                 "/native/workflows/relay/chat",
                 "/native/workflows/relay/config",
                 "/native/workflows/relay/office",
@@ -837,15 +1009,15 @@ class WorkerLiveStreamServer:
                     ("native_transcript", native_provider_key, native_thread_id),
                     "",
                 )
-                native_sync_pending = False
-                should_sync_native = bool(native_thread_id) and (
-                    "tail" in query or "before" in query
+                # A worker-event snapshot is an observation.  In particular,
+                # history pagination is used during page refresh, so it must
+                # not start a transcript import that writes runtime/timeline
+                # state.  A separately owned watcher or an explicit sync owns
+                # those writes; expose only whether one is already running.
+                native_sync_pending = self._native_transcript_task_running(
+                    native_provider_key,
+                    native_thread_id,
                 )
-                if should_sync_native:
-                    native_sync_pending = self._schedule_native_transcript_sync(
-                        native_thread_id,
-                        native_provider=native_provider_key,
-                    )
                 previous_event_count = 0
                 if "tail" in query:
                     tail_limit = _safe_int(query.get("tail", ["80"])[0], default=80)
@@ -1051,6 +1223,20 @@ class WorkerLiveStreamServer:
             native_provider=provider_name,
             include_provider=False,
         )
+        # Deduplication changes persisted timeline rows, so it belongs to the
+        # background import owner rather than any GET or initial SSE replay.
+        # Keeping it beside projection also makes the visible timeline stable
+        # regardless of which read surface observes it first.
+        if self._native_timeline is not None:
+            self._native_timeline.suppress_duplicate_completed_messages(
+                provider_name,
+                native_thread_id,
+            )
+            self._native_timeline.latest_turn_run_state(
+                provider_name,
+                native_thread_id,
+                repair=True,
+            )
         refreshed_signature = self._native_transcript_file_signature(
             provider_name,
             native_thread_id,
@@ -1111,6 +1297,53 @@ class WorkerLiveStreamServer:
                     self._native_background_tasks.pop(task_key, None)
 
         task = asyncio.create_task(sync())
+        self._native_background_tasks[task_key] = task
+        return True
+
+    def _schedule_native_timeline_lifecycle_reconcile(
+        self,
+        provider: str,
+        native_thread_id: str,
+    ) -> bool:
+        """Repair legacy Native lifecycle projection after an SSE replay.
+
+        ``latest_turn_run_state`` can derive a terminal state from runtime
+        events even when an older process skipped its materialized lifecycle
+        item.  The repair is intentionally owned by this idempotent background
+        task rather than a GET handler or the initial SSE snapshot.  Repeating
+        the task after reconnect/restart is safe because the timeline upsert is
+        keyed by provider, thread, turn and item key.
+        """
+        if self._native_timeline is None or not native_thread_id:
+            return False
+        provider_name = provider.strip().lower() or "codex"
+        task_key = ("native_timeline_reconcile", provider_name, native_thread_id)
+        existing = self._native_background_tasks.get(task_key)
+        if existing is not None and not existing.done():
+            return True
+
+        async def reconcile() -> None:
+            try:
+                # Let the initial snapshot flush before any reconciliation is
+                # allowed to write an item or publish an update to the stream.
+                await asyncio.sleep(_NATIVE_BACKGROUND_REFRESH_DELAY_SECONDS)
+                timeline = self._native_timeline
+                if timeline is not None:
+                    timeline.latest_turn_run_state(
+                        provider_name,
+                        native_thread_id,
+                        repair=True,
+                    )
+                self._native_background_errors.pop(task_key, None)
+            except Exception as exc:
+                self._native_background_errors[task_key] = (
+                    str(exc) or "native timeline lifecycle reconciliation failed"
+                )
+            finally:
+                if self._native_background_tasks.get(task_key) is task:
+                    self._native_background_tasks.pop(task_key, None)
+
+        task = asyncio.create_task(reconcile())
         self._native_background_tasks[task_key] = task
         return True
 
@@ -1296,28 +1529,42 @@ class WorkerLiveStreamServer:
         cached = await self._read_cached_native_session(target, native_thread_id)
         if cached is not None:
             payload = dict(cached)
-            session_refresh_pending = self._schedule_native_session_refresh(
-                provider_name,
-                target,
-                native_thread_id,
+            payload.setdefault("native_provider", provider_name)
+            # A detail GET is an observation, not a synchronization command.
+            # In particular, never let page refreshes project a Codex session
+            # into SQLite/timeline as a side effect.  Explicit /sync and the
+            # background watcher remain the write owners.
+            payload["native_sync_pending"] = bool(
+                (task := self._native_background_tasks.get(key)) is not None
+                and not task.done()
             )
-            transcript_sync_pending = self._schedule_native_timeline_transcript_sync_if_needed(
-                provider_name,
-                native_thread_id,
-            )
-            payload["native_sync_pending"] = session_refresh_pending or transcript_sync_pending
             if native_sync_error:
                 payload["native_sync_error"] = native_sync_error
+            payload["presentation"] = build_native_session_presentation(
+                payload,
+                sync_error=native_sync_error,
+            )
             return payload
         try:
+            read_only_session = getattr(target, "peek_session", None)
+            if read_only_session is None:
+                # ``read_session`` is intentionally allowed to project/import
+                # provider history for command and background-sync flows.  A
+                # GET must never fall back to it: third-party providers that
+                # have not opted into the read-only contract get a transparent
+                # stale snapshot instead of an accidental database mutation.
+                raise RuntimeError(
+                    "native provider does not expose a read-only session snapshot"
+                )
             result = await asyncio.wait_for(
-                target.read_session(native_thread_id),
+                read_only_session(native_thread_id),
                 timeout=self._native_sessions_timeout_seconds,
             )
             payload = _json_object(result)
+            payload.setdefault("native_provider", provider_name)
             payload.setdefault("native_session_source", "daemon")
             payload["native_sync_pending"] = False
-            self._native_background_errors.pop(key, None)
+            payload["presentation"] = build_native_session_presentation(payload)
             return payload
         except KeyError:
             raise
@@ -1327,15 +1574,17 @@ class WorkerLiveStreamServer:
             native_sync_error = str(exc) or "native session sync failed"
         payload = {
             "native_thread_id": native_thread_id,
+            "native_provider": provider_name,
             "native_session_source": "stub",
             "native_sync_error": native_sync_error,
-            "native_sync_pending": self._schedule_native_session_refresh(
-                provider_name,
-                target,
-                native_thread_id,
-            ),
+            "native_sync_pending": False,
+            "native_sync_recovery": "请使用同步操作重试；缓存恢复后会显示最后成功更新时间。",
             "thread": {"id": native_thread_id, "threadId": native_thread_id},
         }
+        payload["presentation"] = build_native_session_presentation(
+            payload,
+            sync_error=native_sync_error,
+        )
         return payload
 
     async def _native_sessions_payload(
@@ -1350,7 +1599,7 @@ class WorkerLiveStreamServer:
         key = ("native_sessions", provider_name)
         native_sync_error = self._native_background_errors.get(key, "")
         native_refresh_pending = False
-        if not fresh and getattr(target, "list_cached_sessions", None) is not None:
+        if not fresh:
             sessions = await self._list_cached_native_sessions(target)
             if schedule_refresh:
                 native_refresh_pending = self._schedule_native_sessions_refresh(
@@ -1375,8 +1624,18 @@ class WorkerLiveStreamServer:
                 native_sync_error = str(exc) or "native sessions sync timed out"
                 sessions = await self._list_cached_native_sessions(target)
                 native_session_source = "cache"
+        session_payloads: list[dict[str, Any]] = []
+        for session in sessions:
+            item = _json_object(session)
+            item.setdefault("native_provider", provider_name)
+            item.setdefault("native_session_source", native_session_source)
+            item["presentation"] = build_native_session_presentation(
+                item,
+                sync_error=native_sync_error,
+            )
+            session_payloads.append(item)
         payload: dict[str, Any] = {
-            "sessions": [_json_object(session) for session in sessions],
+            "sessions": session_payloads,
             "native_refresh_pending": native_refresh_pending,
             "native_session_source": native_session_source,
         }
@@ -1454,19 +1713,30 @@ class WorkerLiveStreamServer:
         await writer.drain()
 
         queue = self._subscribe_native_sessions(provider_name)
-        self._ensure_native_sessions_watcher(
-            provider_name,
-            target,
-            legacy_codex_controller=legacy_codex_controller,
-        )
         initial_payload = await self._native_sessions_payload(
             provider_name,
             target,
             legacy_codex_controller=legacy_codex_controller,
             fresh=False,
-            schedule_refresh=True,
+            # The SSE hello snapshot is a read-only snapshot.  Refresh work
+            # starts only after this payload has reached the client.
+            schedule_refresh=False,
         )
         await _write_json_sse(writer, "native_sessions", initial_payload)
+        self._ensure_native_sessions_watcher(
+            provider_name,
+            target,
+            legacy_codex_controller=legacy_codex_controller,
+        )
+        # A cache-first listing needs one eventual daemon refresh even when
+        # the local transcript index itself has not changed.  This is a
+        # background worker, intentionally scheduled after the pure hello
+        # snapshot rather than from GET/SSE initialization.
+        self._schedule_native_sessions_refresh(
+            provider_name,
+            target,
+            legacy_codex_controller=legacy_codex_controller,
+        )
 
         try:
             while not writer.is_closing():
@@ -1679,11 +1949,16 @@ class WorkerLiveStreamServer:
         self._native_background_tasks[key] = task
         return True
 
-    async def _relay_task_detail_after_reconcile(self, task_id: int) -> Any:
+    async def _relay_task_detail(self, task_id: int) -> Any:
+        """Return a Relay read model without advancing its lifecycle.
+
+        HTTP GET, page rendering, and the first SSE snapshot are observations.
+        They must never claim work, dispatch a role, or manufacture artifacts.
+        The lifecycle worker below owns reconciliation instead.
+        """
         if self._relay_service is None:
             raise KeyError(f"unknown relay task id: {task_id}")
-        await self._relay_service.ensure_task_lifecycle_current(task_id)
-        return self._relay_service.get_task(task_id)
+        return self._relay_service.get_task_readonly(task_id)
 
     async def _handle_relay_ui_route(
         self,
@@ -1713,22 +1988,21 @@ class WorkerLiveStreamServer:
             await self._send_html(writer, 200, _native_workflows_page(access_token=token))
             return
         if path == "/native/workflows/relay/office":
-            relay_config = self._relay_service.config() if self._relay_service is not None else {}
-            token_stats = (
-                self._relay_service.today_token_stats() if self._relay_service is not None else {}
+            # Office was a visual promise with no distinct task operation.
+            # Keep old bookmarks useful, but do not present a third Relay
+            # destination beside the product's Tasks and Settings surfaces.
+            selected_workspace = _relay_selected_workspace(
+                str((query.get("workspace") or [""])[0] or ""),
+                _relay_project_rows(self._workspace_catalog),
             )
-            await self._send_html(
+            await self._send_redirect(
                 writer,
-                200,
-                _marvis_relay_office_page(
-                    access_token=token,
-                    relay_config=relay_config,
-                    token_stats=token_stats,
-                ),
+                _relay_settings_href(selected_workspace, token),
             )
             return
         if path in (
             "/native/workflows/relay",
+            "/native/workflows/relay/inbox",
             "/native/workflows/relay/chat",
             "/native/workflows/relay/config",
             "/native/workflows/relay/skills",
@@ -1739,6 +2013,15 @@ class WorkerLiveStreamServer:
                 str((query.get("workspace") or [""])[0] or ""),
                 project_rows,
             )
+        if path in ("/native/workflows/relay/skills", "/native/workflows/relay/profile"):
+            # These were navigation promises rather than working product
+            # surfaces.  Keep old URLs understandable without presenting a
+            # dead control as an available capability.
+            await self._send_redirect(
+                writer,
+                _relay_settings_href(selected_workspace, token),
+            )
+            return
         if path == "/native/workflows/relay/chat":
             await self._send_html(
                 writer,
@@ -1749,23 +2032,65 @@ class WorkerLiveStreamServer:
                 ),
             )
             return
-        if path in ("/native/workflows/relay/skills", "/native/workflows/relay/profile"):
+        if path == "/native/workflows/relay/inbox":
+            summaries = (
+                self._relay_service.list_tasks_readonly(workspace=selected_workspace)
+                if self._relay_service is not None
+                else []
+            )
             await self._send_html(
                 writer,
                 200,
-                _relay_construction_page(
-                    active="skills" if path.endswith("/skills") else "profile",
+                _relay_blocked_inbox_page(
+                    summaries,
                     selected_workspace=selected_workspace,
                     access_token=token,
                 ),
             )
             return
         if path == "/native/workflows/relay":
-            page = _relay_page_number(str((query.get("page") or ["1"])[0] or "1"))
-            summaries = (
-                self._relay_service.list_tasks(workspace=selected_workspace)
-                if self._relay_service is not None
-                else []
+            requested_page = _relay_page_number(str((query.get("page") or ["1"])[0] or "1"))
+            status_filter = _relay_presentation_state_filter(
+                str((query.get("status") or [""])[0] or "")
+            )
+            relay_states = (
+                "running",
+                "waiting_user",
+                "waiting_approval",
+                "blocked",
+                "failed",
+                "completed",
+                "interrupted",
+                "stale",
+            )
+            page_size = 10
+            if self._relay_service is not None:
+                summaries, total, queried_state_counts = (
+                    self._relay_service.list_tasks_page_readonly(
+                        workspace=selected_workspace,
+                        presentation_state=status_filter or None,
+                        page=requested_page,
+                        page_size=page_size,
+                    )
+                )
+            else:
+                summaries, total, queried_state_counts = [], 0, {}
+            state_counts = {
+                state: int(queried_state_counts.get(state, 0))
+                for state in relay_states
+            }
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            current_page = min(max(1, requested_page), total_pages)
+            if current_page != requested_page and self._relay_service is not None:
+                summaries, _, _ = self._relay_service.list_tasks_page_readonly(
+                    workspace=selected_workspace,
+                    presentation_state=status_filter or None,
+                    page=current_page,
+                    page_size=page_size,
+                )
+            active_count = sum(
+                state_counts.get(state, 0)
+                for state in ("running", "waiting_user", "waiting_approval", "blocked", "stale")
             )
             providers = (
                 self._native_registry.list_provider_summaries()
@@ -1783,7 +2108,12 @@ class WorkerLiveStreamServer:
                     projects=project_rows,
                     selected_workspace=selected_workspace,
                     access_token=token,
-                    page=page,
+                    page=current_page,
+                    total=total,
+                    total_pages=total_pages,
+                    active_count=active_count,
+                    state_counts=state_counts,
+                    status_filter=status_filter,
                 ),
             )
             return
@@ -1813,7 +2143,7 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 503, {"error": "relay service unavailable"})
             return
         try:
-            detail = await self._relay_task_detail_after_reconcile(task_id)
+            detail = await self._relay_task_detail(task_id)
         except KeyError:
             await self._send_json(writer, 404, {"error": "relay task not found"})
             return
@@ -1855,6 +2185,64 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 401, {"error": "unauthorized"})
             return
         normalized_path = _normalize_relay_api_path(path)
+
+        async def begin_mutation(
+            operation: str,
+            task_id: int | None,
+            payload: dict[str, Any],
+        ) -> tuple[RelayMutationStore, RelayMutationClaim | None] | None:
+            """Acquire a durable mutation key or answer a replay immediately."""
+
+            mutation_store = RelayMutationStore.from_relay_service(self._relay_service)
+            try:
+                claim = mutation_store.claim(
+                    key=headers.get("idempotency-key", ""),
+                    operation=operation,
+                    task_id=task_id,
+                    payload=payload,
+                )
+            except ValueError as exc:
+                await self._send_json(writer, 400, {"error": str(exc)})
+                return None
+            if claim is None:
+                return mutation_store, None
+            if claim.is_replay:
+                await self._send_json(
+                    writer,
+                    int(claim.response_status or 200),
+                    dict(claim.response_payload or {}),
+                )
+                return None
+            if not claim.should_execute:
+                await self._send_json(
+                    writer,
+                    409,
+                    {
+                        "error": claim.error or "mutation is already in progress",
+                        "task_id": claim.task_id,
+                        "retryable": claim.status == "in_progress",
+                    },
+                )
+                return None
+            return mutation_store, claim
+
+        async def finish_mutation(
+            mutation: tuple[RelayMutationStore, RelayMutationClaim | None],
+            status: int,
+            payload: dict[str, Any],
+        ) -> None:
+            mutation_store, claim = mutation
+            if claim is not None:
+                mutation_store.complete(claim.key, status=status, payload=payload)
+            await self._send_json(writer, status, payload)
+
+        def abandon_mutation(
+            mutation: tuple[RelayMutationStore, RelayMutationClaim | None],
+        ) -> None:
+            mutation_store, claim = mutation
+            if claim is not None:
+                mutation_store.abandon(claim.key)
+
         try:
             if normalized_path == "/api/relay/token-stats":
                 if method != "GET":
@@ -1878,27 +2266,52 @@ class WorkerLiveStreamServer:
                             {"error": "assignments must be an object"},
                         )
                         return
+                    mutation = await begin_mutation("relay.config.save", None, body)
+                    if mutation is None:
+                        return
                     try:
                         config = self._relay_service.save_config(
                             {str(role): str(provider) for role, provider in assignments.items()}
                         )
-                    except ValueError as exc:
-                        await self._send_json(writer, 400, {"error": str(exc)})
+                    except (MaintenanceWindowError, ValueError) as exc:
+                        abandon_mutation(mutation)
+                        await self._send_json(
+                            writer,
+                            423 if isinstance(exc, MaintenanceWindowError) else 400,
+                            {"error": str(exc)},
+                        )
                         return
-                    await self._send_json(writer, 200, config)
+                    await finish_mutation(mutation, 200, config)
                     return
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
             if normalized_path == "/api/relay/tasks":
                 if method == "GET":
-                    summaries = self._relay_service.list_tasks(
+                    status_filter = _relay_presentation_state_filter(
+                        str((query.get("status") or [""])[0] or "")
+                    )
+                    page = _relay_page_number(str((query.get("page") or ["1"])[0] or "1"))
+                    page_size = min(
+                        100,
+                        max(1, _safe_int((query.get("page_size") or ["20"])[0], default=20)),
+                    )
+                    summaries, total, state_counts = self._relay_service.list_tasks_page_readonly(
                         workspace=_optional_nonempty_string((query.get("workspace") or [""])[0]),
-                        status=_optional_nonempty_string((query.get("status") or [""])[0]),
+                        presentation_state=status_filter or None,
+                        page=page,
+                        page_size=page_size,
                     )
                     await self._send_json(
                         writer,
                         200,
-                        {"tasks": [summary.to_dict() for summary in summaries]},
+                        {
+                            "tasks": [summary.to_dict() for summary in summaries],
+                            "total": total,
+                            "page": page,
+                            "page_size": page_size,
+                            "status": status_filter,
+                            "state_counts": state_counts,
+                        },
                     )
                     return
                 if method == "POST":
@@ -1913,32 +2326,54 @@ class WorkerLiveStreamServer:
                             {"error": "relay task workspace is required"},
                         )
                         return
-                    task = self._relay_service.create_task(
-                        title=str(body.get("title") or body.get("prompt") or "Relay Task"),
-                        prompt=str(body.get("prompt") or ""),
-                        workspace=workspace,
-                        provider=str(body.get("provider") or ""),
-                        role_providers=(
-                            {
-                                str(role): str(provider)
-                                for role, provider in body.get("role_providers", {}).items()
-                            }
-                            if isinstance(body.get("role_providers"), dict)
-                            else None
-                        ),
-                        images=_safe_image_attachments(body.get("images")),
-                        files=_safe_relay_file_attachments(body.get("files")),
-                        execution_mode=str(body.get("execution_mode") or "simple"),
-                        execution_goal=str(body.get("execution_goal") or ""),
-                        allow_subagents=str(body.get("allow_subagents") or "auto"),
-                        team_strategy=str(body.get("team_strategy") or "none"),
-                    )
+                    mutation = await begin_mutation("relay.task.create", None, body)
+                    if mutation is None:
+                        return
+                    try:
+                        task = self._relay_service.create_task(
+                            title=str(body.get("title") or body.get("prompt") or "Relay Task"),
+                            prompt=str(body.get("prompt") or ""),
+                            workspace=workspace,
+                            provider=str(body.get("provider") or ""),
+                            role_providers=(
+                                {
+                                    str(role): str(provider)
+                                    for role, provider in body.get("role_providers", {}).items()
+                                }
+                                if isinstance(body.get("role_providers"), dict)
+                                else None
+                            ),
+                            images=_safe_image_attachments(body.get("images")),
+                            files=_safe_relay_file_attachments(body.get("files")),
+                            execution_mode=str(body.get("execution_mode") or "standard"),
+                            execution_goal=str(body.get("execution_goal") or ""),
+                            acceptance_criteria=_relay_acceptance_criteria_from_body(body),
+                            # Legacy clients may still send these values.  The
+                            # service maps them into the automatic contract;
+                            # the user-facing manual toggle no longer exists.
+                            allow_subagents=str(body.get("allow_subagents") or "auto"),
+                            team_strategy=str(body.get("team_strategy") or "none"),
+                        )
+                    except (MaintenanceWindowError, ValueError) as exc:
+                        abandon_mutation(mutation)
+                        await self._send_json(
+                            writer,
+                            423 if isinstance(exc, MaintenanceWindowError) else 400,
+                            {"error": str(exc)},
+                        )
+                        return
+                    mutation_store, claim = mutation
+                    if claim is not None:
+                        mutation_store.bind_task(claim.key, task.id)
                     await self._relay_service.dispatch_role(task.id, "director")
-                    detail = await self._relay_task_detail_after_reconcile(task.id)
-                    await self._send_json(
-                        writer,
+                    detail = await self._relay_task_detail(task.id)
+                    await finish_mutation(
+                        mutation,
                         200,
-                        {"task": detail.task.to_dict()},
+                        {
+                            "task": detail.task.to_dict(),
+                            "presentation": detail.presentation.to_dict(),
+                        },
                     )
                     return
                 await self._send_json(writer, 405, {"error": "method not allowed"})
@@ -1953,7 +2388,7 @@ class WorkerLiveStreamServer:
                 if method != "GET":
                     await self._send_json(writer, 405, {"error": "method not allowed"})
                     return
-                detail = await self._relay_task_detail_after_reconcile(task_id)
+                detail = await self._relay_task_detail(task_id)
                 await self._send_json(
                     writer,
                     200,
@@ -1968,15 +2403,8 @@ class WorkerLiveStreamServer:
                 live = "text/event-stream" in headers.get("accept", "").lower()
                 relay_event_queue = self._relay_service.subscribe_events(task_id) if live else None
                 try:
-                    await self._relay_service.ensure_task_lifecycle_current(task_id)
-                    runtime_store = getattr(self._hub, "_store", None)
-                    if runtime_store is not None and hasattr(
-                        self._relay_service,
-                        "scan_active_native_runtime_events",
-                    ):
-                        await self._relay_service.scan_active_native_runtime_events(runtime_store)
                     events = self._relay_service.events_for_task(task_id, after=after)
-                    detail = self._relay_service.get_task(task_id)
+                    detail = self._relay_service.get_task_readonly(task_id)
                 except Exception:
                     if relay_event_queue is not None:
                         self._relay_service.unsubscribe_events(task_id, relay_event_queue)
@@ -1998,14 +2426,25 @@ class WorkerLiveStreamServer:
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
                     return
-                await self._relay_service.ensure_task_lifecycle_current(task_id)
-                result = await self._relay_service.queue_or_followup_user_input(
-                    task_id,
-                    str(body.get("text") or body.get("prompt") or ""),
-                    images=_safe_image_attachments(body.get("images")),
-                    files=_safe_relay_file_attachments(body.get("files")),
-                )
-                await self._send_json(writer, 200, result)
+                mutation = await begin_mutation("relay.input.queue", task_id, body)
+                if mutation is None:
+                    return
+                try:
+                    result = await self._relay_service.queue_or_followup_user_input(
+                        task_id,
+                        str(body.get("text") or body.get("prompt") or ""),
+                        images=_safe_image_attachments(body.get("images")),
+                        files=_safe_relay_file_attachments(body.get("files")),
+                    )
+                except (KeyError, MaintenanceWindowError, ValueError) as exc:
+                    abandon_mutation(mutation)
+                    await self._send_json(
+                        writer,
+                        423 if isinstance(exc, MaintenanceWindowError) else 400,
+                        {"error": str(exc)},
+                    )
+                    return
+                await finish_mutation(mutation, 200, result)
                 return
             if suffix.startswith("/inputs/"):
                 parts = [part for part in suffix.strip("/").split("/") if part]
@@ -2017,26 +2456,43 @@ class WorkerLiveStreamServer:
                 if method != "POST":
                     await self._send_json(writer, 405, {"error": "method not allowed"})
                     return
+                mutation = await begin_mutation(
+                    f"relay.input.{action}",
+                    task_id,
+                    {"pending_id": pending_id, "action": action},
+                )
+                if mutation is None:
+                    return
                 if action == "steer":
-                    await self._relay_service.ensure_task_lifecycle_current(task_id)
                     try:
                         payload = await self._relay_service.steer_active_attempt_payload(
                             task_id,
                             pending_id,
                         )
-                    except (KeyError, ValueError, RuntimeError) as exc:
-                        await self._send_json(writer, 400, {"error": str(exc)})
+                    except (KeyError, MaintenanceWindowError, ValueError, RuntimeError) as exc:
+                        abandon_mutation(mutation)
+                        await self._send_json(
+                            writer,
+                            423 if isinstance(exc, MaintenanceWindowError) else 400,
+                            {"error": str(exc)},
+                        )
                         return
-                    await self._send_json(writer, 200, {"pending_input": payload})
+                    await finish_mutation(mutation, 200, {"pending_input": payload})
                     return
                 if action == "cancel":
                     try:
                         pending = self._relay_service.cancel_pending_input(task_id, pending_id)
                     except (KeyError, ValueError) as exc:
+                        abandon_mutation(mutation)
                         await self._send_json(writer, 400, {"error": str(exc)})
                         return
-                    await self._send_json(writer, 200, {"pending_input": pending.to_dict()})
+                    await finish_mutation(
+                        mutation,
+                        200,
+                        {"pending_input": pending.to_dict()},
+                    )
                     return
+                abandon_mutation(mutation)
                 await self._send_json(writer, 404, {"error": "not found"})
                 return
             if suffix.startswith("/rounds/"):
@@ -2050,7 +2506,16 @@ class WorkerLiveStreamServer:
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
                     return
-                await self._relay_service.ensure_task_lifecycle_current(task_id)
+                if str(body.get("decision") or "").strip() != "cancel_plan":
+                    if await self._reject_if_maintenance_frozen(writer):
+                        return
+                mutation = await begin_mutation(
+                    "relay.round.control",
+                    task_id,
+                    {"round_id": int(parts[1]), "control": body},
+                )
+                if mutation is None:
+                    return
                 try:
                     result = await self._relay_service.apply_round_control(
                         task_id,
@@ -2065,19 +2530,24 @@ class WorkerLiveStreamServer:
                         ),
                         dispatch_next=False,
                     )
-                except (KeyError, ValueError) as exc:
-                    await self._send_json(writer, 400, {"error": str(exc)})
+                except (KeyError, MaintenanceWindowError, ValueError) as exc:
+                    abandon_mutation(mutation)
+                    await self._send_json(
+                        writer,
+                        423 if isinstance(exc, MaintenanceWindowError) else 400,
+                        {"error": str(exc)},
+                    )
                     return
                 next_role = str(result.get("next_role") or result.get("role") or "").strip()
                 if next_role:
                     self._schedule_relay_dispatch(task_id, next_role)
-                await self._send_json(writer, 200, {"control": result})
+                await finish_mutation(mutation, 200, {"control": result})
                 return
             if suffix == "/sessions":
                 if method != "GET":
                     await self._send_json(writer, 405, {"error": "method not allowed"})
                     return
-                detail = await self._relay_task_detail_after_reconcile(task_id)
+                detail = await self._relay_task_detail(task_id)
                 await self._send_json(
                     writer,
                     200,
@@ -2091,16 +2561,27 @@ class WorkerLiveStreamServer:
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
                     return
-                await self._relay_service.ensure_task_lifecycle_current(task_id)
-                await self._relay_service.add_user_message(
-                    task_id,
-                    str(body.get("text") or body.get("prompt") or ""),
-                    images=_safe_image_attachments(body.get("images")),
-                    files=_safe_relay_file_attachments(body.get("files")),
-                )
-                detail = await self._relay_task_detail_after_reconcile(task_id)
-                await self._send_json(
-                    writer,
+                mutation = await begin_mutation("relay.message.add", task_id, body)
+                if mutation is None:
+                    return
+                try:
+                    await self._relay_service.add_user_message(
+                        task_id,
+                        str(body.get("text") or body.get("prompt") or ""),
+                        images=_safe_image_attachments(body.get("images")),
+                        files=_safe_relay_file_attachments(body.get("files")),
+                    )
+                except (KeyError, MaintenanceWindowError, ValueError) as exc:
+                    abandon_mutation(mutation)
+                    await self._send_json(
+                        writer,
+                        423 if isinstance(exc, MaintenanceWindowError) else 400,
+                        {"error": str(exc)},
+                    )
+                    return
+                detail = await self._relay_task_detail(task_id)
+                await finish_mutation(
+                    mutation,
                     200,
                     _relay_task_detail_json_payload(detail, self._relay_service),
                 )
@@ -2112,28 +2593,124 @@ class WorkerLiveStreamServer:
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
                     return
-                await self._relay_service.ensure_task_lifecycle_current(task_id)
+                mutation = await begin_mutation("relay.role.resume", task_id, body)
+                if mutation is None:
+                    return
                 role = _optional_nonempty_string(body.get("role"))
                 if not role:
-                    detail = self._relay_service.get_task(task_id)
+                    detail = self._relay_service.get_task_readonly(task_id)
                     role = _relay_first_blocked_role(detail.role_jobs)
                 if not role:
+                    abandon_mutation(mutation)
                     await self._send_json(
                         writer,
                         400,
                         {"error": "relay task has no blocked role to resume"},
                     )
                     return
-                await self._relay_service.resume_role(
-                    task_id,
-                    role,
-                    force=bool(body.get("force")),
-                )
-                detail = await self._relay_task_detail_after_reconcile(task_id)
-                await self._send_json(
-                    writer,
+                try:
+                    await self._relay_service.resume_role(
+                        task_id,
+                        role,
+                        force=bool(body.get("force")),
+                    )
+                except (KeyError, MaintenanceWindowError, ValueError) as exc:
+                    abandon_mutation(mutation)
+                    await self._send_json(
+                        writer,
+                        423 if isinstance(exc, MaintenanceWindowError) else 400,
+                        {"error": str(exc)},
+                    )
+                    return
+                detail = await self._relay_task_detail(task_id)
+                await finish_mutation(
+                    mutation,
                     200,
                     _relay_task_detail_json_payload(detail, self._relay_service),
+                )
+                return
+            if suffix == "/archive":
+                if method != "POST":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                body = await self._read_request_json(writer, reader, headers)
+                if body is None:
+                    return
+                mutation = await begin_mutation("relay.task.archive", task_id, body)
+                if mutation is None:
+                    return
+                try:
+                    detail = self._relay_service.get_task_readonly(task_id)
+                except KeyError:
+                    abandon_mutation(mutation)
+                    await self._send_json(writer, 404, {"error": "relay task not found"})
+                    return
+                state = str(getattr(detail.presentation, "state", "") or "")
+                freshness = getattr(detail.presentation, "freshness", {})
+                recovery_required = bool(
+                    freshness.get("recovery_required")
+                    if isinstance(freshness, dict)
+                    else False
+                )
+                if recovery_required:
+                    abandon_mutation(mutation)
+                    await self._send_json(
+                        writer,
+                        409,
+                        {
+                            "error": (
+                                "native approval recovery is pending; wait for the lifecycle worker "
+                                "before archiving"
+                            ),
+                            "state": state,
+                        },
+                    )
+                    return
+                if state in {"running", "waiting_user", "waiting_approval"}:
+                    abandon_mutation(mutation)
+                    await self._send_json(
+                        writer,
+                        409,
+                        {
+                            "error": "active Relay tasks must be interrupted or completed before archiving",
+                            "state": state,
+                        },
+                    )
+                    return
+                mutation_store, _claim = mutation
+                mutation_store.archive_task(
+                    task_id,
+                    reason=str(body.get("reason") or "").strip(),
+                )
+                await finish_mutation(
+                    mutation,
+                    200,
+                    {"task_id": task_id, "archived": True, "state": state},
+                )
+                return
+            if suffix == "/refresh":
+                if method != "POST":
+                    await self._send_json(writer, 405, {"error": "method not allowed"})
+                    return
+                body = await self._read_request_json(writer, reader, headers)
+                if body is None:
+                    return
+                mutation = await begin_mutation("relay.task.refresh", task_id, body)
+                if mutation is None:
+                    return
+                # Verify the target without a lifecycle write, then let the
+                # background reconciliation worker own the provider read.
+                try:
+                    self._relay_service.get_task_readonly(task_id)
+                except KeyError:
+                    abandon_mutation(mutation)
+                    await self._send_json(writer, 404, {"error": "relay task not found"})
+                    return
+                scheduled = self._schedule_relay_task_reconcile(task_id)
+                await finish_mutation(
+                    mutation,
+                    202,
+                    {"task_id": task_id, "scheduled": scheduled},
                 )
                 return
             if suffix == "/interrupt":
@@ -2143,14 +2720,21 @@ class WorkerLiveStreamServer:
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
                     return
-                await self._relay_service.ensure_task_lifecycle_current(task_id)
-                await self._relay_service.interrupt(
-                    task_id,
-                    role=_optional_nonempty_string(body.get("role")),
-                )
-                detail = await self._relay_task_detail_after_reconcile(task_id)
-                await self._send_json(
-                    writer,
+                mutation = await begin_mutation("relay.task.interrupt", task_id, body)
+                if mutation is None:
+                    return
+                try:
+                    await self._relay_service.interrupt(
+                        task_id,
+                        role=_optional_nonempty_string(body.get("role")),
+                    )
+                except (KeyError, ValueError) as exc:
+                    abandon_mutation(mutation)
+                    await self._send_json(writer, 400, {"error": str(exc)})
+                    return
+                detail = await self._relay_task_detail(task_id)
+                await finish_mutation(
+                    mutation,
                     200,
                     _relay_task_detail_json_payload(detail, self._relay_service),
                 )
@@ -2252,13 +2836,15 @@ class WorkerLiveStreamServer:
             if method != "GET":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
-            fresh = query.get("fresh", [""])[0].lower() in ("1", "true", "yes")
             payload = await self._native_sessions_payload(
                 provider_name,
                 target,
                 legacy_codex_controller=legacy_codex_controller,
-                fresh=fresh,
-                schedule_refresh=True,
+                # Listing and page refreshes are read-only views.  A caller
+                # asking for `fresh=1` must use the explicit sync mutation
+                # rather than smuggle a projection through a GET.
+                fresh=False,
+                schedule_refresh=False,
             )
             await self._send_json(
                 writer,
@@ -2271,7 +2857,55 @@ class WorkerLiveStreamServer:
             if method != "GET":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
-            models = await target.list_models()
+            provider_label = {
+                "codex": "Codex",
+                "claude": "Claude",
+                "antigravity": "Antigravity",
+            }.get(provider_name, provider_name or "Native")
+            try:
+                models = await target.list_models()
+            except Exception:
+                # The model picker is configuration, not a cache-backed
+                # execution surface.  Reporting a remembered catalog here
+                # would imply that a disconnected or missing provider can
+                # actually start a turn with that model.  Keep the failure
+                # explicit so Native renders its unavailable/recovery state.
+                await self._send_json(
+                    writer,
+                    503,
+                    {
+                        "error": (
+                            f"无法同步 {provider_label} 模型目录，请检查提供方二进制和 "
+                            "app-server 配置后重试。"
+                        ),
+                        "models": [],
+                        "freshness": {
+                            "source": "unavailable",
+                            "updated_at": "",
+                            "is_stale": True,
+                            "reason": f"{provider_label} 模型目录同步失败",
+                        },
+                        "recovery": "检查提供方二进制与 app-server 配置，然后重试。",
+                    },
+                )
+                return
+            if not models:
+                await self._send_json(
+                    writer,
+                    503,
+                    {
+                        "error": f"{provider_label} 未返回可用模型，请检查 app-server 配置后重试。",
+                        "models": [],
+                        "freshness": {
+                            "source": "unavailable",
+                            "updated_at": "",
+                            "is_stale": True,
+                            "reason": f"{provider_label} 未返回可用模型",
+                        },
+                        "recovery": "检查提供方二进制与 app-server 配置，然后重试。",
+                    },
+                )
+                return
             await self._send_json(
                 writer,
                 200,
@@ -2283,8 +2917,18 @@ class WorkerLiveStreamServer:
             if method != "POST":
                 await self._send_json(writer, 405, {"error": "method not allowed"})
                 return
+            if await self._reject_if_maintenance_frozen(writer):
+                return
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
+                return
+            mutation = await self._begin_native_mutation(
+                writer,
+                headers=headers,
+                operation=f"native.{provider_name}.sessions.start",
+                payload={"provider": provider_name, "body": body},
+            )
+            if mutation is None:
                 return
             prompt = str(body.get("prompt", ""))
             model = _optional_nonempty_string(body.get("model"))
@@ -2297,27 +2941,37 @@ class WorkerLiveStreamServer:
             service_tier = _optional_nonempty_string(
                 body.get("service_tier") or body.get("serviceTier")
             )
-            if prompt.strip() or images:
-                result = await target.start_session(
-                    str(body.get("cwd", "")),
-                    prompt,
-                    model=model,
-                    effort=_optional_nonempty_string(body.get("effort")),
-                    service_tier=service_tier,
-                    images=images,
-                    **permission_kwargs,
-                    **collaboration_kwargs,
-                )
-            else:
-                create_permission_kwargs = dict(permission_kwargs)
-                create_permission_kwargs.pop("sandbox_policy", None)
-                result = await target.create_session(
-                    str(body.get("cwd", "")),
-                    model=model,
-                    service_tier=service_tier,
-                    **create_permission_kwargs,
-                )
-            await self._send_json(writer, 200, _json_object(result))
+            try:
+                if prompt.strip() or images:
+                    result = await target.start_session(
+                        str(body.get("cwd", "")),
+                        prompt,
+                        model=model,
+                        effort=_optional_nonempty_string(body.get("effort")),
+                        service_tier=service_tier,
+                        images=images,
+                        **permission_kwargs,
+                        **collaboration_kwargs,
+                    )
+                else:
+                    create_permission_kwargs = dict(permission_kwargs)
+                    create_permission_kwargs.pop("sandbox_policy", None)
+                    result = await target.create_session(
+                        str(body.get("cwd", "")),
+                        model=model,
+                        service_tier=service_tier,
+                        **create_permission_kwargs,
+                    )
+            except ValueError as exc:
+                self._abandon_native_mutation(mutation)
+                await self._send_json(writer, 400, {"error": str(exc)})
+                return
+            await self._finish_native_mutation(
+                writer,
+                mutation,
+                status=200,
+                payload=_json_object(result),
+            )
             return
 
         approval_prefix = "/approvals/"
@@ -2327,9 +2981,22 @@ class WorkerLiveStreamServer:
                 body = await self._read_request_json(writer, reader, headers)
                 if body is None:
                     return
+                mutation = await self._begin_native_mutation(
+                    writer,
+                    headers=headers,
+                    operation=f"native.{provider_name}.approvals.resolve",
+                    payload={
+                        "provider": provider_name,
+                        "approval_id": parts[0],
+                        "body": body,
+                    },
+                )
+                if mutation is None:
+                    return
                 try:
                     result = await target.resolve_approval(parts[0], body)
                 except KeyError:
+                    self._abandon_native_mutation(mutation)
                     await self._send_json(
                         writer,
                         404,
@@ -2337,9 +3004,15 @@ class WorkerLiveStreamServer:
                     )
                     return
                 except ValueError as exc:
+                    self._abandon_native_mutation(mutation)
                     await self._send_json(writer, 400, {"error": str(exc)})
                     return
-                await self._send_json(writer, 200, _json_object(result))
+                await self._finish_native_mutation(
+                    writer,
+                    mutation,
+                    status=200,
+                    payload=_json_object(result),
+                )
                 return
             await self._send_json(writer, 404, {"error": "not found"})
             return
@@ -2369,22 +3042,52 @@ class WorkerLiveStreamServer:
             await self._send_json(writer, 200, _json_object(session))
             return
         if method == "POST" and action == "attach" and len(parts) == 2:
+            mutation = await self._begin_native_mutation(
+                writer,
+                headers=headers,
+                operation=f"native.{provider_name}.sessions.attach",
+                payload={"provider": provider_name, "thread_id": thread_id},
+            )
+            if mutation is None:
+                return
             try:
                 session = await target.attach_session(thread_id)
             except KeyError:
+                self._abandon_native_mutation(mutation)
                 await self._send_json(writer, 404, {"error": "native session not found"})
                 return
-            await self._send_json(writer, 200, _json_object(session))
+            await self._finish_native_mutation(
+                writer,
+                mutation,
+                status=200,
+                payload=_json_object(session),
+            )
             return
         if method == "POST" and action == "sync" and len(parts) == 2:
+            mutation = await self._begin_native_mutation(
+                writer,
+                headers=headers,
+                operation=f"native.{provider_name}.sessions.sync",
+                payload={"provider": provider_name, "thread_id": thread_id},
+            )
+            if mutation is None:
+                return
             try:
                 session = await target.sync_session(thread_id)
             except KeyError:
+                self._abandon_native_mutation(mutation)
                 await self._send_json(writer, 404, {"error": "native session not found"})
                 return
-            await self._send_json(writer, 200, _json_object(session))
+            await self._finish_native_mutation(
+                writer,
+                mutation,
+                status=200,
+                payload=_json_object(session),
+            )
             return
         if method == "POST" and action == "continue" and len(parts) == 2:
+            if await self._reject_if_maintenance_frozen(writer):
+                return
             capabilities = provider.capabilities()
             if not capabilities.can_continue_session:
                 await self._send_json(
@@ -2395,6 +3098,18 @@ class WorkerLiveStreamServer:
                 return
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
+                return
+            mutation = await self._begin_native_mutation(
+                writer,
+                headers=headers,
+                operation=f"native.{provider_name}.sessions.continue",
+                payload={
+                    "provider": provider_name,
+                    "thread_id": thread_id,
+                    "body": body,
+                },
+            )
+            if mutation is None:
                 return
             permission_kwargs = _native_permission_kwargs_from_body(provider_name, body)
             collaboration_kwargs = _codex_collaboration_kwargs_from_body(
@@ -2421,13 +3136,21 @@ class WorkerLiveStreamServer:
                     **permission_kwargs,
                     **collaboration_kwargs,
                     **continue_kwargs,
-                )
+            )
             except KeyError:
+                self._abandon_native_mutation(mutation)
                 await self._send_json(writer, 404, {"error": "native session not found"})
                 return
-            await self._send_json(writer, 200, _json_object(result))
+            await self._finish_native_mutation(
+                writer,
+                mutation,
+                status=200,
+                payload=_json_object(result),
+            )
             return
         if method == "POST" and action == "steer" and len(parts) == 2:
+            if await self._reject_if_maintenance_frozen(writer):
+                return
             capabilities = provider.capabilities()
             if not capabilities.can_steer_active_turn:
                 await self._send_json(
@@ -2438,6 +3161,18 @@ class WorkerLiveStreamServer:
                 return
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
+                return
+            mutation = await self._begin_native_mutation(
+                writer,
+                headers=headers,
+                operation=f"native.{provider_name}.sessions.steer",
+                payload={
+                    "provider": provider_name,
+                    "thread_id": thread_id,
+                    "body": body,
+                },
+            )
+            if mutation is None:
                 return
             expected_turn_id = str(body.get("expected_turn_id") or body.get("turn_id") or "")
             permission_kwargs = _native_permission_kwargs_from_body(provider_name, body)
@@ -2455,11 +3190,17 @@ class WorkerLiveStreamServer:
                     ),
                     images=_safe_image_attachments(body.get("images")),
                     **permission_kwargs,
-                )
+            )
             except KeyError:
+                self._abandon_native_mutation(mutation)
                 await self._send_json(writer, 404, {"error": "native session not found"})
                 return
-            await self._send_json(writer, 200, _json_object(result))
+            await self._finish_native_mutation(
+                writer,
+                mutation,
+                status=200,
+                payload=_json_object(result),
+            )
             return
         if method == "POST" and action == "interrupt" and len(parts) == 2:
             capabilities = provider.capabilities()
@@ -2473,15 +3214,33 @@ class WorkerLiveStreamServer:
             body = await self._read_request_json(writer, reader, headers)
             if body is None:
                 return
+            mutation = await self._begin_native_mutation(
+                writer,
+                headers=headers,
+                operation=f"native.{provider_name}.sessions.interrupt",
+                payload={
+                    "provider": provider_name,
+                    "thread_id": thread_id,
+                    "body": body,
+                },
+            )
+            if mutation is None:
+                return
             try:
                 result = await target.interrupt_session(
                     thread_id,
                     str(body.get("turn_id", "")),
-                )
+            )
             except KeyError:
+                self._abandon_native_mutation(mutation)
                 await self._send_json(writer, 404, {"error": "native session not found"})
                 return
-            await self._send_json(writer, 200, _json_object(result))
+            await self._finish_native_mutation(
+                writer,
+                mutation,
+                status=200,
+                payload=_json_object(result),
+            )
             return
         await self._send_json(writer, 404, {"error": "not found"})
 
@@ -2691,6 +3450,79 @@ class WorkerLiveStreamServer:
         task.add_done_callback(self._council_run_tasks.discard)
         return _council_run_public_payload(run)
 
+    def _schedule_relay_lifecycle_worker(self) -> bool:
+        """Reconcile Relay lifecycle state outside request handling.
+
+        Reconciliation may consume provider events and persist projections, so it
+        is deliberately not reachable from any GET/SSE path.  The Relay store
+        uses a durable completion-event claim, making repeated worker passes and
+        a process restart safe.  A short initial delay also preserves the
+        read-only contract for startup snapshots.
+        """
+        if self._relay_service is None:
+            return False
+        existing = self._relay_lifecycle_task
+        if existing is not None and not existing.done():
+            return True
+
+        async def reconcile_loop() -> None:
+            try:
+                await asyncio.sleep(1.0)
+                while True:
+                    service = self._relay_service
+                    if service is None:
+                        return
+                    try:
+                        list_tasks = getattr(service, "list_tasks_readonly", service.list_tasks)
+                        summaries = list_tasks()
+                        runtime_store = getattr(self._hub, "_store", None)
+                        for summary in summaries:
+                            task_id = int(getattr(summary, "task_id", 0) or 0)
+                            if not task_id:
+                                continue
+                            presentation = getattr(summary, "presentation", None)
+                            state = str(
+                                getattr(presentation, "state", "")
+                                or getattr(summary, "status", "")
+                                or ""
+                            )
+                            if state in {"completed", "interrupted", "failed"}:
+                                continue
+                            reconcile = getattr(
+                                service,
+                                "reconcile_task_lifecycle",
+                                service.ensure_task_lifecycle_current,
+                            )
+                            try:
+                                result = reconcile(task_id, runtime_store)
+                            except TypeError:
+                                # Compatibility with older Relay service
+                                # implementations while rolling out this release.
+                                result = reconcile(task_id)
+                            if asyncio.iscoroutine(result):
+                                await result
+                        scan = getattr(service, "scan_active_native_runtime_events", None)
+                        if runtime_store is not None and callable(scan):
+                            result = scan(runtime_store)
+                            if asyncio.iscoroutine(result):
+                                await result
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        self._native_background_errors[("relay_lifecycle",)] = (
+                            str(exc) or "relay lifecycle reconciliation failed"
+                        )
+                    else:
+                        self._native_background_errors.pop(("relay_lifecycle",), None)
+                    await asyncio.sleep(2.0)
+            finally:
+                if self._relay_lifecycle_task is task:
+                    self._relay_lifecycle_task = None
+
+        task = asyncio.create_task(reconcile_loop())
+        self._relay_lifecycle_task = task
+        return True
+
     def _schedule_relay_dispatch(self, task_id: int, role: str) -> None:
         if self._relay_service is None or not role:
             return
@@ -2712,6 +3544,31 @@ class WorkerLiveStreamServer:
         task = asyncio.create_task(dispatch())
         self._relay_dispatch_tasks.add(task)
         task.add_done_callback(self._relay_dispatch_tasks.discard)
+
+    def _schedule_relay_task_reconcile(self, task_id: int) -> bool:
+        """Request an explicit lifecycle refresh without writing in the request.
+
+        The task worker is the only boundary allowed to ingest provider runtime
+        events.  This turns an inbox "refresh" into a durable-background
+        operation instead of smuggling reconciliation into a page/API read.
+        """
+
+        if self._relay_service is None:
+            return False
+
+        async def reconcile() -> None:
+            service = self._relay_service
+            if service is None:
+                return
+            runtime_store = getattr(self._hub, "_store", None)
+            result = service.reconcile_task_lifecycle(task_id, runtime_store)
+            if asyncio.iscoroutine(result):
+                await result
+
+        task = asyncio.create_task(reconcile())
+        self._relay_dispatch_tasks.add(task)
+        task.add_done_callback(self._relay_dispatch_tasks.discard)
+        return True
 
     async def _run_async_council_review(
         self,
@@ -3080,7 +3937,7 @@ class WorkerLiveStreamServer:
             ("native_transcript", provider_key, native_thread_id),
             "",
         )
-        sync_pending = self._schedule_native_timeline_transcript_sync_if_needed(
+        sync_pending = self._native_transcript_task_running(
             provider_key,
             native_thread_id,
         )
@@ -3098,10 +3955,6 @@ class WorkerLiveStreamServer:
             )
             return
         if item_snapshot:
-            self._native_timeline.suppress_duplicate_completed_messages(
-                provider_key,
-                native_thread_id,
-            )
             events = self._native_timeline.list_item_events(
                 provider,
                 native_thread_id,
@@ -3171,14 +4024,6 @@ class WorkerLiveStreamServer:
         await writer.drain()
         if self._native_timeline is None:
             return
-        self._native_timeline.suppress_duplicate_completed_messages(
-            provider,
-            native_thread_id,
-        )
-        self._schedule_native_timeline_transcript_sync_if_needed(
-            provider,
-            native_thread_id,
-        )
         latest = after_id
         queue = self._native_timeline.subscribe(
             provider=provider,
@@ -3197,6 +4042,17 @@ class WorkerLiveStreamServer:
                 if not _is_visible_native_timeline_event(event):
                     continue
                 await _write_native_timeline_sse(writer, event)
+            # The replay above is the initial snapshot and deliberately has
+            # no write/sync side effects.  Start a separately owned worker
+            # only after that snapshot has reached the client.
+            self._schedule_native_timeline_transcript_sync_if_needed(
+                provider,
+                native_thread_id,
+            )
+            self._schedule_native_timeline_lifecycle_reconcile(
+                provider,
+                native_thread_id,
+            )
             while not writer.is_closing():
                 try:
                     event = await asyncio.wait_for(
@@ -3204,7 +4060,11 @@ class WorkerLiveStreamServer:
                         timeout=_NATIVE_TRANSCRIPT_WATCH_INTERVAL_SECONDS,
                     )
                 except asyncio.TimeoutError:
-                    await self._sync_native_timeline_transcript_if_needed(
+                    self._schedule_native_timeline_transcript_sync_if_needed(
+                        provider,
+                        native_thread_id,
+                    )
+                    self._schedule_native_timeline_lifecycle_reconcile(
                         provider,
                         native_thread_id,
                     )
@@ -3238,7 +4098,7 @@ class WorkerLiveStreamServer:
             ("native_transcript", provider_key, native_thread_id),
             "",
         )
-        sync_pending = self._schedule_native_timeline_transcript_sync_if_needed(
+        sync_pending = self._native_transcript_task_running(
             provider_key,
             native_thread_id,
         )
@@ -3260,10 +4120,6 @@ class WorkerLiveStreamServer:
                 },
             )
             return
-        self._native_timeline.suppress_duplicate_completed_messages(
-            provider_key,
-            native_thread_id,
-        )
         run_state = self._native_timeline.latest_turn_run_state(
             provider_key,
             native_thread_id,
@@ -3348,14 +4204,6 @@ class WorkerLiveStreamServer:
         if self._native_timeline is None:
             return
         provider_key = provider.strip().lower() or "codex"
-        self._native_timeline.suppress_duplicate_completed_messages(
-            provider_key,
-            native_thread_id,
-        )
-        self._schedule_native_timeline_transcript_sync_if_needed(
-            provider_key,
-            native_thread_id,
-        )
         latest = int(after_update or 0)
         queue = self._native_timeline.subscribe(
             provider=provider_key,
@@ -3381,6 +4229,18 @@ class WorkerLiveStreamServer:
                     replay=True,
                     update_cursor=event.sequence,
                 )
+            # Do not make the first SSE replay a write path.  Once the
+            # client owns its read-only snapshot, the background worker may
+            # import any newer transcript state and publish it through this
+            # subscription.
+            self._schedule_native_timeline_transcript_sync_if_needed(
+                provider_key,
+                native_thread_id,
+            )
+            self._schedule_native_timeline_lifecycle_reconcile(
+                provider_key,
+                native_thread_id,
+            )
             while not writer.is_closing():
                 try:
                     event = await asyncio.wait_for(
@@ -3388,7 +4248,11 @@ class WorkerLiveStreamServer:
                         timeout=_NATIVE_TRANSCRIPT_WATCH_INTERVAL_SECONDS,
                     )
                 except asyncio.TimeoutError:
-                    await self._sync_native_timeline_transcript_if_needed(
+                    self._schedule_native_timeline_transcript_sync_if_needed(
+                        provider_key,
+                        native_thread_id,
+                    )
+                    self._schedule_native_timeline_lifecycle_reconcile(
                         provider_key,
                         native_thread_id,
                     )
@@ -3694,6 +4558,30 @@ async def _send_relay_sse(
     )
     writer.write(header.encode("utf-8"))
     writer.write(b": connected\n\n")
+    task_id = int(getattr(getattr(detail, "task", None), "id", 0) or 0)
+    presentation = getattr(detail, "presentation", None)
+    if hasattr(presentation, "to_dict"):
+        presentation_payload = presentation.to_dict()
+    elif isinstance(presentation, dict):
+        presentation_payload = dict(presentation)
+    else:
+        presentation_payload = {}
+    if presentation_payload:
+        # This is deliberately an unsequenced snapshot.  It gives every
+        # subscriber the same read-only user-facing contract used by the
+        # task page without advancing Last-Event-ID or manufacturing a
+        # durable lifecycle event.
+        await _write_relay_sse_payload(
+            writer,
+            event_id=None,
+            event_type="presentation.snapshot",
+            payload={
+                "event_type": "presentation.snapshot",
+                "task_id": task_id,
+                "current_round_id": int(getattr(detail, "current_round_id", 0) or 0),
+                "presentation": presentation_payload,
+            },
+        )
     seen_relay_sequences: set[int] = set()
     seen_worker_events: set[tuple[str, int, str]] = set()
     initial_events = list(events[:_RELAY_SSE_INITIAL_EVENT_LIMIT])
@@ -3732,7 +4620,6 @@ async def _send_relay_sse(
             },
         )
     role_jobs = _relay_active_worker_jobs(detail)
-    task_id = int(getattr(getattr(detail, "task", None), "id", 0) or 0)
     latest_by_agent: dict[int, int] = {}
     for event in initial_events:
         payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
@@ -3795,7 +4682,7 @@ async def _send_relay_sse(
             refreshed = current_detail
             if refreshed is None:
                 try:
-                    refreshed = relay_service.get_task(task_id)
+                    refreshed = relay_service.get_task_readonly(task_id)
                 except Exception:
                     refreshed = None
             for refreshed_job in _relay_active_worker_jobs(refreshed):
@@ -3968,12 +4855,16 @@ async def _send_relay_sse(
 async def _write_relay_sse_payload(
     writer: asyncio.StreamWriter,
     *,
-    event_id: str,
+    event_id: str | None,
     event_type: str,
     payload: dict[str, Any],
 ) -> None:
     payload = _compact_relay_sse_payload(event_type, payload)
-    writer.write(f"id: {event_id}\n".encode("utf-8"))
+    # Ephemeral snapshots (for example an observed native frame or the
+    # presentation projection) have no durable Relay sequence.  Omitting an
+    # ``id`` is important: an empty SSE id resets EventSource's resume cursor.
+    if event_id:
+        writer.write(f"id: {event_id}\n".encode("utf-8"))
     writer.write(f"event: {event_type}\n".encode("utf-8"))
     writer.write(("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8"))
     await writer.drain()
@@ -4079,26 +4970,19 @@ async def _write_relay_worker_event(
     worker_event: WorkerStreamEvent,
     relay_service: Any | None = None,
 ) -> int:
+    """Write an observed native event without turning the SSE reader into a writer.
+
+    Relay's lifecycle worker is the only component allowed to project native
+    runtime events into ``relay_stream_events``.  An SSE subscription can see a
+    hub event before that worker's next pass, so it may safely forward an
+    ephemeral copy to the connected page.  Persisting it here used to make a
+    page refresh (and even the initial snapshot) advance the database and
+    occasionally race the lifecycle projector.
+    """
     relay_event = _relay_worker_payload(task_id, role, worker_event)
     if relay_event is None:
         return 0
     event_type, payload = relay_event
-    if relay_service is not None and hasattr(relay_service, "_events"):
-        event = relay_service._events.emit(
-            task_id,
-            event_type,
-            role=role,
-            payload=payload,
-        )
-        relay_payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
-        sequence = int(relay_payload.get("sequence") or 0)
-        await _write_relay_sse_payload(
-            writer,
-            event_id=str(sequence),
-            event_type=event_type,
-            payload=relay_payload,
-        )
-        return sequence
     await _write_relay_sse_payload(
         writer,
         event_id="",
@@ -4321,115 +5205,6 @@ def _native_timeline_display_summary(events: list[dict[str, Any]]) -> dict[str, 
     }
 
 
-def _agent_id_from_path(path: str, *, prefix: str, suffix: str) -> int | None:
-    if not path.startswith(prefix) or not path.endswith(suffix):
-        return None
-    raw = path[len(prefix) : -len(suffix)]
-    if not raw.isdigit():
-        return None
-    return int(raw)
-
-
-def _native_timeline_route_from_path(path: str) -> tuple[str, str, bool] | None:
-    prefix = "/api/native/"
-    if not path.startswith(prefix):
-        return None
-    parts = [unquote(part) for part in path[len(prefix) :].split("/") if part]
-    if len(parts) == 4 and parts[1] == "sessions" and parts[3] == "timeline":
-        return parts[0], parts[2], False
-    if (
-        len(parts) == 5
-        and parts[1] == "sessions"
-        and parts[3] == "timeline"
-        and parts[4] == "stream"
-    ):
-        return parts[0], parts[2], True
-    return None
-
-
-def _native_messages_route_from_path(path: str) -> tuple[str, str, bool] | None:
-    prefix = "/api/native/"
-    if not path.startswith(prefix):
-        return None
-    parts = [unquote(part) for part in path[len(prefix) :].split("/") if part]
-    if len(parts) == 4 and parts[1] == "sessions" and parts[3] == "messages":
-        return parts[0], parts[2], False
-    if (
-        len(parts) == 5
-        and parts[1] == "sessions"
-        and parts[3] == "messages"
-        and parts[4] == "stream"
-    ):
-        return parts[0], parts[2], True
-    return None
-
-
-def _relay_task_id_from_ui_path(path: str) -> int | None:
-    prefix = "/native/workflows/relay/tasks/"
-    if not path.startswith(prefix):
-        return None
-    raw = path.removeprefix(prefix).strip("/")
-    return int(raw) if raw.isdigit() else None
-
-
-def _normalize_relay_api_path(path: str) -> str:
-    if path == "/api/relay/runs":
-        return "/api/relay/tasks"
-    prefix = "/api/relay/runs/"
-    if path.startswith(prefix):
-        return "/api/relay/tasks/" + path.removeprefix(prefix)
-    return path
-
-
-def _relay_task_api_parts(path: str) -> tuple[int | None, str]:
-    prefix = "/api/relay/tasks/"
-    if not path.startswith(prefix):
-        return None, ""
-    raw = path.removeprefix(prefix)
-    task_raw, _, suffix_raw = raw.partition("/")
-    if not task_raw.isdigit():
-        return None, ""
-    suffix = f"/{suffix_raw}" if suffix_raw else ""
-    return int(task_raw), suffix
-
-
-def _native_provider_route_parts(path: str) -> tuple[str, str]:
-    prefix = "/api/native/"
-    if not path.startswith(prefix):
-        return "", ""
-    provider, _, suffix = path[len(prefix) :].partition("/")
-    return unquote(provider), suffix
-
-
-def _native_login_provider_from_path(path: str) -> str:
-    parts = [part for part in path.split("/") if part]
-    if len(parts) == 3 and parts[0] == "native" and parts[2] == "login":
-        return unquote(parts[1])
-    return ""
-
-
-def _native_page_provider_from_path(path: str) -> str:
-    parts = [part for part in path.split("/") if part]
-    if len(parts) == 2 and parts[0] == "native":
-        return unquote(parts[1])
-    return ""
-
-
-def _safe_int(raw: str, *, default: int) -> int:
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return max(0, value)
-
-
-def _optional_nonempty_string(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
 def _native_permission_presets(provider: str) -> list[dict[str, object]]:
     normalized = str(provider or "").strip().lower()
     if normalized == "claude":
@@ -4537,7 +5312,8 @@ def _native_app_manifest() -> str:
         "name": "WLCodex Native",
         "short_name": "WLCodex",
         "description": "Native mobile workspace for WLCodex sessions.",
-        "start_url": "/native/codex",
+        # Start from the surface boundary, not an implicitly selected provider.
+        "start_url": "/native",
         "scope": "/",
         "display": "standalone",
         "display_override": ["standalone", "fullscreen", "browser"],
@@ -4708,6 +5484,23 @@ def _safe_relay_file_attachments(value: object) -> list[dict[str, Any]] | None:
             clean["size"] = size
         files.append(clean)
     return files or None
+
+
+def _relay_acceptance_criteria_from_body(body: dict[str, Any]) -> list[str]:
+    """Normalize API/form criteria without accepting a hidden empty contract."""
+    raw = body.get("acceptance_criteria", body.get("acceptanceCriteria", []))
+    if isinstance(raw, str):
+        values = raw.replace("\r\n", "\n").split("\n")
+    elif isinstance(raw, list | tuple):
+        values = raw
+    else:
+        values = []
+    result: list[str] = []
+    for value in values:
+        criterion = str(value or "").strip()
+        if criterion and criterion not in result:
+            result.append(criterion)
+    return result
 
 
 def _is_loopback_peer(writer: asyncio.StreamWriter) -> bool:
@@ -4997,13 +5790,9 @@ def _native_provider_index_html(
 ) -> str:
     token_suffix = _token_suffix(access_token)
     council_links = """
-      <a class="provider council" href="/council__TOKEN_SUFFIX__">
-        <span>议会审核</span>
-        <small>提交方案并运行五席审核</small>
-      </a>
-      <a class="provider relay" data-native-entry="marvis-relay" href="/native/workflows/relay__TOKEN_SUFFIX__">
-        <span>Marvis 接力</span>
-        <small>像 Marvis 一样用对话流调度五角色接力</small>
+      <a class="provider workflow" data-native-entry="workflows" href="/native/workflows__TOKEN_SUFFIX__">
+        <span>工作流</span>
+        <small>进入 Relay 大任务与已支持的协作工作流</small>
       </a>
     """.replace("__TOKEN_SUFFIX__", token_suffix)
     if providers:
@@ -5066,10 +5855,7 @@ def _native_workflows_page(*, access_token: str = "") -> str:
       <span>议会审核</span>
       <small>沿用现有五席审核入口。</small>
     </a>
-    <div class="provider">
-      <span>Dev Flow</span>
-      <small>工作流类入口预留，稳定 UI 接入后开放。</small>
-    </div>
+    <p class="native-workflow-note">未实现的 Skills、Profile、Dev Flow 与工作树不会作为可操作入口展示。</p>
   </main>
 </body>
 </html>""")
@@ -5084,57 +5870,45 @@ def _relay_task_list_page(
     selected_workspace: str = "",
     access_token: str = "",
     page: int = 1,
+    total: int = 0,
+    total_pages: int = 1,
+    active_count: int = 0,
+    state_counts: dict[str, int] | None = None,
+    status_filter: str = "",
 ) -> str:
     token_suffix = _token_suffix(access_token)
     relay_config = relay_config or {}
     selected_workspace = str(selected_workspace or "")
-    sorted_summaries = sorted(
-        summaries,
-        key=lambda summary: str(getattr(summary, "last_activity_at", "") or ""),
-        reverse=True,
-    )
-    filters = ["running", "waiting_user", "blocked", "completed", "interrupted"]
-    counts = {status: 0 for status in filters}
-    for summary in sorted_summaries:
-        status = str(getattr(summary, "status", "") or "")
-        if status in counts:
-            counts[status] += 1
+    filters = [
+        "running", "waiting_user", "waiting_approval", "blocked", "failed",
+        "completed", "interrupted", "stale",
+    ]
+    counts = {status: int((state_counts or {}).get(status, 0) or 0) for status in filters}
     filter_html = "\n".join(
-        '<button class="relay-filter-chip" type="button" '
-        f'data-filter="{escape(status)}">'
-        f"{escape(_relay_task_status_label(status))} "
-        f"<span>{counts.get(status, 0)}</span></button>"
+        f'<a class="relay-filter-chip{" active" if status == status_filter else ""}" '
+        f'href="{escape(_relay_task_list_href(selected_workspace, access_token, 1, status=status))}">'
+        f"{escape(_relay_task_status_label(status))} <span>{counts.get(status, 0)}</span></a>"
         for status in filters
     )
-    page_size = 10
-    task_count = len(sorted_summaries)
-    total_pages = max(1, (task_count + page_size - 1) // page_size)
-    current_page = min(max(1, int(page or 1)), total_pages)
-    page_start = (current_page - 1) * page_size
-    visible_summaries = sorted_summaries[page_start : page_start + page_size]
     pagination_html = _relay_task_pagination_html(
-        current_page=current_page,
+        current_page=page,
         total_pages=total_pages,
         selected_workspace=selected_workspace,
         access_token=access_token,
+        status_filter=status_filter,
     )
-    if visible_summaries:
+    if summaries:
         task_list_html = "\n".join(
-            _relay_task_card_html(summary, token_suffix) for summary in visible_summaries
+            _relay_task_card_html(summary, token_suffix) for summary in summaries
         )
     else:
         task_list_html = """
           <section class="relay-empty-state">
             <h2>还没有接力任务</h2>
             <p>创建一个大任务后，总工程师会先接收并调度架构、开发、测试和审计角色。</p>
-            <p>当前工作区还没有接力任务，可以从底部导航的对话开始第一个任务。</p>
+            <p>当前筛选没有任务。可以新建任务，或调整状态筛选。</p>
           </section>
         """
-    active_count = sum(
-        1
-        for summary in sorted_summaries
-        if str(getattr(summary, "status", "") or "") in {"running", "waiting_user", "blocked"}
-    )
     workspace_nav = _relay_workspace_nav_html(
         projects or [],
         selected_workspace=selected_workspace,
@@ -5146,8 +5920,8 @@ def _relay_task_list_page(
         subtitle=workspace_label,
         back_href=f"/native{token_suffix}",
         right_html=f"""
-          <a class="marvis-relay-icon-button" href="/native/workflows/relay/office{token_suffix}" aria-label="Marvis办公室">
-            <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
+          <a class="marvis-relay-icon-button" href="{escape(_relay_settings_href(selected_workspace, access_token))}" aria-label="Relay设置">
+            <span class="marvis-relay-icon-list" aria-hidden="true"></span>
           </a>
         """,
     )
@@ -5232,10 +6006,14 @@ def _relay_task_list_page(
         <div class="relay-history-head">
           <div class="relay-history-title">
             <h2>任务历史</h2>
-            <span class="relay-muted">共 {task_count} 个任务，{active_count} 个需要跟进</span>
+            <span class="relay-muted">当前 {total} 个任务，{active_count} 个需要跟进</span>
+          </div>
+          <div class="relay-toolbar">
+            <a class="relay-secondary" href="{escape(_relay_inbox_href(selected_workspace, access_token))}">待办收件箱</a>
+            <a class="relay-primary" href="{escape(_relay_chat_href(selected_workspace, access_token))}">新建任务</a>
           </div>
           <div class="relay-filter-row" aria-label="relay task status filters">
-            <button class="relay-filter-chip active" type="button" data-filter="all">全部 <span>{task_count}</span></button>
+            <a class="relay-filter-chip{" active" if not status_filter else ""}" href="{escape(_relay_task_list_href(selected_workspace, access_token, 1))}">全部 <span>{sum(counts.values())}</span></a>
             {filter_html}
           </div>
         </div>
@@ -5250,14 +6028,204 @@ def _relay_task_list_page(
     {bottom_nav_html}
   </nav>
   </div>
+</body>
+</html>""")
+
+
+def _relay_blocked_inbox_page(
+    summaries: list[Any],
+    *,
+    selected_workspace: str = "",
+    access_token: str = "",
+) -> str:
+    """Render the actionable Relay Inbox from the shared read-only projection.
+
+    This intentionally groups *presentation* states rather than raw task
+    statuses.  A user should not have to know whether a provider called a
+    pause ``waiting`` or ``blocked`` in order to find the one next action.
+    """
+
+    token_suffix = _token_suffix(access_token)
+    groups: list[tuple[str, str, tuple[str, ...]]] = [
+        ("waiting_me", "等待我", ("waiting_user", "waiting_approval")),
+        ("waiting_system", "等待系统", ("running",)),
+        ("recovery", "需要恢复", ("blocked", "failed", "interrupted")),
+        ("stale", "已陈旧", ("stale",)),
+    ]
+    grouped: dict[str, list[Any]] = {key: [] for key, _label, _states in groups}
+    for summary in summaries:
+        state = _relay_summary_presentation_state(summary)
+        for key, _label, states in groups:
+            if state in states:
+                grouped[key].append(summary)
+                break
+
+    def card(summary: Any, bucket: str) -> str:
+        presentation = _relay_summary_presentation(summary)
+        state = _relay_summary_presentation_state(summary)
+        task_id = int(getattr(summary, "task_id", 0) or 0)
+        task_href = f"/native/workflows/relay/tasks/{task_id}{token_suffix}"
+        evidence_href = _relay_task_view_href(task_id, access_token, "board")
+        actor = presentation.get("current_actor")
+        actor = actor if isinstance(actor, dict) else {}
+        actor_label = str(actor.get("label") or "系统协调")
+        reason = str(presentation.get("blocking_reason") or "").strip()
+        next_action = str(presentation.get("next_action") or "查看任务状态。")
+        freshness = presentation.get("freshness")
+        freshness = freshness if isinstance(freshness, dict) else {}
+        updated = _relay_activity_label(
+            freshness.get("updated_at") or getattr(summary, "last_activity_at", "")
+        )
+        action_html = [
+            f'<a class="relay-inbox-action secondary" href="{escape(task_href)}">补充信息</a>',
+            f'<a class="relay-inbox-action secondary" href="{escape(evidence_href)}">查看证据</a>',
+        ]
+        if bucket == "recovery":
+            if bool(freshness.get("recovery_required")):
+                # The external provider may already have accepted an approval
+                # action.  Do not offer a resume (which starts a fresh turn)
+                # until the background reconciler has a durable receipt.
+                action_html.insert(
+                    0,
+                    f'<button class="relay-inbox-action primary" type="button" '
+                    f'data-relay-inbox-action="refresh" data-task-id="{task_id}">检查审批回执</button>',
+                )
+            else:
+                action_html.insert(
+                    0,
+                    f'<button class="relay-inbox-action primary" type="button" '
+                    f'data-relay-inbox-action="resume" data-task-id="{task_id}">恢复</button>',
+                )
+                action_html.append(
+                    f'<button class="relay-inbox-action secondary" type="button" '
+                    f'data-relay-inbox-action="archive" data-task-id="{task_id}">归档</button>',
+                )
+        elif bucket == "stale":
+            action_html.insert(
+                0,
+                f'<button class="relay-inbox-action primary" type="button" '
+                f'data-relay-inbox-action="refresh" data-task-id="{task_id}">恢复同步</button>',
+            )
+            action_html.append(
+                f'<button class="relay-inbox-action secondary" type="button" '
+                f'data-relay-inbox-action="archive" data-task-id="{task_id}">归档</button>',
+            )
+        return f"""
+          <article class="relay-inbox-card" data-relay-inbox-card data-state="{escape(state)}">
+            <div class="relay-inbox-card-head">
+              <span class="relay-status-badge is-{escape(_relay_status_class_name(state))}">{escape(_relay_task_status_label(state))}</span>
+              <span class="relay-muted">{escape(updated)}</span>
+            </div>
+            <h3>{escape(str(getattr(summary, 'title', '') or '未命名任务'))}</h3>
+            <p><strong>当前责任：</strong>{escape(actor_label)}</p>
+            <p><strong>唯一下一步：</strong>{escape(next_action)}</p>
+            {f'<p class="relay-inbox-reason"><strong>原因：</strong>{escape(reason)}</p>' if reason else ''}
+            <div class="relay-inbox-actions">{''.join(action_html)}</div>
+            <p class="relay-inbox-status" data-relay-inbox-status role="status" aria-live="polite"></p>
+          </article>
+        """
+
+    sections = []
+    for key, label, _states in groups:
+        items = grouped[key]
+        cards = "".join(card(summary, key) for summary in items)
+        if not cards:
+            cards = '<p class="relay-inbox-empty">当前没有需要处理的任务。</p>'
+        sections.append(
+            f"""
+            <section class="relay-inbox-group" aria-labelledby="relay-inbox-{key}">
+              <div class="relay-inbox-group-head">
+                <h2 id="relay-inbox-{key}">{escape(label)}</h2>
+                <span>{len(items)}</span>
+              </div>
+              <div class="relay-inbox-cards">{cards}</div>
+            </section>
+            """
+        )
+    workspace_label = Path(selected_workspace).name or selected_workspace or "wlcodex"
+    topbar_html = _marvis_relay_topbar(
+        title="Marvis",
+        subtitle=workspace_label,
+        back_href=_relay_workspace_href(selected_workspace, access_token),
+        right_html=(
+            f'<a class="marvis-relay-icon-button" href="{escape(_relay_settings_href(selected_workspace, access_token))}" '
+            'aria-label="Relay设置"><span class="marvis-relay-icon-list" aria-hidden="true"></span></a>'
+        ),
+    )
+    bottom_nav_html = _marvis_relay_bottom_nav(
+        "tasks", access_token=access_token, selected_workspace=selected_workspace
+    )
+    return _replace_html_icons(f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+{_relay_mobile_web_head("Relay 待办收件箱")}
+  <style>
+    html {{ background: var(--bg-canvas); }}
+    body {{ margin: 0; color: var(--text-primary); background: transparent; }}
+    main {{ width: min(920px, 100%); box-sizing: border-box; margin: 0 auto; padding: 18px; }}
+    .relay-inbox-intro {{ display: grid; gap: 5px; margin-bottom: 18px; }}
+    .relay-inbox-intro h2, .relay-inbox-group h2, .relay-inbox-card h3 {{ margin: 0; }}
+    .relay-inbox-intro p, .relay-inbox-card p {{ margin: 0; line-height: 1.5; }}
+    .relay-inbox-intro p, .relay-inbox-card p, .relay-inbox-empty {{ color: var(--text-muted); }}
+    .relay-inbox-groups {{ display: grid; gap: 18px; }}
+    .relay-inbox-group {{ display: grid; gap: 10px; }}
+    .relay-inbox-group-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
+    .relay-inbox-group-head span {{ min-width: 28px; min-height: 28px; display: grid; place-items: center; border-radius: 999px; background: rgba(88,166,255,.14); color: var(--text-primary); }}
+    .relay-inbox-cards {{ display: grid; gap: 10px; }}
+    .relay-inbox-card {{ display: grid; gap: 10px; padding: 14px; border: 1px solid var(--border-card); border-radius: 10px; background: var(--bg-surface); }}
+    .relay-inbox-card-head, .relay-inbox-actions {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+    .relay-inbox-card-head {{ justify-content: space-between; }}
+    .relay-inbox-actions {{ margin-top: 2px; }}
+    .relay-inbox-action {{ min-height: 44px; box-sizing: border-box; display: inline-grid; place-items: center; border: 1px solid var(--border-subtle); border-radius: 7px; padding: 0 13px; color: var(--text-primary); background: transparent; text-decoration: none; font: inherit; cursor: pointer; }}
+    .relay-inbox-action.primary {{ border-color: var(--color-link); background: rgba(88,166,255,.12); }}
+    .relay-inbox-action[disabled] {{ opacity: .58; cursor: wait; }}
+    .relay-inbox-status {{ min-height: 1.3em; font-size: 13px; }}
+    .relay-inbox-status.is-error {{ color: #d83a3a; }}
+    @media (max-width: 760px) {{ main {{ padding: 12px; }} .relay-inbox-action {{ flex: 1 1 130px; }} }}
+  </style>
+</head>
+<body data-marvis-relay-view="inbox">
+  <div class="marvis-relay-phone">
+    {topbar_html}
+    <main>
+      <section class="relay-inbox-intro" aria-labelledby="relay-inbox-title">
+        <h2 id="relay-inbox-title">待办收件箱</h2>
+        <p>按当前可见语义聚合。每张卡只显示一个下一步，不以底层状态机要求你猜测。</p>
+      </section>
+      <div class="relay-inbox-groups">{''.join(sections)}</div>
+    </main>
+    <nav class="marvis-relay-bottom-nav" aria-label="Marvis relay navigation">{bottom_nav_html}</nav>
+  </div>
   <script>
-    document.querySelectorAll("[data-filter]").forEach((button) => {{
-      button.addEventListener("click", () => {{
-        const filter = button.dataset.filter || "all";
-        document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("active", item === button));
-        document.querySelectorAll(".relay-task-card").forEach((card) => {{
-          card.hidden = filter !== "all" && card.dataset.status !== filter;
-        }});
+    const TOKEN_SUFFIX = {json.dumps(token_suffix)};
+    const makeIdempotencyKey = () => crypto.randomUUID ? crypto.randomUUID() : `${{Date.now()}}-${{Math.random()}}`;
+    document.querySelectorAll("[data-relay-inbox-action]").forEach((button) => {{
+      button.addEventListener("click", async () => {{
+        const action = button.dataset.relayInboxAction || "";
+        const taskId = button.dataset.taskId || "";
+        if (!taskId || !action) return;
+        const card = button.closest("[data-relay-inbox-card]");
+        const status = card?.querySelector("[data-relay-inbox-status]");
+        const endpoint = action === "archive" ? "archive" : action === "refresh" ? "refresh" : "resume";
+        const key = button.dataset.idempotencyKey || makeIdempotencyKey();
+        button.dataset.idempotencyKey = key;
+        button.disabled = true;
+        if (status) {{ status.textContent = action === "archive" ? "正在归档…" : "正在处理…"; status.classList.remove("is-error"); }}
+        try {{
+          const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(taskId)}}/${{endpoint}}${{TOKEN_SUFFIX}}`, {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json", "Idempotency-Key": key }},
+            body: JSON.stringify(action === "resume" ? {{ force: true }} : {{}}),
+          }});
+          const payload = await response.json().catch(() => ({{}}));
+          if (!response.ok) throw new Error(payload.error || "操作失败，请重试。");
+          if (action === "archive") {{ card?.remove(); return; }}
+          if (status) status.textContent = action === "refresh" ? "已请求同步，请等待新状态。" : "已恢复任务。";
+        }} catch (error) {{
+          if (status) {{ status.textContent = error?.message || "操作失败，请重试。"; status.classList.add("is-error"); }}
+        }} finally {{
+          button.disabled = false;
+        }}
       }});
     }});
   </script>
@@ -5278,8 +6246,8 @@ def _relay_chat_home_page(
         subtitle=workspace_label,
         back_href=f"/native{token_suffix}",
         right_html=f"""
-          <a class="marvis-relay-icon-button" href="/native/workflows/relay/office{token_suffix}" aria-label="Marvis办公室">
-            <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
+          <a class="marvis-relay-icon-button" href="{escape(_relay_settings_href(selected_workspace, access_token))}" aria-label="Relay设置">
+            <span class="marvis-relay-icon-list" aria-hidden="true"></span>
           </a>
           <a class="marvis-relay-icon-button" href="{escape(_relay_workspace_href(selected_workspace, access_token))}" aria-label="任务">
             <span class="marvis-relay-icon-list" aria-hidden="true"></span>
@@ -5287,7 +6255,7 @@ def _relay_chat_home_page(
         """,
     )
     bottom_nav_html = _marvis_relay_bottom_nav(
-        "chat",
+        "tasks",
         access_token=access_token,
         selected_workspace=selected_workspace,
     )
@@ -5318,29 +6286,64 @@ def _relay_chat_home_page(
     {_marvis_relay_attachment_script()}
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
     const marvisComposer = document.querySelector("[data-marvis-task-composer]");
+    const mutationStatus = marvisComposer?.querySelector("[data-relay-mutation-status]");
+    const goalContract = marvisComposer?.querySelector("[data-relay-goal-contract]");
+    const executionContract = marvisComposer?.querySelector("[data-relay-execution-contract]");
+    const setComposerStatus = (text, isError = false) => {{
+      if (!mutationStatus) return;
+      mutationStatus.textContent = text;
+      mutationStatus.classList.toggle("is-error", isError);
+    }};
+    const updateExecutionContract = () => {{
+      const mode = marvisComposer?.querySelector("input[name=execution_mode]:checked")?.value || "standard";
+      if (goalContract) goalContract.hidden = mode !== "goal";
+      if (executionContract) executionContract.textContent = mode === "plan_first"
+        ? "先计划：架构计划必须经你确认后才进入实现。"
+        : mode === "goal"
+          ? "目标验收：必须完成实现，并提供独立测试或审计证据后才能完成。"
+          : "标准执行：系统根据任务自动选择角色与子代理。";
+    }};
+    marvisComposer?.querySelectorAll("input[name=execution_mode]").forEach((input) => input.addEventListener("change", updateExecutionContract));
+    updateExecutionContract();
     marvisComposer?.addEventListener("submit", async (event) => {{
       event.preventDefault();
       const data = Object.fromEntries(new FormData(marvisComposer).entries());
       const attachments = window.marvisRelayAttachments?.payload() || {{}};
       const hasAttachments = Boolean((attachments.images || []).length || (attachments.files || []).length);
       const title = String(data.title || "").trim() || (hasAttachments ? "请查看附件" : "");
-      if (!title) return;
+      if (!title) {{ setComposerStatus("请先描述任务。", true); return; }}
       data.title = title;
       data.prompt = title;
-      if (String(data.execution_mode || "") === "goal" && !String(data.execution_goal || "").trim()) {{
-        data.execution_goal = title;
+      if (String(data.execution_mode || "") === "goal") {{
+        if (!String(data.execution_goal || "").trim()) {{ setComposerStatus("目标验收需要明确目标。", true); return; }}
+        if (!String(data.acceptance_criteria || "").trim()) {{ setComposerStatus("目标验收需要至少一条验收条件。", true); return; }}
       }}
       if ((attachments.images || []).length) data.images = attachments.images;
       if ((attachments.files || []).length) data.files = attachments.files;
-      const response = await fetch(`/api/relay/tasks${{TOKEN_SUFFIX}}`, {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify(data),
-      }});
-      const payload = await response.json();
-      if (payload?.task?.id) {{
+      const submit = marvisComposer.querySelector("[data-marvis-submit]");
+      const idempotencyKey = submit?.dataset.idempotencyKey
+        || (crypto.randomUUID ? crypto.randomUUID() : `${{Date.now()}}-${{Math.random()}}`);
+      if (submit) submit.dataset.idempotencyKey = idempotencyKey;
+      submit?.setAttribute("aria-busy", "true");
+      if (submit) submit.disabled = true;
+      setComposerStatus("正在创建任务…");
+      try {{
+        const response = await fetch(`/api/relay/tasks${{TOKEN_SUFFIX}}`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }},
+          body: JSON.stringify(data),
+        }});
+        const payload = await response.json().catch(() => ({{}}));
+        if (!response.ok) throw new Error(payload.error || "创建任务失败，请重试。");
+        if (!payload?.task?.id) throw new Error("服务未返回任务标识，请重试。");
+        if (submit) delete submit.dataset.idempotencyKey;
         window.marvisRelayAttachments?.clear();
         window.location.href = `/native/workflows/relay/tasks/${{encodeURIComponent(payload.task.id)}}${{TOKEN_SUFFIX}}`;
+      }} catch (error) {{
+        setComposerStatus(error?.message || "创建失败，请重试。", true);
+      }} finally {{
+        submit?.removeAttribute("aria-busy");
+        if (submit) submit.disabled = false;
       }}
     }});
   </script>
@@ -5460,23 +6463,37 @@ def _relay_config_page(
     const TOKEN_SUFFIX = {json.dumps(token_suffix)};
     const RELAY_HISTORY_HREF = {json.dumps(back_href)};
     const statusNode = document.getElementById("relay-config-status");
-    document.getElementById("save-relay-config")?.addEventListener("click", async () => {{
+    const saveButton = document.getElementById("save-relay-config");
+    saveButton?.addEventListener("click", async () => {{
       const assignments = {{}};
       document.querySelectorAll("[data-role-provider]").forEach((select) => {{
         assignments[select.dataset.roleProvider] = select.value;
       }});
-      const response = await fetch(`/api/relay/config${{TOKEN_SUFFIX}}`, {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify({{assignments}}),
-      }});
-      if (!response.ok) {{
-        const payload = await response.json().catch(() => ({{}}));
-        statusNode.textContent = payload.error || "保存失败";
-        return;
+      const idempotencyKey = saveButton.dataset.idempotencyKey
+        || (crypto.randomUUID ? crypto.randomUUID() : `${{Date.now()}}-${{Math.random()}}`);
+      saveButton.dataset.idempotencyKey = idempotencyKey;
+      saveButton.disabled = true;
+      saveButton.setAttribute("aria-busy", "true");
+      statusNode.textContent = "保存中…";
+      try {{
+        const response = await fetch(`/api/relay/config${{TOKEN_SUFFIX}}`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }},
+          body: JSON.stringify({{assignments}}),
+        }});
+        if (!response.ok) {{
+          const payload = await response.json().catch(() => ({{}}));
+          throw new Error(payload.error || "保存失败");
+        }}
+        delete saveButton.dataset.idempotencyKey;
+        statusNode.textContent = "配置已保存";
+        window.location.href = RELAY_HISTORY_HREF;
+      }} catch (error) {{
+        statusNode.textContent = error?.message || "保存失败，请重试";
+      }} finally {{
+        saveButton.disabled = false;
+        saveButton.removeAttribute("aria-busy");
       }}
-      statusNode.textContent = "配置已保存";
-      window.location.href = RELAY_HISTORY_HREF;
     }});
   </script>
 </body>
@@ -5534,31 +6551,11 @@ def _relay_workspace_nav_html(
     """
 
 
-def _relay_workspace_href(workspace: str, access_token: str) -> str:
-    params = []
-    if access_token:
-        params.append(f"token={quote(access_token)}")
-    if workspace:
-        params.append(f"workspace={quote(workspace)}")
-    suffix = "?" + "&".join(params) if params else ""
-    return f"/native/workflows/relay{suffix}"
-
-
 def _relay_page_number(raw_page: str) -> int:
     try:
         return max(1, int(raw_page))
     except (TypeError, ValueError):
         return 1
-
-
-def _relay_task_list_href(workspace: str, access_token: str, page: int) -> str:
-    params = []
-    if access_token:
-        params.append(f"token={quote(access_token)}")
-    if workspace:
-        params.append(f"workspace={quote(workspace)}")
-    params.append(f"page={max(1, int(page))}")
-    return f"/native/workflows/relay?{'&'.join(params)}"
 
 
 def _relay_task_pagination_html(
@@ -5567,6 +6564,7 @@ def _relay_task_pagination_html(
     total_pages: int,
     selected_workspace: str,
     access_token: str,
+    status_filter: str = "",
 ) -> str:
     if total_pages <= 1:
         return ""
@@ -5575,7 +6573,7 @@ def _relay_task_pagination_html(
     if current_page > 1:
         previous_html = (
             '<a class="relay-page-link" '
-            f'href="{escape(_relay_task_list_href(selected_workspace, access_token, current_page - 1))}">'
+            f'href="{escape(_relay_task_list_href(selected_workspace, access_token, current_page - 1, status=status_filter))}">'
             "上一页</a>"
         )
     else:
@@ -5583,7 +6581,7 @@ def _relay_task_pagination_html(
     if current_page < total_pages:
         next_html = (
             '<a class="relay-page-link" '
-            f'href="{escape(_relay_task_list_href(selected_workspace, access_token, current_page + 1))}">'
+            f'href="{escape(_relay_task_list_href(selected_workspace, access_token, current_page + 1, status=status_filter))}">'
             "下一页</a>"
         )
     else:
@@ -5595,34 +6593,6 @@ def _relay_task_pagination_html(
         {next_html}
       </nav>
     """
-
-
-def _relay_task_view_href(task_id: int, access_token: str, view: str) -> str:
-    params = []
-    if access_token:
-        params.append(f"token={quote(access_token, safe='')}")
-    params.append(f"view={quote(_relay_task_detail_view(view), safe='')}")
-    suffix = "?" + "&".join(params)
-    return f"/native/workflows/relay/tasks/{task_id}{suffix}"
-
-
-def _relay_task_events_suffix(access_token: str, after: int) -> str:
-    params = []
-    if access_token:
-        params.append(f"token={quote(access_token, safe='')}")
-    if after > 0:
-        params.append(f"after={after}")
-    return "?" + "&".join(params) if params else ""
-
-
-def _relay_config_href(workspace: str, access_token: str) -> str:
-    params = []
-    if access_token:
-        params.append(f"token={quote(access_token)}")
-    if workspace:
-        params.append(f"workspace={quote(workspace)}")
-    suffix = "?" + "&".join(params) if params else ""
-    return f"/native/workflows/relay/config{suffix}"
 
 
 def _relay_project_rows(workspaces: Any = None) -> list[dict[str, Any]]:
@@ -5807,395 +6777,6 @@ def _marvis_relay_confirmation_source_label(source: str, provider: str = "") -> 
     if clean_source == "relay_prompt_fallback":
         return "Relay 澄清确认"
     return ""
-
-
-def _marvis_relay_topbar(
-    *,
-    title: str = "Marvis",
-    subtitle: str = "",
-    back_href: str = "",
-    right_html: str = "",
-) -> str:
-    left = (
-        f'<a class="marvis-relay-menu is-back" href="{escape(back_href)}" aria-label="返回上一级">'
-        "<span></span><span></span><span></span></a>"
-        if back_href
-        else '<button class="marvis-relay-menu" type="button" aria-label="菜单"><span></span><span></span><span></span></button>'
-    )
-    subtitle_html = (
-        f'<div class="marvis-relay-device"><span class="marvis-relay-dot"></span>{escape(subtitle)}</div>'
-        if subtitle
-        else ""
-    )
-    actions = (
-        right_html
-        or """
-      <button class="marvis-relay-icon-button" type="button" aria-label="设备">
-        <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
-      </button>
-      <button class="marvis-relay-icon-button" type="button" aria-label="任务">
-        <span class="marvis-relay-icon-list" aria-hidden="true"></span>
-      </button>
-    """
-    )
-    return f"""
-    <header class="marvis-relay-topbar">
-      {left}
-      <div class="marvis-relay-brand">
-        <h1>{escape(title)}</h1>
-        {subtitle_html}
-      </div>
-      <div class="marvis-relay-actions">{actions}</div>
-    </header>
-    """
-
-
-def _marvis_relay_bottom_nav(
-    active: str = "chat",
-    *,
-    access_token: str = "",
-    selected_workspace: str = "",
-) -> str:
-    token_suffix = _token_suffix(access_token)
-    workspace_query = ""
-    if selected_workspace:
-        joiner = "&" if token_suffix else "?"
-        workspace_query = f"{joiner}workspace={quote(selected_workspace, safe='/')}"
-    hrefs = {
-        "chat": f"/native/workflows/relay/chat{token_suffix}{workspace_query}",
-        "tasks": f"/native/workflows/relay{token_suffix}{workspace_query}",
-        "skills": f"/native/workflows/relay/skills{token_suffix}{workspace_query}",
-        "profile": f"/native/workflows/relay/profile{token_suffix}{workspace_query}",
-    }
-    items = [
-        ("chat", "对话", "chat"),
-        ("tasks", "任务", "clock"),
-        ("skills", "技能", "tool"),
-        ("profile", "我的", "person"),
-    ]
-    rows = []
-    for key, label, icon in items:
-        class_name = f"marvis-relay-nav-item{' active' if key == active else ''}"
-        current = ' aria-current="page"' if key == active else ""
-        icon_html = _marvis_relay_nav_icon_html(icon)
-        rows.append(
-            f"""
-        <a class="{class_name}" href="{escape(hrefs[key])}" data-marvis-nav="{escape(key)}"{current}>
-          {icon_html}
-          <span>{escape(label)}</span>
-        </a>
-        """
-        )
-    return "\n".join(rows)
-
-
-def _marvis_relay_nav_icon_html(icon: str) -> str:
-    icons = {
-        "chat": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
-        "clock": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
-        "tool": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
-        "person": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
-    }
-    return f'<span class="marvis-relay-nav-icon" aria-hidden="true">{icons.get(icon, icons["chat"])}</span>'
-
-
-def _marvis_relay_task_composer(
-    *,
-    token_suffix: str,
-    selected_workspace: str,
-    access_token: str = "",
-    placeholder: str = "请输入任务",
-) -> str:
-    workspace_dock = _marvis_relay_workspace_dock(
-        selected_workspace,
-        access_token=access_token,
-    )
-    return f"""
-    {workspace_dock}
-    <form class="marvis-relay-composer" data-marvis-task-composer action="/api/relay/tasks{token_suffix}">
-      <div class="marvis-relay-mode-strip" aria-label="接力模式">
-        <label><input type="radio" name="execution_mode" value="simple" checked><span>简单</span></label>
-        <label><input type="radio" name="execution_mode" value="plan_first"><span>计划</span></label>
-        <label><input type="radio" name="execution_mode" value="goal"><span>目标</span></label>
-        <label><input type="radio" name="execution_mode" value="auto"><span>自动</span></label>
-        <input type="hidden" name="allow_subagents" value="off">
-        <label><input type="checkbox" name="allow_subagents" value="auto" checked><span>使用子代理</span></label>
-      </div>
-      <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
-      <input name="title" autocomplete="off" placeholder="{escape(placeholder)}">
-      <input type="hidden" name="prompt" value="">
-      <input type="hidden" name="execution_goal" value="">
-      <input type="hidden" name="workspace" value="{escape(selected_workspace)}">
-      <button class="marvis-relay-submit" type="submit" aria-label="发送任务" data-marvis-submit>
-        <span class="marvis-relay-submit-arrow" aria-hidden="true">↑</span>
-        <span class="marvis-relay-submit-stop" aria-hidden="true">■</span>
-      </button>
-      <div class="marvis-relay-composer-attachments" data-marvis-attachment-strip hidden></div>
-    </form>
-    {_marvis_relay_attachment_sheet_html()}
-    """
-
-
-def _marvis_relay_workspace_dock(workspace: str, *, access_token: str = "") -> str:
-    workspace = str(workspace or "")
-    label = Path(workspace).name or workspace or "选择工作区"
-    href = _relay_workspace_href(workspace, access_token)
-    return f"""
-    <div class="marvis-relay-workspace-dock" aria-label="当前工作区">
-      <span class="marvis-relay-workspace-folder" aria-hidden="true"></span>
-      <span class="marvis-relay-workspace-label">工作区</span>
-      <a class="marvis-relay-workspace-chip" href="{escape(href)}" title="{escape(workspace or label)}">
-        <span class="marvis-relay-workspace-name">{escape(label)}</span>
-        <span class="marvis-relay-workspace-action">选择</span>
-      </a>
-    </div>
-    """
-
-
-def _marvis_relay_attachment_sheet_html() -> str:
-    return """
-    <div class="marvis-relay-attachment-backdrop" data-marvis-attachment-backdrop hidden></div>
-    <section class="marvis-relay-attachment-sheet" data-marvis-attachment-sheet hidden aria-modal="true" role="dialog" aria-label="添加到对话">
-      <button class="marvis-relay-attachment-close" type="button" aria-label="关闭" data-marvis-attachment-close>×</button>
-      <h2>添加到对话</h2>
-      <div class="marvis-relay-attachment-grid" aria-label="附件类型">
-        <button class="marvis-relay-attachment-tile" type="button" data-marvis-pick-image>
-          <img class="marvis-relay-sheet-icon-native marvis-relay-sheet-icon-native-small" src="/static/marvis/attachment-icon-album-marvis.png" alt="" aria-hidden="true">
-          <span>相册</span>
-        </button>
-        <button class="marvis-relay-attachment-tile" type="button" data-marvis-pick-file>
-          <img class="marvis-relay-sheet-icon-native marvis-relay-sheet-icon-native-small" src="/static/marvis/attachment-icon-local-file-marvis.png" alt="" aria-hidden="true">
-          <span>本地文件</span>
-        </button>
-      </div>
-      <div class="marvis-relay-skill-section">
-        <p>我的技能</p>
-        <button class="marvis-relay-skill-row" type="button" aria-label="添加技能">
-          <img class="marvis-relay-sheet-icon-native marvis-relay-sheet-icon-native-skill" src="/static/marvis/attachment-icon-skills-marvis.png" alt="" aria-hidden="true">
-          <span class="marvis-relay-skill-text">
-            <strong>添加技能</strong>
-            <small>有200+技能可供使用</small>
-          </span>
-          <span class="marvis-relay-skill-chevron" aria-hidden="true">›</span>
-        </button>
-      </div>
-      <input type="file" accept="image/*" multiple hidden data-marvis-image-input>
-      <input type="file" accept=".txt,.md,.markdown,.json,.jsonl,.log,.csv,.tsv,.yaml,.yml,.toml,.ini,.py,.js,.ts,.tsx,.jsx,.css,.html,.xml,.sh,.zsh,.sql,text/*,application/json" multiple hidden data-marvis-file-input>
-    </section>
-    """
-
-
-def _marvis_relay_attachment_script() -> str:
-    return r"""
-    function setupMarvisRelayAttachments() {
-      const composer = document.querySelector("[data-marvis-task-composer], [data-marvis-followup-composer]");
-      const sheet = document.querySelector("[data-marvis-attachment-sheet]");
-      if (!composer || !sheet) {
-        return { payload: () => ({}), clear: () => {}, hasAttachments: () => false };
-      }
-      const backdrop = document.querySelector("[data-marvis-attachment-backdrop]");
-      const openButton = composer.querySelector("[data-marvis-attach-open]");
-      const closeButton = sheet.querySelector("[data-marvis-attachment-close]");
-      const imageInput = sheet.querySelector("[data-marvis-image-input]");
-      const fileInput = sheet.querySelector("[data-marvis-file-input]");
-      const strip = composer.querySelector("[data-marvis-attachment-strip]");
-      const state = { images: [], files: [] };
-      const textFilePattern = /\.(txt|md|markdown|json|jsonl|log|csv|tsv|yaml|yml|toml|ini|py|js|ts|tsx|jsx|css|html|xml|sh|zsh|sql)$/i;
-      function openSheet() {
-        sheet.hidden = false;
-        backdrop.hidden = false;
-        requestAnimationFrame(() => {
-          sheet.classList.add("open");
-          backdrop.classList.add("visible");
-        });
-      }
-      function closeSheet() {
-        sheet.classList.remove("open");
-        backdrop.classList.remove("visible");
-        window.setTimeout(() => {
-          sheet.hidden = true;
-          backdrop.hidden = true;
-        }, 180);
-      }
-      function readRelayImageAttachment(file) {
-        return new Promise((resolve, reject) => {
-          if (!file || !String(file.type || "").startsWith("image/")) {
-            reject(new Error("请选择图片文件"));
-            return;
-          }
-          const reader = new FileReader();
-          reader.onload = () => resolve({
-            filename: file.name || "image",
-            mime_type: file.type || "image/*",
-            size: file.size || 0,
-            url: String(reader.result || "")
-          });
-          reader.onerror = () => reject(new Error("图片读取失败"));
-          reader.readAsDataURL(file);
-        });
-      }
-      function readRelayTextAttachment(file) {
-        return new Promise((resolve, reject) => {
-          if (!file) {
-            reject(new Error("请选择文件"));
-            return;
-          }
-          const mime = String(file.type || "");
-          const name = String(file.name || "attachment.txt");
-          if (mime && !mime.startsWith("text/") && mime !== "application/json" && !textFilePattern.test(name)) {
-            reject(new Error(`${name} 暂只支持文本/代码文件`));
-            return;
-          }
-          if (file.size > 1024 * 1024) {
-            reject(new Error(`${name} 超过 1MB，请拆小后再上传`));
-            return;
-          }
-          const reader = new FileReader();
-          reader.onload = () => resolve({
-            filename: name,
-            mime_type: mime || "text/plain",
-            size: file.size || 0,
-            text: String(reader.result || "")
-          });
-          reader.onerror = () => reject(new Error("文件读取失败"));
-          reader.readAsText(file);
-        });
-      }
-      function renderRelayAttachmentStrip() {
-        const hasImages = state.images.length > 0;
-        const hasFiles = state.files.length > 0;
-        composer?.classList.toggle("has-image-attachments", hasImages);
-        if (!strip) return;
-        strip.innerHTML = "";
-        strip.hidden = !hasImages && !hasFiles;
-        state.images.forEach((item, index) => {
-          const preview = document.createElement("button");
-          preview.type = "button";
-          preview.className = "marvis-relay-composer-image-preview";
-          preview.title = "移除图片";
-          const img = document.createElement("img");
-          img.src = item.url || "";
-          img.alt = "";
-          const remove = document.createElement("span");
-          remove.className = "marvis-relay-composer-image-remove";
-          remove.setAttribute("aria-hidden", "true");
-          preview.append(img, remove);
-          preview.addEventListener("click", () => {
-            state.images.splice(index, 1);
-            renderRelayAttachmentStrip();
-          });
-          strip.appendChild(preview);
-        });
-        state.files.forEach((item, index) => {
-          const chip = document.createElement("button");
-          chip.type = "button";
-          chip.className = "marvis-relay-composer-attachment is-file";
-          chip.title = item.filename || "文件";
-          chip.innerHTML = '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span><span></span><b aria-hidden="true">&#215;</b>';
-          chip.querySelector("span:nth-child(2)").textContent = item.filename || "文件";
-          chip.addEventListener("click", () => {
-            state.files.splice(index, 1);
-            renderRelayAttachmentStrip();
-          });
-          strip.appendChild(chip);
-        });
-        document.dispatchEvent(new CustomEvent("marvis-relay-attachments-changed"));
-      }
-      function addErrorChip(message) {
-        if (!strip || !message) return;
-        strip.hidden = false;
-        const chip = document.createElement("span");
-        chip.className = "marvis-relay-composer-attachment is-error";
-        chip.textContent = message;
-        strip.appendChild(chip);
-        window.setTimeout(() => {
-          chip.remove();
-          if (!strip.children.length) strip.hidden = true;
-        }, 3500);
-      }
-      openButton?.addEventListener("click", openSheet);
-      closeButton?.addEventListener("click", closeSheet);
-      backdrop?.addEventListener("click", closeSheet);
-      sheet.querySelector("[data-marvis-pick-image]")?.addEventListener("click", () => imageInput?.click());
-      sheet.querySelector("[data-marvis-pick-file]")?.addEventListener("click", () => fileInput?.click());
-      imageInput?.addEventListener("change", async () => {
-        for (const file of Array.from(imageInput.files || [])) {
-          try {
-            state.images.push(await readRelayImageAttachment(file));
-          } catch (error) {
-            addErrorChip(error?.message || "图片读取失败");
-          }
-        }
-        imageInput.value = "";
-        renderRelayAttachmentStrip();
-        closeSheet();
-      });
-      fileInput?.addEventListener("change", async () => {
-        for (const file of Array.from(fileInput.files || [])) {
-          try {
-            state.files.push(await readRelayTextAttachment(file));
-          } catch (error) {
-            addErrorChip(error?.message || "文件读取失败");
-          }
-        }
-        fileInput.value = "";
-        renderRelayAttachmentStrip();
-        closeSheet();
-      });
-      const api = {
-        payload() {
-          return {
-            images: state.images.map((item) => ({...item})),
-            files: state.files.map((item) => ({...item}))
-          };
-        },
-        clear() {
-          state.images = [];
-          state.files = [];
-          renderRelayAttachmentStrip();
-        },
-        hasAttachments() {
-          return state.images.length > 0 || state.files.length > 0;
-        }
-      };
-      window.readRelayImageAttachment = readRelayImageAttachment;
-      window.readRelayTextAttachment = readRelayTextAttachment;
-      window.marvisRelayAttachments = api;
-      return api;
-    }
-    function appendMarvisAttachmentList(parent, attachments = {}) {
-      if (!parent) return;
-      const images = Array.isArray(attachments.images) ? attachments.images : [];
-      const files = Array.isArray(attachments.files) ? attachments.files : [];
-      if (!images.length && !files.length) return;
-      const imageList = document.createElement("div");
-      imageList.className = "marvis-relay-message-images";
-      images.forEach((item) => {
-        const src = String(item?.url || item?.data_url || "");
-        if (!src) return;
-        const image = document.createElement("img");
-        image.className = "marvis-relay-message-image";
-        image.src = src;
-        image.alt = "";
-        image.loading = "lazy";
-        imageList.appendChild(image);
-      });
-      if (imageList.children.length) parent.appendChild(imageList);
-      if (!files.length) return;
-      const list = document.createElement("div");
-      list.className = "marvis-relay-attachment-list";
-      const addChip = (item) => {
-        const chip = document.createElement("span");
-        chip.className = "marvis-relay-attachment-chip marvis-relay-attachment-chip-file";
-        chip.innerHTML = '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span><span></span>';
-        chip.querySelector("span:last-child").textContent = item.filename || "文件";
-        list.appendChild(chip);
-      };
-      files.forEach((item) => addChip(item));
-      parent.appendChild(list);
-    }
-    setupMarvisRelayAttachments();
-    """
 
 
 def _marvis_relay_office_roles(relay_config: dict[str, Any] | None) -> list[dict[str, str]]:
@@ -6583,20 +7164,27 @@ def _marvis_relay_office_page(
         if (!provider) return;
         const nextAssignments = {{...assignments, [activeRole]: provider}};
         if (modelStatus) modelStatus.textContent = "保存中...";
+        const idempotencyKey = target.dataset.idempotencyKey
+          || (crypto.randomUUID ? crypto.randomUUID() : `${{Date.now()}}-${{Math.random()}}`);
+        target.dataset.idempotencyKey = idempotencyKey;
+        target.setAttribute("aria-busy", "true");
         try {{
           const response = await fetch(`/api/relay/config${{TOKEN_SUFFIX}}`, {{
             method: "POST",
-            headers: {{"Content-Type": "application/json"}},
+            headers: {{"Content-Type": "application/json", "Idempotency-Key": idempotencyKey}},
             body: JSON.stringify({{assignments: nextAssignments}}),
           }});
           if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
           const payload = await response.json();
           assignments = payload.assignments || nextAssignments;
+          delete target.dataset.idempotencyKey;
           updatePersonaProvider(activeRole, assignments[activeRole]);
           if (title) title.textContent = personas[activeRole]?.title || "Relay Agent";
           renderProviderOptions();
         }} catch (error) {{
           if (modelStatus) modelStatus.textContent = "保存失败，请重试";
+        }} finally {{
+          target.removeAttribute("aria-busy");
         }}
       }});
       const tokenStats = document.querySelector("[data-marvis-token-stats]");
@@ -6671,8 +7259,35 @@ def _marvis_relay_office_page(
           // Keep the last good values; the office should stay quiet if stats lag.
         }}
       }};
+      // Token totals are supplementary read-model data.  Do not keep a
+      // second-level poll alive behind a healthy Relay event stream or while
+      // the page is hidden: the last confirmed value remains useful until a
+      // visible refresh succeeds.
+      const TOKEN_STATS_REFRESH_INTERVAL_MS = 30000;
+      let tokenStatsRefreshTimer = null;
+      const stopTokenStatsRefresh = () => {{
+        if (!tokenStatsRefreshTimer) return;
+        window.clearInterval(tokenStatsRefreshTimer);
+        tokenStatsRefreshTimer = null;
+      }};
+      const startTokenStatsRefresh = () => {{
+        if (document.visibilityState === "hidden" || tokenStatsRefreshTimer) return;
+        tokenStatsRefreshTimer = window.setInterval(
+          refreshTokenStats,
+          TOKEN_STATS_REFRESH_INTERVAL_MS,
+        );
+      }};
+      document.addEventListener("visibilitychange", () => {{
+        if (document.visibilityState === "hidden") {{
+          stopTokenStatsRefresh();
+          return;
+        }}
+        refreshTokenStats();
+        startTokenStatsRefresh();
+      }});
+      window.addEventListener("pagehide", stopTokenStatsRefresh);
       refreshTokenStats();
-      window.setInterval(refreshTokenStats, 2000);
+      startTokenStatsRefresh();
     }})();
   </script>
 </body>
@@ -6727,14 +7342,15 @@ def _marvis_relay_followup_composer(
     return f"""
     {workspace_dock}
     <div class="marvis-relay-pending-inputs" data-marvis-pending-inputs{" hidden" if not pending_visible else ""}></div>
-    <form class="marvis-relay-composer" data-marvis-followup-composer data-task-status-value="{escape(task_status)}" data-current-round-id="{int(current_round_id)}" data-interrupt-url="/api/relay/tasks/{task_id}/interrupt" method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
+    <form class="marvis-relay-composer" data-marvis-followup-composer data-task-status-value="{escape(task_status)}" data-current-round-id="{int(current_round_id)}" method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
       <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
       <textarea name="text" placeholder="{escape(placeholder)}" aria-label="继续补充给总工程师"></textarea>
       <button class="marvis-relay-submit" type="submit" aria-label="发送补充" data-marvis-submit>
         <span class="marvis-relay-submit-arrow" aria-hidden="true">↑</span>
-        <span class="marvis-relay-submit-stop" aria-hidden="true">■</span>
       </button>
       <div class="marvis-relay-composer-attachments" data-marvis-attachment-strip hidden></div>
+      <button class="marvis-relay-interrupt" type="button" data-marvis-interrupt-button data-interrupt-url="/api/relay/tasks/{task_id}/interrupt">中断当前执行</button>
+      <p class="marvis-relay-mutation-status" data-relay-mutation-status role="status" aria-live="polite"></p>
     </form>
     {_marvis_relay_attachment_sheet_html()}
     """
@@ -6871,7 +7487,7 @@ def _marvis_relay_plan_control_html(detail: Any) -> str:
         <button type="button" data-plan-decision="cancel_plan">停止</button>
       </div>
     </section>
-    <div class="marvis-relay-confirmation-page" data-marvis-confirmation-page hidden>
+    <section class="marvis-relay-confirmation-page" data-marvis-confirmation-page data-round-id="{round_id}" data-artifact-id="{artifact_id}" role="dialog" aria-modal="true" aria-label="{escape(title)}" hidden>
       <div class="marvis-relay-confirmation-page-shell">
         <header>
           <button type="button" data-marvis-confirmation-close aria-label="返回">‹</button>
@@ -6884,7 +7500,7 @@ def _marvis_relay_plan_control_html(detail: Any) -> str:
           <ul{" hidden" if not question_html else ""}>{question_html}</ul>
         </main>
       </div>
-    </div>
+    </section>
     """
 
 
@@ -6958,7 +7574,7 @@ def _marvis_relay_work_log_html(
 ) -> str:
     return f"""
     <div class="marvis-relay-backdrop" data-marvis-work-log-backdrop hidden></div>
-    <section class="marvis-work-log" data-marvis-work-log data-marvis-work-log-max-event-id="{max(0, int(max_event_id))}" aria-label="工作日志">
+    <section class="marvis-work-log" data-marvis-work-log data-marvis-work-log-max-event-id="{max(0, int(max_event_id))}" aria-label="工作日志" hidden>
       <button class="marvis-work-log-close" type="button" data-marvis-close-log aria-label="关闭">×</button>
       <div class="marvis-work-log-tabs">
         <button class="marvis-work-log-tab active" type="button">工作日志</button>
@@ -7950,11 +8566,28 @@ def _relay_role_config_html(
 
 
 def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
-    status = str(summary.status)
+    presentation = _relay_summary_presentation(summary)
+    status = _relay_summary_presentation_state(summary)
     status_label = _relay_task_status_label(status)
-    activity = _relay_activity_label(summary.last_activity_at)
+    freshness = presentation.get("freshness") if isinstance(presentation.get("freshness"), dict) else {}
+    activity = _relay_activity_label(freshness.get("updated_at") or getattr(summary, "last_activity_at", ""))
     workspace = str(summary.workspace or "")
     project_name = Path(workspace).name or workspace or "wlcodex"
+    actor = presentation.get("current_actor") if isinstance(presentation.get("current_actor"), dict) else {}
+    actor_label = str(actor.get("label") or "系统协调")
+    handoff = str(getattr(summary, "latest_handoff_summary", "") or "").strip()
+    blocking_reason = str(presentation.get("blocking_reason") or "").strip()
+    next_action = str(presentation.get("next_action") or "等待系统更新。")
+    evidence_html = (
+        f'<div class="relay-summary">最新交接：{escape(handoff)}</div>'
+        if handoff
+        else ""
+    )
+    blocking_html = (
+        f'<div class="relay-summary relay-card-blocked">阻塞原因：{escape(blocking_reason)}</div>'
+        if blocking_reason
+        else ""
+    )
     status_class = "relay-status-badge"
     if status:
         status_class += f" is-{_relay_status_class_name(status)}"
@@ -7971,45 +8604,15 @@ def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
           </div>
         </div>
         <div class="relay-title">{escape(summary.title)}</div>
+        <div class="relay-card-side"><strong>当前责任：</strong>{escape(actor_label)}</div>
+        {evidence_html}
+        {blocking_html}
+        <div class="relay-summary"><strong>下一步：</strong>{escape(next_action)}</div>
         <div class="marvis-relay-task-card-footer">
           <a class="relay-open relay-card-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">打开任务</a>
         </div>
       </article>
     """
-
-
-def _relay_status_class_name(status: str) -> str:
-    safe = "".join(char if char.isalnum() else "-" for char in status.lower()).strip("-")
-    return safe or "unknown"
-
-
-def _relay_task_status_label(status: str) -> str:
-    return {
-        "queued": "排队中",
-        "running": "进行中",
-        "waiting_user": "等待你",
-        "blocked": "已阻塞",
-        "failed": "失败",
-        "completed": "已完成",
-        "interrupted": "已中断",
-    }.get(status, status or "未知")
-
-
-def _relay_role_label(role: str) -> str:
-    return RELAY_ROLE_DISPLAY_NAMES.get(role, role)
-
-
-def _relay_role_status_label(status: str) -> str:
-    return {
-        "idle": "未调度",
-        "queued": "待启动",
-        "streaming": "输出中",
-        "waiting": "等待",
-        "passed": "已完成",
-        "failed": "失败",
-        "blocked": "阻塞",
-        "interrupted": "中断",
-    }.get(status, status or "未知")
 
 
 def _relay_routing_route_label(route: str) -> str:
@@ -8026,40 +8629,6 @@ def _relay_text_needs_chinese_fallback(text: str) -> bool:
 
 def _relay_routing_risk_label(risk: str) -> str:
     return routing_risk_label(risk)
-
-
-def _relay_phase_label(phase: str) -> str:
-    return {
-        "director": "总工程师接收",
-        "architect": "架构设计",
-        "implementer": "开发实现",
-        "tester": "测试验证",
-        "auditor": "审计复核",
-        "complete": "完成总结",
-    }.get(phase, phase or "总工程师接收")
-
-
-def _relay_activity_label(value: Any) -> str:
-    if not value:
-        return "暂无活动"
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        timestamp = str(value).strip()
-        if not timestamp:
-            return "暂无活动"
-        normalized = re.sub(
-            r"(\.\d{6})\d+([+-]\d\d:\d\d|Z)?$",
-            r"\1\2",
-            timestamp,
-        )
-        try:
-            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
-        except ValueError:
-            return "最近活动未知"
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_RELAY_ACTIVITY_DISPLAY_TZ)
-    return f"最近活动 {parsed.astimezone(_RELAY_ACTIVITY_DISPLAY_TZ):%m-%d %H:%M}"
 
 
 def _relay_event_dict(event: Any) -> dict[str, Any]:
@@ -8079,11 +8648,21 @@ def _relay_latest_event_sequence(events: list[Any] | tuple[Any, ...]) -> int:
 
 
 def _relay_task_detail_json_payload(detail: Any, relay_service: Any) -> dict[str, Any]:
+    """Serialize an already-read Relay detail without lifecycle repair.
+
+    ``detail`` is deliberately obtained through ``get_task_readonly`` by the
+    HTTP handler.  Building the auxiliary Marvis graph from the service used
+    to call its mutating compatibility getter a second time, which made an
+    otherwise harmless detail GET backfill old lifecycle rows.  The graph is
+    a pure view of this detail, so keep it on the same read-only boundary.
+
+    ``relay_service`` remains an argument for source compatibility with
+    existing internal callers; it must not be consulted while rendering.
+    """
+    del relay_service
     payload = detail.to_dict() if hasattr(detail, "to_dict") else dict(detail)
-    task_payload = payload.get("task") if isinstance(payload.get("task"), dict) else {}
-    task_id = int(getattr(getattr(detail, "task", None), "id", 0) or task_payload.get("id") or 0)
     round_id = int(getattr(detail, "current_round_id", 0) or payload.get("current_round_id") or 0)
-    state = relay_service.build_marvis_relay_state(task_id, round_id or None)
+    state = build_marvis_relay_state(detail, round_id=round_id or None)
     payload["marvis_relay_state"] = state.to_json_dict()
     return payload
 
@@ -8122,8 +8701,8 @@ def _relay_task_detail_page(
         subtitle=device_label,
         back_href=back_href,
         right_html=f"""
-          <a class="marvis-relay-icon-button" href="/native/workflows/relay/office{token_suffix}" aria-label="Marvis办公室">
-            <span class="marvis-relay-icon-devices" aria-hidden="true"></span>
+          <a class="marvis-relay-icon-button" href="{escape(_relay_settings_href(str(task.workspace or ""), access_token))}" aria-label="Relay设置">
+            <span class="marvis-relay-icon-list" aria-hidden="true"></span>
           </a>
           <button class="marvis-relay-icon-button" type="button" data-marvis-open-log aria-label="工作日志">
             <span class="marvis-relay-icon-list" aria-hidden="true"></span>
@@ -8131,7 +8710,7 @@ def _relay_task_detail_page(
         """,
     )
     bottom_nav_html = _marvis_relay_bottom_nav(
-        "chat",
+        "tasks",
         access_token=access_token,
         selected_workspace=str(task.workspace or ""),
     )
@@ -8270,39 +8849,259 @@ def _relay_task_detail_page(
             ensure_ascii=False,
         )
     };
+    const marvisRelayPhone = document.querySelector(".marvis-relay-phone");
     const marvisWorkLog = document.querySelector("[data-marvis-work-log]");
     const marvisWorkLogBackdrop = document.querySelector("[data-marvis-work-log-backdrop]");
-    function marvisWorkLogIsDesktop() {{
-      return window.matchMedia("(min-width: 980px)").matches;
+    const marvisWorkLogDesktopQuery = window.matchMedia("(min-width: 980px)");
+    const MARVIS_DIALOG_FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
+    const marvisDialogReturnFocus = new WeakMap();
+    let marvisWorkLogTrigger = null;
+    let marvisWorkLogCloseTimer = null;
+
+    function marvisFocusableNodes(surface) {{
+      if (!(surface instanceof HTMLElement)) return [];
+      return Array.from(surface.querySelectorAll(MARVIS_DIALOG_FOCUSABLE)).filter((node) =>
+        node instanceof HTMLElement
+        && !node.hidden
+        && !node.closest("[hidden]")
+        && node.getAttribute("aria-hidden") !== "true"
+      );
     }}
-    function openMarvisWorkLog() {{
-      if (!marvisWorkLog) return;
-      marvisWorkLog.hidden = false;
-      if (marvisWorkLogBackdrop && !marvisWorkLogIsDesktop()) marvisWorkLogBackdrop.hidden = false;
+    function trapMarvisDialogFocus(surface, event) {{
+      if (event.key !== "Tab") return;
+      const nodes = marvisFocusableNodes(surface);
+      if (!nodes.length) return;
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      if (event.shiftKey && document.activeElement === first) {{
+        event.preventDefault();
+        last.focus();
+      }} else if (!event.shiftKey && document.activeElement === last) {{
+        event.preventDefault();
+        first.focus();
+      }}
+    }}
+    function focusMarvisDialog(surface) {{
+      marvisFocusableNodes(surface)[0]?.focus({{ preventScroll: true }});
+    }}
+    function setMarvisSurfaceInert(surface, isInert) {{
+      if (!(surface instanceof HTMLElement)) return;
+      if ("inert" in surface) surface.inert = Boolean(isInert);
+      if (isInert) {{
+        surface.setAttribute("aria-hidden", "true");
+      }} else {{
+        surface.removeAttribute("aria-hidden");
+      }}
+    }}
+    function setMarvisModalBackground(dialog, isOpen) {{
+      [marvisRelayPhone, marvisWorkLog, marvisWorkLogBackdrop].forEach((surface) => {{
+        if (surface instanceof HTMLElement && surface !== dialog) {{
+          setMarvisSurfaceInert(surface, isOpen);
+        }}
+      }});
+    }}
+    function bindMarvisConfirmationPage(page) {{
+      if (!(page instanceof HTMLElement) || page.dataset.marvisConfirmationDialogBound === "true") return;
+      page.dataset.marvisConfirmationDialogBound = "true";
+      page.setAttribute("role", "dialog");
+      page.setAttribute("aria-modal", "true");
+      page.addEventListener("keydown", (event) => {{
+        if (page.hidden) return;
+        if (event.key === "Escape") {{
+          event.preventDefault();
+          closeMarvisConfirmationPage(page);
+          return;
+        }}
+        trapMarvisDialogFocus(page, event);
+      }});
+    }}
+    function moveMarvisConfirmationPagesToDocumentRoot() {{
+      document.querySelectorAll("[data-marvis-confirmation-page]").forEach((page) => {{
+        if (!(page instanceof HTMLElement)) return;
+        if (page.parentElement === marvisRelayPhone) document.body.appendChild(page);
+        bindMarvisConfirmationPage(page);
+      }});
+    }}
+    function marvisConfirmationPageFor(trigger) {{
+      const control = trigger instanceof HTMLElement
+        ? trigger.closest("[data-marvis-plan-control]")
+        : null;
+      const artifactId = control?.getAttribute("data-artifact-id") || "";
+      const roundId = control?.getAttribute("data-round-id") || "";
+      const pages = Array.from(document.querySelectorAll("[data-marvis-confirmation-page]"))
+        .filter((page) => page instanceof HTMLElement);
+      return pages.find((page) =>
+        page.getAttribute("data-artifact-id") === artifactId
+        && page.getAttribute("data-round-id") === roundId
+      ) || pages[pages.length - 1] || null;
+    }}
+    function openMarvisConfirmationPage(page, trigger) {{
+      if (!(page instanceof HTMLElement)) return;
+      bindMarvisConfirmationPage(page);
+      if (page.parentElement !== document.body) document.body.appendChild(page);
+      const previouslyFocused = trigger instanceof HTMLElement
+        ? trigger
+        : document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      marvisDialogReturnFocus.set(page, previouslyFocused);
+      page.hidden = false;
+      focusMarvisDialog(page);
+      setMarvisModalBackground(page, true);
       requestAnimationFrame(() => {{
+        if (page.hidden) return;
+        focusMarvisDialog(page);
+      }});
+    }}
+    function closeMarvisConfirmationPage(page, options = {{}}) {{
+      if (!(page instanceof HTMLElement) || page.hidden) return;
+      const restoreFocus = options.restoreFocus !== false;
+      const previouslyFocused = marvisDialogReturnFocus.get(page);
+      marvisDialogReturnFocus.delete(page);
+      page.hidden = true;
+      setMarvisModalBackground(page, false);
+      if (
+        restoreFocus
+        && previouslyFocused instanceof HTMLElement
+        && previouslyFocused.isConnected
+      ) {{
+        requestAnimationFrame(() => {{
+          if (!previouslyFocused.closest("[hidden]")) {{
+            previouslyFocused.focus({{ preventScroll: true }});
+          }}
+        }});
+      }}
+    }}
+    moveMarvisConfirmationPagesToDocumentRoot();
+
+    function marvisWorkLogIsDesktop() {{
+      return marvisWorkLogDesktopQuery.matches;
+    }}
+    function updateMarvisWorkLogSemantics() {{
+      if (!(marvisWorkLog instanceof HTMLElement)) return;
+      if (marvisWorkLogIsDesktop()) {{
+        marvisWorkLog.removeAttribute("role");
+        marvisWorkLog.removeAttribute("aria-modal");
+      }} else {{
+        marvisWorkLog.setAttribute("role", "dialog");
+        marvisWorkLog.setAttribute("aria-modal", "true");
+      }}
+    }}
+    function restoreMarvisWorkLogFocus() {{
+      const previouslyFocused = marvisWorkLogTrigger
+        || document.querySelector("[data-marvis-open-log]");
+      marvisWorkLogTrigger = null;
+      if (
+        previouslyFocused instanceof HTMLElement
+        && previouslyFocused.isConnected
+      ) {{
+        requestAnimationFrame(() => {{
+          if (!previouslyFocused.closest("[hidden]")) {{
+            previouslyFocused.focus({{ preventScroll: true }});
+          }}
+        }});
+      }}
+    }}
+    function finishMarvisWorkLogClose() {{
+      marvisWorkLogCloseTimer = null;
+      if (!(marvisWorkLog instanceof HTMLElement)) return;
+      marvisWorkLog.hidden = true;
+      marvisWorkLogBackdrop?.setAttribute("hidden", "");
+      setMarvisModalBackground(marvisWorkLog, false);
+      restoreMarvisWorkLogFocus();
+    }}
+    function openMarvisWorkLog(trigger) {{
+      if (!(marvisWorkLog instanceof HTMLElement)) return;
+      if (marvisWorkLogCloseTimer) {{
+        clearTimeout(marvisWorkLogCloseTimer);
+        marvisWorkLogCloseTimer = null;
+      }}
+      marvisWorkLogTrigger = trigger instanceof HTMLElement
+        ? trigger
+        : document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      marvisWorkLog.hidden = false;
+      updateMarvisWorkLogSemantics();
+      if (!marvisWorkLogIsDesktop()) {{
+        focusMarvisDialog(marvisWorkLog);
+        setMarvisModalBackground(marvisWorkLog, true);
+        marvisWorkLogBackdrop?.removeAttribute("hidden");
+      }}
+      requestAnimationFrame(() => {{
+        if (marvisWorkLog.hidden) return;
         marvisWorkLog.classList.add("open");
-        if (!marvisWorkLogIsDesktop()) marvisWorkLogBackdrop?.classList.add("visible");
+        if (!marvisWorkLogIsDesktop()) {{
+          marvisWorkLogBackdrop?.classList.add("visible");
+          focusMarvisDialog(marvisWorkLog);
+        }}
       }});
     }}
     function closeMarvisWorkLog() {{
-      if (!marvisWorkLog) return;
-      if (marvisWorkLogIsDesktop()) return;
+      if (!(marvisWorkLog instanceof HTMLElement) || marvisWorkLog.hidden) return;
+      if (marvisWorkLogCloseTimer) clearTimeout(marvisWorkLogCloseTimer);
       marvisWorkLog.classList.remove("open");
       marvisWorkLogBackdrop?.classList.remove("visible");
-      setTimeout(() => {{
+      if (marvisWorkLogIsDesktop()) {{
+        finishMarvisWorkLogClose();
+        return;
+      }}
+      marvisWorkLogCloseTimer = setTimeout(finishMarvisWorkLogClose, 240);
+    }}
+    function initializeMarvisWorkLog() {{
+      if (!(marvisWorkLog instanceof HTMLElement)) return;
+      updateMarvisWorkLogSemantics();
+      if (marvisWorkLogIsDesktop()) {{
+        marvisWorkLog.hidden = false;
+        marvisWorkLog.classList.add("open");
+      }} else {{
         marvisWorkLog.hidden = true;
-        if (marvisWorkLogBackdrop) marvisWorkLogBackdrop.hidden = true;
-      }}, 240);
+        marvisWorkLog.classList.remove("open");
+        marvisWorkLogBackdrop?.classList.remove("visible");
+        marvisWorkLogBackdrop?.setAttribute("hidden", "");
+      }}
     }}
-    if (marvisWorkLog && marvisWorkLogIsDesktop()) {{
-      marvisWorkLog.hidden = false;
-      marvisWorkLog.classList.add("open");
+    function syncMarvisWorkLogViewport() {{
+      if (!(marvisWorkLog instanceof HTMLElement)) return;
+      if (marvisWorkLogCloseTimer) {{
+        clearTimeout(marvisWorkLogCloseTimer);
+        marvisWorkLogCloseTimer = null;
+      }}
+      updateMarvisWorkLogSemantics();
+      if (marvisWorkLogIsDesktop()) {{
+        marvisWorkLogBackdrop?.classList.remove("visible");
+        marvisWorkLogBackdrop?.setAttribute("hidden", "");
+        setMarvisModalBackground(marvisWorkLog, false);
+        if (!marvisWorkLog.hidden) marvisWorkLog.classList.add("open");
+        return;
+      }}
+      if (marvisWorkLog.hidden) return;
+      focusMarvisDialog(marvisWorkLog);
+      setMarvisModalBackground(marvisWorkLog, true);
+      marvisWorkLogBackdrop?.removeAttribute("hidden");
+      requestAnimationFrame(() => {{
+        if (marvisWorkLog.hidden || marvisWorkLogIsDesktop()) return;
+        marvisWorkLog.classList.add("open");
+        marvisWorkLogBackdrop?.classList.add("visible");
+        focusMarvisDialog(marvisWorkLog);
+      }});
     }}
+    initializeMarvisWorkLog();
+    marvisWorkLogDesktopQuery.addEventListener?.("change", syncMarvisWorkLogViewport);
     document.querySelectorAll("[data-marvis-open-log]").forEach((button) => {{
-      button.addEventListener("click", openMarvisWorkLog);
+      button.addEventListener("click", () => openMarvisWorkLog(button));
     }});
     document.querySelectorAll("[data-marvis-close-log], [data-marvis-work-log-backdrop]").forEach((button) => {{
       button.addEventListener("click", closeMarvisWorkLog);
+    }});
+    marvisWorkLog?.addEventListener("keydown", (event) => {{
+      if (marvisWorkLog.hidden) return;
+      if (event.key === "Escape") {{
+        event.preventDefault();
+        closeMarvisWorkLog();
+        return;
+      }}
+      if (!marvisWorkLogIsDesktop()) trapMarvisDialogFocus(marvisWorkLog, event);
     }});
     function labelForRole(role) {{
       return ROLE_LABELS[role] || role || "角色";
@@ -9696,6 +10495,8 @@ def _relay_task_detail_page(
     const pendingInputsContainer = document.querySelector("[data-marvis-pending-inputs]");
     const followupTextInput = followupComposer?.querySelector("textarea[name='text']");
     const followupSubmitButton = followupComposer?.querySelector("[data-marvis-submit]");
+    const followupInterruptButton = followupComposer?.querySelector("[data-marvis-interrupt-button]");
+    const relayMutationStatus = followupComposer?.querySelector("[data-relay-mutation-status]");
     const pendingInputs = new Map();
     let relayTaskStatus = followupComposer?.dataset.taskStatusValue || "";
     let waitingControlInput = "";
@@ -9713,9 +10514,44 @@ def _relay_task_detail_page(
     }}
     function updateRelayComposerAction() {{
       if (!followupSubmitButton) return;
-      const showStop = relayTaskIsRunning() && !relayFollowupHasText() && !relayFollowupHasAttachments();
-      followupSubmitButton.classList.toggle("is-stop", showStop);
-      followupSubmitButton.setAttribute("aria-label", showStop ? "中断任务" : "发送补充");
+      followupSubmitButton.setAttribute("aria-label", "发送补充");
+      if (followupInterruptButton) {{
+        const canInterrupt = relayTaskIsRunning();
+        followupInterruptButton.hidden = !canInterrupt;
+        followupInterruptButton.disabled = !canInterrupt;
+      }}
+    }}
+    function setRelayMutationStatus(text, isError = false) {{
+      if (!relayMutationStatus) return;
+      relayMutationStatus.textContent = text;
+      relayMutationStatus.classList.toggle("is-error", isError);
+    }}
+    function relayIdempotencyKey() {{
+      return window.crypto?.randomUUID?.() || `${{Date.now()}}-${{Math.random()}}`;
+    }}
+    async function relayMutation(url, body, button) {{
+      const idempotencyKey = button?.dataset.relayIdempotencyKey || relayIdempotencyKey();
+      if (button) button.dataset.relayIdempotencyKey = idempotencyKey;
+      if (button) {{
+        button.disabled = true;
+        button.setAttribute("aria-busy", "true");
+      }}
+      try {{
+        const response = await fetch(url, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }},
+          body: JSON.stringify(body || {{}}),
+        }});
+        const payload = await response.json().catch(() => ({{}}));
+        if (!response.ok) throw new Error(payload.error || `请求失败 (${{response.status}})`);
+        if (button) delete button.dataset.relayIdempotencyKey;
+        return payload;
+      }} finally {{
+        if (button) {{
+          button.disabled = false;
+          button.removeAttribute("aria-busy");
+        }}
+      }}
     }}
     function marvisEscapeText(value) {{
       return String(value || "")
@@ -9786,14 +10622,17 @@ def _relay_task_detail_page(
       if (!pendingId) return;
       target.setAttribute("disabled", "disabled");
       const action = steerId ? "steer" : "cancel";
+      const idempotencyKey = target.dataset.relayIdempotencyKey || relayIdempotencyKey();
+      target.dataset.relayIdempotencyKey = idempotencyKey;
       try {{
         const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/inputs/${{encodeURIComponent(pendingId)}}/${{action}}${{TOKEN_SUFFIX}}`, {{
           method: "POST",
-          headers: {{ "Content-Type": "application/json" }},
+          headers: {{ "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }},
           body: JSON.stringify({{}}),
         }});
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const payload = await response.json();
+        delete target.dataset.relayIdempotencyKey;
         const item = payload.pending_input || payload;
         if (action === "cancel") {{
           removePendingInput(pendingId);
@@ -9845,10 +10684,10 @@ def _relay_task_detail_page(
       return "Relay 澄清确认";
     }}
     function hidePlanControlSurface() {{
-      document.querySelectorAll("[data-marvis-plan-control]").forEach((node) => {{
-        if (node instanceof HTMLElement) node.hidden = true;
-      }});
       document.querySelectorAll("[data-marvis-confirmation-page]").forEach((node) => {{
+        closeMarvisConfirmationPage(node, {{ restoreFocus: false }});
+      }});
+      document.querySelectorAll("[data-marvis-plan-control]").forEach((node) => {{
         if (node instanceof HTMLElement) node.hidden = true;
       }});
       planControl = null;
@@ -9901,9 +10740,14 @@ def _relay_task_detail_page(
           <button type="button" data-plan-decision="cancel_plan">停止</button>
         </div>`;
       document.querySelector(".marvis-relay-phone")?.appendChild(node);
-      const page = document.createElement("div");
+      const page = document.createElement("section");
       page.className = "marvis-relay-confirmation-page";
       page.setAttribute("data-marvis-confirmation-page", "");
+      page.setAttribute("data-round-id", roundId);
+      page.setAttribute("data-artifact-id", artifactId);
+      page.setAttribute("role", "dialog");
+      page.setAttribute("aria-modal", "true");
+      page.setAttribute("aria-label", title);
       page.hidden = true;
       page.innerHTML = `<div class="marvis-relay-confirmation-page-shell">
           <header>
@@ -9916,7 +10760,8 @@ def _relay_task_detail_page(
             <p>${{marvisEscapeText(summary + (questions.length ? "\\n\\n待确认：\\n" + questions.map((item) => "- " + item).join("\\n") : ""))}}</p>
           </main>
         </div>`;
-      document.querySelector(".marvis-relay-phone")?.appendChild(page);
+      document.body.appendChild(page);
+      bindMarvisConfirmationPage(page);
       planControl = node;
     }}
     document.addEventListener("click", async (event) => {{
@@ -9924,11 +10769,17 @@ def _relay_task_detail_page(
       if (!(target instanceof HTMLElement)) return;
       const openConfirmation = target.closest("[data-marvis-confirmation-open]");
       if (openConfirmation) {{
-        document.querySelector("[data-marvis-confirmation-page]")?.removeAttribute("hidden");
+        openMarvisConfirmationPage(
+          marvisConfirmationPageFor(openConfirmation),
+          openConfirmation,
+        );
         return;
       }}
-      if (target.closest("[data-marvis-confirmation-close]")) {{
-        document.querySelector("[data-marvis-confirmation-page]")?.setAttribute("hidden", "");
+      const closeConfirmation = target.closest("[data-marvis-confirmation-close]");
+      if (closeConfirmation) {{
+        closeMarvisConfirmationPage(
+          closeConfirmation.closest("[data-marvis-confirmation-page]"),
+        );
         return;
       }}
       const optionButton = target.closest("[data-confirmation-option-id]");
@@ -9965,6 +10816,8 @@ def _relay_task_detail_page(
         controlPayload.selected_option_label = selected.getAttribute("data-confirmation-option-label") || "";
         controlPayload.selected_option_instruction = selected.getAttribute("data-confirmation-option-instruction") || "";
       }}
+      const idempotencyKey = target.dataset.relayIdempotencyKey || relayIdempotencyKey();
+      target.dataset.relayIdempotencyKey = idempotencyKey;
       const shouldLeaveWaiting = decision === "approve_plan" || decision === "continue" || decision === "cancel_plan";
       if (shouldLeaveWaiting) {{
         hidePlanControlSurface();
@@ -9974,10 +10827,11 @@ def _relay_task_detail_page(
       try {{
         const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/rounds/${{encodeURIComponent(roundId)}}/control${{TOKEN_SUFFIX}}`, {{
           method: "POST",
-          headers: {{ "Content-Type": "application/json" }},
+          headers: {{ "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }},
           body: JSON.stringify(controlPayload),
         }});
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+        delete target.dataset.relayIdempotencyKey;
         if (decision === "approve_plan" || decision === "continue") {{
           updateTaskStatus("running");
           waitingControlInput = "";
@@ -10014,6 +10868,7 @@ def _relay_task_detail_page(
       if (relayEventsSource) relayEventsSource.addEventListener(name, handler);
     }}
     function scheduleRelayEventsReconnect() {{
+      if (document.visibilityState === "hidden") return;
       if (relayEventsReconnectTimer) return;
       if (relayEventsSource) {{
         relayEventsSource.close();
@@ -10036,6 +10891,7 @@ def _relay_task_detail_page(
       }}
     }}
     function connectRelayEventSource() {{
+      if (document.visibilityState === "hidden") return;
       closeRelayEventSource();
       relayEventsSource = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{relayEventsSuffix()}}`);
       relayEventBindings.forEach(([name, handler]) => relayEventsSource.addEventListener(name, handler));
@@ -10048,10 +10904,22 @@ def _relay_task_detail_page(
     }}
     document.addEventListener("visibilitychange", () => {{
       if (document.visibilityState === "visible") connectRelayEventSource();
+      else closeRelayEventSource();
     }});
     window.addEventListener("pageshow", () => connectRelayEventSource());
     window.addEventListener("pagehide", closeRelayEventSource);
     window.addEventListener("beforeunload", closeRelayEventSource);
+    addRelayEventListener("presentation.snapshot", (event) => {{
+      const payload = parseRelayEvent(event);
+      const presentation = payload.presentation;
+      if (!presentation || typeof presentation !== "object") return;
+      const state = String(presentation.state || "");
+      if (state) updateTaskStatus(state);
+      const actor = presentation.current_actor;
+      if (actor && typeof actor === "object" && actor.role && actor.status) {{
+        setRoleStatus(String(actor.role), String(actor.status), {{ force: true }});
+      }}
+    }});
     addRelayEventListener("role.queued", (event) => {{
       const payload = parseRelayEvent(event);
       if (!isCurrentRoundEvent(payload)) return;
@@ -10260,92 +11128,94 @@ def _relay_task_detail_page(
       const attachments = window.marvisRelayAttachments?.payload() || {{}};
       const hasAttachments = Boolean((attachments.images || []).length || (attachments.files || []).length);
       if (!String(data.text || "").trim() && !hasAttachments) {{
-        if (!followupSubmitButton?.classList.contains("is-stop") || !relayTaskIsRunning()) return;
-        const response = await fetch(`${{form.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{
-          method: "POST",
-          headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{}}),
-        }});
-        if (response.ok) {{
-          if (relayTaskIsRunning()) {{
-            updateTaskStatus("interrupted");
-            clearAllRolePreviews();
-          }}
-        }}
+        setRelayMutationStatus("请输入补充内容或添加附件。", true);
         return;
       }}
       if ((attachments.images || []).length) data.images = attachments.images;
       if ((attachments.files || []).length) data.files = attachments.files;
-      if (String(relayTaskStatus || "").trim() === "waiting_user" && waitingControlInput) {{
-        const roundId = activeRelayRoundId || form.dataset.currentRoundId || CURRENT_ROUND_ID;
-        const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/rounds/${{encodeURIComponent(roundId)}}/control${{TOKEN_SUFFIX}}`, {{
-          method: "POST",
-          headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ decision: waitingControlInput, comment: String(data.text || "").trim() }}),
-        }});
-        if (!response.ok) return;
-        waitingControlInput = "";
-        form.reset();
-        window.marvisRelayAttachments?.clear();
-        hidePlanControlSurface();
-        updateTaskStatus("running");
-        updateRelayComposerAction();
-        return;
-      }}
-      if (relayTaskAcceptsPendingInput()) {{
-        const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/inputs${{TOKEN_SUFFIX}}`, {{
-          method: "POST",
-          headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify(data),
-        }});
-        if (!response.ok) return;
-        const payload = await response.json();
-        const responseDisposition = String(payload.disposition || "pending");
-        if (responseDisposition === "followup") {{
-          const followup = payload.followup || payload;
-          const roundId = activateRelayRound(followup);
-          const key = followup.artifact_id ? `user_followup:${{followup.artifact_id}}` : `user_followup:${{followup.context_packet_id || Date.now()}}`;
-          clearMarvisConversationPausedRows();
-          appendMarvisConversationUser(followup.text || data.text || "已添加附件", key, false, {{
-            images: followup.images || attachments.images || [],
-            files: followup.files || attachments.files || []
-          }});
-          appendMarvisConversationWaiting(roundId);
+      setRelayMutationStatus("正在发送…");
+      let localKey = "";
+      try {{
+        if (String(relayTaskStatus || "").trim() === "waiting_user" && waitingControlInput) {{
+          const roundId = activeRelayRoundId || form.dataset.currentRoundId || CURRENT_ROUND_ID;
+          await relayMutation(
+            `/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/rounds/${{encodeURIComponent(roundId)}}/control${{TOKEN_SUFFIX}}`,
+            {{ decision: waitingControlInput, comment: String(data.text || "").trim() }},
+            followupSubmitButton,
+          );
+          waitingControlInput = "";
+          form.reset();
+          window.marvisRelayAttachments?.clear();
+          hidePlanControlSurface();
           updateTaskStatus("running");
-          setRoleStatus("director", "queued", {{ force: true }});
-        }} else {{
-          upsertPendingInput(payload.pending_input || payload);
+          setRelayMutationStatus("已提交，任务继续执行。");
+          return;
         }}
+        if (relayTaskAcceptsPendingInput()) {{
+          const payload = await relayMutation(
+            `/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/inputs${{TOKEN_SUFFIX}}`,
+            data,
+            followupSubmitButton,
+          );
+          const responseDisposition = String(payload.disposition || "pending");
+          if (responseDisposition === "followup") {{
+            const followup = payload.followup || payload;
+            const roundId = activateRelayRound(followup);
+            const key = followup.artifact_id ? `user_followup:${{followup.artifact_id}}` : `user_followup:${{followup.context_packet_id || Date.now()}}`;
+            clearMarvisConversationPausedRows();
+            appendMarvisConversationUser(followup.text || data.text || "已添加附件", key, false, {{
+              images: followup.images || attachments.images || [],
+              files: followup.files || attachments.files || []
+            }});
+            appendMarvisConversationWaiting(roundId);
+            updateTaskStatus("running");
+            setRoleStatus("director", "queued", {{ force: true }});
+            setRelayMutationStatus("已加入当前任务。");
+          }} else {{
+            upsertPendingInput(payload.pending_input || payload);
+            setRelayMutationStatus("已排队，将在当前轮结束后处理。");
+          }}
+          form.reset();
+          window.marvisRelayAttachments?.clear();
+          return;
+        }}
+        localKey = `local-followup:${{Date.now()}}`;
+        clearMarvisConversationPausedRows();
+        appendMarvisConversationUser(data.text || "已添加附件", localKey, true, attachments);
+        appendMarvisConversationWaiting();
+        updateTaskStatus("running");
+        setRoleStatus("director", "queued", {{ force: true }});
+        await relayMutation(
+          `/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/message${{TOKEN_SUFFIX}}`,
+          data,
+          followupSubmitButton,
+        );
         form.reset();
         window.marvisRelayAttachments?.clear();
+        setRelayMutationStatus("已发送给总工程师。");
+      }} catch (error) {{
+        setRelayMutationStatus(error?.message || "发送失败，请重试。", true);
+        if (localKey) {{
+          markMarvisConversationUserFailed(localKey);
+          clearMarvisConversationWaiting();
+        }}
+      }} finally {{
         updateRelayComposerAction();
-        return;
       }}
-      const localKey = `local-followup:${{Date.now()}}`;
-      clearMarvisConversationPausedRows();
-      appendMarvisConversationUser(data.text || "已添加附件", localKey, true, attachments);
-      appendMarvisConversationWaiting();
-      updateTaskStatus("running");
-      setRoleStatus("director", "queued", {{ force: true }});
-      const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/message${{TOKEN_SUFFIX}}`, {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify(data),
-      }});
-      if (!response.ok) {{
-        markMarvisConversationUserFailed(localKey);
-        clearMarvisConversationWaiting();
-        return;
-      }}
-      form.reset();
-      window.marvisRelayAttachments?.clear();
-      updateRelayComposerAction();
     }});
-    document.querySelector("[data-interrupt-url]")?.addEventListener("click", async (event) => {{
-      const target = event.currentTarget;
-      const response = await fetch(`${{target.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{ method: "POST" }});
-      if (response.ok) {{
+    followupInterruptButton?.addEventListener("click", async (event) => {{
+      event.preventDefault();
+      if (!relayTaskIsRunning()) return;
+      setRelayMutationStatus("正在中断当前执行…");
+      try {{
+        await relayMutation(`${{followupInterruptButton.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{}}, followupInterruptButton);
         updateTaskStatus("interrupted");
+        clearAllRolePreviews();
+        setRelayMutationStatus("已请求中断。", false);
+      }} catch (error) {{
+        setRelayMutationStatus(error?.message || "中断失败，请重试。", true);
+      }} finally {{
+        updateRelayComposerAction();
       }}
     }});
   </script>
@@ -12283,6 +13153,7 @@ def _native_codex_page(provider_name: str = "codex", *, theme: str = "") -> str:
   <title>__MARVIS_TITLE__</title>
 __NATIVE_APP_HEAD__
   <link rel="stylesheet" href="/static/native_app_bundle.css">
+  <script src="/static/surface_runtime.js?v=20260710-semantic-closure"></script>
 __MARVIS_CSS_LINK__  <style>
     :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; }
     body { background: #000; }
@@ -12391,7 +13262,8 @@ __MARVIS_CSS_LINK__  <style>
     .recent-status { position: relative; display: grid; place-items: center; width: 34px; min-height: 28px; color: #b8b8bd; font-size: 14px; line-height: 1; }
     .recent-status.running::before { content: ""; width: 18px; height: 18px; border: 2px solid transparent; border-top-color: var(--native-remote-blue); border-right-color: var(--native-remote-blue); border-radius: 50%; animation: nativeRemoteSpin .85s linear infinite; }
     .recent-status.finished::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--native-remote-red); box-shadow: 0 0 10px rgba(255,59,79,.35); }
-    .recent-status.running .status-time, .recent-status.finished .status-time { display: none; }
+    .recent-status.stale::before { content: "!"; display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid #f5c451; border-radius: 50%; color: #f5c451; font-size: 12px; font-weight: 800; }
+    .recent-status.running .status-time, .recent-status.finished .status-time, .recent-status.stale .status-time { display: none; }
     .recent.loading .recent-status::before { content: ""; width: 18px; height: 18px; border: 2px solid transparent; border-top-color: var(--native-remote-blue); border-right-color: var(--native-remote-blue); border-radius: 50%; animation: nativeRemoteSpin .85s linear infinite; }
     .recent.loading .recent-status .status-time { display: none; }
     @keyframes nativeRemoteSpin { to { transform: rotate(360deg); } }
@@ -12454,6 +13326,11 @@ __MARVIS_CSS_LINK__  <style>
     button.mode-chip-cancel:not(.secondary):not(.warn):not(:disabled):hover { background: rgba(255,255,255,.1); filter: none; }
     .model-popover { position: absolute; left: 0; bottom: 48px; width: min(330px, calc(100vw - 52px)); border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); overflow: hidden; z-index: 6; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
     .model-popover.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
+    .model-catalog-notice { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 9px 10px; border: 1px solid rgba(245,196,81,.52); border-radius: 12px; background: rgba(103,78,12,.27); color: #fff4c4; font-size: 12px; line-height: 1.4; }
+    .model-catalog-notice[hidden] { display: none; }
+    .model-catalog-notice-copy { min-width: 0; flex: 1 1 auto; }
+    .model-catalog-retry { flex: 0 0 auto; min-height: 44px; padding: 0 11px; border: 1px solid rgba(245,196,81,.72); border-radius: 10px; background: #2d250f; color: #fff4c4; font-size: 12px; font-weight: var(--weight-extrabold); }
+    .model-catalog-retry:disabled { opacity: .64; }
     .setting-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 12px 18px; border-bottom: 1px solid var(--border-section); color: var(--btn-primary-bg); }
     .setting-row[hidden] { display: none; }
     .setting-row:last-child { border-bottom: 0; }
@@ -12632,6 +13509,10 @@ __MARVIS_CSS_LINK__  <style>
         </div>
       </div>
     </div>
+    <div class="model-catalog-notice" id="modelCatalogNotice" role="status" aria-live="polite" hidden>
+      <span class="model-catalog-notice-copy" id="modelCatalogNoticeText"></span>
+      <button class="model-catalog-retry" id="modelCatalogRetry" type="button">重试同步</button>
+    </div>
     <div class="attachment-strip" id="attachmentStrip" hidden></div>
     <div class="selected-plugin-strip" id="selectedPluginStrip" hidden></div>
     <div class="mode-chip-row">
@@ -12701,6 +13582,7 @@ __ICONS_JS__
     let sessionsRefreshTimer = null;
     let sessionsEventSource = null;
     let sessionsReconnectTimer = null;
+    let sessionsFallbackPollTimer = null;
     let projectRoot = "";
     let projectCatalog = [];
     let renderedSessionsDataSignature = "";
@@ -12743,6 +13625,9 @@ __ICONS_JS__
     const permissionOptions = document.getElementById("permissionOptions");
     const reasoningOptions = document.getElementById("reasoningOptions");
     const serviceTierOptions = document.getElementById("serviceTierOptions");
+    const modelCatalogNotice = document.getElementById("modelCatalogNotice");
+    const modelCatalogNoticeText = document.getElementById("modelCatalogNoticeText");
+    const modelCatalogRetry = document.getElementById("modelCatalogRetry");
     const modelSettingValue = document.getElementById("modelSettingValue");
     const reasoningSettingValue = document.getElementById("reasoningSettingValue");
     const serviceTierSettingValue = document.getElementById("serviceTierSettingValue");
@@ -12758,6 +13643,9 @@ __ICONS_JS__
     const PERMISSION_PRESETS = __PERMISSION_PRESETS_JSON__;
     const PLUGIN_MENU_ITEMS = __PLUGIN_MENU_ITEMS_JSON__;
     let modelCatalog = [];
+    let modelCatalogAvailable = false;
+    let modelCatalogLoading = false;
+    let modelCatalogUnavailableReason = "正在同步模型目录";
     let savedModelSettings = loadSavedModelSettings();
     let savedPermissionSettings = loadSavedPermissionSettings();
     let selectedCollaborationMode = loadSavedCollaborationMode();
@@ -12788,6 +13676,14 @@ __ICONS_JS__
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || res.statusText);
       return data;
+    }
+
+    function nativeMutationKey(operation) {
+      const runtime = window.WLCodexSurfaceRuntime;
+      if (runtime && typeof runtime.mutationKey === "function") {
+        return runtime.mutationKey("native-" + operation);
+      }
+      return "native-" + operation + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
     }
 
     function tokenizedPath(path) {
@@ -12849,11 +13745,30 @@ __ICONS_JS__
       }
     }
 
+    function stopSessionsFallbackPoll() {
+      if (!sessionsFallbackPollTimer) return;
+      window.clearInterval(sessionsFallbackPollTimer);
+      sessionsFallbackPollTimer = null;
+    }
+
+    function startSessionsFallbackPoll() {
+      // The session stream owns normal refreshes.  A visible page falls back
+      // to a slow poll only while that stream is unavailable.
+      if (document.visibilityState === "hidden" || sessionsEventSource || sessionsFallbackPollTimer) return;
+      sessionsFallbackPollTimer = window.setInterval(
+        refreshSessionsSilently,
+        SESSION_POLL_INTERVAL_MS,
+      );
+    }
+
     function startSessionsStream() {
-      if (sessionsEventSource) return;
+      if (document.visibilityState === "hidden" || sessionsEventSource) return;
       try {
         const source = new EventSource(sessionsStreamPath());
         sessionsEventSource = source;
+        source.onopen = () => {
+          stopSessionsFallbackPoll();
+        };
         source.addEventListener("native_sessions", message => {
           const data = JSON.parse(message.data || "{}");
           applySessionsPayload(data, true);
@@ -12862,6 +13777,8 @@ __ICONS_JS__
           if (sessionsEventSource !== source) return;
           source.close();
           sessionsEventSource = null;
+          startSessionsFallbackPoll();
+          if (document.visibilityState === "hidden") return;
           if (!sessionsReconnectTimer) {
             sessionsReconnectTimer = window.setTimeout(() => {
               sessionsReconnectTimer = null;
@@ -12871,7 +13788,14 @@ __ICONS_JS__
         };
       } catch (_error) {
         sessionsEventSource = null;
+        startSessionsFallbackPoll();
       }
+    }
+
+    function resumeSessionsLiveConnection() {
+      if (document.visibilityState === "hidden") return;
+      refreshSessionsSilently();
+      startSessionsStream();
     }
 
     async function loadProjects() {
@@ -12893,6 +13817,10 @@ __ICONS_JS__
           title: String(session.title || ""),
           cwd: String(session.cwd || ""),
           status: String(session.status || ""),
+          presentation_state: String(((session.presentation || {}).state) || ""),
+          presentation_source: String((((session.presentation || {}).freshness || {}).source) || ""),
+          presentation_stale: Boolean((((session.presentation || {}).freshness || {}).is_stale)),
+          presentation_reason: String((((session.presentation || {}).freshness || {}).reason) || ""),
           model: String(((session.metadata || {}).model) || ""),
           effort: String(((session.metadata || {}).effort) || ""),
           service_tier: String(((session.metadata || {}).service_tier) || ""),
@@ -12929,25 +13857,79 @@ __ICONS_JS__
       await loadSessions(true);
     }
 
+    function usableModelCatalogEntries(rawModels) {
+      return (Array.isArray(rawModels) ? rawModels : []).filter(model => {
+        const modelId = String((model && (model.model || model.id)) || "").trim();
+        return Boolean(modelId);
+      });
+    }
+
+    function showModelCatalogUnavailable(reason) {
+      modelCatalogUnavailableReason = String(reason || "未能同步可用模型").trim() || "未能同步可用模型";
+      modelCatalogNoticeText.textContent = `模型目录不可用：${modelCatalogUnavailableReason}。无法创建新会话；请检查 ${PROVIDER_LABEL} 二进制和 app-server 配置后重试。`;
+      modelCatalogNotice.hidden = false;
+      modelCatalogRetry.disabled = modelCatalogLoading;
+    }
+
+    function setModelCatalogUnavailable(reason) {
+      modelCatalogAvailable = false;
+      modelCatalog = [];
+      showModelCatalogUnavailable(reason);
+      modelSelector.innerHTML = '<option value="">模型目录不可用</option>';
+      reasoningSelector.innerHTML = '<option value="">推理</option>';
+      serviceTierSelector.innerHTML = '<option value="">速度</option>';
+      modelSelector.disabled = true;
+      reasoningSelector.disabled = true;
+      serviceTierSelector.disabled = true;
+      modelOptions.innerHTML = "";
+      reasoningOptions.innerHTML = "";
+      serviceTierOptions.innerHTML = "";
+      modelOptions.hidden = true;
+      reasoningOptions.hidden = true;
+      serviceTierOptions.hidden = true;
+      modelSettingsDirty = false;
+      updateSettingVisibility();
+      updateSettingSummary();
+    }
+
+    function setModelCatalogAvailable(models) {
+      modelCatalog = usableModelCatalogEntries(models);
+      modelCatalogAvailable = modelCatalog.length > 0;
+      if (!modelCatalogAvailable) {
+        setModelCatalogUnavailable("提供方未返回可用模型");
+        return false;
+      }
+      modelCatalogNotice.hidden = true;
+      modelCatalogRetry.disabled = false;
+      modelSelector.disabled = false;
+      reasoningSelector.disabled = false;
+      serviceTierSelector.disabled = false;
+      renderModelSettings();
+      return true;
+    }
+
     async function loadModelCatalog() {
+      if (modelCatalogLoading) return false;
+      modelCatalogLoading = true;
+      modelCatalogRetry.disabled = true;
       try {
         const result = await api(`${API_BASE}/models`);
-        modelCatalog = Array.isArray(result.models) ? result.models : [];
-        renderModelSettings();
+        return setModelCatalogAvailable(result.models);
       } catch (error) {
-        modelCatalog = [];
-        modelSelector.innerHTML = `<option value="">${escapeHtml(error.message || "模型不可用")}</option>`;
-        reasoningSelector.innerHTML = `<option value="">推理</option>`;
-        serviceTierSelector.innerHTML = `<option value="">速度</option>`;
-        modelOptions.innerHTML = "";
-        reasoningOptions.innerHTML = "";
-        serviceTierOptions.innerHTML = "";
-        updateSettingVisibility();
-        updateSettingSummary();
+        setModelCatalogUnavailable(error.message || "未能同步可用模型");
+        return false;
+      } finally {
+        modelCatalogLoading = false;
+        modelCatalogRetry.disabled = false;
+        updateStartControls();
       }
     }
 
     function renderModelSettings() {
+      if (!modelCatalogAvailable) {
+        setModelCatalogUnavailable(modelCatalogUnavailableReason);
+        return;
+      }
       const visibleModels = modelCatalog.filter(model => !model.hidden);
       const models = visibleModels.length ? visibleModels : modelCatalog;
       modelSelector.innerHTML = "";
@@ -13022,6 +14004,7 @@ __ICONS_JS__
     }
 
     function selectedModelCatalogEntry() {
+      if (!modelCatalogAvailable) return null;
       return modelCatalog.find(model => {
         return (model.model || model.id || "") === modelSelector.value;
       }) || modelCatalog.find(model => model.isDefault) || modelCatalog[0] || null;
@@ -13214,6 +14197,9 @@ __ICONS_JS__
     }
 
     function readSelectedModelSettings() {
+      if (!modelCatalogAvailable) {
+        return normalizeModelSettings({version: MODEL_SETTINGS_STORAGE_VERSION});
+      }
       return normalizeModelSettings({
         model: modelSelector.value,
         effort: reasoningSettingRow.hidden ? "" : reasoningSelector.value,
@@ -13545,6 +14531,12 @@ __ICONS_JS__
     }
 
     function updateSettingSummary() {
+      if (!modelCatalogAvailable) {
+        modelSettingValue.textContent = "模型目录不可用";
+        modelSettingsButton.textContent = "模型目录不可用";
+        modelSettingsButton.classList.remove("modified");
+        return;
+      }
       const modelText = selectedOptionText(modelSelector, "模型");
       const effortText = selectedOptionText(reasoningSelector, "默认");
       const tierText = selectedOptionText(serviceTierSelector, "正常");
@@ -13845,6 +14837,8 @@ __ICONS_JS__
       return String((session && session.native_thread_id) || "");
     }
     function sessionVisualStateClass(session) {
+      const freshness = ((session && session.presentation) || {}).freshness || {};
+      if (freshness.is_stale || freshness.stale) return "stale";
       const status = String((session && session.status) || "").trim().toLowerCase();
       if (status === "running" || status === "in_progress" || status === "queued") return "running";
       if (isUnreadCompletedSession(session)) return "finished";
@@ -13922,8 +14916,13 @@ __ICONS_JS__
       const parts = [];
       const workspace = lastPath(session.cwd || "");
       const settings = sessionModelSettingsLabel(session);
+      const presentation = (session && session.presentation) || {};
+      const freshness = presentation.freshness || {};
       if (workspace) parts.push(workspace);
       if (settings) parts.push(settings);
+      if (freshness.is_stale || freshness.stale) parts.push("缓存快照");
+      else if (presentation.state === "waiting_approval") parts.push("等待审批");
+      else if (presentation.state === "waiting_user") parts.push("等待输入");
       if (session.status) parts.push(session.status);
       return parts.join(" · ");
     }
@@ -13947,6 +14946,11 @@ __ICONS_JS__
 
     async function startNewChat(prompt) {
       if (startingChat) return;
+      if (!modelCatalogAvailable) {
+        showModelCatalogUnavailable(modelCatalogUnavailableReason);
+        updateStartControls();
+        return;
+      }
       const promptText = String(prompt || "");
       startingChat = true;
       updateStartControls();
@@ -13961,9 +14965,9 @@ __ICONS_JS__
         selectedPlugins: selectedPlugins.map(plugin => ({...plugin}))
       };
       const body = {cwd: selectedProjectCwd, prompt: promptText};
-      if (settings.model) body.model = settings.model;
-      if (settings.effort) body.effort = settings.effort;
-      if (settings.service_tier) body.service_tier = settings.service_tier;
+      if (modelCatalogAvailable && settings.model) body.model = settings.model;
+      if (modelCatalogAvailable && settings.effort) body.effort = settings.effort;
+      if (modelCatalogAvailable && settings.service_tier) body.service_tier = settings.service_tier;
       let permissionMode = permissionSettings.permission_mode;
       if (USES_CLAUDE_PLAN_PERMISSION_MODE && selectedCollaborationMode === "plan") {
         permissionMode = "plan";
@@ -13987,7 +14991,8 @@ __ICONS_JS__
       try {
         const result = await api(`${API_BASE}/sessions/start`, {
           method: "POST",
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
+          headers: {"Idempotency-Key": nativeMutationKey("session-start")}
         });
         openLive(result);
       } catch (error) {
@@ -14017,7 +15022,9 @@ __ICONS_JS__
       controlsEl.classList.toggle("has-draft", viewMode === "compose" && hasDraft);
       sendButton.innerHTML = viewMode === "compose" ? ICONS.send : '<span class="compose-icon" aria-hidden="true"></span><span>聊天</span>';
       sendButton.setAttribute("aria-label", viewMode === "compose" ? "发送" : "聊天");
-      sendButton.disabled = startingChat || (viewMode === "compose" && !hasDraft);
+      sendButton.disabled = startingChat || (
+        viewMode === "compose" && (!modelCatalogAvailable || !hasDraft)
+      );
     }
 
     async function openLive(session = selected) {
@@ -14076,6 +15083,9 @@ __ICONS_JS__
         reasoningOptions.hidden = true;
       }
     };
+    modelCatalogRetry.onclick = () => {
+      void loadModelCatalog();
+    };
     permissionSettingsButton.onclick = () => {
       const willClose = !permissionPopover.classList.contains("closed");
       if (willClose) savePermissionSettingsIfChanged();
@@ -14109,15 +15119,15 @@ __ICONS_JS__
       markPermissionSettingsDirty();
     };
     modelSettingRow.onclick = event => {
-      if (event.target === modelSelector) return;
+      if (!modelCatalogAvailable || event.target === modelSelector) return;
       toggleSettingOptions(modelOptions);
     };
     serviceTierSettingRow.onclick = event => {
-      if (event.target === serviceTierSelector) return;
+      if (!modelCatalogAvailable || event.target === serviceTierSelector) return;
       toggleSettingOptions(serviceTierOptions);
     };
     reasoningSettingRow.onclick = event => {
-      if (event.target === reasoningSelector) return;
+      if (!modelCatalogAvailable || event.target === reasoningSelector) return;
       toggleSettingOptions(reasoningOptions);
     };
     document.getElementById("back").onclick = () => {
@@ -14301,10 +15311,23 @@ __ICONS_JS__
     loadModelCatalog();
     loadHomeData();
     startSessionsStream();
-    window.addEventListener("pagehide", closeSessionsStream);
-    window.addEventListener("beforeunload", closeSessionsStream);
-    window.addEventListener("pageshow", () => startSessionsStream());
-    setInterval(refreshSessionsSilently, SESSION_POLL_INTERVAL_MS);
+    window.addEventListener("pagehide", () => {
+      stopSessionsFallbackPoll();
+      closeSessionsStream();
+    });
+    window.addEventListener("beforeunload", () => {
+      stopSessionsFallbackPoll();
+      closeSessionsStream();
+    });
+    window.addEventListener("pageshow", resumeSessionsLiveConnection);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        stopSessionsFallbackPoll();
+        closeSessionsStream();
+        return;
+      }
+      resumeSessionsLiveConnection();
+    });
   </script>
 __MARVIS_EXTRA_HTML__
 </body>
@@ -14597,10 +15620,11 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex", theme: str 
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>__SAFE_TITLE__</title>
 __NATIVE_APP_HEAD__
   <link rel="stylesheet" href="/static/native_app_bundle.css">
+  <script src="/static/surface_runtime.js?v=20260710-semantic-closure"></script>
 __MARVIS_CSS_LINK__  <style>
     :root { --native-remote-blue: #58a6ff; --native-remote-red: #ff3b4f; --native-ui-font-size: 15px; --native-code-font-size: 12px; --native-top-control-y: calc(14px + env(safe-area-inset-top)); --native-top-control-size: 46px; }
     html, body, .native-mobile-shell, .codex-run-shell, .codex-transcript, .transcript-body, .codex-input-dock, input, textarea { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
@@ -14675,6 +15699,11 @@ __MARVIS_CSS_LINK__  <style>
     .connected .status-dot { background: var(--color-success); animation: breathe 2s ease-in-out infinite; }
     .reconnecting .status-dot { background: var(--color-error); animation: breathe 1s ease-in-out infinite; }
     main { padding: 12px 20px calc(var(--codex-dock-height, 150px) + 32px + env(safe-area-inset-bottom)); }
+    .native-presentation-notice { display: flex; align-items: center; gap: 12px; min-height: 44px; margin: 2px 0 14px; padding: 10px 12px; border: 1px solid rgba(245,196,81,.52); border-radius: 12px; background: rgba(103,78,12,.27); color: #fff4c4; font-size: 13px; line-height: 1.42; }
+    .native-presentation-notice[hidden] { display: none; }
+    .native-presentation-copy { min-width: 0; flex: 1 1 auto; }
+    .native-presentation-retry { flex: 0 0 auto; min-height: 44px; padding: 0 12px; border: 1px solid rgba(245,196,81,.72); border-radius: 10px; background: #2d250f; color: #fff4c4; font-size: 13px; font-weight: var(--weight-extrabold); }
+    .native-presentation-retry:disabled { opacity: .64; }
     .event-cursor { color: #777b86; font-size: 12px; }
     .codex-transcript { display: grid; gap: 18px; padding-top: 8px; }
     .transcript-item { display: grid; gap: 7px; min-width: 0; padding: 0; }
@@ -14840,6 +15869,11 @@ __MARVIS_CSS_LINK__  <style>
     button.mode-chip-cancel:not(.secondary):not(.warn):not(:disabled):hover { background: rgba(255,255,255,.1); filter: none; }
     .model-popover { position: absolute; left: 0; bottom: 50px; width: min(330px, calc(100vw - 52px)); border: 1px solid var(--border-popover); border-radius: 22px; background: var(--bg-popover); box-shadow: 0 20px 54px rgba(0,0,0,.55); overflow: hidden; z-index: 6; opacity: 1; transform: translateY(0) scale(1); transform-origin: bottom left; transition: opacity 180ms var(--ease-default), transform 180ms var(--ease-default); }
     .model-popover.closed { opacity: 0; transform: translateY(8px) scale(0.96); pointer-events: none; }
+    .model-catalog-notice { display: flex; gap: 10px; align-items: center; min-width: 0; padding: 9px 10px; border: 1px solid rgba(245,196,81,.52); border-radius: 12px; background: rgba(103,78,12,.27); color: #fff4c4; font-size: 12px; line-height: 1.4; }
+    .model-catalog-notice[hidden] { display: none; }
+    .model-catalog-notice-copy { min-width: 0; flex: 1 1 auto; }
+    .model-catalog-retry { flex: 0 0 auto; min-height: 44px; padding: 0 11px; border: 1px solid rgba(245,196,81,.72); border-radius: 10px; background: #2d250f; color: #fff4c4; font-size: 12px; font-weight: var(--weight-extrabold); }
+    .model-catalog-retry:disabled { opacity: .64; }
     .handoff-panel { position: fixed; left: 26px; right: 26px; bottom: 112px; width: auto; max-height: min(76vh, 760px); display: grid; gap: 10px; padding: 0; border: 0; background: transparent; box-shadow: none; z-index: 7; }
     .handoff-panel[hidden] { display: none; }
     .handoff-targets, .handoff-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
@@ -14991,6 +16025,9 @@ __MARVIS_CSS_LINK__  <style>
         <div class="context-info-row"><span class="context-info-label">上下文:</span><span class="context-info-value" id="contextUsageValue">等待同步</span></div>
         <div class="context-info-row"><span class="context-info-label">5 小时限制:</span><span class="context-info-value" id="contextFiveHourValue">等待同步</span></div>
         <div class="context-info-row"><span class="context-info-label">7 天限制:</span><span class="context-info-value" id="contextSevenDayValue">等待同步</span></div>
+        <div class="context-info-row"><span class="context-info-label">会话状态:</span><span class="context-info-value" id="contextPresentationStateValue">等待同步</span></div>
+        <div class="context-info-row"><span class="context-info-label">同步来源:</span><span class="context-info-value" id="contextFreshnessValue">等待同步</span></div>
+        <div class="context-info-row"><span class="context-info-label">下一步:</span><span class="context-info-value" id="contextNextActionValue">等待同步</span></div>
       </div>
     </section>
     <section class="native-header-popover session-action-menu" id="sessionActionMenu" role="menu" aria-label="会话操作" hidden>
@@ -15011,6 +16048,10 @@ __MARVIS_CSS_LINK__  <style>
       </button>
     </section>
     <main>
+      <section class="native-presentation-notice" id="nativePresentationNotice" role="status" aria-live="polite" hidden>
+        <span class="native-presentation-copy" id="nativePresentationNoticeText"></span>
+        <button class="native-presentation-retry" id="nativePresentationRetry" type="button" hidden>重新同步</button>
+      </section>
       <span class="event-cursor" id="cursor" hidden></span>
       <button class="history-fold" id="historyFold" hidden>更早的消息</button>
       <section class="codex-transcript" id="events"><div class="empty" id="empty">输入消息开始新会话</div></section>
@@ -15129,6 +16170,10 @@ __MARVIS_CSS_LINK__  <style>
         <input id="imageInput" type="file" accept="image/*" multiple hidden>
         <span class="send-status" id="sendStatus"></span>
       </div>
+      <div class="model-catalog-notice" id="modelCatalogNotice" role="status" aria-live="polite" hidden>
+        <span class="model-catalog-notice-copy" id="modelCatalogNoticeText"></span>
+        <button class="model-catalog-retry" id="modelCatalogRetry" type="button">重试同步</button>
+      </div>
       <div class="selected-plugin-strip" id="selectedPluginStrip" hidden></div>
       <div class="mode-chip-row">
         <div class="mode-chip plan-mode-chip" id="planModeChip" hidden>
@@ -15150,6 +16195,9 @@ __MARVIS_CSS_LINK__  <style>
         <button class="warn" id="interrupt">中断</button>
       </div>
     </section>
+    <button class="new-messages-notice" id="newMessagesNotice" type="button" hidden>
+      有新消息，查看
+    </button>
     <pre class="viewport-debug" id="viewportDebug" hidden></pre>
   </div>
   <div class="plan-page-backdrop" id="planPage" role="dialog" aria-modal="true" aria-label="计划" hidden>
@@ -15175,6 +16223,7 @@ __MARVIS_CSS_LINK__  <style>
     const state = document.getElementById("state");
     const cursor = document.getElementById("cursor");
     const events = document.getElementById("events");
+    const newMessagesNotice = document.getElementById("newMessagesNotice");
     const header = document.getElementById("header");
     const empty = document.getElementById("empty");
     const headerRunIndicator = document.getElementById("headerRunIndicator");
@@ -15188,6 +16237,9 @@ __MARVIS_CSS_LINK__  <style>
     const contextUsageValue = document.getElementById("contextUsageValue");
     const contextFiveHourValue = document.getElementById("contextFiveHourValue");
     const contextSevenDayValue = document.getElementById("contextSevenDayValue");
+    const contextPresentationStateValue = document.getElementById("contextPresentationStateValue");
+    const contextFreshnessValue = document.getElementById("contextFreshnessValue");
+    const contextNextActionValue = document.getElementById("contextNextActionValue");
     const contextThreadCopyButton = document.getElementById("contextThreadCopyButton");
     const sessionActionTitle = document.getElementById("sessionActionTitle");
     const copySessionIdButton = document.getElementById("copySessionIdButton");
@@ -15197,6 +16249,9 @@ __MARVIS_CSS_LINK__  <style>
     const sessionFloatTitle = document.getElementById("sessionFloatTitle");
     const sessionFloatMeta = document.getElementById("sessionFloatMeta");
     const sessionFloatState = document.getElementById("sessionFloatState");
+    const nativePresentationNotice = document.getElementById("nativePresentationNotice");
+    const nativePresentationNoticeText = document.getElementById("nativePresentationNoticeText");
+    const nativePresentationRetry = document.getElementById("nativePresentationRetry");
     const historyFold = document.getElementById("historyFold");
     const composerActivity = document.getElementById("composerActivity");
     const inputDock = document.querySelector(".codex-input-dock");
@@ -15212,6 +16267,22 @@ __ICONS_JS__
     const SUPPORTS_PLAN_MODE = __SUPPORTS_PLAN_MODE_JSON__;
     const SUPPORTS_PLUGIN_MENU = __SUPPORTS_PLUGIN_MENU_JSON__;
     const USES_CLAUDE_PLAN_PERMISSION_MODE = __USES_CLAUDE_PLAN_PERMISSION_MODE_JSON__;
+    function isNearTimelineBottom() {
+      const remaining = document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
+      return remaining < 96;
+    }
+    function scrollToBottom(force = false) {
+      if (force || isNearTimelineBottom()) {
+        window.scrollTo({top: document.documentElement.scrollHeight, behavior: "smooth"});
+        if (newMessagesNotice) newMessagesNotice.hidden = true;
+        return;
+      }
+      if (newMessagesNotice) newMessagesNotice.hidden = false;
+    }
+    newMessagesNotice?.addEventListener("click", () => scrollToBottom(true));
+    window.addEventListener("scroll", () => {
+      if (isNearTimelineBottom() && newMessagesNotice) newMessagesNotice.hidden = true;
+    }, {passive: true});
     let nativeThreadId = params.get("native_thread_id") || "";
     let invalidNativeThreadId = Boolean(nativeThreadId && !isValidNativeThreadId(nativeThreadId));
     if (invalidNativeThreadId) nativeThreadId = "";
@@ -15230,12 +16301,14 @@ __ICONS_JS__
     let streamReconnectDelay = 500;
     let pollInFlight = false;
     let nativeTranscriptSyncTimer = null;
+    const NATIVE_TRANSCRIPT_FALLBACK_INTERVAL_MS = 30000;
     const terminalTranscriptSyncTurns = new Set();
     const authHeaders = token ? {"Authorization": "Bearer " + token} : {};
     const promptInput = document.getElementById("prompt");
     const continueButton = document.getElementById("continue");
     const steerButton = document.getElementById("steer");
     const interruptButton = document.getElementById("interrupt");
+    const dockActions = document.querySelector(".dock-actions");
     const modelSettingsButton = document.getElementById("modelSettingsButton");
     const permissionSettingsButton = document.getElementById("permissionSettingsButton");
     const modelPopover = document.getElementById("modelPopover");
@@ -15254,6 +16327,9 @@ __ICONS_JS__
     const permissionOptions = document.getElementById("permissionOptions");
     const reasoningOptions = document.getElementById("reasoningOptions");
     const serviceTierOptions = document.getElementById("serviceTierOptions");
+    const modelCatalogNotice = document.getElementById("modelCatalogNotice");
+    const modelCatalogNoticeText = document.getElementById("modelCatalogNoticeText");
+    const modelCatalogRetry = document.getElementById("modelCatalogRetry");
     function resizePromptInput() {
       promptInput.style.height = "auto";
       promptInput.style.height = `${Math.min(Math.max(promptInput.scrollHeight, 44), 132)}px`;
@@ -15353,6 +16429,7 @@ __ICONS_JS__
     const handoffPreviewButton = document.getElementById("handoffPreviewButton");
     const handoffExecuteButton = document.getElementById("handoffExecuteButton");
     const planPage = document.getElementById("planPage");
+    const nativeAppShell = planPage?.previousElementSibling;
     const planPageClose = document.getElementById("planPageClose");
     const planPageDownload = document.getElementById("planPageDownload");
     const planPageCopy = document.getElementById("planPageCopy");
@@ -15364,6 +16441,9 @@ __ICONS_JS__
     const planExecutionConfirm = document.getElementById("planExecutionConfirm");
     const planExecutionRevise = document.getElementById("planExecutionRevise");
     const planExecutionSkip = document.getElementById("planExecutionSkip");
+    const planPageFocusableSelector = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    let planPagePreviouslyFocused = null;
+    let planPagePreviousOverflow = "";
     const streamPathBase = "__STREAM_PATH__";
     const agentRunId = __AGENT_RUN_ID__;
     const NATIVE_TIMELINE_RECENT_LIMIT = 80;
@@ -15400,6 +16480,9 @@ __ICONS_JS__
     let nativeTurnRunning = false;
     const turnStatus = {active: false, turnId: "", label: "连接会话", tone: "neutral", terminal: false};
     let modelCatalog = [];
+    let modelCatalogAvailable = false;
+    let modelCatalogLoading = false;
+    let modelCatalogUnavailableReason = "正在同步模型目录";
     let providerCapabilities = {};
     let savedDisplaySettings = loadSavedDisplaySettings();
     let savedModelSettings = loadSavedModelSettings();
@@ -15590,6 +16673,13 @@ __ICONS_JS__
         if (timeoutId) window.clearTimeout(timeoutId);
       }
     }
+    function nativeMutationKey(operation) {
+      const runtime = window.WLCodexSurfaceRuntime;
+      if (runtime && typeof runtime.mutationKey === "function") {
+        return runtime.mutationKey("native-" + operation);
+      }
+      return "native-" + operation + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+    }
     async function withNativeSoftTimeout(promise, message, delayMs = 12000) {
       let settled = false;
       let timedOut = false;
@@ -15637,7 +16727,8 @@ __ICONS_JS__
       if (!nativeThreadId) throw new Error("会话未连接");
       return api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/${action}`, {
         method: "POST",
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        headers: {"Idempotency-Key": nativeMutationKey("session-" + action)}
       });
     }
     async function loadNativeSessionInfo() {
@@ -15652,12 +16743,94 @@ __ICONS_JS__
         );
         updateNativeSessionInfo(session || {});
       } catch (error) {
-        updateNativeSessionInfo({status: error.message || "不可用"});
+        const reason = error.message || "无法读取原生会话状态";
+        updateNativeSessionInfo({
+          status: reason,
+          presentation: {
+            state: "stale",
+            freshness: {
+              source: "unavailable",
+              updated_at: "",
+              is_stale: true,
+              reason,
+            },
+            blocking_reason: reason,
+            next_action: "重新同步",
+            allowed_actions: ["refresh"],
+          },
+        });
       }
     }
     function updateNativeSessionInfo(session) {
       currentSessionInfo = {...currentSessionInfo, ...(session || {})};
       updateNativeHeaderContext();
+      applyNativeSessionPresentation(currentSessionInfo);
+    }
+    function nativePresentationStateLabel(value) {
+      const labels = {
+        running: "正在执行",
+        waiting_user: "等待你的输入",
+        waiting_approval: "等待审批",
+        blocked: "已阻塞",
+        completed: "已完成",
+        interrupted: "已中断",
+        failed: "执行失败",
+        stale: "状态已陈旧",
+      };
+      return labels[String(value || "").trim()] || "等待同步";
+    }
+    function nativePresentationSourceLabel(value) {
+      const labels = {
+        daemon: "原生实时状态",
+        "app-server": "原生实时状态",
+        live: "原生实时状态",
+        native: "原生实时状态",
+        cache: "缓存快照",
+        stub: "尚未取得会话快照",
+        unavailable: "连接失败",
+      };
+      return labels[String(value || "").trim().toLowerCase()] || "等待同步";
+    }
+    function nativePresentationUpdatedAt(value) {
+      if (value === undefined || value === null || value === "") return "未知";
+      const numeric = Number(value);
+      const candidate = Number.isFinite(numeric) && String(value).trim() !== ""
+        ? new Date(numeric < 100000000000 ? numeric * 1000 : numeric)
+        : new Date(String(value));
+      if (Number.isNaN(candidate.getTime())) return String(value);
+      return candidate.toLocaleString("zh-CN", {
+        month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+      });
+    }
+    function applyNativeSessionPresentation(session) {
+      const presentation = (session && session.presentation) || null;
+      if (!presentation || typeof presentation !== "object") {
+        writeCompactText(contextPresentationStateValue, "等待同步");
+        writeCompactText(contextFreshnessValue, "等待同步");
+        writeCompactText(contextNextActionValue, "等待同步");
+        nativePresentationNotice.hidden = true;
+        nativePresentationRetry.hidden = true;
+        return;
+      }
+      const freshness = presentation.freshness || {};
+      const stale = Boolean(freshness.is_stale || freshness.stale);
+      const stateLabel = nativePresentationStateLabel(presentation.state);
+      const sourceLabel = nativePresentationSourceLabel(freshness.source);
+      const updatedLabel = nativePresentationUpdatedAt(freshness.updated_at);
+      const nextAction = String(presentation.next_action || "等待同步").trim() || "等待同步";
+      const reason = String(
+        freshness.reason || presentation.blocking_reason || ""
+      ).trim();
+      writeCompactText(contextPresentationStateValue, stateLabel);
+      writeCompactText(contextFreshnessValue, `${sourceLabel} · ${updatedLabel}`);
+      writeCompactText(contextNextActionValue, nextAction);
+      const shouldShowNotice = stale || Boolean(reason);
+      nativePresentationNotice.hidden = !shouldShowNotice;
+      nativePresentationRetry.hidden = !stale;
+      if (shouldShowNotice) {
+        const explanation = reason || "原生状态尚未确认，请先重新同步后再决定下一步。";
+        nativePresentationNoticeText.textContent = `${sourceLabel}，最后更新 ${updatedLabel}。${explanation} 下一步：${nextAction}`;
+      }
     }
     function updateNativeHeaderContext() {
       const title = nativeSessionTitle();
@@ -15926,25 +17099,78 @@ __ICONS_JS__
         body: JSON.stringify(body)
       });
     }
+    function usableModelCatalogEntries(rawModels) {
+      return (Array.isArray(rawModels) ? rawModels : []).filter(model => {
+        const modelId = String((model && (model.model || model.id)) || "").trim();
+        return Boolean(modelId);
+      });
+    }
+
+    function showModelCatalogUnavailable(reason) {
+      modelCatalogUnavailableReason = String(reason || "未能同步可用模型").trim() || "未能同步可用模型";
+      modelCatalogNoticeText.textContent = `模型目录不可用：${modelCatalogUnavailableReason}。当前会话仍可继续，但不会发送本地保存的模型选择；请检查 ${PROVIDER_LABEL} 二进制和 app-server 配置后重试。`;
+      modelCatalogNotice.hidden = false;
+      modelCatalogRetry.disabled = modelCatalogLoading;
+    }
+
+    function setModelCatalogUnavailable(reason) {
+      modelCatalogAvailable = false;
+      modelCatalog = [];
+      showModelCatalogUnavailable(reason);
+      modelSelector.innerHTML = '<option value="">模型目录不可用</option>';
+      reasoningSelector.innerHTML = '<option value="">推理</option>';
+      serviceTierSelector.innerHTML = '<option value="">速度</option>';
+      modelSelector.disabled = true;
+      reasoningSelector.disabled = true;
+      serviceTierSelector.disabled = true;
+      modelOptions.innerHTML = "";
+      reasoningOptions.innerHTML = "";
+      serviceTierOptions.innerHTML = "";
+      modelOptions.hidden = true;
+      reasoningOptions.hidden = true;
+      serviceTierOptions.hidden = true;
+      modelSettingsDirty = false;
+      updateSettingVisibility();
+      updateSettingSummary();
+    }
+
+    function setModelCatalogAvailable(models) {
+      modelCatalog = usableModelCatalogEntries(models);
+      modelCatalogAvailable = modelCatalog.length > 0;
+      if (!modelCatalogAvailable) {
+        setModelCatalogUnavailable("提供方未返回可用模型");
+        return false;
+      }
+      modelCatalogNotice.hidden = true;
+      modelCatalogRetry.disabled = false;
+      modelSelector.disabled = false;
+      reasoningSelector.disabled = false;
+      serviceTierSelector.disabled = false;
+      renderModelSettings();
+      return true;
+    }
+
     async function loadModelCatalog() {
+      if (modelCatalogLoading) return false;
+      modelCatalogLoading = true;
+      modelCatalogRetry.disabled = true;
       try {
         const result = await api(`${API_BASE}/models`);
-        modelCatalog = Array.isArray(result.models) ? result.models : [];
-        renderModelSettings();
+        return setModelCatalogAvailable(result.models);
       } catch (error) {
-        modelCatalog = [];
-        modelSelector.innerHTML = `<option value="">${escapeHtml(error.message || "模型不可用")}</option>`;
-        reasoningSelector.innerHTML = `<option value="">推理</option>`;
-        serviceTierSelector.innerHTML = `<option value="">速度</option>`;
-        modelOptions.innerHTML = "";
-        reasoningOptions.innerHTML = "";
-        serviceTierOptions.innerHTML = "";
-        updateSettingVisibility();
-        updateSettingSummary();
+        setModelCatalogUnavailable(error.message || "未能同步可用模型");
+        return false;
+      } finally {
+        modelCatalogLoading = false;
+        modelCatalogRetry.disabled = false;
+        updateComposerDisabled();
       }
-      updateComposerDisabled();
     }
     function renderModelSettings() {
+      if (!modelCatalogAvailable) {
+        setModelCatalogUnavailable(modelCatalogUnavailableReason);
+        return;
+      }
       const visibleModels = modelCatalog.filter(model => !model.hidden);
       const models = visibleModels.length ? visibleModels : modelCatalog;
       modelSelector.innerHTML = "";
@@ -16016,6 +17242,7 @@ __ICONS_JS__
       updateSettingSummary();
     }
     function selectedModelCatalogEntry() {
+      if (!modelCatalogAvailable) return null;
       return modelCatalog.find(model => {
         return (model.model || model.id || "") === modelSelector.value;
       }) || modelCatalog.find(model => model.isDefault) || modelCatalog[0] || null;
@@ -16210,6 +17437,9 @@ __ICONS_JS__
       }
     }
     function readSelectedModelSettings() {
+      if (!modelCatalogAvailable) {
+        return normalizeModelSettings({version: MODEL_SETTINGS_STORAGE_VERSION});
+      }
       return normalizeModelSettings({
         model: modelSelector.value,
         effort: reasoningSettingRow.hidden ? "" : reasoningSelector.value,
@@ -16537,7 +17767,8 @@ __ICONS_JS__
       try {
         await api(`${API_BASE}/approvals/${encodeURIComponent(requestId)}/resolve`, {
           method: "POST",
-          body: JSON.stringify({action})
+          body: JSON.stringify({action}),
+          headers: {"Idempotency-Key": nativeMutationKey("approval-" + requestId)}
         });
         setApprovalState(card, action, "resolved");
         await pollEvents();
@@ -16636,6 +17867,27 @@ __ICONS_JS__
     handoffExecuteButton.onclick = executeHandoff;
     handoffCopyButton.onclick = copyHandoffPrompt;
     planPageClose.onclick = closePlanPage;
+    planPage.addEventListener("click", event => {
+      if (event.target === planPage) closePlanPage();
+    });
+    planPage.addEventListener("keydown", event => {
+      if (event.key !== "Tab" || planPage.hidden) return;
+      const focusable = Array.from(planPage.querySelectorAll(planPageFocusableSelector))
+        .filter(node => node instanceof HTMLElement && !node.hidden);
+      if (!focusable.length) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
     planPageDownload.onclick = () => {
       if (!activePlan) return;
       downloadPlanText(activePlan.title, activePlan.body);
@@ -16668,6 +17920,9 @@ __ICONS_JS__
         serviceTierOptions.hidden = true;
         reasoningOptions.hidden = true;
       }
+    };
+    modelCatalogRetry.onclick = () => {
+      void loadModelCatalog();
     };
     permissionSettingsButton.onclick = () => {
       const willClose = !permissionPopover.classList.contains("closed");
@@ -16704,15 +17959,15 @@ __ICONS_JS__
       markPermissionSettingsDirty();
     };
     modelSettingRow.onclick = event => {
-      if (event.target === modelSelector) return;
+      if (!modelCatalogAvailable || event.target === modelSelector) return;
       toggleSettingOptions(modelOptions);
     };
     serviceTierSettingRow.onclick = event => {
-      if (event.target === serviceTierSelector) return;
+      if (!modelCatalogAvailable || event.target === serviceTierSelector) return;
       toggleSettingOptions(serviceTierOptions);
     };
     reasoningSettingRow.onclick = event => {
-      if (event.target === reasoningSelector) return;
+      if (!modelCatalogAvailable || event.target === reasoningSelector) return;
       toggleSettingOptions(reasoningOptions);
     };
     attachmentButton.onclick = toggleComposerActionMenu;
@@ -16758,7 +18013,13 @@ __ICONS_JS__
       closeHeaderPopovers();
     });
     document.addEventListener("keydown", event => {
-      if (event.key === "Escape") closeHeaderPopovers();
+      if (event.key !== "Escape") return;
+      if (!planPage.hidden) {
+        event.preventDefault();
+        closePlanPage();
+        return;
+      }
+      closeHeaderPopovers();
     });
     document.getElementById("back").onclick = () => {
       const params = new URLSearchParams();
@@ -16770,14 +18031,18 @@ __ICONS_JS__
     };
     async function submitPrompt(action = primaryComposerAction()) {
       if (sendingPrompt) return;
-      if (action === "interrupt") {
-        await interruptNativeTurn();
-        return;
-      }
       if (action === "choose") {
         openInterruptionChoice();
         return;
       }
+      if (action === "wait") {
+        setSendStatus("当前轮正在执行，请等待或使用单独的中断按钮", "");
+        return;
+      }
+      // Sending, keyboard submission, attachments and steer choices must
+      // never become an interrupt mutation.  Interrupts are issued only by
+      // ``interruptButton.onclick`` below, where the user sees that intent.
+      if (action !== "continue" && action !== "steer") return;
       const prompt = promptInput.value;
       if (!prompt.trim() && imageAttachments.length === 0) {
         setSendStatus("请输入内容或照片", "error");
@@ -16845,10 +18110,14 @@ __ICONS_JS__
       saveModelSettingsIfChanged();
       savePermissionSettingsIfChanged();
       const permissionSettings = readSelectedPermissionSettings();
+      const modelSettings = readSelectedModelSettings();
       const body = {prompt};
-      if (savedModelSettings.model) body.model = savedModelSettings.model;
-      if (savedModelSettings.effort) body.effort = savedModelSettings.effort;
-      if (savedModelSettings.service_tier) body.service_tier = savedModelSettings.service_tier;
+      // A catalog outage must never turn a previous localStorage choice into
+      // an unverified provider model for an existing session.  Continue the
+      // known session with provider defaults until a fresh catalog returns.
+      if (modelCatalogAvailable && modelSettings.model) body.model = modelSettings.model;
+      if (modelCatalogAvailable && modelSettings.effort) body.effort = modelSettings.effort;
+      if (modelCatalogAvailable && modelSettings.service_tier) body.service_tier = modelSettings.service_tier;
       let permissionMode = permissionSettings.permission_mode;
       if (USES_CLAUDE_PLAN_PERMISSION_MODE && selectedCollaborationMode === "plan") {
         permissionMode = "plan";
@@ -16893,7 +18162,6 @@ __ICONS_JS__
     function primaryComposerAction() {
       if (!nativeTurnRunning) return "continue";
       if (canSteerActiveTurn() && composerHasDraft()) return "choose";
-      if (canInterruptActiveTurn() && !composerHasDraft()) return "interrupt";
       return "wait";
     }
     function applyNativeTurnState(event, options = {}) {
@@ -17064,9 +18332,16 @@ __ICONS_JS__
       if (!plan || !String(plan.body || "").trim()) return;
       activePlan = plan;
       renderPlanPage(plan);
+      planPagePreviouslyFocused = document.activeElement;
+      planPagePreviousOverflow = document.body.style.overflow;
+      if (nativeAppShell) {
+        nativeAppShell.inert = true;
+        nativeAppShell.setAttribute("aria-hidden", "true");
+      }
       planPage.hidden = false;
       document.body.style.overflow = "hidden";
       updatePlanActionState();
+      requestAnimationFrame(() => planPageClose?.focus());
     }
     function renderPlanPage(plan) {
       planPageTitle.textContent = plan.title || "计划";
@@ -17088,8 +18363,17 @@ __ICONS_JS__
       return source || String(text || "").trim();
     }
     function closePlanPage() {
+      if (planPage.hidden) return;
       planPage.hidden = true;
-      document.body.style.overflow = "";
+      document.body.style.overflow = planPagePreviousOverflow;
+      if (nativeAppShell) {
+        nativeAppShell.inert = false;
+        nativeAppShell.removeAttribute("aria-hidden");
+      }
+      if (planPagePreviouslyFocused instanceof HTMLElement) {
+        planPagePreviouslyFocused.focus({preventScroll: true});
+      }
+      planPagePreviouslyFocused = null;
     }
     function showPlanExecutionBar(plan = activePlan) {
       if (!planExecutionBar) return;
@@ -17338,14 +18622,18 @@ __ICONS_JS__
     }
     function updateComposerDisabled() {
       const mode = primaryComposerAction();
-      const requiresTurn = mode === "interrupt" || mode === "steer";
-      steerButton.hidden = !canSteerActiveTurn();
-      interruptButton.hidden = !canInterruptActiveTurn();
-      continueButton.innerHTML = mode === "interrupt" ? ICONS.stop : ICONS.send;
-      continueButton.classList.toggle("stop", mode === "interrupt");
+      const requiresTurn = mode === "steer";
+      const hasActiveTurn = Boolean(nativeTurnRunning && nativeThreadId && activeTurnId);
+      const canSteer = hasActiveTurn && canSteerActiveTurn();
+      const canInterrupt = hasActiveTurn && canInterruptActiveTurn();
+      if (dockActions) dockActions.hidden = !(canSteer || canInterrupt);
+      steerButton.hidden = !canSteer;
+      interruptButton.hidden = !canInterrupt;
+      continueButton.innerHTML = ICONS.send;
+      continueButton.classList.remove("stop");
       continueButton.setAttribute(
         "aria-label",
-        mode === "interrupt" ? "中断当前轮" : mode === "wait" ? "等待当前轮" : nativeTurnRunning ? "发送到当前轮" : "发送"
+        mode === "wait" ? "等待当前轮" : nativeTurnRunning ? "发送到当前轮" : "发送"
       );
       continueButton.disabled = (
         sendingPrompt ||
@@ -17356,18 +18644,24 @@ __ICONS_JS__
       );
       steerButton.disabled = sendingPrompt || !canSteerActiveTurn() || !nativeThreadId || !activeTurnId;
       attachmentButton.disabled = sendingPrompt;
-      modelSelector.disabled = sendingPrompt || nativeTurnRunning;
+      modelSelector.disabled = !modelCatalogAvailable || sendingPrompt || nativeTurnRunning;
       modelSettingsButton.disabled = false;
       permissionSelector.disabled = sendingPrompt;
       permissionSettingsButton.disabled = false;
-      reasoningSelector.disabled = sendingPrompt || nativeTurnRunning || reasoningSelector.options.length <= 1;
-      serviceTierSelector.disabled = sendingPrompt || nativeTurnRunning || serviceTierSelector.options.length <= 1;
+      reasoningSelector.disabled = !modelCatalogAvailable || sendingPrompt || nativeTurnRunning || reasoningSelector.options.length <= 1;
+      serviceTierSelector.disabled = !modelCatalogAvailable || sendingPrompt || nativeTurnRunning || serviceTierSelector.options.length <= 1;
       interruptButton.disabled = sendingPrompt || !canInterruptActiveTurn() || !nativeThreadId || !activeTurnId;
       updateHandoffControls();
       syncSettingOptionsDisabled();
       setComposerActivity(nativeTurnRunning || sendingPrompt);
     }
     function updateSettingSummary() {
+      if (!modelCatalogAvailable) {
+        modelSettingValue.textContent = "模型目录不可用";
+        modelSettingsButton.textContent = "模型目录不可用";
+        modelSettingsButton.classList.remove("modified");
+        return;
+      }
       const modelText = selectedOptionText(modelSelector, "模型");
       const effortText = selectedOptionText(reasoningSelector, "默认");
       const tierText = selectedOptionText(serviceTierSelector, "正常");
@@ -17525,7 +18819,7 @@ __ICONS_JS__
         }
       };
       renderTranscript(event, "user local-pending", "你");
-      window.scrollTo(0, document.body.scrollHeight);
+      scrollToBottom(true);
     }
     async function attachNative() {
       if (invalidNativeThreadId) return;
@@ -17534,7 +18828,8 @@ __ICONS_JS__
       try {
         const result = await withNativeSoftTimeout(api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/attach`, {
           method: "POST",
-          body: "{}"
+          body: "{}",
+          headers: {"Idempotency-Key": nativeMutationKey("session-attach")}
         }), "连接原生会话较慢");
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.active_turn_id || "";
@@ -17551,7 +18846,8 @@ __ICONS_JS__
       try {
         const result = await withNativeSoftTimeout(api(`${API_BASE}/sessions/${encodeURIComponent(nativeThreadId)}/sync`, {
           method: "POST",
-          body: "{}"
+          body: "{}",
+          headers: {"Idempotency-Key": nativeMutationKey("session-sync")}
         }), "同步原生 transcript 较慢");
         if (result && result.turn_id) nativeTurnId = result.turn_id;
         activeTurnId = result.turn_running ? (result.active_turn_id || result.turn_id || activeTurnId || "") : "";
@@ -17563,14 +18859,54 @@ __ICONS_JS__
         renderStatus("native_sync_failed", error.message || String(error));
       }
     }
-    function startNativeTranscriptSyncLoop() {
-      if (nativeTranscriptSyncTimer) return;
-      if (nativeThreadId && !invalidNativeThreadId) {
-        syncNativeTranscript().then(pollEvents);
+    nativePresentationRetry.addEventListener("click", async () => {
+      if (!nativeThreadId || invalidNativeThreadId || nativePresentationRetry.disabled) return;
+      nativePresentationRetry.disabled = true;
+      nativePresentationRetry.textContent = "正在同步";
+      try {
+        await syncNativeTranscript();
+        // This is deliberately an explicit user action.  Normal page loads
+        // and SSE initial snapshots stay read-only; only this retry is allowed
+        // to request provider transcript synchronization.
+        await loadNativeSessionInfo();
+      } finally {
+        nativePresentationRetry.disabled = false;
+        nativePresentationRetry.textContent = "重新同步";
       }
-      nativeTranscriptSyncTimer = setInterval(pollEvents, 1000);
+    });
+    function stopNativeTranscriptFallback() {
+      if (!nativeTranscriptSyncTimer) return;
+      window.clearInterval(nativeTranscriptSyncTimer);
+      nativeTranscriptSyncTimer = null;
+    }
+    function startNativeTranscriptFallback() {
+      // EventSource is the normal delivery path.  Polling exists only as a
+      // low-frequency, visible-page recovery path while it reconnects.
+      if (document.visibilityState === "hidden" || source || nativeTranscriptSyncTimer) return;
+      nativeTranscriptSyncTimer = window.setInterval(
+        pollEvents,
+        NATIVE_TRANSCRIPT_FALLBACK_INTERVAL_MS,
+      );
+    }
+    function resumeNativeLiveConnection() {
+      if (document.visibilityState === "hidden") return;
+      pollEvents();
+      if (!source) openStream(currentStreamCursor());
+    }
+    function startNativeTranscriptSyncLoop() {
+      if (nativeThreadId && !invalidNativeThreadId) {
+        // Opening the page is read-only: messages are restored from the
+        // cached snapshot and SSE.  Transcript writes stay behind explicit
+        // recovery/history actions or the server-side background worker.
+        resumeNativeLiveConnection();
+      }
       document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) pollEvents();
+        if (document.visibilityState === "hidden") {
+          stopNativeTranscriptFallback();
+          closeLiveEventSource();
+          return;
+        }
+        resumeNativeLiveConnection();
       });
     }
     function scheduleTerminalTranscriptSync(event) {
@@ -17596,24 +18932,23 @@ __ICONS_JS__
     loadProviderCapabilities();
     loadModelCatalog();
     if (invalidNativeThreadId) renderStatus("native_session_invalid", "会话链接无效，请从最近会话重新打开");
-    refreshNativeControlInBackground();
     loadNativeSessionInfo().catch(() => {});
     loadRecentEvents().catch(error => {
       renderStatus("load_recent_failed", error.message || String(error));
     }).then(() => {
       startNativeTranscriptSyncLoop();
     });
-    window.addEventListener("pagehide", closeLiveEventSource);
-    window.addEventListener("beforeunload", closeLiveEventSource);
-    window.addEventListener("pageshow", () => {
-      if (!source && currentStreamCursor()) openStream(currentStreamCursor());
-      pollEvents();
+    window.addEventListener("pagehide", () => {
+      stopNativeTranscriptFallback();
+      closeLiveEventSource();
     });
-    function refreshNativeControlInBackground() {
-      attachNative().then(loadNativeSessionInfo).catch(error => {
-        renderStatus("native_sync_failed", error.message || String(error));
-      });
-    }
+    window.addEventListener("beforeunload", () => {
+      stopNativeTranscriptFallback();
+      closeLiveEventSource();
+    });
+    window.addEventListener("pageshow", () => {
+      resumeNativeLiveConnection();
+    });
     async function loadRecentEvents() {
       let snapshot;
       if (nativeThreadId) {
@@ -17922,11 +19257,13 @@ __ICONS_JS__
       }
     }
     function scheduleStreamReconnect() {
-      if (streamReconnectTimer) return;
+      if (document.visibilityState === "hidden") return;
       if (source) {
         source.close();
         source = null;
       }
+      startNativeTranscriptFallback();
+      if (streamReconnectTimer) return;
       streamReconnectTimer = window.setTimeout(() => {
         streamReconnectTimer = null;
         openStream(currentStreamCursor());
@@ -17937,15 +19274,18 @@ __ICONS_JS__
       return nativeThreadId ? nativeUpdateCursor : latestEventId;
     }
     function openStream(afterId) {
+      if (document.visibilityState === "hidden") return;
       closeLiveEventSource();
       source = new EventSource(streamPathWithCursor(afterId));
       source.onopen = () => {
         streamReconnectDelay = 500;
+        stopNativeTranscriptFallback();
         setConnectionState("connected");
       };
       source.onerror = () => {
         setConnectionState("reconnecting");
         pollEvents();
+        startNativeTranscriptFallback();
         scheduleStreamReconnect();
       };
       source.onmessage = (message) => renderNativeStreamPayload(JSON.parse(message.data));
@@ -18163,7 +19503,7 @@ __ICONS_JS__
         applyNativeTurnState(event);
         updateComposerDisabled();
         if (event.id) cursor.textContent = "#" + event.id;
-        window.scrollTo(0, document.body.scrollHeight);
+        scrollToBottom();
         return;
       }
       if (isOfficialAssistantTranscriptEvent(event)) {
@@ -18171,7 +19511,7 @@ __ICONS_JS__
         applyNativeTurnState(event);
         updateComposerDisabled();
         if (event.id) cursor.textContent = "#" + event.id;
-        window.scrollTo(0, document.body.scrollHeight);
+        scrollToBottom();
         return;
       }
       if (previousLatestTurnId && incomingTurnId && incomingTurnId !== previousLatestTurnId) {
@@ -18179,7 +19519,7 @@ __ICONS_JS__
         applyNativeTurnState(event);
         updateComposerDisabled();
         if (event.id) cursor.textContent = "#" + event.id;
-        window.scrollTo(0, document.body.scrollHeight);
+        scrollToBottom();
         return;
       }
       render(event);
@@ -18797,7 +20137,7 @@ __ICONS_JS__
       } finally {
         renderTarget = previousTarget;
       }
-      if (options.scroll !== false) window.scrollTo(0, document.body.scrollHeight);
+      if (options.scroll !== false) scrollToBottom();
     }
     function renderAssistant(event, opts = {}) {
       renderTranscript(event, "assistant", PROVIDER_LABEL, opts);
@@ -19937,17 +21277,26 @@ def _legacy_live_page(agent_run_id: int) -> str:
       }}
       return response.json().catch(() => ({{}}));
     }}
+    function nativeMutationKey(operation) {{
+      const runtime = window.WLCodexSurfaceRuntime;
+      if (runtime && typeof runtime.mutationKey === "function") {{
+        return runtime.mutationKey("native-" + operation);
+      }}
+      return "native-" + operation + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+    }}
     async function nativeControl(action, body) {{
       if (!nativeThreadId) return;
       await api(`/api/native/codex/sessions/${{encodeURIComponent(nativeThreadId)}}/${{action}}`, {{
         method: "POST",
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        headers: {{"Idempotency-Key": nativeMutationKey("session-" + action)}}
       }});
     }}
     async function resolveApproval(requestId, action) {{
       await api(`/api/native/codex/approvals/${{encodeURIComponent(requestId)}}/resolve`, {{
         method: "POST",
-        body: JSON.stringify({{action}})
+        body: JSON.stringify({{action}}),
+        headers: {{"Idempotency-Key": nativeMutationKey("approval-" + requestId)}}
       }});
     }}
     document.getElementById("continue").onclick = () => nativeControl("continue", {{prompt: promptInput.value}});

@@ -1,5 +1,8 @@
 # WLCodex ECC-Inspired Engineer Expertise Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Status
 
 Drafted on 2026-05-26 from the approved direction:

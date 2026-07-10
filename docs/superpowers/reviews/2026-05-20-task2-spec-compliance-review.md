@@ -1,5 +1,8 @@
 # Spec Compliance Review — Task 2: Cockpit Menu And Help UX
 
+> **SUPERSEDED — historical review only.** It is not a current release result;
+> use [the current semantic contract](../../product-semantics.md) and current tests.
+
 > Superseded on 2026-05-20 by
 > `docs/superpowers/reviews/2026-05-20-deep-repair-spec-compliance-review.md`.
 > This review used the older `/new` = "新任务" and `/sessions` legacy-menu

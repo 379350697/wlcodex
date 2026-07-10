@@ -1,5 +1,8 @@
 # WLCodex Relay Task Workspace Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Status
 
 Drafted on 2026-06-14 after the user corrected the product shape: relay mode

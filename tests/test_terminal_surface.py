@@ -16,7 +16,7 @@ from wlcodex.surfaces.terminal.renderer import (
     render_no_session_hint,
     render_busy_selector,
 )
-from wlcodex.surfaces.terminal.redaction import redact_terminal_text, redact_and_cap_frame
+from wlcodex.surfaces.terminal.redaction import redact_and_cap_frame
 from wlcodex.surfaces.terminal.manager import TerminalSessionManager
 from wlcodex.surfaces.core.models import TerminalPolicy
 from wlcodex.surfaces.terminal.router import (
@@ -243,7 +243,7 @@ def test_terminal_manager_active_for_conversation_returns_latest_attached():
         strategy="stream_json",
         external_session_id="cl_1",
     )
-    ref2 = manager.attach(
+    manager.attach(
         conversation_id=42,
         agent="claude",
         strategy="stream_json",

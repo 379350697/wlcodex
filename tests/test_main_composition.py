@@ -20,6 +20,13 @@ from wlcodex.watchdog import TaskLivenessConfig, TaskWatchdog
 pytestmark = pytest.mark.integration
 
 
+def _discard_unrun_event_loop_future(_loop: object, future: object) -> None:
+    """Close a coroutine passed to a deliberately short-circuited test loop."""
+    close = getattr(future, "close", None)
+    if callable(close):
+        close()
+
+
 def _write_test_config(path: Path) -> None:
     path.parent.mkdir(exist_ok=True)
     path.write_text(
@@ -197,6 +204,158 @@ def test_web_only_entry_is_selected_when_live_stream_exists() -> None:
     ) is True
 
 
+def test_web_only_persists_legacy_queue_recovery_without_dispatch(
+    tmp_path: Path,
+) -> None:
+    """Tokenless web-only never leaves a historical Telegram queue silent."""
+    from types import SimpleNamespace
+
+    from wlcodex.main import (
+        _mark_legacy_queues_for_web_only,
+        _should_run_web_entry_only,
+    )
+    from wlcodex.runtime_diagnostics import build_runtime_status
+    from wlcodex.runtime_event_store import RuntimeEventStore
+    from wlcodex.runtime_events import (
+        AggregateType,
+        EventSource,
+        EventType,
+        RuntimeEvent,
+        Visibility,
+        now_iso,
+    )
+
+    config = load_config(_write_test_config_toml(live_stream_enabled=True))
+    ledger = Ledger.open(tmp_path / "web-only-legacy-queue.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    legacy = ledger.create_conversation(
+        chat_id=1,
+        user_id=1,
+        title="Legacy queued task",
+        mode="chief_engineer",
+        workspace_alias="demo",
+        legacy_compatible=True,
+    )
+    queued = store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_QUEUED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id=f"queued-{legacy.id}",
+        correlation_id="legacy-queued-web-only",
+        source=EventSource.CONTROLLER,
+        actor="user",
+        visibility=Visibility.USER,
+        payload={"goal": "resume historic Telegram work"},
+        occurred_at=now_iso(),
+        conversation_id=legacy.id,
+    ))
+
+    web_only = _should_run_web_entry_only(
+        config,
+        token=None,
+        live_stream_components=SimpleNamespace(server=object()),
+    )
+    assert web_only is True
+    assert _mark_legacy_queues_for_web_only(
+        web_entry_only=web_only,
+        runtime_store=store,
+    ) == 1
+
+    recovery = store.list_by_conversation(legacy.id)[-1]
+    assert recovery.event_type == EventType.RUN_RECOVERY_REQUIRED
+    assert recovery.causation_id == queued.id
+    assert recovery.payload["state"] == "needs_recovery"
+    assert "Telegram" in recovery.payload["blocking_reason"]
+    assert "Native/Relay" in recovery.payload["next_action"]
+    assert store.get_conversation_runtime_state(legacy.id) == "needs_recovery"
+    # No web-only fallback may manufacture an execution row or claim the item.
+    assert ledger._conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    assert ledger._conn.execute("SELECT COUNT(*) FROM orchestration_runs").fetchone()[0] == 0
+    assert store.claim_next_queued_run_for_workspace(
+        "demo",
+        lease_owner="web-only-must-not-dispatch",
+    ) is None
+    status = build_runtime_status(store, legacy.id)
+    assert status.status == "needs_recovery"
+    assert "Telegram" in status.blocking_reason
+    assert "Native/Relay" in status.next_action
+    # The recovery marker is durable and idempotent across web-only restarts.
+    assert _mark_legacy_queues_for_web_only(
+        web_entry_only=web_only,
+        runtime_store=store,
+    ) == 0
+
+    # Broken historic references cannot be leased by any workspace either;
+    # mark them explicitly instead of leaving an invisible queue row behind.
+    orphaned_queued = store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_QUEUED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id="queued-orphaned-legacy",
+        correlation_id="legacy-queued-orphaned-web-only",
+        source=EventSource.CONTROLLER,
+        actor="user",
+        visibility=Visibility.USER,
+        payload={"goal": "recover disconnected historic queue"},
+        occurred_at=now_iso(),
+        conversation_id=999,
+    ))
+    assert _mark_legacy_queues_for_web_only(
+        web_entry_only=web_only,
+        runtime_store=store,
+    ) == 1
+    orphaned_recovery = store.list_by_conversation(999)[-1]
+    assert orphaned_recovery.causation_id == orphaned_queued.id
+    assert orphaned_recovery.payload["queue_kind"] == "legacy_telegram_orphaned"
+    assert orphaned_recovery.payload["conversation_missing"] is True
+    assert store.get_conversation_runtime_state(999) == "needs_recovery"
+    assert _mark_legacy_queues_for_web_only(
+        web_entry_only=web_only,
+        runtime_store=store,
+    ) == 0
+
+    # Telegram-enabled startup skips this marker path and keeps normal
+    # per-workspace leasing for an in-flight legacy conversation.
+    enabled = ledger.create_conversation(
+        chat_id=2,
+        user_id=2,
+        title="Telegram-enabled queued task",
+        mode="chief_engineer",
+        workspace_alias="demo",
+        legacy_compatible=True,
+    )
+    enabled_queued = store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.RUN_QUEUED,
+        aggregate_type=AggregateType.ORCHESTRATION_RUN,
+        aggregate_id=f"queued-{enabled.id}",
+        correlation_id="legacy-queued-telegram-enabled",
+        source=EventSource.CONTROLLER,
+        actor="user",
+        visibility=Visibility.USER,
+        payload={"goal": "normal Telegram queue consumer"},
+        occurred_at=now_iso(),
+        conversation_id=enabled.id,
+    ))
+    telegram_enabled = _should_run_web_entry_only(
+        config,
+        token="telegram-token-present",
+        live_stream_components=SimpleNamespace(server=object()),
+    )
+    assert telegram_enabled is False
+    assert _mark_legacy_queues_for_web_only(
+        web_entry_only=telegram_enabled,
+        runtime_store=store,
+    ) == 0
+    claim = store.claim_next_queued_run_for_workspace(
+        "demo",
+        lease_owner="telegram-enabled-worker",
+    )
+    assert claim is not None
+    assert claim.queued_event.id == enabled_queued.id
+
+
 class _FakeLiveStreamServer:
     host = "127.0.0.1"
     port = 18731
@@ -232,6 +391,16 @@ class _FakeRelayRuntimeProjector:
         self.scan_count += 1
         self.scanned.set()
         return 0
+
+
+class _FakeRetentionRunner:
+    def __init__(self) -> None:
+        self.run_count = 0
+        self.ran = asyncio.Event()
+
+    def run_once(self) -> None:
+        self.run_count += 1
+        self.ran.set()
 
 
 @pytest.mark.asyncio
@@ -288,6 +457,29 @@ async def test_web_only_entry_runs_relay_runtime_projector_scan() -> None:
     assert server.started is True
     assert server.stopped is True
     assert projector.scan_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_retention_loop_waits_for_interval_before_first_apply() -> None:
+    from wlcodex.main import _run_runtime_raw_frame_retention_loop
+
+    runner = _FakeRetentionRunner()
+    task = asyncio.create_task(
+        _run_runtime_raw_frame_retention_loop(
+            runner.run_once,
+            interval_seconds=0.01,
+        )
+    )
+
+    try:
+        assert runner.run_count == 0
+        await asyncio.wait_for(runner.ran.wait(), timeout=1)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert runner.run_count >= 1
 
 
 class _FakeUpdater:
@@ -1150,6 +1342,14 @@ def test_main_passes_terminal_manager_to_build_application(tmp_path: Path) -> No
         fake.create_interaction_renderer = MagicMock(return_value=None)
         return fake
 
+    def _new_short_circuit_loop():
+        loop = MagicMock()
+        loop.run_until_complete.side_effect = lambda future: _discard_unrun_event_loop_future(
+            loop,
+            future,
+        )
+        return loop
+
     # ── Test case 1: terminal.enabled=false → terminal_manager is None ──
     config_path = tmp_path / "test_disabled.toml"
     sqlite_path = tmp_path / "wlcodex_disabled.sqlite3"
@@ -1184,12 +1384,12 @@ def test_main_passes_terminal_manager_to_build_application(tmp_path: Path) -> No
     # Patch on the concrete BaseEventLoop, not the abstract class.
     from asyncio import base_events as _base_events
     original_run_until_complete = _base_events.BaseEventLoop.run_until_complete
-    _base_events.BaseEventLoop.run_until_complete = lambda self, future: None
+    _base_events.BaseEventLoop.run_until_complete = _discard_unrun_event_loop_future
 
     # Also prevent new_event_loop from returning a real loop.
     original_new_event_loop = _asyncio.new_event_loop
     original_set_event_loop = _asyncio.set_event_loop
-    _asyncio.new_event_loop = lambda: MagicMock()
+    _asyncio.new_event_loop = _new_short_circuit_loop
     _asyncio.set_event_loop = lambda loop: None
 
     original_build = main_mod.build_application
@@ -1248,8 +1448,8 @@ def test_main_passes_terminal_manager_to_build_application(tmp_path: Path) -> No
         return fake_app, _make_fake_handlers()
 
     # Re-apply event loop patches (they were restored in test case 1's finally).
-    _base_events.BaseEventLoop.run_until_complete = lambda self, future: None
-    _asyncio.new_event_loop = lambda: MagicMock()
+    _base_events.BaseEventLoop.run_until_complete = _discard_unrun_event_loop_future
+    _asyncio.new_event_loop = _new_short_circuit_loop
     _asyncio.set_event_loop = lambda loop: None
 
     main_mod.build_application = fake_build2
@@ -1422,9 +1622,13 @@ auditor = ["custom_read"]
     monkeypatch.setattr(
         _base_events.BaseEventLoop,
         "run_until_complete",
-        lambda self, future: None,
+        _discard_unrun_event_loop_future,
     )
-    monkeypatch.setattr(_asyncio, "new_event_loop", lambda: MagicMock())
+    short_circuit_loop = MagicMock()
+    short_circuit_loop.run_until_complete.side_effect = (
+        lambda future: _discard_unrun_event_loop_future(short_circuit_loop, future)
+    )
+    monkeypatch.setattr(_asyncio, "new_event_loop", lambda: short_circuit_loop)
     monkeypatch.setattr(_asyncio, "set_event_loop", lambda loop: None)
     monkeypatch.setattr(_sys, "argv", ["main.py", "--fake-backend", "--config", str(config_path)])
     monkeypatch.setenv("WLCODEX_TELEGRAM_BOT_TOKEN", "test-main-composition-token")
@@ -1514,9 +1718,13 @@ auditor = ["strong_codex"]
     monkeypatch.setattr(
         _base_events.BaseEventLoop,
         "run_until_complete",
-        lambda self, future: None,
+        _discard_unrun_event_loop_future,
     )
-    monkeypatch.setattr(_asyncio, "new_event_loop", lambda: MagicMock())
+    short_circuit_loop = MagicMock()
+    short_circuit_loop.run_until_complete.side_effect = (
+        lambda future: _discard_unrun_event_loop_future(short_circuit_loop, future)
+    )
+    monkeypatch.setattr(_asyncio, "new_event_loop", lambda: short_circuit_loop)
     monkeypatch.setattr(_asyncio, "set_event_loop", lambda loop: None)
     monkeypatch.setattr(_sys, "argv", ["main.py", "--fake-backend", "--config", str(config_path)])
     monkeypatch.setenv("WLCODEX_TELEGRAM_BOT_TOKEN", "test-main-composition-token")

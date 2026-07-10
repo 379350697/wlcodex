@@ -281,6 +281,48 @@ async def _request_relay(
 
 
 @pytest.mark.asyncio
+async def test_archive_rejects_uncertain_native_approval_recovery(tmp_path: Path) -> None:
+    service = _relay_service(tmp_path)
+    task = service.create_task(
+        title="Approval recovery",
+        prompt="Preserve the unresolved provider action.",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.lifecycle.set_round_confirmation(
+        task.id,
+        1,
+        source="provider_native_resolving",
+        kind="command_approval",
+        role="director",
+        provider="codex",
+        provider_request_id="req-recovery",
+        runtime_event_id=99,
+        native_session_id="native-test",
+        agent_run_id=101,
+        turn_id="turn-test",
+    )
+
+    response = await _request_relay(
+        tmp_path,
+        f"POST /api/relay/tasks/{task.id}/archive HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: 2\r\n"
+        "Connection: close\r\n\r\n{}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 409" in response
+    assert "native approval recovery is pending" in response
+    archived = service._store._ledger._conn.execute(
+        "SELECT COUNT(*) AS count FROM relay_task_archives WHERE team_run_id = ?",
+        (task.id,),
+    ).fetchone()
+    assert int(archived["count"]) == 0
+
+
+@pytest.mark.asyncio
 async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
     body = json.dumps(
         {
@@ -290,6 +332,7 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
             "provider": "claude",
             "execution_mode": "goal",
             "execution_goal": "ship relay lifecycle",
+            "acceptance_criteria": ["relay lifecycle is delivered"],
             "allow_subagents": "auto",
         }
     )
@@ -349,6 +392,52 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
         "tester",
         "auditor",
     ]
+
+
+@pytest.mark.asyncio
+async def test_relay_detail_get_keeps_legacy_lifecycle_rows_readonly(tmp_path: Path) -> None:
+    """The canonical detail payload must not repair lifecycle rows on GET.
+
+    This uses an intentionally incomplete historical task because the old
+    Marvis-state helper silently called the mutating detail getter after the
+    request handler had already selected the read-only one.
+    """
+    service = _relay_service(tmp_path)
+    task = service.create_task(
+        title="Read-only legacy detail",
+        prompt="Do not backfill while rendering.",
+        workspace="/repo",
+        provider="claude",
+    )
+    conn = service._store._ledger._conn
+    conn.execute("DELETE FROM relay_role_attempts WHERE team_run_id = ?", (task.id,))
+    conn.execute("DELETE FROM relay_rounds WHERE team_run_id = ?", (task.id,))
+    conn.commit()
+    before = {
+        table: int(
+            conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]
+        )
+        for table in ("relay_role_attempts", "relay_rounds", "team_artifacts")
+    }
+
+    response = await _request_relay(
+        tmp_path,
+        f"GET /api/relay/tasks/{task.id} HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["presentation"]["state"] == "running"
+    assert payload["marvis_relay_state"]["task_id"] == task.id
+    after = {
+        table: int(
+            conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]
+        )
+        for table in before
+    }
+    assert after == before
 
 
 @pytest.mark.asyncio
@@ -1001,7 +1090,10 @@ async def test_relay_events_stream_caps_initial_replay_for_large_history(
     finally:
         await server.stop()
 
-    assert response.count("\nevent: ") == 101
+    # An unsequenced presentation snapshot precedes the durable replay and
+    # therefore does not consume any of the 100 history slots.
+    assert response.count("\nevent: ") == 102
+    assert "event: presentation.snapshot" in response
     assert response.count("event: role.status") <= 100
     assert "event: timeline.truncated" in response
     assert '"remaining": 28' in response
@@ -1093,7 +1185,7 @@ async def test_relay_events_snapshot_does_not_duplicate_projected_runtime_delta(
 
 
 @pytest.mark.asyncio
-async def test_relay_sse_snapshot_accepts_durable_valid_role_completion(
+async def test_relay_sse_initial_snapshot_is_readonly_until_background_reconcile(
     tmp_path: Path,
 ) -> None:
     service = _relay_service(tmp_path)
@@ -1163,6 +1255,16 @@ async def test_relay_sse_snapshot_accepts_durable_valid_role_completion(
             agent_run_id=agent_run_id,
         )
     )
+    conn = service._store._ledger._conn
+    before_snapshot = {
+        table: int(conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
+        for table in (
+            "team_artifacts",
+            "relay_role_attempts",
+            "relay_stream_events",
+            "relay_completion_claims",
+        )
+    }
 
     response = await _request_relay(
         tmp_path,
@@ -1173,7 +1275,19 @@ async def test_relay_sse_snapshot_accepts_durable_valid_role_completion(
 
     assert "event: role.native_event" in response
     assert '"kind": "message_completed"' in response
-    jobs = {job.role: job for job in service.get_task(task.id).role_jobs}
+    assert "event: presentation.snapshot" in response
+    assert '"presentation": {"state": "running"' in response
+    after_snapshot = {
+        table: int(conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
+        for table in before_snapshot
+    }
+    assert after_snapshot == before_snapshot
+    jobs = {job.role: job for job in service.get_task_readonly(task.id).role_jobs}
+    assert jobs["implementer"].status == "streaming"
+
+    await service.reconcile_task_lifecycle(task.id, runtime_store)
+
+    jobs = {job.role: job for job in service.get_task_readonly(task.id).role_jobs}
     assert jobs["implementer"].status == "passed"
     assert jobs["tester"].status == "streaming"
 

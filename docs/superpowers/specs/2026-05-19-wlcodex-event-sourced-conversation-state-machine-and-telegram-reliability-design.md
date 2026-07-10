@@ -1,5 +1,8 @@
 # WLCodex Event-Sourced Conversation State Machine And Telegram Reliability Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 > Superseded in user semantics by the 2026-05-20 Remote Workbench repair.
 > Runtime events remain the fact source, but "new task"/queue wording below is
 > historical. Current product paths keep Workbench continuity until `/new`;

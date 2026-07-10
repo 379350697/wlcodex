@@ -1,5 +1,8 @@
 # WLCodex Remote Workbench Cockpit And Onsite Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Decision
 
 WLCodex should move from command-shaped dual modes to a remote-workbench

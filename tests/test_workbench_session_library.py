@@ -8,12 +8,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 
 from wlcodex.workbench.sessions import (
     AgentSessionLibrary,
     AgentSessionResumability,
-    AgentSessionSummary,
 )
 
 

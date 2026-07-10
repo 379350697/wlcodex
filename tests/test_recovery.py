@@ -4,8 +4,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 from wlcodex.db import Ledger
 from wlcodex.models import TaskStatus
 from wlcodex.runtime_diagnostics import (
@@ -22,6 +20,9 @@ from wlcodex.runtime_events import (
     Visibility,
     now_iso,
 )
+
+
+pytestmark = pytest.mark.integration
 
 
 def test_recovery_pauses_running_queued_and_waiting(tmp_path: Path) -> None:

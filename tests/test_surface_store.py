@@ -3,7 +3,6 @@
 replay_surface_state must be a pure function: no SQLite, no side effects.
 """
 
-import pytest
 
 from wlcodex.runtime_events import (
     AggregateType,

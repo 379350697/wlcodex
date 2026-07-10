@@ -1,5 +1,8 @@
 # Spec Compliance Review — Repair Task 6: Execution-Mode Session Persistence
 
+> **SUPERSEDED — historical review only.** It is not a current release result;
+> use [the current semantic contract](../../product-semantics.md) and current tests.
+
 **Reviewer**: Spec Compliance Reviewer (independent)
 **Date**: 2026-05-20
 **Verdict**: **PASS**

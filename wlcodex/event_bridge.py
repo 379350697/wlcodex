@@ -571,6 +571,7 @@ class EventBridge:
         and runs the task liveness watchdog when configured.
         """
         self._running = True
+        await self._drain_available_workspaces_on_startup()
         expiry_task = asyncio.create_task(
             self._expiry_loop(), name="approval-expiry-scan"
         )
@@ -597,6 +598,28 @@ class EventBridge:
                 except asyncio.CancelledError:
                     pass
             self._running = False
+
+    async def _drain_available_workspaces_on_startup(self) -> None:
+        """Kick queued consumers once after process startup.
+
+        A workspace can already be free when the event pump restarts, so no
+        terminal backend event may arrive to trigger the normal drain path.
+        Running the same per-workspace sequence here keeps both waiting-slot
+        tasks and durable ``run.queued`` leases live without globally
+        consuming another workspace's queue.
+        """
+
+        for workspace_alias in list(self._service._workspaces):
+            try:
+                await drain_workspace(self._service, self._backend, workspace_alias)
+                if self._on_workspace_freed is not None:
+                    await self._on_workspace_freed(workspace_alias)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Startup workspace drain failed for %s", workspace_alias
+                )
 
     async def _expiry_loop(self) -> None:
         while True:

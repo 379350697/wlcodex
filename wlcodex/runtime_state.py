@@ -73,6 +73,7 @@ _VALID_ORCHESTRATION_PHASES = frozenset({
     "completed",
     "failed",
     "cancelled",
+    "needs_recovery",
 })
 
 _ORCH_STATUS_MAP: dict[str, str] = {
@@ -444,8 +445,6 @@ def _apply_event(snap: RuntimeStateSnapshot, event: Any) -> None:
     snap.last_event_at = event.occurred_at
 
     etype = event.event_type
-    agg_type = event.aggregate_type
-    agg_id = event.aggregate_id
 
     # --- Orchestration lifecycle ---
     if etype in (
@@ -454,6 +453,7 @@ def _apply_event(snap: RuntimeStateSnapshot, event: Any) -> None:
         EventType.RUN_PHASE_CHANGED,
         EventType.RUN_COMPLETED,
         EventType.RUN_FAILED,
+        EventType.RUN_RECOVERY_REQUIRED,
         EventType.RUN_CANCELLED,
         EventType.RUN_CANCEL_REQUESTED,
     ):
@@ -633,6 +633,19 @@ def _apply_orchestration_event(snap: RuntimeStateSnapshot, event: Any) -> None:
         orch.last_active_agent = str(payload.get("last_active_agent", orch.last_active_agent))
         _propagate_conversation_state(snap, event, "failed")
 
+    elif event.event_type == EventType.RUN_RECOVERY_REQUIRED:
+        orch.status = "needs_user"
+        orch.current_phase = "needs_recovery"
+        orch.failure_reason = str(
+            payload.get("reason", "runtime hand-off requires recovery")
+        )
+        # A queue may require recovery before an orchestration row has ever
+        # been created (for example a historical Telegram queue in formal
+        # web-only mode).  Propagate the durable recovery state to its
+        # conversation as well, rather than leaving the user-facing view at
+        # the misleading prior "queued" state.
+        _propagate_conversation_state(snap, event, "needs_recovery")
+
     elif event.event_type == EventType.RUN_CANCELLED:
         orch.status = "cancelled"
         orch.completed_at = event.occurred_at
@@ -807,7 +820,6 @@ def _apply_approval_event(snap: RuntimeStateSnapshot, event: Any) -> None:
 
 def _apply_timeout_event(snap: RuntimeStateSnapshot, event: Any) -> None:
     """Record timeout info on the affected agent state."""
-    payload = event.payload
     agent_run_id = event.agent_run_id
 
     if agent_run_id is not None:

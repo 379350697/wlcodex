@@ -44,6 +44,20 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeRetentionConfig:
+    """Bounded hot storage and durable archive policy for raw provider frames."""
+
+    archive_dir: Path = Path("runtime/provider-raw-frame-archives")
+    hot_retention_days: int = 7
+    archive_retention_days: int = 90
+    interval_seconds: int = 6 * 60 * 60
+    batch_size: int = 250
+    # The initial 66GB migration is an explicit maintenance action.  Only an
+    # operator enables the periodic worker after that archive has been verified.
+    scheduled_apply_enabled: bool = False
+
+
+@dataclass(frozen=True)
 class DisplayConfig:
     status_update_min_interval_seconds: int
     tail_lines: int
@@ -334,6 +348,7 @@ class AppConfig:
     live_stream: LiveStreamConfig = LiveStreamConfig()
     codex_native: CodexNativeConfig = CodexNativeConfig()
     native_agents: NativeAgentsConfig = NativeAgentsConfig()
+    runtime_retention: RuntimeRetentionConfig = RuntimeRetentionConfig()
 
     def workspace_by_alias(self, alias: str) -> WorkspaceConfig:
         for workspace in self.workspaces:
@@ -403,6 +418,7 @@ def load_config(path: Path) -> AppConfig:
     product_raw = data.get("product", {})
     telegram_output_raw = data.get("telegram_output", {})
     live_stream_raw = data.get("live_stream", {})
+    runtime_retention_raw = data.get("runtime_retention", {})
     codex_native_raw = data.get("codex_native", {})
     native_agents_raw = data.get("native_agents", {})
     native_agents_config = _native_agents_config(native_agents_raw)
@@ -556,6 +572,10 @@ def load_config(path: Path) -> AppConfig:
         live_stream=_live_stream_config(live_stream_raw),
         codex_native=codex_native_config,
         native_agents=native_agents_config,
+        runtime_retention=_runtime_retention_config(
+            runtime_retention_raw,
+            sqlite_path=Path(storage["sqlite_path"]),
+        ),
     )
 
 
@@ -654,6 +674,37 @@ def _live_stream_config(data: dict[str, object]) -> LiveStreamConfig:
         allow_unauthenticated_loopback=bool(
             data.get("allow_unauthenticated_loopback", True)
         ),
+    )
+
+
+def _runtime_retention_config(
+    data: dict[str, object],
+    *,
+    sqlite_path: Path,
+) -> RuntimeRetentionConfig:
+    hot_retention_days = int(data.get("hot_retention_days", 7))
+    archive_retention_days = int(data.get("archive_retention_days", 90))
+    interval_seconds = int(data.get("interval_seconds", 6 * 60 * 60))
+    batch_size = int(data.get("batch_size", 250))
+    if hot_retention_days < 1:
+        raise ConfigError("runtime_retention.hot_retention_days must be at least 1")
+    if archive_retention_days < 1:
+        raise ConfigError("runtime_retention.archive_retention_days must be at least 1")
+    if interval_seconds < 60:
+        raise ConfigError("runtime_retention.interval_seconds must be at least 60")
+    if batch_size < 1:
+        raise ConfigError("runtime_retention.batch_size must be at least 1")
+    default_archive_dir = sqlite_path.parent / "provider-raw-frame-archives"
+    archive_dir = Path(
+        os.path.expanduser(str(data.get("archive_dir", default_archive_dir)))
+    )
+    return RuntimeRetentionConfig(
+        archive_dir=archive_dir,
+        hot_retention_days=hot_retention_days,
+        archive_retention_days=archive_retention_days,
+        interval_seconds=interval_seconds,
+        batch_size=batch_size,
+        scheduled_apply_enabled=bool(data.get("scheduled_apply_enabled", False)),
     )
 
 

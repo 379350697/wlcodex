@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from wlcodex.models import TeamAgentJob, TeamArtifact, TeamRun
@@ -11,16 +11,20 @@ from wlcodex.relay.context import build_relay_board
 from wlcodex.relay.graph import MarvisRelayState, build_marvis_relay_state
 from wlcodex.relay.lifecycle import RelayLifecycleStore
 from wlcodex.relay.models import (
+    GoalAcceptanceRecord,
     RELAY_ROLE_IDS,
     HandoffPacket,
     RelayBoard,
+    RelayPendingInputClaim,
     RelayPendingInput,
+    RelayPresentation,
     RelayRoleJob,
     RelaySessionLink,
     RelayTask,
     RelayTaskDetail,
     RelayTaskSummary,
     RoleContextPacket,
+    build_relay_presentation,
 )
 from wlcodex.live_stream.models import stream_event_from_runtime
 from wlcodex.runtime_events import RuntimeEvent
@@ -33,7 +37,16 @@ class RelayStore:
     def __init__(self, ledger: Any) -> None:
         self._ledger = ledger
         self.lifecycle = RelayLifecycleStore(ledger)
-        self.lifecycle.backfill_all_relay_tasks()
+        # Do not repair legacy records during construction.  A store may be
+        # instantiated while serving an initial page/SSE snapshot; lifecycle
+        # reconciliation belongs to the explicit background worker.
+
+    def assert_submissions_open(self) -> None:
+        """Ask the shared ledger whether an operator has frozen new work."""
+
+        assert_open = getattr(self._ledger, "assert_submissions_open", None)
+        if callable(assert_open):
+            assert_open()
 
     def create_task(
         self,
@@ -90,9 +103,33 @@ class RelayStore:
         *,
         workspace: str | None = None,
         status: str | None = None,
+        include_archived: bool = False,
     ) -> list[RelayTaskSummary]:
+        """Return the user-facing list projection without lifecycle writes."""
+
+        return self.list_tasks_readonly(
+            workspace=workspace,
+            status=status,
+            include_archived=include_archived,
+        )
+
+    def list_tasks_readonly(
+        self,
+        *,
+        workspace: str | None = None,
+        status: str | None = None,
+        include_archived: bool = False,
+    ) -> list[RelayTaskSummary]:
+        """Read Relay cards without backfill, sync, dispatch or artifact writes."""
+
+        archive_clause = "" if include_archived else (
+            " AND NOT EXISTS ("
+            "SELECT 1 FROM relay_task_archives "
+            "WHERE relay_task_archives.team_run_id = team_runs.id)"
+        )
         rows = self._ledger._conn.execute(
-            "SELECT * FROM team_runs WHERE route = 'relay' ORDER BY updated_at DESC, id DESC"
+            "SELECT * FROM team_runs WHERE route = 'relay'"
+            f"{archive_clause} ORDER BY updated_at DESC, id DESC"
         ).fetchall()
         summaries: list[RelayTaskSummary] = []
         for row in rows:
@@ -102,8 +139,12 @@ class RelayStore:
             if status and task.status != status:
                 continue
             artifacts = self._relay_artifacts(task.id)
-            current_artifacts = _current_round_artifacts(artifacts)
+            current_round_id = self.current_round_id_readonly(task.id, artifacts=artifacts)
+            current_artifacts = _artifacts_for_round(artifacts, current_round_id)
             jobs = self._role_jobs(task.id, artifacts=current_artifacts)
+            board = self._latest_board(task, current_artifacts or artifacts)
+            latest_handoff = self._latest_handoff(current_artifacts)
+            execution = self.lifecycle.round_execution(task.id, current_round_id)
             summaries.append(
                 RelayTaskSummary.from_task(
                     task,
@@ -114,12 +155,191 @@ class RelayStore:
                     ),
                     latest_handoff_summary=_latest_summary(current_artifacts, "handoff_packet"),
                     last_activity_at=_latest_activity_at(task, artifacts),
+                    presentation=build_relay_presentation(
+                        task=task,
+                        role_jobs=jobs,
+                        board=board,
+                        round_execution=execution,
+                        latest_handoff=(
+                            latest_handoff.to_json_dict() if latest_handoff is not None else None
+                        ),
+                    ),
                 )
             )
         return sorted(
             summaries,
             key=lambda summary: str(summary.last_activity_at or ""),
             reverse=True,
+        )
+
+    def list_tasks_page_readonly(
+        self,
+        *,
+        workspace: str | None = None,
+        presentation_state: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        include_archived: bool = False,
+    ) -> tuple[list[RelayTaskSummary], int, dict[str, int]]:
+        """Read one Relay task page after database-side semantic filtering.
+
+        ``RelayPresentation`` remains a pure Python projection for the detail
+        and card view.  The stable state portion (task status, active-round
+        confirmation and freshness) is also expressed as a SQL CTE here so a
+        list request does not hydrate every artifact merely to find page 1.
+        The selected rows are then projected with the canonical Python
+        builder, keeping one user-visible presentation contract.
+        """
+
+        selected_state = str(presentation_state or "").strip().lower()
+        page = max(1, int(page or 1))
+        page_size = min(100, max(1, int(page_size or 20)))
+        cte, params = self._task_presentation_cte(
+            workspace=workspace,
+            include_archived=include_archived,
+        )
+        state_clause = ""
+        state_params: list[Any] = []
+        if selected_state:
+            state_clause = " WHERE presentation_state = ?"
+            state_params.append(selected_state)
+        count_row = self._ledger._conn.execute(
+            f"{cte} SELECT COUNT(*) AS total FROM task_projection{state_clause}",
+            [*params, *state_params],
+        ).fetchone()
+        total = int(count_row["total"] if count_row is not None else 0)
+        count_rows = self._ledger._conn.execute(
+            f"{cte} "
+            "SELECT presentation_state, COUNT(*) AS count "
+            "FROM task_projection GROUP BY presentation_state",
+            params,
+        ).fetchall()
+        state_counts = {
+            str(row["presentation_state"]): int(row["count"])
+            for row in count_rows
+        }
+        offset = (page - 1) * page_size
+        rows = self._ledger._conn.execute(
+            f"{cte} SELECT * FROM task_projection{state_clause} "
+            "ORDER BY list_activity_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*params, *state_params, page_size, offset],
+        ).fetchall()
+        summaries = [self._summary_from_task_row(row) for row in rows]
+        return summaries, total, state_counts
+
+    def _task_presentation_cte(
+        self,
+        *,
+        workspace: str | None,
+        include_archived: bool,
+    ) -> tuple[str, list[Any]]:
+        """Build a bound read-only SQL projection for Relay list navigation."""
+
+        clauses = ["team_runs.route = 'relay'"]
+        params: list[Any] = []
+        if not include_archived:
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM relay_task_archives "
+                "WHERE relay_task_archives.team_run_id = team_runs.id)"
+            )
+        selected_workspace = str(workspace or "").strip()
+        if selected_workspace:
+            # Historic non-Relay ``goal`` rows and malformed legacy goals are
+            # intentionally treated as an empty workspace instead of making a
+            # harmless list GET fail on ``json_extract``.
+            clauses.append(
+                "COALESCE(json_extract("
+                "CASE WHEN substr(team_runs.goal, 1, 6) = 'relay:' "
+                "AND json_valid(substr(team_runs.goal, 7)) "
+                "THEN substr(team_runs.goal, 7) ELSE '{}' END, "
+                "'$.workspace'), '') = ?"
+            )
+            params.append(selected_workspace)
+        where_clause = " AND ".join(clauses)
+        return (
+            f"""
+            WITH latest_round AS (
+                SELECT team_run_id, MAX(round_id) AS round_id
+                FROM relay_rounds
+                WHERE status != 'superseded'
+                GROUP BY team_run_id
+            ), current_round AS (
+                SELECT rounds.team_run_id,
+                       rounds.waiting_reason,
+                       rounds.confirmation_source,
+                       rounds.confirmation_kind
+                FROM relay_rounds AS rounds
+                JOIN latest_round
+                  ON latest_round.team_run_id = rounds.team_run_id
+                 AND latest_round.round_id = rounds.round_id
+            ), task_projection AS (
+                SELECT team_runs.*,
+                       COALESCE(
+                           (SELECT MAX(created_at) FROM team_artifacts
+                            WHERE team_artifacts.team_run_id = team_runs.id),
+                           team_runs.updated_at
+                       ) AS list_activity_at,
+                       CASE
+                           WHEN COALESCE(current_round.confirmation_source, '')
+                                IN ('provider_native_resolving', 'provider_native_superseding')
+                           THEN 'blocked'
+                           WHEN team_runs.status IN ('queued', 'running')
+                                AND (
+                                    team_runs.updated_at = ''
+                                    OR julianday(team_runs.updated_at) IS NULL
+                                    OR julianday('now') - julianday(team_runs.updated_at) > (30.0 / 1440.0)
+                                )
+                           THEN 'stale'
+                           WHEN team_runs.status IN ('queued', 'running') THEN 'running'
+                           WHEN team_runs.status = 'waiting_user'
+                                AND (
+                                    COALESCE(current_round.waiting_reason, '')
+                                        IN ('plan_approval', 'provider_approval')
+                                    OR COALESCE(current_round.confirmation_kind, '') LIKE '%\\_approval' ESCAPE '\\'
+                                )
+                           THEN 'waiting_approval'
+                           WHEN team_runs.status = 'waiting_user' THEN 'waiting_user'
+                           WHEN team_runs.status = 'blocked' THEN 'blocked'
+                           WHEN team_runs.status = 'failed' THEN 'failed'
+                           WHEN team_runs.status = 'completed' THEN 'completed'
+                           WHEN team_runs.status = 'interrupted' THEN 'interrupted'
+                           ELSE 'stale'
+                       END AS presentation_state
+                FROM team_runs
+                LEFT JOIN current_round ON current_round.team_run_id = team_runs.id
+                WHERE {where_clause}
+            )
+            """,
+            params,
+        )
+
+    def _summary_from_task_row(self, row: Any) -> RelayTaskSummary:
+        """Build the canonical pure presentation for one selected list row."""
+
+        task = self._task_from_run(_row_to_team_run(row))
+        artifacts = self._relay_artifacts(task.id)
+        current_round_id = self.current_round_id_readonly(task.id, artifacts=artifacts)
+        current_artifacts = _artifacts_for_round(artifacts, current_round_id)
+        jobs = self._role_jobs(task.id, artifacts=current_artifacts)
+        board = self._latest_board(task, current_artifacts or artifacts)
+        latest_handoff = self._latest_handoff(current_artifacts)
+        execution = self.lifecycle.round_execution(task.id, current_round_id)
+        return RelayTaskSummary.from_task(
+            task,
+            role_statuses={job.role: job.status for job in jobs},
+            role_providers={job.role: job.provider for job in jobs},
+            director_decision_summary=_latest_summary(current_artifacts, "routing_decision"),
+            latest_handoff_summary=_latest_summary(current_artifacts, "handoff_packet"),
+            last_activity_at=_latest_activity_at(task, artifacts),
+            presentation=build_relay_presentation(
+                task=task,
+                role_jobs=jobs,
+                board=board,
+                round_execution=execution,
+                latest_handoff=(
+                    latest_handoff.to_json_dict() if latest_handoff is not None else None
+                ),
+            ),
         )
 
     def get_runtime_setting(self, key: str, default: str | None = None) -> str | None:
@@ -317,15 +537,28 @@ class RelayStore:
             raise KeyError(f"unknown relay task id: {task_id}")
         self.lifecycle.backfill_task(task_id)
         self.lifecycle.sync_legacy_projection(task_id)
+        return self.get_task_detail_readonly(task_id)
+
+    def get_task_detail_readonly(self, task_id: int) -> RelayTaskDetail:
+        """Build a Relay detail projection without changing lifecycle state.
+
+        This is the only detail method intended for HTTP GET/SSE snapshots.
+        Mutating callers retain :meth:`get_task_detail`, whose compatibility
+        repair is intentionally explicit and isolated from request rendering.
+        """
+
         team_run = self._ledger.get_team_run(task_id)
+        if team_run is None or team_run.route != "relay":
+            raise KeyError(f"unknown relay task id: {task_id}")
         task = self._task_from_run(team_run)
         artifacts = self._relay_artifacts(task_id)
-        current_round_id = self.current_round_id(task_id)
+        current_round_id = self.current_round_id_readonly(task_id, artifacts=artifacts)
         current_artifacts = _artifacts_for_round(artifacts, current_round_id)
         board = self._latest_board(task, current_artifacts or artifacts)
         latest_handoff = self._latest_handoff(current_artifacts)
         routing_decision = _latest_routing_decision(current_artifacts)
         role_jobs = self._role_jobs(task_id, artifacts=current_artifacts)
+        round_execution = self.lifecycle.round_execution(task_id, current_round_id)
         return RelayTaskDetail(
             task=task,
             board=board,
@@ -345,7 +578,17 @@ class RelayStore:
             routing_decision=routing_decision,
             current_round_id=current_round_id,
             pending_inputs=self.list_pending_inputs(task_id),
-            round_execution=self.lifecycle.round_execution(task_id, current_round_id),
+            round_execution=round_execution,
+            goal_acceptance_records=self.list_goal_acceptance_records(task_id),
+            presentation=build_relay_presentation(
+                task=task,
+                role_jobs=role_jobs,
+                board=board,
+                round_execution=round_execution,
+                latest_handoff=(
+                    latest_handoff.to_json_dict() if latest_handoff is not None else None
+                ),
+            ),
         )
 
     def build_marvis_relay_state(
@@ -396,6 +639,18 @@ class RelayStore:
             current_round_id=target_round_id,
             pending_inputs=detail.pending_inputs,
             round_execution=self.lifecycle.round_execution(detail.task.id, target_round_id),
+            goal_acceptance_records=[
+                record
+                for record in detail.goal_acceptance_records
+                if int(record.round_id) == target_round_id
+            ],
+            presentation=self._presentation_for_round(
+                task=task,
+                role_jobs=role_jobs,
+                board=self._latest_board(task, round_artifacts or detail.artifacts),
+                artifacts=round_artifacts,
+                round_id=target_round_id,
+            ),
         )
 
     def save_context_packet(
@@ -441,6 +696,203 @@ class RelayStore:
         self.lifecycle.sync_legacy_projection(task_id)
         return artifact
 
+    def record_goal_acceptance(
+        self,
+        task_id: int,
+        *,
+        round_id: int,
+        implementation_artifact_id: int | None,
+        implementation_run_id: int | None,
+        verifier_artifact_id: int | None,
+        verifier_role: str,
+        test_declaration: dict[str, Any],
+        test_execution: dict[str, Any],
+        exit_code: int | None,
+        status: str,
+        evidence_status: str,
+        reason: str = "",
+    ) -> GoalAcceptanceRecord:
+        """Persist one goal-verification attempt before task completion can use it.
+
+        Attempts are append-only.  A retry receives a new ``attempt_no`` so a
+        previously failed test remains available as evidence instead of being
+        overwritten by a later pass.
+        """
+
+        clean_status = str(status or "not_run").strip()
+        clean_evidence_status = str(evidence_status or "not_run").strip()
+        allowed = {"passed", "failed", "not_run"}
+        if clean_status not in allowed:
+            raise ValueError(f"invalid goal acceptance status: {clean_status}")
+        if clean_evidence_status not in allowed:
+            raise ValueError(
+                f"invalid goal acceptance evidence_status: {clean_evidence_status}"
+            )
+        clean_role = str(verifier_role or "").strip()
+        if clean_role not in {"tester", "auditor"}:
+            raise ValueError(f"invalid goal acceptance verifier role: {clean_role}")
+        clean_round_id = _coerce_round_id(round_id)
+        if clean_round_id <= 0:
+            raise ValueError("goal acceptance requires a positive round_id")
+        clean_implementation_artifact_id = _positive_int(implementation_artifact_id)
+        clean_implementation_run_id = _positive_int(implementation_run_id)
+        clean_verifier_artifact_id = _positive_int(verifier_artifact_id)
+        if verifier_artifact_id is not None and clean_verifier_artifact_id is None:
+            raise ValueError("invalid goal acceptance verifier artifact id")
+        if clean_verifier_artifact_id is None:
+            raise ValueError("goal acceptance requires a verifier artifact")
+        self._assert_goal_acceptance_artifact(
+            task_id,
+            clean_verifier_artifact_id,
+            round_id=clean_round_id,
+            role=clean_role,
+            artifact_type="test_report" if clean_role == "tester" else "audit_report",
+        )
+        if implementation_artifact_id is not None:
+            if clean_implementation_artifact_id is None or clean_implementation_run_id is None:
+                raise ValueError(
+                    "bound goal acceptance requires implementation artifact and run ids"
+                )
+            implementation_payload = self._assert_goal_acceptance_artifact(
+                task_id,
+                clean_implementation_artifact_id,
+                round_id=clean_round_id,
+                role="implementer",
+                artifact_type="implementation_report",
+            )
+            if _positive_int(implementation_payload.get("implementation_run_id")) != (
+                clean_implementation_run_id
+            ):
+                raise ValueError(
+                    "goal acceptance implementation_run_id does not match implementation artifact"
+                )
+        elif clean_evidence_status == "passed":
+            raise ValueError("unbound goal acceptance cannot have passed evidence")
+        row = self._ledger._conn.execute(
+            """
+            SELECT COALESCE(MAX(attempt_no), 0) + 1 AS attempt_no
+            FROM relay_goal_acceptance_records
+            WHERE team_run_id = ?
+              AND round_id = ?
+              AND COALESCE(implementation_artifact_id, 0) = COALESCE(?, 0)
+              AND verifier_role = ?
+            """,
+            (task_id, clean_round_id, clean_implementation_artifact_id, clean_role),
+        ).fetchone()
+        attempt_no = int(row["attempt_no"] if row is not None else 1)
+        now = _now_text()
+        cur = self._ledger._conn.execute(
+            """
+            INSERT INTO relay_goal_acceptance_records (
+                team_run_id, round_id, implementation_artifact_id,
+                implementation_run_id, verifier_artifact_id, verifier_role,
+                attempt_no, test_declaration_json, test_execution_json,
+                exit_code, status, evidence_status, reason, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                clean_round_id,
+                clean_implementation_artifact_id,
+                clean_implementation_run_id,
+                clean_verifier_artifact_id,
+                clean_role,
+                attempt_no,
+                json.dumps(test_declaration or {}, ensure_ascii=False, sort_keys=True),
+                json.dumps(test_execution or {}, ensure_ascii=False, sort_keys=True),
+                exit_code,
+                clean_status,
+                clean_evidence_status,
+                str(reason or ""),
+                now,
+                now,
+            ),
+        )
+        self._ledger._conn.commit()
+        saved = self._ledger._conn.execute(
+            "SELECT * FROM relay_goal_acceptance_records WHERE id = ?",
+            (int(cur.lastrowid),),
+        ).fetchone()
+        if saved is None:
+            raise KeyError(f"unknown goal acceptance record id: {cur.lastrowid}")
+        return _goal_acceptance_record_from_row(saved)
+
+    def _assert_goal_acceptance_artifact(
+        self,
+        task_id: int,
+        artifact_id: int,
+        *,
+        round_id: int,
+        role: str,
+        artifact_type: str,
+    ) -> dict[str, Any]:
+        """Return an artifact only when it belongs to this exact acceptance scope."""
+
+        row = self._ledger._conn.execute(
+            """
+            SELECT artifact_type, payload_json FROM team_artifacts
+            WHERE id = ? AND team_run_id = ?
+            """,
+            (artifact_id, task_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("goal acceptance artifact does not belong to this task")
+        payload = _relay_json_payload(row["payload_json"])
+        if (_coerce_round_id(payload.get("round_id")) or 1) != int(round_id):
+            raise ValueError("goal acceptance artifact does not belong to this round")
+        if str(row["artifact_type"] or "") != artifact_type:
+            raise ValueError("goal acceptance artifact type does not match verifier binding")
+        if str(payload.get("relay_role") or payload.get("role") or "") != role:
+            raise ValueError("goal acceptance artifact role does not match verifier binding")
+        return payload
+
+    def list_goal_acceptance_records(
+        self,
+        task_id: int,
+        *,
+        round_id: int | None = None,
+    ) -> list[GoalAcceptanceRecord]:
+        sql = "SELECT * FROM relay_goal_acceptance_records WHERE team_run_id = ?"
+        params: list[Any] = [task_id]
+        if round_id is not None:
+            sql += " AND round_id = ?"
+            params.append(int(round_id))
+        sql += " ORDER BY id ASC"
+        rows = self._ledger._conn.execute(sql, params).fetchall()
+        return [_goal_acceptance_record_from_row(row) for row in rows]
+
+    def annotate_goal_acceptance_artifact(
+        self,
+        task_id: int,
+        artifact_id: int,
+        record: GoalAcceptanceRecord,
+    ) -> None:
+        """Expose the durable record in the verifier artifact without mutating it.
+
+        Existing task detail/work-log consumers already project artifact
+        payloads.  Including the immutable acceptance summary there makes the
+        `passed`/`failed`/`not_run` state visible even before a dedicated UI
+        consumes ``goal_acceptance_records``.
+        """
+
+        row = self._ledger._conn.execute(
+            """
+            SELECT payload_json FROM team_artifacts
+            WHERE id = ? AND team_run_id = ?
+            """,
+            (int(artifact_id), task_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown relay artifact id: {artifact_id}")
+        payload = _relay_json_payload(row["payload_json"])
+        payload["goal_acceptance"] = record.to_dict()
+        self._ledger._conn.execute(
+            "UPDATE team_artifacts SET payload_json = ? WHERE id = ? AND team_run_id = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), int(artifact_id), task_id),
+        )
+        self._ledger._conn.commit()
+
     def save_handoff_packet(
         self,
         task_id: int,
@@ -472,6 +924,20 @@ class RelayStore:
         return self.lifecycle.current_round_id(
             task_id,
             fallback=_current_round_id(self._relay_artifacts(task_id)),
+        )
+
+    def current_round_id_readonly(
+        self,
+        task_id: int,
+        *,
+        artifacts: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Read the current round without invoking backfill or legacy sync."""
+
+        source_artifacts = artifacts if artifacts is not None else self._relay_artifacts(task_id)
+        return self.lifecycle.current_round_id_readonly(
+            task_id,
+            fallback=_current_round_id(source_artifacts),
         )
 
     def next_round_id(self, task_id: int) -> int:
@@ -515,6 +981,498 @@ class RelayStore:
             "SELECT * FROM relay_pending_inputs WHERE id = last_insert_rowid()"
         ).fetchone()
         return _pending_input_from_row(row)
+
+    def claim_pending_input_for_workspace(
+        self,
+        workspace: str,
+        *,
+        lease_owner: str,
+        task_id: int | None = None,
+        pending_input_id: int | None = None,
+        queued_through_round_id: int | None = None,
+        lease_seconds: int = 300,
+    ) -> RelayPendingInputClaim | None:
+        """Atomically lease the next eligible pending input for one workspace.
+
+        The queue is deliberately selected by workspace, never by a global
+        task order.  A lease row exists only while a worker owns the input;
+        this lets the maintenance drain distinguish active work from durable
+        historical input.  Expired rows are reclaimed by the next worker.
+
+        ``task_id``/``queued_through_round_id`` narrow the claim for the
+        terminal-round consumer.  Leaving them unset is useful to a dedicated
+        workspace worker that scans ready work itself.
+        """
+
+        clean_workspace = str(workspace or "").strip()
+        owner = str(lease_owner or "").strip()
+        if not clean_workspace or not owner:
+            return None
+        seconds = max(1, int(lease_seconds or 300))
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        expires_at = (now + timedelta(seconds=seconds)).isoformat()
+        conn = self._ledger._conn
+        owns_transaction = not conn.in_transaction
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            # A per-input lease alone permits two different tasks in the same
+            # workspace to be consumed concurrently.  Claim a workspace-wide
+            # fence first; ``BEGIN IMMEDIATE`` makes this check-and-claim
+            # atomic across worker processes sharing the SQLite database.
+            workspace_lock = conn.execute(
+                """
+                SELECT pending_input_id, lease_owner, lease_expires_at
+                FROM relay_workspace_queue_locks
+                WHERE workspace = ?
+                """,
+                (clean_workspace,),
+            ).fetchone()
+            if workspace_lock is not None:
+                lock_expiry = str(workspace_lock["lease_expires_at"] or "")
+                if _relay_lease_is_active(lock_expiry, now):
+                    if owns_transaction:
+                        conn.commit()
+                    return None
+                conn.execute(
+                    "DELETE FROM relay_workspace_queue_locks WHERE workspace = ?",
+                    (clean_workspace,),
+                )
+
+            # Rolling upgrades can have an old per-input lease without the
+            # new workspace fence.  Treat it as a live fence rather than
+            # starting another provider action in that workspace.
+            legacy_active_lease = conn.execute(
+                """
+                SELECT lease_expires_at
+                FROM relay_workspace_queue_leases
+                WHERE workspace = ?
+                  AND lease_owner != ''
+                ORDER BY lease_expires_at ASC, pending_input_id ASC
+                """,
+                (clean_workspace,),
+            ).fetchall()
+            if any(
+                _relay_lease_is_active(str(row["lease_expires_at"] or ""), now)
+                for row in legacy_active_lease
+            ):
+                if owns_transaction:
+                    conn.commit()
+                return None
+            rows = conn.execute(
+                """
+                SELECT pending.*,
+                       lease.pending_input_id AS lease_pending_input_id,
+                       lease.workspace AS lease_workspace,
+                       lease.lease_owner AS current_lease_owner,
+                       lease.lease_expires_at AS current_lease_expires_at,
+                       lease.attempt_count AS current_attempt_count
+                FROM relay_pending_inputs AS pending
+                LEFT JOIN relay_workspace_queue_leases AS lease
+                    ON lease.pending_input_id = pending.id
+                WHERE pending.status = 'pending'
+                ORDER BY pending.created_at ASC, pending.id ASC
+                """
+            ).fetchall()
+            selected: Any | None = None
+            selected_workspace = ""
+            for row in rows:
+                candidate_task_id = int(row["team_run_id"])
+                if task_id is not None and candidate_task_id != int(task_id):
+                    continue
+                if pending_input_id is not None and int(row["id"]) != int(pending_input_id):
+                    continue
+                if (
+                    queued_through_round_id is not None
+                    and int(row["queued_after_round_id"] or 1)
+                    > int(queued_through_round_id)
+                ):
+                    continue
+                lease_workspace = str(row["lease_workspace"] or "").strip()
+                candidate_workspace = lease_workspace or self._workspace_for_task_locked(
+                    candidate_task_id
+                )
+                if candidate_workspace != clean_workspace:
+                    continue
+                previous_owner = str(row["current_lease_owner"] or "").strip()
+                previous_expiry = str(row["current_lease_expires_at"] or "").strip()
+                if previous_owner and _relay_lease_is_active(previous_expiry, now):
+                    continue
+                selected = row
+                selected_workspace = candidate_workspace
+                break
+            if selected is None:
+                if owns_transaction:
+                    conn.commit()
+                return None
+            pending_id = int(selected["id"])
+            existing_lease_id = selected["lease_pending_input_id"]
+            if existing_lease_id is not None:
+                cur = conn.execute(
+                    """
+                    UPDATE relay_workspace_queue_leases
+                    SET workspace = ?,
+                        lease_owner = ?,
+                        lease_expires_at = ?,
+                        attempt_count = attempt_count + 1,
+                        last_error = '',
+                        updated_at = ?
+                    WHERE pending_input_id = ?
+                    """,
+                    (
+                        selected_workspace,
+                        owner,
+                        expires_at,
+                        now_text,
+                        pending_id,
+                    ),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO relay_workspace_queue_leases (
+                        pending_input_id, team_run_id, workspace, lease_owner,
+                        lease_expires_at, attempt_count, last_error,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, 1, '', ?, ?)
+                    """,
+                    (
+                        pending_id,
+                        int(selected["team_run_id"]),
+                        selected_workspace,
+                        owner,
+                        expires_at,
+                        now_text,
+                        now_text,
+                    ),
+                )
+            if int(cur.rowcount or 0) != 1:
+                if owns_transaction:
+                    conn.commit()
+                return None
+            conn.execute(
+                """
+                INSERT INTO relay_workspace_queue_locks (
+                    workspace, pending_input_id, team_run_id, lease_owner,
+                    lease_expires_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    selected_workspace,
+                    pending_id,
+                    int(selected["team_run_id"]),
+                    owner,
+                    expires_at,
+                    now_text,
+                    now_text,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT pending.*, lease.workspace, lease.lease_owner,
+                       lease.lease_expires_at, lease.attempt_count
+                FROM relay_pending_inputs AS pending
+                JOIN relay_workspace_queue_leases AS lease
+                    ON lease.pending_input_id = pending.id
+                WHERE pending.id = ?
+                """,
+                (pending_id,),
+            ).fetchone()
+            if owns_transaction:
+                conn.commit()
+        except Exception:
+            if owns_transaction:
+                conn.rollback()
+            raise
+        if row is None:
+            return None
+        return RelayPendingInputClaim(
+            pending_input=_pending_input_from_row(row),
+            workspace=str(row["workspace"] or selected_workspace),
+            lease_owner=str(row["lease_owner"] or owner),
+            lease_expires_at=str(row["lease_expires_at"] or expires_at),
+            attempt_count=int(row["attempt_count"] or 1),
+        )
+
+    def renew_pending_input_claim(
+        self,
+        claim: RelayPendingInputClaim,
+        *,
+        lease_seconds: int = 300,
+    ) -> RelayPendingInputClaim | None:
+        """Extend an owned lease before a provider-facing side effect."""
+
+        seconds = max(1, int(lease_seconds or 300))
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        expires_at = (now + timedelta(seconds=seconds)).isoformat()
+        conn = self._ledger._conn
+        owns_transaction = not conn.in_transaction
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                """
+                UPDATE relay_workspace_queue_leases
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE pending_input_id = ?
+                  AND team_run_id = ?
+                  AND workspace = ?
+                  AND lease_owner = ?
+                  AND lease_expires_at > ?
+                """,
+                (
+                    expires_at,
+                    now_text,
+                    claim.pending_input.id,
+                    claim.pending_input.task_id,
+                    claim.workspace,
+                    claim.lease_owner,
+                    now_text,
+                ),
+            )
+            if int(cur.rowcount or 0) == 1:
+                lock = conn.execute(
+                    """
+                    UPDATE relay_workspace_queue_locks
+                    SET lease_expires_at = ?, updated_at = ?
+                    WHERE workspace = ?
+                      AND pending_input_id = ?
+                      AND team_run_id = ?
+                      AND lease_owner = ?
+                      AND lease_expires_at > ?
+                    """,
+                    (
+                        expires_at,
+                        now_text,
+                        claim.workspace,
+                        claim.pending_input.id,
+                        claim.pending_input.task_id,
+                        claim.lease_owner,
+                        now_text,
+                    ),
+                )
+                if int(lock.rowcount or 0) != 1:
+                    raise RuntimeError("pending input workspace lock is no longer owned")
+            if owns_transaction:
+                conn.commit()
+        except Exception:
+            if owns_transaction:
+                conn.rollback()
+            raise
+        if int(cur.rowcount or 0) != 1:
+            return None
+        return RelayPendingInputClaim(
+            pending_input=claim.pending_input,
+            workspace=claim.workspace,
+            lease_owner=claim.lease_owner,
+            lease_expires_at=expires_at,
+            attempt_count=claim.attempt_count,
+        )
+
+    def release_pending_input_claim(
+        self,
+        claim: RelayPendingInputClaim,
+        *,
+        error: str = "",
+    ) -> bool:
+        """Drop an owned lease after a recoverable failure.
+
+        We intentionally delete rather than retain a terminal lease row:
+        pending input remains the retry record, while the absence of a lease
+        means no worker is live.  This also keeps maintenance drain truthful.
+        """
+
+        del error  # The pending record is the durable retry source; no live lease remains.
+        conn = self._ledger._conn
+        owns_transaction = not conn.in_transaction
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                """
+                DELETE FROM relay_workspace_queue_leases
+                WHERE pending_input_id = ?
+                  AND team_run_id = ?
+                  AND workspace = ?
+                  AND lease_owner = ?
+                """,
+                (
+                    claim.pending_input.id,
+                    claim.pending_input.task_id,
+                    claim.workspace,
+                    claim.lease_owner,
+                ),
+            )
+            if int(cur.rowcount or 0) == 1:
+                conn.execute(
+                    """
+                    DELETE FROM relay_workspace_queue_locks
+                    WHERE workspace = ?
+                      AND pending_input_id = ?
+                      AND team_run_id = ?
+                      AND lease_owner = ?
+                    """,
+                    (
+                        claim.workspace,
+                        claim.pending_input.id,
+                        claim.pending_input.task_id,
+                        claim.lease_owner,
+                    ),
+                )
+            if owns_transaction:
+                conn.commit()
+            return int(cur.rowcount or 0) == 1
+        except Exception:
+            if owns_transaction:
+                conn.rollback()
+            raise
+
+    def consume_pending_input_claim(
+        self,
+        claim: RelayPendingInputClaim,
+        *,
+        consumed_round_id: int,
+    ) -> RelayPendingInput:
+        """Atomically mark a claimed input consumed and release its lease."""
+
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        conn = self._ledger._conn
+        owns_transaction = not conn.in_transaction
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            lease = conn.execute(
+                """
+                SELECT 1
+                FROM relay_workspace_queue_leases
+                WHERE pending_input_id = ?
+                  AND team_run_id = ?
+                  AND workspace = ?
+                  AND lease_owner = ?
+                  AND lease_expires_at > ?
+                """,
+                (
+                    claim.pending_input.id,
+                    claim.pending_input.task_id,
+                    claim.workspace,
+                    claim.lease_owner,
+                    now_text,
+                ),
+            ).fetchone()
+            if lease is None:
+                raise RuntimeError("pending input claim is no longer owned")
+            updated = conn.execute(
+                """
+                UPDATE relay_pending_inputs
+                SET status = 'consumed',
+                    updated_at = ?,
+                    consumed_round_id = ?
+                WHERE id = ?
+                  AND team_run_id = ?
+                  AND status = 'pending'
+                """,
+                (
+                    now_text,
+                    int(consumed_round_id),
+                    claim.pending_input.id,
+                    claim.pending_input.task_id,
+                ),
+            )
+            if int(updated.rowcount or 0) != 1:
+                raise RuntimeError("pending input is no longer consumable")
+            conn.execute(
+                """
+                DELETE FROM relay_workspace_queue_leases
+                WHERE pending_input_id = ? AND lease_owner = ?
+                """,
+                (claim.pending_input.id, claim.lease_owner),
+            )
+            conn.execute(
+                """
+                DELETE FROM relay_workspace_queue_locks
+                WHERE workspace = ?
+                  AND pending_input_id = ?
+                  AND team_run_id = ?
+                  AND lease_owner = ?
+                """,
+                (
+                    claim.workspace,
+                    claim.pending_input.id,
+                    claim.pending_input.task_id,
+                    claim.lease_owner,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM relay_pending_inputs WHERE id = ?",
+                (claim.pending_input.id,),
+            ).fetchone()
+            if owns_transaction:
+                conn.commit()
+        except Exception:
+            if owns_transaction:
+                conn.rollback()
+            raise
+        if row is None:
+            raise RuntimeError("pending input disappeared while being consumed")
+        return _pending_input_from_row(row)
+
+    def pending_input_transition_artifact(
+        self,
+        task_id: int,
+        pending_input_id: int,
+    ) -> dict[str, Any] | None:
+        """Return the durable marker that binds a pending input to its turn."""
+
+        for artifact in reversed(self._relay_artifacts(task_id)):
+            if str(artifact.get("artifact_type") or "") != "pending_input_transition":
+                continue
+            if int(artifact.get("pending_input_id") or 0) == int(pending_input_id):
+                return artifact
+        return None
+
+    def followup_round_for_transition_artifact(
+        self,
+        task_id: int,
+        transition_artifact_id: int,
+    ) -> int | None:
+        row = self._ledger._conn.execute(
+            """
+            SELECT round_id
+            FROM relay_rounds
+            WHERE team_run_id = ? AND trigger_artifact_id = ?
+            ORDER BY round_id ASC
+            LIMIT 1
+            """,
+            (task_id, transition_artifact_id),
+        ).fetchone()
+        return int(row["round_id"]) if row is not None else None
+
+    def pending_input_followup_artifact(
+        self,
+        task_id: int,
+        pending_input_id: int,
+    ) -> dict[str, Any] | None:
+        """Find the idempotency record for a pending-input follow-up."""
+
+        for artifact in reversed(self._relay_artifacts(task_id)):
+            if str(artifact.get("artifact_type") or "") != "user_followup":
+                continue
+            if int(artifact.get("pending_input_id") or 0) == int(pending_input_id):
+                return artifact
+        return None
+
+    def _workspace_for_task_locked(self, task_id: int) -> str:
+        team_run = self._ledger.get_team_run(task_id)
+        if team_run is None or str(getattr(team_run, "route", "") or "") != "relay":
+            return ""
+        workspace = str(self._task_from_run(team_run).workspace or "").strip()
+        # A legacy task may not have a workspace.  Keep it isolated rather
+        # than putting every such task into one global queue partition.
+        return workspace or f"relay-task:{task_id}"
 
     def get_pending_input(self, task_id: int, pending_input_id: int) -> RelayPendingInput:
         row = self._ledger._conn.execute(
@@ -643,7 +1601,21 @@ class RelayStore:
         self.lifecycle.set_round_status(task_id, self.current_round_id(task_id), status)
         self.lifecycle.sync_legacy_projection(task_id)
 
-    def find_role_by_agent_run_id(self, agent_run_id: int) -> tuple[int, str] | None:
+    def find_relay_attempt_by_agent_run_id(
+        self,
+        agent_run_id: int,
+    ) -> tuple[int, str, int] | None:
+        """Locate the historical Relay attempt that owns a provider run.
+
+        The team-job table is only a current-round mirror.  Looking there
+        first can map a late completion from a superseded round onto the role
+        now displayed in a later round.  Relay attempts retain the immutable
+        provider identity and are therefore the authoritative routing source.
+        """
+
+        attempt = self.lifecycle.attempt_by_agent_run_id(agent_run_id)
+        if attempt is not None:
+            return attempt.team_run_id, attempt.role, attempt.round_id
         row = self._ledger._conn.execute(
             """
             SELECT team_runs.id AS task_id, team_agent_jobs.role AS role
@@ -658,7 +1630,18 @@ class RelayStore:
         ).fetchone()
         if row is None:
             return None
-        return int(row["task_id"]), str(row["role"])
+        return int(row["task_id"]), str(row["role"]), self.current_round_id_readonly(
+            int(row["task_id"])
+        )
+
+    def find_role_by_agent_run_id(self, agent_run_id: int) -> tuple[int, str] | None:
+        """Compatibility projection of :meth:`find_relay_attempt_by_agent_run_id`."""
+
+        mapping = self.find_relay_attempt_by_agent_run_id(agent_run_id)
+        if mapping is None:
+            return None
+        task_id, role, _round_id = mapping
+        return task_id, role
 
     def update_role_metadata(
         self,
@@ -1078,6 +2061,26 @@ class RelayStore:
                 )
         return build_relay_board(task, latest_user_input=task.prompt)
 
+    def _presentation_for_round(
+        self,
+        *,
+        task: RelayTask,
+        role_jobs: list[RelayRoleJob],
+        board: RelayBoard,
+        artifacts: list[dict[str, Any]],
+        round_id: int,
+    ) -> RelayPresentation:
+        latest_handoff = self._latest_handoff(artifacts)
+        return build_relay_presentation(
+            task=task,
+            role_jobs=role_jobs,
+            board=board,
+            round_execution=self.lifecycle.round_execution(task.id, round_id),
+            latest_handoff=(
+                latest_handoff.to_json_dict() if latest_handoff is not None else None
+            ),
+        )
+
     def _latest_handoff(self, artifacts: list[dict[str, Any]]) -> HandoffPacket | None:
         for artifact in reversed(artifacts):
             if artifact.get("artifact_type") == "handoff_packet":
@@ -1140,6 +2143,51 @@ def _decode_goal(goal: str) -> dict[str, Any]:
 
 def _now_text() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _goal_acceptance_record_from_row(row: Any) -> GoalAcceptanceRecord:
+    return GoalAcceptanceRecord(
+        id=int(row["id"]),
+        task_id=int(row["team_run_id"]),
+        round_id=int(row["round_id"]),
+        implementation_artifact_id=(
+            int(row["implementation_artifact_id"])
+            if row["implementation_artifact_id"] is not None
+            else None
+        ),
+        implementation_run_id=(
+            int(row["implementation_run_id"])
+            if row["implementation_run_id"] is not None
+            else None
+        ),
+        verifier_artifact_id=(
+            int(row["verifier_artifact_id"])
+            if row["verifier_artifact_id"] is not None
+            else None
+        ),
+        verifier_role=str(row["verifier_role"] or ""),
+        attempt_no=int(row["attempt_no"] or 1),
+        test_declaration=_relay_json_payload(row["test_declaration_json"]),
+        test_execution=_relay_json_payload(row["test_execution_json"]),
+        exit_code=int(row["exit_code"]) if row["exit_code"] is not None else None,
+        status=str(row["status"] or "not_run"),
+        evidence_status=str(row["evidence_status"] or "not_run"),
+        reason=str(row["reason"] or ""),
+        created_at=str(row["created_at"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+    )
+
+
+def _relay_lease_is_active(value: str, now: datetime) -> bool:
+    """Treat malformed lease times as expired so a crashed worker is recoverable."""
+
+    try:
+        expires_at = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at > now
 
 
 def _pending_input_from_row(row: Any) -> RelayPendingInput:
@@ -1281,6 +2329,16 @@ def _coerce_round_id(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return round_id if round_id > 0 else 0
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        candidate = int(value)
+    except (TypeError, ValueError):
+        return None
+    return candidate if candidate > 0 else None
 
 
 def _annotate_artifact_rounds(

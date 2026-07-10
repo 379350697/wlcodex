@@ -169,6 +169,90 @@ def test_list_by_agent_run_after_rejects_non_positive_limit(tmp_path: Path) -> N
     assert events == []
 
 
+def test_queued_run_started_handoff_prevents_retry_and_keeps_consumed_audit(
+    tmp_path: Path,
+) -> None:
+    """A crash after launch acknowledgement must never start the queue twice."""
+    ledger = Ledger.open(tmp_path / "queue.sqlite3")
+    ledger.migrate()
+    store = RuntimeEventStore(ledger._conn)
+    conversation = ledger.create_conversation(
+        chat_id=1,
+        user_id=1,
+        title="queued",
+        mode="chief_engineer",
+        workspace_alias="demo",
+    )
+    queued = store.append(
+        _make_event(
+            event_type=EventType.RUN_QUEUED,
+            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+            aggregate_id="queued-1",
+            conversation_id=conversation.id,
+            agent_run_id=None,
+            payload={"goal": "run once"},
+        )
+    )
+    claim = store.claim_next_queued_run_for_workspace(
+        "demo",
+        lease_owner="worker-a",
+    )
+    assert claim is not None
+
+    # ``OrchestrationRunner`` writes this marker synchronously before its
+    # background coroutine can run.  Simulate a process dying immediately
+    # after that hand-off, before it can append run.queued.consumed.
+    store.append(
+        _make_event(
+            event_type=EventType.RUN_STARTED,
+            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+            aggregate_id="orch-1",
+            conversation_id=conversation.id,
+            agent_run_id=None,
+            causation_id=queued.id,
+            payload={"phase": "running_analysis"},
+        )
+    )
+
+    assert store.claim_next_queued_run_for_workspace(
+        "demo",
+        lease_owner="worker-b",
+    ) is None
+
+    # The original worker may still record the explicit audit marker; the
+    # hand-off marker must not make this normal bookkeeping path fail.
+    consumed = store.consume_queued_run_claim(claim)
+    assert consumed is not None
+    assert consumed.event_type == EventType.RUN_QUEUED_CONSUMED
+
+
+def test_latest_approval_resolution_is_scoped_to_request_and_agent_run(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    matching = store.append(
+        _make_event(
+            event_type=EventType.APPROVAL_RESOLVED,
+            aggregate_type=AggregateType.APPROVAL,
+            aggregate_id="req-1",
+            agent_run_id=7,
+            payload={"decision": "accept"},
+        )
+    )
+    store.append(
+        _make_event(
+            event_type=EventType.APPROVAL_RESOLVED,
+            aggregate_type=AggregateType.APPROVAL,
+            aggregate_id="req-1",
+            agent_run_id=8,
+            payload={"decision": "cancel"},
+        )
+    )
+
+    assert store.latest_approval_resolution("req-1", agent_run_id=7) == matching
+    assert store.latest_approval_resolution("missing") is None
+
+
 def test_payload_item_ids_by_agent_run_reads_item_id_variants(
     tmp_path: Path,
 ) -> None:

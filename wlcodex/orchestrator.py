@@ -909,8 +909,8 @@ class ChiefEngineerOrchestrator:
         claude_summary = impl
         if claude_drift:
             claude_summary = (
-                f"WARNING: Claude 实施文本中检测到直接 Telegram delivery "
-                f"/ token access 漂移:\n"
+                "WARNING: Claude 实施文本中检测到直接 Telegram delivery "
+                "/ token access 漂移:\n"
                 + "\n".join(f"  - {f}" for f in claude_drift)
                 + f"\n\n---原始 Claude 摘要---\n{impl[:2000]}"
             )

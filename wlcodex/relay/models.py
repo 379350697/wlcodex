@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from wlcodex.relay.artifact_types import ALL_RELAY_ARTIFACT_TYPES
@@ -42,6 +43,120 @@ RELAY_ROLE_JOB_STATUSES = (
     "interrupted",
 )
 RELAY_ARTIFACT_TYPES = ALL_RELAY_ARTIFACT_TYPES
+RELAY_EXECUTION_MODES = (
+    "standard",
+    "plan_first",
+    "goal",
+)
+RELAY_PRESENTATION_STATES = (
+    "running",
+    "waiting_user",
+    "waiting_approval",
+    "blocked",
+    "completed",
+    "interrupted",
+    "failed",
+    "stale",
+)
+GOAL_ACCEPTANCE_STATUSES = (
+    "passed",
+    "failed",
+    "not_run",
+)
+GOAL_ACCEPTANCE_TEST_KINDS = (
+    "pytest",
+    "unittest",
+    "npm_test",
+    "pnpm_test",
+)
+
+
+def normalize_relay_execution_mode(value: Any) -> str:
+    """Return the durable execution contract for new and legacy Relay records."""
+
+    mode = str(value or "").strip().lower()
+    legacy_modes = {
+        "": "standard",
+        "simple": "standard",
+        "auto": "standard",
+        "team": "standard",
+        "standard": "standard",
+        "plan": "plan_first",
+        "plan_first": "plan_first",
+        "goal": "goal",
+    }
+    return legacy_modes.get(mode, "standard")
+
+
+def normalize_acceptance_criteria(values: Any) -> list[str]:
+    """Keep a small, ordered and de-duplicated public acceptance contract."""
+
+    if not isinstance(values, list | tuple):
+        return []
+    criteria: list[str] = []
+    for value in values:
+        criterion = str(value or "").strip()
+        if criterion and criterion not in criteria:
+            criteria.append(criterion)
+    return criteria
+
+
+def normalize_goal_acceptance_declaration(
+    value: Any,
+) -> tuple[dict[str, Any], str]:
+    """Validate the only provider-supplied input accepted by goal verification.
+
+    Relay never interprets a model-produced shell command.  A verifier can
+    bind itself to an implementation run and select one explicitly supported
+    test *kind* with structured arguments.  The controlled executor turns the
+    declaration into an argv list later, with the task workspace as its cwd.
+    """
+
+    if not isinstance(value, dict):
+        return {}, "goal_acceptance must be an object"
+    unknown = sorted(set(value) - {"implementation_run_id", "test"})
+    if unknown:
+        return {}, "goal_acceptance has unsupported fields: " + ", ".join(unknown)
+    raw_run_id = value.get("implementation_run_id")
+    if isinstance(raw_run_id, bool) or not isinstance(raw_run_id, int) or raw_run_id <= 0:
+        return {}, "goal_acceptance requires a positive implementation_run_id"
+    normalized: dict[str, Any] = {"implementation_run_id": int(raw_run_id)}
+    if "test" not in value or value.get("test") is None:
+        return normalized, ""
+    raw_test = value.get("test")
+    if not isinstance(raw_test, dict):
+        return {}, "goal_acceptance.test must be an object"
+    unknown_test = sorted(set(raw_test) - {"kind", "args", "script"})
+    if unknown_test:
+        return {}, "goal_acceptance.test has unsupported fields: " + ", ".join(unknown_test)
+    kind = str(raw_test.get("kind") or "").strip()
+    if kind not in GOAL_ACCEPTANCE_TEST_KINDS:
+        return {}, "goal_acceptance.test.kind is not an approved test kind"
+    raw_args = raw_test.get("args", [])
+    if not isinstance(raw_args, list) or len(raw_args) > 32:
+        return {}, "goal_acceptance.test.args must be a list of at most 32 values"
+    args: list[str] = []
+    for raw_arg in raw_args:
+        if not isinstance(raw_arg, str):
+            return {}, "goal_acceptance.test.args must contain only strings"
+        arg = raw_arg.strip()
+        if not arg or len(arg) > 512:
+            return {}, "goal_acceptance.test.args contains an invalid value"
+        args.append(arg)
+    script = str(raw_test.get("script") or "").strip()
+    if kind in {"npm_test", "pnpm_test"}:
+        if args:
+            return {}, "package-manager goal tests do not accept free-form args"
+        if script not in {"test", "test:e2e"}:
+            return {}, "package-manager goal tests require an approved script"
+    elif script:
+        return {}, "python goal tests do not accept a package script"
+    normalized["test"] = {
+        "kind": kind,
+        "args": args,
+        **({"script": script} if script else {}),
+    }
+    return normalized, ""
 
 
 def _clean_list(values: list[Any] | tuple[Any, ...] | None) -> list[str]:
@@ -112,6 +227,31 @@ class RelayTask:
 
 
 @dataclass(frozen=True)
+class GoalAcceptanceRecord:
+    """Durable, run-bound outcome of one goal-mode verification attempt."""
+
+    id: int
+    task_id: int
+    round_id: int
+    implementation_artifact_id: int | None
+    implementation_run_id: int | None
+    verifier_artifact_id: int | None
+    verifier_role: str
+    attempt_no: int
+    test_declaration: dict[str, Any] = field(default_factory=dict)
+    test_execution: dict[str, Any] = field(default_factory=dict)
+    exit_code: int | None = None
+    status: str = "not_run"
+    evidence_status: str = "not_run"
+    reason: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class RelayRoleJob:
     id: int
     task_id: int
@@ -164,6 +304,23 @@ class RelayPendingInput:
 
 
 @dataclass(frozen=True)
+class RelayPendingInputClaim:
+    """An owned, durable lease for consuming one queued Relay follow-up.
+
+    The pending input remains the historical source record.  A claim is only
+    present while a worker may still create the follow-up round or dispatch
+    its director.  Releasing or consuming the claim removes the lease row so
+    a maintenance drain never mistakes historical inputs for live work.
+    """
+
+    pending_input: RelayPendingInput
+    workspace: str
+    lease_owner: str
+    lease_expires_at: str
+    attempt_count: int = 1
+
+
+@dataclass(frozen=True)
 class RelayBoard:
     task_id: int
     current_goal: str
@@ -177,6 +334,229 @@ class RelayBoard:
 
     def to_json_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class RelayPresentation:
+    """Pure, user-facing projection shared by every Relay surface.
+
+    The Relay task, role jobs and artifacts remain the source records.  This
+    object is deliberately a projection, so rendering it never needs to
+    reconcile or mutate any lifecycle record.
+    """
+
+    state: str
+    freshness: dict[str, Any]
+    current_actor: dict[str, str]
+    blocking_reason: str
+    next_action: str
+    allowed_actions: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def build_relay_presentation(
+    *,
+    task: RelayTask,
+    role_jobs: list[RelayRoleJob],
+    board: RelayBoard,
+    round_execution: dict[str, Any] | None = None,
+    latest_handoff: dict[str, Any] | None = None,
+    source: str = "relay_lifecycle",
+) -> RelayPresentation:
+    """Project lifecycle truth without changing it.
+
+    The mapping intentionally compresses transport-specific role/job statuses
+    into a stable user vocabulary.  Callers can still expose the raw records
+    alongside this projection for expert/debug views.
+    """
+
+    execution = round_execution if isinstance(round_execution, dict) else {}
+    raw_status = str(task.status or "").strip()
+    confirmation = execution.get("confirmation")
+    if not isinstance(confirmation, dict):
+        confirmation = {}
+    waiting_reason = str(execution.get("waiting_reason") or "").strip()
+    confirmation_kind = str(confirmation.get("kind") or "").strip()
+    confirmation_source = str(confirmation.get("source") or "").strip()
+    recovery_required = confirmation_source in {
+        "provider_native_resolving",
+        "provider_native_superseding",
+    }
+    approval_wait = waiting_reason in {
+        "plan_approval",
+        "provider_approval",
+    } or confirmation_kind.endswith("_approval")
+    state = {
+        "queued": "running",
+        "running": "running",
+        "waiting_user": "waiting_approval" if approval_wait else "waiting_user",
+        "blocked": "blocked",
+        "failed": "failed",
+        "completed": "completed",
+        "interrupted": "interrupted",
+    }.get(raw_status, "stale")
+    # The provider may have accepted an approval action just before a process
+    # crash, while Relay has not yet durably finalized its own projection.  Do
+    # not expose that temporary claim as another actionable approval: replay
+    # would risk authorizing or cancelling the same request twice.
+    if recovery_required:
+        state = "blocked"
+    updated_at = str(task.updated_at or "").strip()
+    stale_reason = _presentation_stale_reason(updated_at)
+    if stale_reason and state == "running":
+        state = "stale"
+    if state == "stale" and not stale_reason:
+        stale_reason = f"未知的 Relay 状态：{raw_status or 'empty'}"
+    freshness = {
+        "source": source,
+        "updated_at": updated_at,
+        "is_stale": state == "stale" or bool(stale_reason),
+        "reason": stale_reason,
+        "recovery_required": recovery_required,
+        "recovery_state": "needs_recovery" if recovery_required else "",
+    }
+
+    actor = _presentation_current_actor(role_jobs, state=state)
+    blocking_reason = _presentation_blocking_reason(
+        role_jobs,
+        state=state,
+        waiting_reason=waiting_reason,
+        board=board,
+        recovery_required=recovery_required,
+    )
+    next_action = _presentation_next_action(
+        state=state,
+        board=board,
+        latest_handoff=latest_handoff,
+        actor=actor,
+        blocking_reason=blocking_reason,
+        recovery_required=recovery_required,
+    )
+    return RelayPresentation(
+        state=state,
+        freshness=freshness,
+        current_actor=actor,
+        blocking_reason=blocking_reason,
+        next_action=next_action,
+        allowed_actions=_presentation_allowed_actions(
+            state,
+            recovery_required=recovery_required,
+        ),
+    )
+
+
+def _presentation_stale_reason(updated_at: str) -> str:
+    if not updated_at:
+        return "缺少可验证的最后更新时间"
+    try:
+        observed_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return "最后更新时间格式无法验证"
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - observed_at > timedelta(minutes=30):
+        return "超过 30 分钟未收到新的 Relay 状态"
+    return ""
+
+
+def _presentation_current_actor(
+    role_jobs: list[RelayRoleJob],
+    *,
+    state: str,
+) -> dict[str, str]:
+    preferred_statuses = {
+        "blocked": ("blocked", "failed", "waiting", "streaming", "queued"),
+        "failed": ("failed", "blocked", "waiting", "streaming", "queued"),
+        "waiting_user": ("waiting", "streaming", "queued"),
+        "waiting_approval": ("waiting", "streaming", "queued"),
+    }.get(state, ("streaming", "queued", "waiting", "blocked", "failed"))
+    for status in preferred_statuses:
+        for job in role_jobs:
+            if str(job.status or "") == status:
+                return {
+                    "role": job.role,
+                    "label": job.display_name,
+                    "status": status,
+                }
+    return {"role": "", "label": "", "status": ""}
+
+
+def _presentation_blocking_reason(
+    role_jobs: list[RelayRoleJob],
+    *,
+    state: str,
+    waiting_reason: str,
+    board: RelayBoard,
+    recovery_required: bool = False,
+) -> str:
+    if recovery_required:
+        return "原生审批操作尚未获得可验证回执；为避免重复授权，任务需要恢复。"
+    if state in {"blocked", "failed"}:
+        for job in role_jobs:
+            if str(job.status or "") in {"blocked", "failed"} and job.error_message:
+                return str(job.error_message)
+        return "任务已停止，需要恢复或补充信息。"
+    if state in {"waiting_user", "waiting_approval"}:
+        if board.open_questions:
+            return "；".join(str(item) for item in board.open_questions if str(item).strip())
+        return waiting_reason or "等待用户确认。"
+    return ""
+
+
+def _presentation_next_action(
+    *,
+    state: str,
+    board: RelayBoard,
+    latest_handoff: dict[str, Any] | None,
+    actor: dict[str, str],
+    blocking_reason: str,
+    recovery_required: bool = False,
+) -> str:
+    if recovery_required:
+        return "等待系统恢复审批回执；如持续无回执，请查看证据并恢复任务。"
+    if state == "waiting_approval":
+        return "审阅当前方案或审批请求后确认。"
+    if state == "waiting_user":
+        return "补充必要信息后继续。"
+    if state in {"blocked", "failed"}:
+        return "恢复任务或补充信息后重试。"
+    if state == "completed":
+        return "任务已完成；可发送后续需求。"
+    if state == "interrupted":
+        return "任务已中断；可恢复或创建后续任务。"
+    if state == "stale":
+        return "刷新运行状态或检查同步来源。"
+    if board.next_step:
+        return str(board.next_step)
+    if isinstance(latest_handoff, dict) and latest_handoff.get("next_action"):
+        return str(latest_handoff["next_action"])
+    if actor.get("label"):
+        return f"等待{actor['label']}处理。"
+    return blocking_reason or "等待系统更新。"
+
+
+def _presentation_allowed_actions(
+    state: str,
+    *,
+    recovery_required: bool = False,
+) -> list[str]:
+    # A provider-side approval may already have crossed the network boundary.
+    # Until its durable acknowledgement is reconciled, a role resume would
+    # create a fresh turn and turn an uncertain approval into duplicate work.
+    # Refresh only schedules the idempotent lifecycle reconciler.
+    if recovery_required:
+        return ["refresh"]
+    if state == "running":
+        return ["add_input", "interrupt"]
+    if state in {"waiting_user", "waiting_approval"}:
+        return ["add_input", "resolve"]
+    if state in {"blocked", "failed"}:
+        return ["resume", "add_input"]
+    if state in {"completed", "interrupted"}:
+        return ["add_input"]
+    return ["refresh"]
 
 
 @dataclass(frozen=True)
@@ -281,6 +661,21 @@ class RelayTaskSummary:
     role_statuses: dict[str, str]
     role_providers: dict[str, str]
     last_activity_at: str
+    presentation: RelayPresentation = field(
+        default_factory=lambda: RelayPresentation(
+            state="stale",
+            freshness={
+                "source": "relay_lifecycle",
+                "updated_at": "",
+                "is_stale": True,
+                "reason": "缺少任务投影",
+            },
+            current_actor={"role": "", "label": "", "status": ""},
+            blocking_reason="",
+            next_action="刷新运行状态或检查同步来源。",
+            allowed_actions=["refresh"],
+        )
+    )
 
     @classmethod
     def from_task(
@@ -292,6 +687,7 @@ class RelayTaskSummary:
         director_decision_summary: str = "",
         latest_handoff_summary: str = "",
         last_activity_at: str | None = None,
+        presentation: RelayPresentation | None = None,
     ) -> "RelayTaskSummary":
         return cls(
             task_id=task.id,
@@ -305,6 +701,16 @@ class RelayTaskSummary:
             role_statuses=role_statuses,
             role_providers=dict(role_providers or task.role_providers),
             last_activity_at=last_activity_at or task.updated_at,
+            presentation=presentation
+            or build_relay_presentation(
+                task=task,
+                role_jobs=[],
+                board=RelayBoard(
+                    task_id=task.id,
+                    current_goal=task.prompt,
+                    phase=task.phase,
+                ),
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -323,6 +729,22 @@ class RelayTaskDetail:
     current_round_id: int = 1
     pending_inputs: list[RelayPendingInput] = field(default_factory=list)
     round_execution: dict[str, Any] = field(default_factory=dict)
+    goal_acceptance_records: list[GoalAcceptanceRecord] = field(default_factory=list)
+    presentation: RelayPresentation = field(
+        default_factory=lambda: RelayPresentation(
+            state="stale",
+            freshness={
+                "source": "relay_lifecycle",
+                "updated_at": "",
+                "is_stale": True,
+                "reason": "缺少任务投影",
+            },
+            current_actor={"role": "", "label": "", "status": ""},
+            blocking_reason="",
+            next_action="刷新运行状态或检查同步来源。",
+            allowed_actions=["refresh"],
+        )
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -336,6 +758,10 @@ class RelayTaskDetail:
             "current_round_id": self.current_round_id,
             "pending_inputs": [item.to_dict() for item in self.pending_inputs],
             "round_execution": self.round_execution,
+            "goal_acceptance_records": [
+                record.to_dict() for record in self.goal_acceptance_records
+            ],
+            "presentation": self.presentation.to_dict(),
         }
 
 

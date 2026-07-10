@@ -102,7 +102,12 @@ def test_terminal_surface_config_defaults() -> None:
     assert config.redaction_enabled is True
 
 
-def _write_live_stream_config(tmp_path: Path, *, live_stream_block: str = "") -> Path:
+def _write_live_stream_config(
+    tmp_path: Path,
+    *,
+    live_stream_block: str = "",
+    runtime_retention_block: str = "",
+) -> Path:
     config_path = tmp_path / "wlcodex.toml"
     config_path.write_text(
         f"""
@@ -128,6 +133,8 @@ alias = "wlcodex"
 path = "/tmp/wlcodex"
 
 {live_stream_block}
+
+{runtime_retention_block}
 """.strip(),
         encoding="utf-8",
     )
@@ -148,6 +155,29 @@ def test_live_stream_config_defaults_disabled(tmp_path: Path) -> None:
     assert config.codex_native.sock_path is None
     assert config.codex_native.listen_endpoint == "ws://127.0.0.1:18742"
     assert config.codex_native.remote_control is True
+    assert config.runtime_retention.hot_retention_days == 7
+    assert config.runtime_retention.archive_retention_days == 90
+    assert config.runtime_retention.interval_seconds == 6 * 60 * 60
+    assert config.runtime_retention.archive_dir == Path("runtime/provider-raw-frame-archives")
+    assert config.runtime_retention.scheduled_apply_enabled is False
+
+
+def test_runtime_retention_config_allows_explicit_archive_directory(tmp_path: Path) -> None:
+    config_path = _write_live_stream_config(
+        tmp_path,
+        runtime_retention_block="""
+[runtime_retention]
+archive_dir = "/var/lib/wlcodex/raw-archives"
+batch_size = 128
+scheduled_apply_enabled = true
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.runtime_retention.archive_dir == Path("/var/lib/wlcodex/raw-archives")
+    assert config.runtime_retention.batch_size == 128
+    assert config.runtime_retention.scheduled_apply_enabled is True
 
 
 def test_live_stream_config_can_be_enabled(tmp_path: Path) -> None:

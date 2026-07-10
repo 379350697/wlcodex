@@ -158,6 +158,8 @@ class FakeControlResult:
 class FakeNativeController:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
+        self.list_models_error: Exception | None = None
+        self.models: list[dict[str, Any]] | None = None
         self.sessions = [
             FakeNativeSession(
                 "thread-1",
@@ -174,8 +176,16 @@ class FakeNativeController:
         self.calls.append(("list_sessions",))
         return self.sessions
 
+    async def list_cached_sessions(self, limit: int = 50) -> list[FakeNativeSession]:
+        self.calls.append(("list_cached_sessions", limit))
+        return self.sessions[:limit]
+
     async def list_models(self) -> list[dict[str, Any]]:
         self.calls.append(("list_models",))
+        if self.list_models_error is not None:
+            raise self.list_models_error
+        if self.models is not None:
+            return self.models
         return [
             {
                 "id": "gpt-5.5",
@@ -199,6 +209,10 @@ class FakeNativeController:
 
     async def read_session(self, native_thread_id: str) -> dict[str, Any]:
         self.calls.append(("read_session", native_thread_id))
+        return {"thread": {"id": native_thread_id, "turns": []}, "agent_run_id": 42}
+
+    async def peek_session(self, native_thread_id: str) -> dict[str, Any]:
+        self.calls.append(("peek_session", native_thread_id))
         return {"thread": {"id": native_thread_id, "turns": []}, "agent_run_id": 42}
 
     async def attach_session(self, native_thread_id: str) -> dict[str, Any]:
@@ -708,20 +722,18 @@ async def test_native_routes_allow_public_loopback_when_token_is_disabled(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert _json_body(response) == {
-        "sessions": [
-                {
-                    "native_thread_id": "thread-1",
-                    "agent_run_id": 42,
-                    "activity_at": "2026-05-31T12:39:00+00:00",
-                    "updated_at": "2026-05-31T13:00:00+00:00",
-                    "metadata": _FAKE_SESSION_METADATA,
-                }
-            ],
-        "native_refresh_pending": False,
-        "native_session_source": "daemon",
-    }
-    assert controller.calls == [("list_sessions",)]
+    body = _json_body(response)
+    assert body["native_refresh_pending"] is False
+    assert body["native_session_source"] == "cache"
+    assert len(body["sessions"]) == 1
+    session = body["sessions"][0]
+    assert session["native_thread_id"] == "thread-1"
+    assert session["agent_run_id"] == 42
+    assert session["metadata"] == _FAKE_SESSION_METADATA
+    assert session["native_session_source"] == "cache"
+    assert session["presentation"]["freshness"]["source"] == "cache"
+    assert session["presentation"]["freshness"]["is_stale"] is True
+    assert controller.calls == [("list_cached_sessions", 50)]
 
 
 @pytest.mark.asyncio
@@ -1093,20 +1105,18 @@ async def test_native_sessions_returns_json_with_bearer_token(tmp_path: Path) ->
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert _json_body(response) == {
-        "sessions": [
-                {
-                    "native_thread_id": "thread-1",
-                    "agent_run_id": 42,
-                    "activity_at": "2026-05-31T12:39:00+00:00",
-                    "updated_at": "2026-05-31T13:00:00+00:00",
-                    "metadata": _FAKE_SESSION_METADATA,
-                }
-            ],
-        "native_refresh_pending": False,
-        "native_session_source": "daemon",
-    }
-    assert controller.calls == [("list_sessions",)]
+    body = _json_body(response)
+    assert body["native_refresh_pending"] is False
+    assert body["native_session_source"] == "cache"
+    assert len(body["sessions"]) == 1
+    session = body["sessions"][0]
+    assert session["native_thread_id"] == "thread-1"
+    assert session["agent_run_id"] == 42
+    assert session["metadata"] == _FAKE_SESSION_METADATA
+    assert session["native_session_source"] == "cache"
+    assert session["presentation"]["freshness"]["source"] == "cache"
+    assert session["presentation"]["freshness"]["is_stale"] is True
+    assert controller.calls == [("list_cached_sessions", 50)]
 
 
 @pytest.mark.asyncio
@@ -1140,22 +1150,21 @@ async def test_native_sessions_returns_cached_snapshot_when_provider_times_out(
 
     assert "HTTP/1.1 200 OK" in response
     body = _json_body(response)
-    assert body["sessions"] == [
-        {
-            "native_thread_id": "cached-thread",
-            "agent_run_id": 123,
-            "activity_at": "2026-05-31T12:39:00+00:00",
-            "updated_at": "2026-05-31T13:00:00+00:00",
-            "metadata": {"source": "cache"},
-        }
+    assert [session["native_thread_id"] for session in body["sessions"]] == [
+        "cached-thread"
     ]
-    assert body["native_refresh_pending"] is True
+    session = body["sessions"][0]
+    assert session["metadata"] == {"source": "cache"}
+    assert session["native_session_source"] == "cache"
+    assert session["presentation"]["state"] == "stale"
+    assert session["presentation"]["freshness"]["is_stale"] is True
+    assert body["native_refresh_pending"] is False
     assert body["native_session_source"] == "cache"
-    assert provider.calls == [("list_cached_sessions", 50), ("list_sessions", 50)]
+    assert provider.calls == [("list_cached_sessions", 50)]
 
 
 @pytest.mark.asyncio
-async def test_native_codex_sessions_background_refresh_indexes_jsonl_sessions(
+async def test_native_codex_sessions_get_keeps_cache_and_index_readonly(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -1186,8 +1195,8 @@ async def test_native_codex_sessions_background_refresh_indexes_jsonl_sessions(
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert provider.calls == [("list_cached_sessions", 50), ("list_sessions", 50)]
-    assert mirror.calls == [("index_recent_sessions", 100)]
+    assert provider.calls == [("list_cached_sessions", 50)]
+    assert mirror.calls == []
 
 
 @pytest.mark.asyncio
@@ -1325,13 +1334,13 @@ async def test_native_sessions_returns_immediately_with_empty_cache(
     assert "HTTP/1.1 200 OK" in response
     body = _json_body(response)
     assert body["sessions"] == []
-    assert body["native_refresh_pending"] is True
+    assert body["native_refresh_pending"] is False
     assert body["native_session_source"] == "cache"
-    assert provider.calls == [("list_cached_sessions", 50), ("list_sessions", 50)]
+    assert provider.calls == [("list_cached_sessions", 50)]
 
 
 @pytest.mark.asyncio
-async def test_native_sessions_cache_response_reports_background_refresh_error(
+async def test_native_sessions_get_reports_existing_background_refresh_error_without_retry(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -1345,6 +1354,7 @@ async def test_native_sessions_cache_response_reports_background_refresh_error(
         allow_unauthenticated_loopback=False,
         native_sessions_timeout_seconds=10,
     )
+    server._native_background_errors[("native_sessions", "codex")] = "boom"
     await server.start()
     try:
         first_response = await _read_response(
@@ -1369,17 +1379,17 @@ async def test_native_sessions_cache_response_reports_background_refresh_error(
 
     assert "HTTP/1.1 200 OK" in first_response
     first_body = _json_body(first_response)
-    assert "native_sync_error" not in first_body
-    assert first_body["native_refresh_pending"] is True
+    assert first_body["native_sync_error"] == "boom"
+    assert first_body["native_refresh_pending"] is False
+    assert first_body["sessions"][0]["presentation"]["freshness"]["reason"] == "boom"
 
     assert "HTTP/1.1 200 OK" in second_response
     second_body = _json_body(second_response)
     assert second_body["native_session_source"] == "cache"
     assert second_body["native_sync_error"] == "boom"
-    assert second_body["native_refresh_pending"] is True
+    assert second_body["native_refresh_pending"] is False
     assert provider.calls == [
         ("list_cached_sessions", 50),
-        ("list_sessions", 50),
         ("list_cached_sessions", 50),
     ]
 
@@ -1417,6 +1427,84 @@ async def test_native_models_route_returns_official_catalog(tmp_path: Path) -> N
         "description": "Deep",
     }
     assert body["models"][0]["serviceTiers"][1]["id"] == "fast"
+    assert controller.calls == [("list_models",)]
+
+
+@pytest.mark.asyncio
+async def test_native_models_route_reports_catalog_unavailable_without_fallback(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    controller.list_models_error = FileNotFoundError("codex binary missing")
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/models HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 503 Service Unavailable" in response
+    body = _json_body(response)
+    assert body["models"] == []
+    assert body["freshness"] == {
+        "source": "unavailable",
+        "updated_at": "",
+        "is_stale": True,
+        "reason": "Codex 模型目录同步失败",
+    }
+    assert "模型目录" in body["error"]
+    assert "gpt-5.5" not in response
+    assert controller.calls == [("list_models",)]
+
+
+@pytest.mark.asyncio
+async def test_native_models_route_reports_empty_catalog_without_fallback(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    controller = FakeNativeController()
+    controller.models = []
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_controller=controller,
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/codex/models HTTP/1.1\r\n"
+            "Host: test\r\n"
+            "Authorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 503 Service Unavailable" in response
+    body = _json_body(response)
+    assert body["models"] == []
+    assert body["freshness"]["reason"] == "Codex 未返回可用模型"
+    assert "gpt-5.5" not in response
     assert controller.calls == [("list_models",)]
 
 
@@ -2034,7 +2122,7 @@ async def test_native_status_and_read_routes_return_json(tmp_path: Path) -> None
     assert _json_body(status_response)["remote_control_status"] == "ready"
     assert "HTTP/1.1 200 OK" in read_response
     assert _json_body(read_response)["thread"]["id"] == "thread-1"
-    assert controller.calls == [("status",), ("read_session", "thread-1")]
+    assert controller.calls == [("status",), ("list_cached_sessions", 50)]
 
 
 @pytest.mark.asyncio
@@ -2088,11 +2176,110 @@ async def test_native_read_route_returns_cached_session_when_daemon_is_slow(
     assert body["thread"]["title"] == "cached title"
     assert body["thread"]["cwd"] == "/workspace/cached"
     assert body["native_session_source"] == "cache"
-    assert body["native_sync_pending"] is True
-    assert controller.calls == [
-        ("read_cached_session", "thread-1"),
-        ("read_session", "thread-1"),
-    ]
+    assert body["native_sync_pending"] is False
+    assert body["presentation"]["freshness"]["source"] == "cache"
+    assert controller.calls == [("read_cached_session", "thread-1")]
+
+
+@pytest.mark.asyncio
+async def test_native_detail_get_never_falls_back_to_mutating_provider_read(
+    tmp_path: Path,
+) -> None:
+    class WriteOnReadProvider:
+        provider = "unsafe"
+        provider_engine = "test"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def read_session(self, native_session_id: str) -> dict[str, Any]:
+            self.calls.append(native_session_id)
+            raise AssertionError("GET must not call a mutating read_session")
+
+    store = _store(tmp_path)
+    provider = WriteOnReadProvider()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([provider]),
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+    )
+    await server.start()
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/unsafe/sessions/thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert body["native_session_source"] == "stub"
+    assert "read-only session snapshot" in body["native_sync_error"]
+    assert body["presentation"]["state"] == "stale"
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_native_detail_get_uses_read_only_peek_without_writing_projection(
+    tmp_path: Path,
+) -> None:
+    class PeekOnlyProvider:
+        provider = "peek"
+        provider_engine = "test"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def list_cached_sessions(self, limit: int = 50) -> list[Any]:
+            self.calls.append(("list_cached_sessions", str(limit)))
+            return []
+
+        async def peek_session(self, native_session_id: str) -> dict[str, Any]:
+            self.calls.append(("peek_session", native_session_id))
+            return {
+                "thread": {"id": native_session_id, "status": "active"},
+                "agent_run_id": 42,
+            }
+
+        async def read_session(self, native_session_id: str) -> dict[str, Any]:
+            raise AssertionError("GET must use peek_session")
+
+    store = _store(tmp_path)
+    provider = PeekOnlyProvider()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(store),
+        native_registry=NativeAgentRegistry([provider]),
+        access_token="secret",
+        allow_unauthenticated_loopback=False,
+    )
+    await server.start()
+    changes_before = store._conn.total_changes
+    try:
+        response = await _read_response(
+            server.host,
+            server.port,
+            "GET /api/native/peek/sessions/thread-1 HTTP/1.1\r\n"
+            "Host: test\r\nAuthorization: Bearer secret\r\n"
+            "Connection: close\r\n\r\n",
+        )
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in response
+    body = _json_body(response)
+    assert body["native_session_source"] == "daemon"
+    assert body["presentation"]["state"] == "running"
+    assert provider.calls == [("list_cached_sessions", "50"), ("peek_session", "thread-1")]
+    assert store._conn.total_changes == changes_before
 
 
 @pytest.mark.asyncio
@@ -2830,9 +3017,11 @@ def test_worker_live_page_matches_remote_mobile_running_header_and_dock_shape() 
 
     assert (
         '<meta name="viewport" content="width=device-width, initial-scale=1, '
-        'maximum-scale=1, user-scalable=no, viewport-fit=cover">'
+        'viewport-fit=cover">'
         in response
     )
+    assert "maximum-scale=1" not in response
+    assert "user-scalable=no" not in response
     assert (
         "html, body, .native-mobile-shell, .codex-run-shell, .codex-transcript, "
         ".transcript-body, .codex-input-dock, input, textarea { -webkit-text-size-adjust: 100%; "
@@ -2942,7 +3131,7 @@ def test_native_app_manifest_uses_standalone_display_and_native_start_url() -> N
 
     assert manifest["name"] == "WLCodex Native"
     assert manifest["short_name"] == "WLCodex"
-    assert manifest["start_url"] == "/native/codex"
+    assert manifest["start_url"] == "/native"
     assert manifest["scope"] == "/"
     assert manifest["display"] == "standalone"
     assert manifest["display_override"] == ["standalone", "fullscreen", "browser"]
@@ -3442,6 +3631,11 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "插件" in response
     assert 'id="imageInput"' in response
     assert 'id="attachmentStrip"' in response
+    assert 'id="modelCatalogNotice"' in response
+    assert 'id="modelCatalogRetry"' in response
+    assert "let modelCatalogAvailable = false;" in response
+    assert "function setModelCatalogUnavailable(reason)" in response
+    assert "无法创建新会话" in response
     assert "async function loadModelCatalog()" in response
     assert "api(`${API_BASE}/models`)" in response
     assert "function renderReasoningAndSpeed" in response
@@ -3460,9 +3654,9 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "permissionOptions.hidden = false;" in response
     assert "saveModelSettingsIfChanged();" in response
     assert "savePermissionSettingsIfChanged();" in response
-    assert "if (settings.model) body.model = settings.model;" in response
-    assert "if (settings.effort) body.effort = settings.effort;" in response
-    assert "if (settings.service_tier) body.service_tier = settings.service_tier;" in response
+    assert "if (modelCatalogAvailable && settings.model) body.model = settings.model;" in response
+    assert "if (modelCatalogAvailable && settings.effort) body.effort = settings.effort;" in response
+    assert "if (modelCatalogAvailable && settings.service_tier) body.service_tier = settings.service_tier;" in response
     assert "if (attachmentsForSend.length) {" in response
     assert "body.images = attachmentsForSend.map(image => ({" in response
     assert "function selectComposerPlugin(item)" in response
@@ -3509,7 +3703,7 @@ async def test_native_provider_index_page_exposes_model_settings_for_new_session
     assert "let startingChat = false;" in response
     assert "function updateStartControls()" in response
     assert 'controlsEl.classList.toggle("has-draft", viewMode === "compose" && hasDraft);' in response
-    assert 'sendButton.disabled = startingChat || (viewMode === "compose" && !hasDraft);' in response
+    assert 'viewMode === "compose" && (!modelCatalogAvailable || !hasDraft)' in response
     assert "async function handleProjectNewChat()" in response
     assert "await startNewChat(promptEl.value.trim());" in response
     assert "promptEl.focus();" not in response
@@ -3635,7 +3829,9 @@ def test_native_provider_projects_load_once_and_session_refresh_is_unified() -> 
         assert "const SESSION_REFRESH_PENDING_DELAY_MS = 10000;" in response
         assert "const SESSION_POLL_INTERVAL_MS = 30000;" in response
         assert "setInterval(loadHomeData, 15000)" not in response
-        assert "setInterval(refreshSessionsSilently, SESSION_POLL_INTERVAL_MS)" in response
+        assert "function startSessionsFallbackPoll()" in response
+        assert "sessionsFallbackPollTimer = window.setInterval(" in response
+        assert "sessionsEventSource || sessionsFallbackPollTimer" in response
         assert "sessions = data.sessions || [];" not in stream_body
         assert "applySessionsPayload(data, true);" in stream_body
         assert "loadProjects();" not in startup_body
@@ -3648,17 +3844,23 @@ def test_native_provider_home_uses_session_stream_with_polling_fallback() -> Non
 
         assert "let sessionsEventSource = null;" in response
         assert "let sessionsReconnectTimer = null;" in response
+        assert "let sessionsFallbackPollTimer = null;" in response
         assert "function sessionsStreamPath()" in response
         assert "function closeSessionsStream()" in response
+        assert "function stopSessionsFallbackPoll()" in response
+        assert "function startSessionsFallbackPoll()" in response
         assert "new EventSource(sessionsStreamPath())" in response
+        assert "source.onopen = () => {" in response
+        assert "stopSessionsFallbackPoll();" in response
         assert "source.addEventListener(\"native_sessions\"" in response
         assert "applySessionsPayload(data, true);" in response
         assert "renderSessionsIfDataChanged();" in response
         assert "function startSessionsStream()" in response
         assert "startSessionsStream();" in response
-        assert 'window.addEventListener("pagehide", closeSessionsStream);' in response
-        assert 'window.addEventListener("pageshow", () => startSessionsStream());' in response
-        assert "setInterval(refreshSessionsSilently, SESSION_POLL_INTERVAL_MS)" in response
+        assert 'window.addEventListener("pagehide", () => {' in response
+        assert 'window.addEventListener("pageshow", resumeSessionsLiveConnection);' in response
+        assert 'document.addEventListener("visibilitychange", () => {' in response
+        assert 'document.visibilityState === "hidden"' in response
         assert "setInterval(loadHomeData, 3000)" not in response
 
 
@@ -3839,7 +4041,7 @@ async def test_worker_stream_routes_require_auth_when_token_is_configured(
 
 
 @pytest.mark.asyncio
-async def test_worker_events_schedules_native_thread_sync_before_returning_snapshot(
+async def test_worker_events_snapshot_never_starts_native_thread_sync(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -3868,12 +4070,12 @@ async def test_worker_events_schedules_native_thread_sync_before_returning_snaps
     assert "HTTP/1.1 200 OK" in response
     body = _json_body(response)
     assert body["native_sync_error"] == ""
-    assert body["native_sync_pending"] is True
-    assert controller.calls == [("sync_session", "thread-1")]
+    assert body["native_sync_pending"] is False
+    assert controller.calls == []
 
 
 @pytest.mark.asyncio
-async def test_worker_events_tail_returns_snapshot_when_native_sync_times_out(
+async def test_worker_events_tail_stays_readonly_when_provider_would_be_slow(
     tmp_path: Path,
 ) -> None:
     class SlowNativeController(FakeNativeController):
@@ -3910,22 +4112,17 @@ async def test_worker_events_tail_returns_snapshot_when_native_sync_times_out(
     body = _json_body(response)
     assert body["events"][0]["payload"]["delta"] == "hello"
     assert body["native_sync_error"] == ""
-    assert body["native_sync_pending"] is True
-    assert controller.calls == [("sync_session", "thread-1")]
+    assert body["native_sync_pending"] is False
+    assert controller.calls == []
 
 
 @pytest.mark.asyncio
-async def test_worker_events_tail_reports_background_native_sync_error(
+async def test_worker_events_tail_reports_existing_background_sync_error_without_retry(
     tmp_path: Path,
 ) -> None:
-    class FailingNativeController(FakeNativeController):
-        async def sync_session(self, native_thread_id: str) -> FakeControlResult:
-            self.calls.append(("sync_session", native_thread_id))
-            raise RuntimeError("boom")
-
     store = _store(tmp_path)
     _append_worker_event(store, agent_run_id=42, native_thread_id="thread-1")
-    controller = FailingNativeController()
+    controller = FakeNativeController()
     server = WorkerLiveStreamServer(
         host="127.0.0.1",
         port=0,
@@ -3933,6 +4130,7 @@ async def test_worker_events_tail_reports_background_native_sync_error(
         native_controller=controller,
         access_token="secret",
     )
+    server._native_background_errors[("native_transcript", "codex", "thread-1")] = "boom"
     await server.start()
     try:
         first_response = await _read_response(
@@ -3942,7 +4140,6 @@ async def test_worker_events_tail_reports_background_native_sync_error(
             "Host: test\r\nAuthorization: Bearer secret\r\n"
             "Connection: close\r\n\r\n",
         )
-        await asyncio.sleep(0.1)
         second_response = await _read_response(
             server.host,
             server.port,
@@ -3956,15 +4153,15 @@ async def test_worker_events_tail_reports_background_native_sync_error(
     assert "HTTP/1.1 200 OK" in first_response
     first_body = _json_body(first_response)
     assert first_body["events"][0]["payload"]["delta"] == "hello"
-    assert first_body["native_sync_error"] == ""
-    assert first_body["native_sync_pending"] is True
+    assert first_body["native_sync_error"] == "boom"
+    assert first_body["native_sync_pending"] is False
 
     assert "HTTP/1.1 200 OK" in second_response
     second_body = _json_body(second_response)
     assert second_body["events"][0]["payload"]["delta"] == "hello"
     assert second_body["native_sync_error"] == "boom"
-    assert second_body["native_sync_pending"] is True
-    assert controller.calls == [("sync_session", "thread-1")]
+    assert second_body["native_sync_pending"] is False
+    assert controller.calls == []
 
 
 @pytest.mark.asyncio
@@ -4247,7 +4444,7 @@ async def test_native_timeline_endpoint_initial_snapshot_compacts_delta_burst(
 
 
 @pytest.mark.asyncio
-async def test_native_timeline_json_returns_projection_before_background_sync(
+async def test_native_timeline_json_get_is_readonly_and_keeps_projection_unchanged(
     tmp_path: Path,
 ) -> None:
     runtime_store = _store(tmp_path)
@@ -4316,6 +4513,7 @@ async def test_native_timeline_json_returns_projection_before_background_sync(
         access_token="secret",
     )
     await server.start()
+    changes_before = runtime_store._conn.total_changes
     try:
         response = await _read_response(
             server.host,
@@ -4325,13 +4523,15 @@ async def test_native_timeline_json_returns_projection_before_background_sync(
             "Connection: close\r\n\r\n",
         )
         await asyncio.sleep(0.1)
+        changes_after = runtime_store._conn.total_changes
     finally:
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
-    assert ("sync_thread", "thread-1") in mirror.calls
+    assert mirror.calls == []
+    assert changes_after == changes_before
     body = _json_body(response)
-    assert body["native_sync_pending"] is True
+    assert body["native_sync_pending"] is False
     assert [event["payload"]["text"] for event in body["events"]] == ["已投影消息"]
 
 
@@ -5037,7 +5237,7 @@ async def test_native_messages_show_interrupted_lifecycle_after_user_turn(
 
 
 @pytest.mark.asyncio
-async def test_native_messages_lazily_repair_unprojected_interrupted_lifecycle(
+async def test_native_messages_get_keeps_unprojected_interrupted_lifecycle_readonly(
     tmp_path: Path,
 ) -> None:
     runtime_store = _store(tmp_path)
@@ -5117,6 +5317,7 @@ async def test_native_messages_lazily_repair_unprojected_interrupted_lifecycle(
         access_token="secret",
     )
     await server.start()
+    changes_before = runtime_store._conn.total_changes
     try:
         response = await _read_response(
             server.host,
@@ -5126,20 +5327,111 @@ async def test_native_messages_lazily_repair_unprojected_interrupted_lifecycle(
             "Host: test\r\nAuthorization: Bearer secret\r\n"
             "Connection: close\r\n\r\n",
         )
+        await asyncio.sleep(0.1)
+        changes_after = runtime_store._conn.total_changes
     finally:
         await server.stop()
 
     assert "HTTP/1.1 200 OK" in response
     body = _json_body(response)
-    assert [item["kind"] for item in body["items"]] == ["lifecycle"]
-    assert body["items"][0]["status"] == "interrupted"
-    assert body["items"][0]["text"] == "已中断"
-    assert body["update_cursor"] > user_update_cursor
+    assert body["items"] == []
+    assert body["update_cursor"] == user_update_cursor
     assert body["run_state"] == {
         "active": False,
         "status": "interrupted",
         "active_turn_id": "",
     }
+    assert changes_after == changes_before
+
+
+@pytest.mark.asyncio
+async def test_native_messages_sse_repairs_unprojected_lifecycle_after_readonly_snapshot(
+    tmp_path: Path,
+) -> None:
+    runtime_store = _store(tmp_path)
+    timeline_store = NativeTimelineStore(runtime_store._conn)
+    runtime_store.add_projector(timeline_store.project_runtime_event)
+    runtime_store.append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.USER_MESSAGE_RECEIVED,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="user",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "itemId": "user-1",
+                "text": "先给出快照",
+                "provider": "codex",
+            },
+            occurred_at="2026-05-30T00:00:00+00:00",
+            agent_run_id=42,
+        )
+    )
+    # Bypass the registered projector to reproduce a legacy row left behind
+    # by an earlier process.  The read endpoint must only derive its state;
+    # the independently owned SSE worker repairs the materialized lifecycle.
+    RuntimeEventStore(runtime_store._conn).append(
+        RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.AGENT_RUN_ACTIVITY,
+            aggregate_type="agent_run",
+            aggregate_id="42",
+            correlation_id="agent:42",
+            source="codex",
+            actor="codex_native",
+            visibility="internal",
+            payload={
+                "native_thread_id": "thread-1",
+                "native_turn_id": "turn-1",
+                "provider": "codex",
+                "action": "turn_completed",
+                "status": "interrupted",
+            },
+            occurred_at="2026-05-30T00:00:01+00:00",
+            agent_run_id=42,
+        )
+    )
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(runtime_store),
+        native_controller=FakeNativeController(),
+        native_timeline=timeline_store,
+        access_token="secret",
+    )
+    await server.start()
+    reader = writer = None
+    changes_before = runtime_store._conn.total_changes
+    try:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        writer.write(
+            b"GET /api/native/codex/sessions/thread-1/messages/stream?after=0 HTTP/1.1\r\n"
+            b"Host: test\r\nAuthorization: Bearer secret\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        await writer.drain()
+        await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        initial = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        changes_after_snapshot = runtime_store._conn.total_changes
+        repaired = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=1.0)
+        changes_after_reconcile = runtime_store._conn.total_changes
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await server.stop()
+
+    assert "先给出快照" in initial.decode("utf-8")
+    assert "已中断" not in initial.decode("utf-8")
+    assert changes_after_snapshot == changes_before
+    assert "event: message_added" in repaired.decode("utf-8")
+    assert "已中断" in repaired.decode("utf-8")
+    assert changes_after_reconcile > changes_before
 
 
 @pytest.mark.asyncio
@@ -5875,7 +6167,7 @@ async def test_worker_events_tail_filters_to_current_native_turn(
     body = _json_body(response)
     assert [event["payload"]["delta"] for event in body["events"]] == ["current turn"]
     assert body["previous_event_count"] == 1
-    assert controller.calls == [("sync_session", "thread-1")]
+    assert controller.calls == []
 
 
 @pytest.mark.asyncio
@@ -6006,6 +6298,8 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert 'id="modelSettingsButton"' in response
     assert 'id="modelPopover"' in response
     assert 'id="modelSelector"' in response
+    assert 'id="modelCatalogNotice"' in response
+    assert 'id="modelCatalogRetry"' in response
     assert 'id="imageInput"' in response
     assert 'id="attachmentButton"' in response
     assert 'id="composerActionMenu"' in response
@@ -6046,11 +6340,14 @@ async def test_worker_live_page_uses_native_codex_run_interaction_model(
     assert "function applyNativeTurnState" in response
     assert 'id="composerActivity"' in response
     assert "function setComposerActivity" in response
-    assert "continueButton.innerHTML = mode === \"interrupt\" ? ICONS.stop : ICONS.send;" in response
-    assert 'const requiresTurn = mode === "interrupt" || mode === "steer";' in response
+    # Sending and interrupting are separate, intention-revealing controls.
+    # The composer must never turn its send action into an implicit interrupt.
+    assert "continueButton.innerHTML = ICONS.send;" in response
+    assert 'const requiresTurn = mode === "steer";' in response
     assert "requiresTurn && !activeTurnId" in response
-    assert "steerButton.hidden = !canSteerActiveTurn();" in response
-    assert "interruptButton.hidden = !canInterruptActiveTurn();" in response
+    assert "steerButton.hidden = !canSteer;" in response
+    assert "interruptButton.hidden = !canInterrupt;" in response
+    assert "interruptButton.onclick = interruptNativeTurn;" in response
     assert 'class="dock-actions" hidden' in response
     assert "function readImageAttachment" in response
     assert "function selectComposerPlugin(item)" in response
@@ -6127,8 +6424,8 @@ def test_live_page_gates_active_turn_controls_with_provider_capabilities() -> No
     assert "await api(`${API_BASE}/capabilities`)" in response
     assert "function canSteerActiveTurn()" in response
     assert "function canInterruptActiveTurn()" in response
-    assert "steerButton.hidden = !canSteerActiveTurn();" in response
-    assert "interruptButton.hidden = !canInterruptActiveTurn();" in response
+    assert "steerButton.hidden = !canSteer;" in response
+    assert "interruptButton.hidden = !canInterrupt;" in response
     assert "message assistant" not in response
 
 
@@ -6422,11 +6719,27 @@ def test_live_page_waits_during_active_turn_when_provider_cannot_steer() -> None
 
     assert 'if (!nativeTurnRunning) return "continue";' in response
     assert 'if (canSteerActiveTurn() && composerHasDraft()) return "choose";' in response
-    assert (
-        'if (canInterruptActiveTurn() && !composerHasDraft()) return "interrupt";'
-        in response
-    )
+    assert 'return "interrupt";' not in response
+    assert 'if (action === "wait") {' in response
     assert 'mode === "wait" ? "等待当前轮"' in response
+
+
+def test_native_composer_paths_cannot_issue_interrupts() -> None:
+    response = _live_page(42, native_provider="codex")
+    submit_start = response.index("async function submitPrompt(action = primaryComposerAction())")
+    submit_end = response.index("function buildNativePromptBody", submit_start)
+    submit_handler = response[submit_start:submit_end]
+
+    # Keyboard submit, the ordinary send button and attachment flow all reach
+    # submitPrompt.  That function permits only normal/steer dispatches; the
+    # dedicated button remains the sole path to the interrupt mutation.
+    assert "promptInput.addEventListener(\"keydown\"" in response
+    assert "continueButton.onclick = () => submitPrompt();" in response
+    assert "attachmentButton.onclick = toggleComposerActionMenu;" in response
+    assert 'if (action !== "continue" && action !== "steer") return;' in submit_handler
+    assert "interruptNativeTurn" not in submit_handler
+    assert 'nativeControl("interrupt"' not in submit_handler
+    assert "interruptButton.onclick = interruptNativeTurn;" in response
 
 
 def test_live_page_routes_global_status_through_turn_state_gate() -> None:
@@ -6579,6 +6892,9 @@ async def test_worker_live_page_uses_official_model_catalog_settings(
     assert "速度" in response
     assert "推理" in response
     assert "async function loadModelCatalog" in response
+    assert "let modelCatalogAvailable = false;" in response
+    assert "function setModelCatalogUnavailable(reason)" in response
+    assert "当前会话仍可继续，但不会发送本地保存的模型选择" in response
     assert 'const API_BASE = "/api/native/codex";' in response
     assert "api(`${API_BASE}/models`)" in response
     assert "function updateSettingSummary" in response
@@ -6611,13 +6927,14 @@ async def test_worker_live_page_uses_official_model_catalog_settings(
     assert "syncSettingOptionsSelection(container, select);" in response
     assert "syncSettingOptionsSelection(reasoningOptions, reasoningSelector);" in response
     assert "syncSettingOptionsSelection(serviceTierOptions, serviceTierSelector);" in response
-    assert "body.model = savedModelSettings.model;" in response
-    assert "body.effort = savedModelSettings.effort;" in response
-    assert "body.service_tier = savedModelSettings.service_tier;" in response
+    assert "const modelSettings = readSelectedModelSettings();" in response
+    assert "if (modelCatalogAvailable && modelSettings.model) body.model = modelSettings.model;" in response
+    assert "if (modelCatalogAvailable && modelSettings.effort) body.effort = modelSettings.effort;" in response
+    assert "if (modelCatalogAvailable && modelSettings.service_tier) body.service_tier = modelSettings.service_tier;" in response
     assert "modelSettingsButton.disabled = false;" in response
     assert "function syncSettingOptionsDisabled" in response
-    assert "reasoningSelector.disabled = sendingPrompt || nativeTurnRunning" in response
-    assert "serviceTierSelector.disabled = sendingPrompt || nativeTurnRunning" in response
+    assert "reasoningSelector.disabled = !modelCatalogAvailable || sendingPrompt || nativeTurnRunning" in response
+    assert "serviceTierSelector.disabled = !modelCatalogAvailable || sendingPrompt || nativeTurnRunning" in response
     assert 'service_tier: serviceTierSettingRow.hidden ? "" : serviceTierSelector.value,' in response
     assert 'modelSettingsButton.textContent = [modelText, effortText].filter(Boolean).join(" ");' in response
     assert 'if (!serviceTierSettingRow.hidden) summaryParts.push(tierText);' not in response
@@ -6687,7 +7004,7 @@ async def test_worker_live_page_uses_provider_scoped_model_catalog_for_antigravi
     assert 'const PROVIDER = "antigravity";' in response
     assert 'const API_BASE = "/api/native/antigravity";' in response
     assert "api(`${API_BASE}/models`)" in response
-    assert "body.model = savedModelSettings.model;" in response
+    assert "if (modelCatalogAvailable && modelSettings.model) body.model = modelSettings.model;" in response
 
 
 @pytest.mark.asyncio
@@ -6780,20 +7097,25 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "syncNativeTranscript().then(pollEvents);" in response
     assert "let nativeSyncInFlight = false;" not in response
     assert "function startNativeTranscriptSyncLoop()" in response
-    assert "setInterval(pollEvents, 1000)" in response
+    assert "const NATIVE_TRANSCRIPT_FALLBACK_INTERVAL_MS = 30000;" in response
+    assert "function stopNativeTranscriptFallback()" in response
+    assert "function startNativeTranscriptFallback()" in response
+    assert "NATIVE_TRANSCRIPT_FALLBACK_INTERVAL_MS," in response
+    assert "setInterval(pollEvents, 1000)" not in response
     assert "setInterval(syncNativeTranscriptAndPoll, 2500)" not in response
     assert "async function syncNativeTranscriptAndPoll()" not in response
     assert 'document.addEventListener("visibilitychange", () => {' in response
-    assert "if (!document.hidden) pollEvents();" in response
-    assert "function refreshNativeControlInBackground()" in response
-    assert "refreshNativeControlInBackground();" in response
+    assert 'document.visibilityState === "hidden"' in response
+    assert "resumeNativeLiveConnection();" in response
+    assert "function refreshNativeControlInBackground()" not in response
+    assert "refreshNativeControlInBackground();" not in response
     assert "loadNativeSessionInfo().catch(() => {});" in response
     assert "setInterval(() => loadNativeSessionInfo().catch(() => {}), 30000);" not in response
     assert "loadRecentEvents().catch(error => {" in response
     assert "loadNativeSessionInfo().catch(() => {}).then(loadRecentEvents)" not in response
     assert "attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).then(() => {" not in response
     assert "attachNative().then(syncNativeTranscript).then(loadNativeSessionInfo).catch" not in response
-    assert "attachNative().then(loadNativeSessionInfo).catch" in response
+    assert "attachNative().then(loadNativeSessionInfo).catch" not in response
     assert "async function withNativeSoftTimeout(promise, message, delayMs = 12000)" in response
     assert "timeoutMs: 2500" not in response
     assert "同步原生 transcript 较慢" in response
@@ -6816,6 +7138,21 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "function displayEventCount(sourceEvents)" in response
     assert "function pollEvents" in response
     assert "startNativeTranscriptSyncLoop();" in response
+    start_loop = re.search(
+        r"function startNativeTranscriptSyncLoop\(\) \{(?P<body>.*?)\n    \}",
+        response,
+        flags=re.DOTALL,
+    )
+    assert start_loop is not None
+    assert "syncNativeTranscript" not in start_loop.group("body")
+    assert "resumeNativeLiveConnection();" in start_loop.group("body")
+    startup = response[
+        response.index("renderPluginList();") : response.index(
+            'window.addEventListener("pagehide", () => {'
+        )
+    ]
+    assert "attachNative(" not in startup
+    assert "syncNativeTranscript(" not in startup
     assert "const nextEvents = nativeMessageItemsToEvents(snapshot.items);" in response
     assert "function nativeMessagesPath(params)" in response
     assert "function nativeMessagesStreamPath(afterId)" in response
@@ -6839,7 +7176,9 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "function closeLiveEventSource()" in response
     assert "function scheduleStreamReconnect()" in response
     assert "scheduleStreamReconnect();" in response
-    assert 'window.addEventListener("pagehide", closeLiveEventSource);' in response
+    assert 'window.addEventListener("pagehide", () => {' in response
+    assert "stopNativeTranscriptFallback();" in response
+    assert "closeLiveEventSource();" in response
     assert 'window.addEventListener("pageshow", () => {' in response
     assert "function isInternalEvent(event)" in response
     assert "if (isInternalEvent(event)) return;" in response
@@ -7228,7 +7567,7 @@ async def test_worker_live_page_clears_running_composer_state_on_terminal_turn_e
         '"aborted", "timed_out", "timeout", "orphaned"]'
     ) in response
     assert "nativeTurnRunning = false;" in response
-    assert 'continueButton.innerHTML = mode === "interrupt" ? ICONS.stop : ICONS.send;' in response
+    assert "continueButton.innerHTML = ICONS.send;" in response
     assert "(!nativeTurnRunning && !composerHasDraft())" in response
     assert 'activeTurnId = result.turn_running ? (result.active_turn_id || result.turn_id || activeTurnId || "") : "";' in response
     assert "const terminalTranscriptSyncTurns = new Set();" in response

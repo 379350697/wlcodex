@@ -1,5 +1,8 @@
 # WLCodex Claude Binary Resilience Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Decision
 
 WLCodex should stop depending on a versioned Claude Code binary path from the

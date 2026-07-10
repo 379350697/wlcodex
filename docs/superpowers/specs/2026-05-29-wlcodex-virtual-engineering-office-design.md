@@ -1,5 +1,8 @@
 # WLCodex Virtual Engineering Office Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Status
 
 Drafted on 2026-05-29 from the product direction discussed with the user.

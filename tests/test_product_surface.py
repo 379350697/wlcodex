@@ -1,5 +1,7 @@
 """Tests for wlcodex.surfaces.product — speaker labels, diff hiding, routing."""
 
+import importlib
+
 import pytest
 
 from wlcodex.surfaces.product.events import ProductDisplayEvent
@@ -254,5 +256,5 @@ def test_unknown_phase_continues_conversation():
 
 def test_product_surface_does_not_import_terminal():
     """Product Surface must not import from Terminal Surface."""
-    with pytest.raises(ImportError):
-        from wlcodex.surfaces.product import terminal  # noqa: F811
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("wlcodex.surfaces.product.terminal")

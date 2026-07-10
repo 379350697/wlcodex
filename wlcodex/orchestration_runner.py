@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import logging
 import subprocess
 import uuid
@@ -472,7 +471,18 @@ class OrchestrationRunner:
         codex_thread_id: str = "",
         claude_session_id: str = "",
         correlation_id: str = "",
+        causation_id: int | None = None,
     ) -> asyncio.Task[None]:
+        """Durably acknowledge a launch before its background task can run.
+
+        ``asyncio.create_task`` only schedules the coroutine; a process can
+        otherwise die after this method returns but before the coroutine emits
+        ``run.started``.  Queue consumers use that event as their durable
+        hand-off marker.  Record it synchronously here (after scheduling, but
+        before yielding to the event loop) so a crash cannot make the queued
+        item eligible for a second launch.
+        """
+        cid = correlation_id or str(uuid.uuid4())
         task = asyncio.create_task(
             self._run_chief_engineer(
                 prompt=prompt,
@@ -484,10 +494,34 @@ class OrchestrationRunner:
                 workspace_path=workspace_path,
                 codex_thread_id=codex_thread_id,
                 claude_session_id=claude_session_id,
-                correlation_id=correlation_id or str(uuid.uuid4()),
+                correlation_id=cid,
+                causation_id=causation_id,
             ),
             name=f"chief-engineer-{orchestration_run_id}",
         )
+        try:
+            self._emit_event(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.RUN_STARTED,
+                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                aggregate_id=str(orchestration_run_id),
+                correlation_id=cid,
+                source=EventSource.ORCHESTRATOR,
+                actor="orchestrator",
+                visibility=Visibility.OPERATOR,
+                payload={"goal": prompt, "phase": "running_analysis"},
+                occurred_at=now_iso(),
+                conversation_id=conversation.id,
+                orchestration_run_id=orchestration_run_id,
+                task_id=task_id,
+                causation_id=causation_id,
+            ))
+        except Exception:
+            # The scheduled coroutine has not had a chance to run yet.  Do
+            # not leave an unacknowledged background execution alive if the
+            # durable launch marker could not be written.
+            task.cancel()
+            raise
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         task.add_done_callback(self._log_unexpected_failure)
@@ -588,8 +622,34 @@ class OrchestrationRunner:
         codex_thread_id: str = "",
         claude_session_id: str = "",
         correlation_id: str = "",
+        causation_id: int | None = None,
     ) -> None:
         cid = correlation_id or str(uuid.uuid4())
+        # ``run.started`` is written synchronously by ``start_chief_engineer``
+        # before this coroutine gets a timeslice.  This separate activity
+        # marker proves the executor actually began.  Startup recovery can
+        # therefore distinguish a durable hand-off with no executor from a
+        # run that began and later failed normally, without ever launching it
+        # a second time.
+        self._emit_event(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.RUN_PHASE_CHANGED,
+            aggregate_type=AggregateType.ORCHESTRATION_RUN,
+            aggregate_id=str(orchestration_run_id),
+            correlation_id=cid,
+            source=EventSource.ORCHESTRATOR,
+            actor="orchestrator",
+            visibility=Visibility.OPERATOR,
+            payload={
+                "phase": "running_analysis",
+                "handoff_activity": "executor_started",
+            },
+            occurred_at=now_iso(),
+            conversation_id=conversation.id,
+            orchestration_run_id=orchestration_run_id,
+            task_id=task_id,
+            causation_id=causation_id,
+        ))
         loop = asyncio.get_running_loop()
         codex_heartbeat_last_at = 0.0
         claude_heartbeat_last_at = 0.0
@@ -778,23 +838,6 @@ class OrchestrationRunner:
                         orch.set_pending_user_context("; ".join(pending_texts))
             except Exception:
                 logger.debug("Failed to query pending context for verification", exc_info=True)
-
-        # Emit run.started
-        self._emit_event(RuntimeEvent(
-            schema_version=1,
-            event_type=EventType.RUN_STARTED,
-            aggregate_type=AggregateType.ORCHESTRATION_RUN,
-            aggregate_id=str(orchestration_run_id),
-            correlation_id=cid,
-            source=EventSource.ORCHESTRATOR,
-            actor="orchestrator",
-            visibility=Visibility.OPERATOR,
-            payload={"goal": prompt, "phase": "running_analysis"},
-            occurred_at=now_iso(),
-            conversation_id=conversation.id,
-            orchestration_run_id=orchestration_run_id,
-            task_id=task_id,
-        ))
 
         terminal_sent = False
         orch_result_status = "running"

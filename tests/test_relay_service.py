@@ -340,7 +340,7 @@ def test_antigravity_plan_first_uses_prompt_fallback_without_unknown_flags(tmp_p
     assert attempt.provider_mode["provider_mode"] == "prompt_plan_fallback"
 
 
-def test_legacy_team_mode_normalizes_to_auto_with_subagents_allowed(tmp_path) -> None:
+def test_legacy_team_mode_normalizes_to_standard_with_subagents_allowed(tmp_path) -> None:
     service, _provider = _service(tmp_path)
     task = service.create_task(
         title="Relay",
@@ -352,11 +352,10 @@ def test_legacy_team_mode_normalizes_to_auto_with_subagents_allowed(tmp_path) ->
 
     execution = service._store.lifecycle.round_execution(task.id, 1)
 
-    assert execution["execution_mode"] == "auto"
-    assert execution["execution_strategy"] == {
-        "allow_subagents": "auto",
-        "subagent_decision_json": {},
-    }
+    assert execution["execution_mode"] == "standard"
+    assert execution["execution_strategy"]["allow_subagents"] == "auto"
+    assert execution["execution_strategy"]["subagent_decision_json"] == {}
+    assert execution["execution_strategy"]["execution_contract_version"] == 1
 
 
 def test_legacy_team_strategy_allows_subagents_without_preserving_manual_strategy(tmp_path) -> None:
@@ -367,16 +366,19 @@ def test_legacy_team_strategy_allows_subagents_without_preserving_manual_strateg
         workspace="/repo",
         provider="claude",
         execution_mode="goal",
+        execution_goal="Review the result.",
+        acceptance_criteria=["A reviewer records an outcome."],
         team_strategy="code_review",
     )
 
     execution = service._store.lifecycle.round_execution(task.id, 1)
 
     assert execution["execution_mode"] == "goal"
-    assert execution["execution_strategy"] == {
-        "allow_subagents": "auto",
-        "subagent_decision_json": {},
-    }
+    assert execution["execution_strategy"]["allow_subagents"] == "auto"
+    assert execution["execution_strategy"]["subagent_decision_json"] == {}
+    assert execution["execution_strategy"]["acceptance_criteria"] == [
+        "A reviewer records an outcome."
+    ]
     assert "team_strategy" not in execution["execution_strategy"]
 
 
@@ -433,7 +435,7 @@ def test_subagents_do_not_use_provider_team_topology_mode(tmp_path) -> None:
         if artifact.get("artifact_type") == "role_dispatch_metadata"
         and artifact.get("relay_role") == "director"
     ][-1]
-    assert metadata["provider_mode"]["execution_mode"] == "auto"
+    assert metadata["provider_mode"]["execution_mode"] == "standard"
     assert metadata["provider_mode"]["allow_subagents"] == "auto"
     assert metadata["provider_mode"]["provider_mode"] != "provider_team_topology"
     assert service._store.lifecycle.latest_attempt(task.id, 1, "director").team_strategy == "none"
@@ -563,6 +565,431 @@ async def test_terminal_round_consumes_pending_input_into_next_round(tmp_path) -
     assert detail.task.status == "running"
     assert next(job for job in detail.role_jobs if job.role == "director").status == "queued"
     assert [call[0] for call in provider.calls] == ["start_session"]
+
+
+@pytest.mark.asyncio
+async def test_multiple_inputs_queued_in_one_round_are_consumed_in_order(tmp_path) -> None:
+    """Older queued input remains eligible after the first follow-up advances."""
+
+    service, _provider = _active_turn_service(tmp_path)
+    task = service.create_task(
+        title="Ordered queued input",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    first = service.queue_user_input(task.id, "first queued request")
+    second = service.queue_user_input(task.id, "second queued request")
+    service._store.update_task_status(task.id, "completed")
+
+    first_consumed = await service.consume_pending_after_round(
+        task.id,
+        1,
+        dispatch_next=False,
+    )
+    service._store.update_task_status(task.id, "completed")
+    second_consumed = await service.consume_pending_after_round(
+        task.id,
+        2,
+        dispatch_next=False,
+    )
+
+    assert first_consumed is not None and first_consumed.id == first.id
+    assert second_consumed is not None and second_consumed.id == second.id
+    assert first_consumed.consumed_round_id == 2
+    assert second_consumed.consumed_round_id == 3
+    assert service.get_task(task.id).current_round_id == 3
+
+
+@pytest.mark.asyncio
+async def test_workspace_claim_allows_only_one_followup_and_dispatch(tmp_path) -> None:
+    """Two workers racing one task cannot create two turns or provider calls."""
+
+    database = tmp_path / "relay-workspace-claim.sqlite3"
+    ledger = Ledger.open(database)
+    ledger.migrate()
+    provider = FakeProvider()
+    first = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    )
+    task = first.create_task(
+        title="Lease race",
+        prompt="Build it",
+        workspace="/repo-a",
+        provider="claude",
+    )
+    pending = first.queue_user_input(task.id, "only one follow-up")
+    first._store.update_task_status(task.id, "completed")
+
+    second_ledger = Ledger.open(database)
+    second_ledger.migrate()
+    second = RelayService(
+        store=RelayStore(second_ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    )
+    results = await asyncio.gather(
+        first.consume_pending_after_round(task.id, 1),
+        second.consume_pending_after_round(task.id, 1),
+    )
+
+    assert sum(result is not None for result in results) == 1
+    assert first._store.get_pending_input(task.id, pending.id).status == "consumed"
+    assert first.get_task(task.id).current_round_id == 2
+    artifacts = first.get_task(task.id).artifacts
+    assert len(
+        [
+            artifact
+            for artifact in artifacts
+            if artifact.get("artifact_type") == "user_followup"
+            and int(artifact.get("pending_input_id") or 0) == pending.id
+        ]
+    ) == 1
+    assert [call[0] for call in provider.calls] == ["start_session"]
+    lease_count = ledger._conn.execute(
+        "SELECT COUNT(*) AS count FROM relay_workspace_queue_leases"
+    ).fetchone()
+    assert int(lease_count["count"]) == 0
+
+
+def test_workspace_claim_is_exclusive_across_different_tasks(tmp_path) -> None:
+    """One workspace fence prevents parallel follow-ups from separate tasks."""
+
+    service, _provider = _service(tmp_path)
+    first_task = service.create_task(
+        title="Workspace fence A",
+        prompt="Build A",
+        workspace="/repo-a",
+        provider="claude",
+    )
+    second_task = service.create_task(
+        title="Workspace fence B",
+        prompt="Build B",
+        workspace="/repo-a",
+        provider="claude",
+    )
+    first_pending = service.queue_user_input(first_task.id, "first follow-up")
+    second_pending = service.queue_user_input(second_task.id, "second follow-up")
+    store = service._store
+
+    first_claim = store.claim_pending_input_for_workspace(
+        "/repo-a",
+        lease_owner="worker-one",
+        task_id=first_task.id,
+        pending_input_id=first_pending.id,
+    )
+    assert first_claim is not None
+    assert (
+        store.claim_pending_input_for_workspace(
+            "/repo-a",
+            lease_owner="worker-two",
+            task_id=second_task.id,
+            pending_input_id=second_pending.id,
+        )
+        is None
+    )
+
+    assert store.release_pending_input_claim(first_claim)
+    second_claim = store.claim_pending_input_for_workspace(
+        "/repo-a",
+        lease_owner="worker-two",
+        task_id=second_task.id,
+        pending_input_id=second_pending.id,
+    )
+    assert second_claim is not None
+
+
+@pytest.mark.asyncio
+async def test_late_old_agent_completion_never_projects_onto_current_round(tmp_path) -> None:
+    """A late provider result cannot mutate the same role in a newer round."""
+
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Late completion",
+        prompt="Keep old provider output out of a new follow-up round.",
+        workspace="/repo-a",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    original = service._store.lifecycle.latest_attempt(task.id, 1, "director")
+    assert original.agent_run_id is not None
+
+    service._store.start_followup_round(task.id)
+    await service.dispatch_role(task.id, "director")
+    current = service._store.lifecycle.latest_attempt(task.id, 2, "director")
+    assert current.agent_run_id is not None
+    assert current.agent_run_id != original.agent_run_id
+    assert service._store.find_relay_attempt_by_agent_run_id(original.agent_run_id) == (
+        task.id,
+        "director",
+        1,
+    )
+    assert service._runtime_event_round_id(task.id, "director", original.agent_run_id) == 1
+
+    result = await service.handle_role_completion_event(
+        task.id,
+        "director",
+        runtime_event_id=881,
+        agent_run_id=original.agent_run_id,
+        output=_strict_json_envelope(role="director", artifact_type="routing_decision"),
+    )
+
+    detail = service.get_task(task.id)
+    current_after = service._store.lifecycle.latest_attempt(task.id, 2, "director")
+    assert result is None
+    assert detail.current_round_id == 2
+    assert current_after.status == "streaming"
+    assert current_after.agent_run_id == current.agent_run_id
+    assert not any(
+        int(artifact.get("runtime_event_id") or 0) == 881
+        for artifact in detail.artifacts
+    )
+    claim = service._store._ledger._conn.execute(
+        """
+        SELECT claimed_round_id, status
+        FROM relay_completion_event_claims
+        WHERE team_run_id = ? AND runtime_event_id = ?
+        """,
+        (task.id, 881),
+    ).fetchone()
+    assert int(claim["claimed_round_id"]) == 1
+    assert claim["status"] == "ignored_stale"
+    assert [call[0] for call in provider.calls] == ["start_session", "start_session"]
+
+    late_runtime = RuntimeEvent(
+        id=883,
+        schema_version=1,
+        event_type=EventType.MODEL_MESSAGE_COMPLETED,
+        aggregate_type=AggregateType.AGENT_RUN,
+        aggregate_id=str(original.agent_run_id),
+        correlation_id="late-director-completion",
+        source=EventSource.CLAUDE,
+        actor="claude",
+        visibility=Visibility.USER,
+        payload={
+            "text": _strict_json_envelope(role="director", artifact_type="routing_decision")
+        },
+        occurred_at=now_iso(),
+        agent_run_id=original.agent_run_id,
+    )
+    await service.handle_runtime_event(late_runtime)
+    assert service.get_task(task.id).current_round_id == 2
+    runtime_claim = service._store._ledger._conn.execute(
+        """
+        SELECT claimed_round_id, status
+        FROM relay_completion_event_claims
+        WHERE team_run_id = ? AND runtime_event_id = ?
+        """,
+        (task.id, 883),
+    ).fetchone()
+    # Runtime routing rejects the stale attempt before it reaches the
+    # projector; direct/reconciliation entry points above still durably mark
+    # the same condition as ignored_stale.
+    assert runtime_claim is None
+
+    unmatched = await service.handle_role_completion_event(
+        task.id,
+        "director",
+        runtime_event_id=882,
+        agent_run_id=999_999,
+        output=_strict_json_envelope(role="director", artifact_type="routing_decision"),
+    )
+    assert unmatched is None
+    assert service._store._ledger._conn.execute(
+        """
+        SELECT COUNT(*) AS count FROM relay_completion_event_claims
+        WHERE team_run_id = ? AND runtime_event_id = ?
+        """,
+        (task.id, 882),
+    ).fetchone()["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_completion_recovery_finalizes_original_round_after_advance(tmp_path) -> None:
+    """Crash recovery uses the original completion identity, never round two."""
+
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Completion recovery",
+        prompt="Finish the original provider completion exactly once.",
+        workspace="/repo-a",
+        provider="claude",
+    )
+    await service.dispatch_role(task.id, "director")
+    original = service._store.lifecycle.latest_attempt(task.id, 1, "director")
+    assert original.agent_run_id is not None
+    claimed = service._store.lifecycle.claim_completion_event_result(
+        task.id,
+        1,
+        "director",
+        891,
+        agent_run_id=original.agent_run_id,
+    )
+    assert claimed.acquired
+    saved = service._store.save_artifact(
+        task.id,
+        "director",
+        "routing_decision",
+        {
+            "round_id": 1,
+            "runtime_event_id": 891,
+            "status": "passed",
+            "route": "director_only",
+            "required_roles": ["director"],
+        },
+        summary="original completion persisted before crash",
+    )
+    service._store.start_followup_round(task.id)
+    service._store._ledger._conn.execute(
+        """
+        UPDATE relay_completion_event_claims
+        SET updated_at = ?
+        WHERE team_run_id = ? AND runtime_event_id = ?
+        """,
+        ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(), task.id, 891),
+    )
+    service._store._ledger._conn.commit()
+    artifact_count_before = len(service.get_task(task.id).artifacts)
+
+    result = await service.handle_role_completion_event(
+        task.id,
+        "director",
+        runtime_event_id=891,
+        agent_run_id=original.agent_run_id,
+        output=_strict_json_envelope(role="director", artifact_type="routing_decision"),
+    )
+
+    detail = service.get_task(task.id)
+    claim = service._store._ledger._conn.execute(
+        """
+        SELECT claimed_round_id, status, artifact_id
+        FROM relay_completion_event_claims
+        WHERE team_run_id = ? AND runtime_event_id = ?
+        """,
+        (task.id, 891),
+    ).fetchone()
+    assert result is None
+    assert detail.current_round_id == 2
+    assert len(detail.artifacts) == artifact_count_before
+    assert int(claim["claimed_round_id"]) == 1
+    assert claim["status"] == "applied"
+    assert int(claim["artifact_id"]) == saved.id
+
+
+def test_workspace_claim_expires_then_consume_removes_lease(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Lease expiry",
+        prompt="Build it",
+        workspace="/repo-a",
+        provider="claude",
+    )
+    pending = service.queue_user_input(task.id, "retry after crash")
+    store = service._store
+    first = store.claim_pending_input_for_workspace(
+        "/repo-a",
+        lease_owner="worker-one",
+        task_id=task.id,
+        pending_input_id=pending.id,
+        lease_seconds=60,
+    )
+    assert first is not None
+    store._ledger._conn.execute(
+        "UPDATE relay_workspace_queue_leases SET lease_expires_at = ? WHERE pending_input_id = ?",
+        ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), pending.id),
+    )
+    store._ledger._conn.execute(
+        "UPDATE relay_workspace_queue_locks SET lease_expires_at = ? WHERE pending_input_id = ?",
+        ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), pending.id),
+    )
+    store._ledger._conn.commit()
+
+    second = store.claim_pending_input_for_workspace(
+        "/repo-a",
+        lease_owner="worker-two",
+        task_id=task.id,
+        pending_input_id=pending.id,
+    )
+
+    assert second is not None
+    assert second.lease_owner == "worker-two"
+    assert second.attempt_count == 2
+    consumed = store.consume_pending_input_claim(second, consumed_round_id=2)
+    assert consumed.status == "consumed"
+    lease_count = store._ledger._conn.execute(
+        "SELECT COUNT(*) AS count FROM relay_workspace_queue_leases WHERE pending_input_id = ?",
+        (pending.id,),
+    ).fetchone()
+    assert int(lease_count["count"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_transition_recovers_after_crash_before_consume(tmp_path, monkeypatch) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Queue recovery",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    pending = service.queue_user_input(task.id, "resume one target round")
+    service._store.update_task_status(task.id, "completed")
+    original_consume = service._store.consume_pending_input_claim
+
+    def crash_after_side_effect(*_args, **_kwargs):
+        raise RuntimeError("simulated crash before queue consume")
+
+    monkeypatch.setattr(service._store, "consume_pending_input_claim", crash_after_side_effect)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await service.consume_pending_after_round(task.id, 1, dispatch_next=False)
+    monkeypatch.setattr(service._store, "consume_pending_input_claim", original_consume)
+
+    # The marker and target round are durable, but the source input remains
+    # retryable.  A worker restart must finish that one target, not create a
+    # third round or duplicate the user follow-up artifact.
+    assert service.get_task(task.id).current_round_id == 2
+    assert service._store.get_pending_input(task.id, pending.id).status == "pending"
+    assert await service.reconcile_task_lifecycle(task.id)
+    detail = service.get_task(task.id)
+    assert detail.current_round_id == 2
+    assert service._store.get_pending_input(task.id, pending.id).status == "consumed"
+    assert len(
+        [
+            artifact
+            for artifact in detail.artifacts
+            if artifact.get("artifact_type") == "user_followup"
+            and int(artifact.get("pending_input_id") or 0) == pending.id
+        ]
+    ) == 1
+    assert [call[0] for call in provider.calls] == ["start_session"]
+
+
+@pytest.mark.asyncio
+async def test_pending_consumer_respects_maintenance_freeze(tmp_path) -> None:
+    service, _provider = _service(tmp_path)
+    task = service.create_task(
+        title="Frozen queue",
+        prompt="Build it",
+        workspace="/repo",
+        provider="claude",
+    )
+    pending = service.queue_user_input(task.id, "do not consume in maintenance")
+    service._store.update_task_status(task.id, "completed")
+    service._store._ledger.begin_maintenance_window(operator_note="test freeze")
+    try:
+        assert await service.consume_pending_after_round(task.id, 1) is None
+        assert await service.reconcile_task_lifecycle(task.id) is False
+        assert service.get_task(task.id).current_round_id == 1
+        assert service._store.get_pending_input(task.id, pending.id).status == "pending"
+        lease_count = service._store._ledger._conn.execute(
+            "SELECT COUNT(*) AS count FROM relay_workspace_queue_leases"
+        ).fetchone()
+        assert int(lease_count["count"]) == 0
+    finally:
+        service._store._ledger.cancel_maintenance_window()
 
 
 @pytest.mark.asyncio
@@ -900,6 +1327,47 @@ def test_resume_role_force_redispatches_streaming_role(tmp_path) -> None:
         "start_session",
         "continue_session",
     ]
+
+
+@pytest.mark.parametrize(
+    "claim_source",
+    ["provider_native_resolving", "provider_native_superseding"],
+)
+def test_resume_role_never_redispatches_while_native_approval_recovery_is_pending(
+    tmp_path,
+    claim_source: str,
+) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(
+        title="Relay approval recovery",
+        prompt="Do not start a second turn.",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_task_status(task.id, "blocked")
+    service._store.update_role_status(task.id, "implementer", "blocked")
+    service._store.lifecycle.set_round_confirmation(
+        task.id,
+        1,
+        source=claim_source,
+        kind="command_approval",
+        role="implementer",
+        provider="codex",
+        provider_request_id="req-recovery",
+        runtime_event_id=99,
+        native_session_id="native-test",
+        agent_run_id=101,
+        turn_id="turn-test",
+    )
+
+    with pytest.raises(ValueError, match="native approval recovery is pending"):
+        asyncio.run(service.resume_role(task.id, "implementer", force=True))
+
+    detail = service.get_task_readonly(task.id)
+    job = next(candidate for candidate in detail.role_jobs if candidate.role == "implementer")
+    assert detail.task.status == "blocked"
+    assert job.status == "blocked"
+    assert provider.calls == []
 
 
 def test_create_task_snapshots_role_providers_and_dispatches_each_role_provider(
@@ -2267,6 +2735,354 @@ def test_codex_approval_runtime_event_records_native_confirmation_provenance(
         {"action": "approve_once"},
     )
     assert not any(call[0] == "continue_session" for call in provider.calls)
+
+
+def test_native_approval_supersede_cancels_old_request_and_replaces_projection(
+    tmp_path,
+) -> None:
+    """A newer provider approval atomically replaces the only actionable one."""
+    ledger = Ledger.open(tmp_path / "relay.sqlite3")
+    ledger.migrate()
+    provider = FakeCodexProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="codex",
+    )
+    task = service.create_task(
+        title="Native supersede",
+        prompt="Run guarded commands",
+        workspace="/repo",
+        provider="codex",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(ledger._conn)
+
+    def approval(request_id: str):
+        return runtime_store.append(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.APPROVAL_REQUESTED,
+            aggregate_type=AggregateType.APPROVAL,
+            aggregate_id=request_id,
+            correlation_id="approval-supersede",
+            source=EventSource.CODEX,
+            actor="codex",
+            visibility=Visibility.USER,
+            payload={
+                "codexRequestId": request_id,
+                "kind": "command",
+                "summary": f"Run {request_id}",
+                "turnId": "turn-codex-1",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=701,
+            task_id=task.id,
+        ))
+
+    old_event = approval("req-old")
+    asyncio.run(service.handle_runtime_event(old_event))
+    new_event = approval("req-new")
+    asyncio.run(service.handle_runtime_event(new_event))
+
+    execution = service._store.lifecycle.round_execution(task.id, 1)
+    detail = service.get_task(task.id)
+    assert provider.calls[-1] == ("resolve_approval", "req-old", {"action": "cancel"})
+    assert execution["confirmation"]["provider_request_id"] == "req-new"
+    assert execution["confirmation"]["runtime_event_id"] == new_event.id
+    assert execution["pending_approval_count"] == 1
+    assert detail.task.status == "waiting_user"
+    assert {job.role: job.status for job in detail.role_jobs}["director"] == "waiting"
+    superseded = [
+        event for event in service._events.list_events(task.id)
+        if event.event_type == "approval.superseded"
+    ]
+    assert superseded[-1].payload["replacement_request_id"] == "req-new"
+
+    asyncio.run(
+        service.apply_round_control(
+            task.id,
+            1,
+            decision="continue",
+            dispatch_next=False,
+        )
+    )
+    execution = service._store.lifecycle.round_execution(task.id, 1)
+    row = ledger._conn.execute(
+        "SELECT status FROM team_runs WHERE id = ?", (task.id,)
+    ).fetchone()
+    assert provider.calls[-1] == (
+        "resolve_approval", "req-new", {"action": "approve_once"}
+    )
+    assert execution["confirmation"]["provider_request_id"] == ""
+    assert execution["pending_approval_count"] == 0
+    assert row["status"] == "running"
+
+
+def test_native_approval_supersede_keeps_old_confirmation_when_cancel_fails(
+    tmp_path,
+) -> None:
+    """A failed provider cancel cannot leave Relay pointing at an unhandled request."""
+    class CancelFailingProvider(FakeCodexProvider):
+        async def resolve_approval(self, request_id: str, body: dict[str, Any]):
+            self.calls.append(("resolve_approval", request_id, body))
+            if request_id == "req-old" and body == {"action": "cancel"}:
+                raise RuntimeError("cancel transport failed")
+            return {"request_id": request_id, "status": "resolved"}
+
+    ledger = Ledger.open(tmp_path / "relay.sqlite3")
+    ledger.migrate()
+    provider = CancelFailingProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="codex",
+    )
+    task = service.create_task(
+        title="Native cancel failure",
+        prompt="Run guarded commands",
+        workspace="/repo",
+        provider="codex",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(ledger._conn)
+    for request_id in ("req-old", "req-new"):
+        event = runtime_store.append(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.APPROVAL_REQUESTED,
+            aggregate_type=AggregateType.APPROVAL,
+            aggregate_id=request_id,
+            correlation_id="approval-cancel-fail",
+            source=EventSource.CODEX,
+            actor="codex",
+            visibility=Visibility.USER,
+            payload={
+                "codexRequestId": request_id,
+                "kind": "command",
+                "turnId": "turn-codex-1",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=701,
+            task_id=task.id,
+        ))
+        asyncio.run(service.handle_runtime_event(event))
+
+    execution = service._store.lifecycle.round_execution(task.id, 1)
+    detail = service.get_task(task.id)
+    assert provider.calls[-1] == ("resolve_approval", "req-old", {"action": "cancel"})
+    assert execution["confirmation"]["provider_request_id"] == "req-old"
+    assert execution["confirmation"]["source"] == "provider_native_approval"
+    assert execution["pending_approval_count"] == 1
+    assert detail.task.status == "waiting_user"
+    assert any(
+        event.event_type == "approval.supersede_failed"
+        for event in service._events.list_events(task.id)
+    )
+
+
+def test_native_approval_supersede_recovers_after_provider_ack_before_db_finalize(
+    tmp_path,
+) -> None:
+    """A crash after provider cancel must not strand or duplicate approval state."""
+    ledger = Ledger.open(tmp_path / "relay.sqlite3")
+    ledger.migrate()
+    provider = FakeCodexProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="codex",
+    )
+    task = service.create_task(
+        title="Native supersede recovery",
+        prompt="Run guarded commands",
+        workspace="/repo",
+        provider="codex",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(ledger._conn)
+
+    def approval(request_id: str):
+        return runtime_store.append(RuntimeEvent(
+            schema_version=1,
+            event_type=EventType.APPROVAL_REQUESTED,
+            aggregate_type=AggregateType.APPROVAL,
+            aggregate_id=request_id,
+            correlation_id="approval-supersede-recovery",
+            source=EventSource.CODEX,
+            actor="codex",
+            visibility=Visibility.USER,
+            payload={
+                "codexRequestId": request_id,
+                "kind": "command",
+                "turnId": "turn-codex-1",
+            },
+            occurred_at=now_iso(),
+            agent_run_id=701,
+            task_id=task.id,
+        ))
+
+    old_event = approval("req-old")
+    asyncio.run(service.handle_runtime_event(old_event))
+    assert service._store.lifecycle.claim_provider_native_approval_action(
+        task.id,
+        1,
+        provider_request_id="req-old",
+        runtime_event_id=old_event.id,
+        action="superseding",
+    )
+    new_event = approval("req-new")
+    # The Codex controller persists this acknowledgement before
+    # ``resolve_approval`` returns.  Simulate the process dying before Relay
+    # can atomically replace the old confirmation with ``req-new``.
+    runtime_store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.APPROVAL_RESOLVED,
+        aggregate_type=AggregateType.APPROVAL,
+        aggregate_id="req-old",
+        correlation_id="approval-supersede-recovery",
+        source=EventSource.CODEX,
+        actor="codex",
+        visibility=Visibility.USER,
+        payload={"decision": "cancel"},
+        occurred_at=now_iso(),
+        agent_run_id=701,
+        task_id=task.id,
+    ))
+
+    restarted = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="codex",
+    )
+    assert asyncio.run(restarted.reconcile_task_lifecycle(task.id, runtime_store))
+
+    execution = restarted._store.lifecycle.round_execution(task.id, 1)
+    assert execution["confirmation"]["source"] == "provider_native_approval"
+    assert execution["confirmation"]["provider_request_id"] == "req-new"
+    assert execution["confirmation"]["runtime_event_id"] == new_event.id
+    assert execution["pending_approval_count"] == 1
+    assert not any(call[0] == "resolve_approval" for call in provider.calls)
+
+
+def test_native_approval_resolution_recovers_after_provider_ack_before_finalize(
+    tmp_path,
+) -> None:
+    """A restarted lifecycle worker finalizes a persisted provider response once."""
+    ledger = Ledger.open(tmp_path / "relay.sqlite3")
+    ledger.migrate()
+    provider = FakeCodexProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="codex",
+    )
+    task = service.create_task(
+        title="Native resolution recovery",
+        prompt="Stop guarded command",
+        workspace="/repo",
+        provider="codex",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    runtime_store = RuntimeEventStore(ledger._conn)
+    event = runtime_store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.APPROVAL_REQUESTED,
+        aggregate_type=AggregateType.APPROVAL,
+        aggregate_id="req-cancel",
+        correlation_id="approval-resolution-recovery",
+        source=EventSource.CODEX,
+        actor="codex",
+        visibility=Visibility.USER,
+        payload={"codexRequestId": "req-cancel", "turnId": "turn-codex-1"},
+        occurred_at=now_iso(),
+        agent_run_id=701,
+        task_id=task.id,
+    ))
+    asyncio.run(service.handle_runtime_event(event))
+    assert service._store.lifecycle.claim_provider_native_approval_action(
+        task.id,
+        1,
+        provider_request_id="req-cancel",
+        runtime_event_id=event.id,
+        action="resolving",
+    )
+    runtime_store.append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.APPROVAL_RESOLVED,
+        aggregate_type=AggregateType.APPROVAL,
+        aggregate_id="req-cancel",
+        correlation_id="approval-resolution-recovery",
+        source=EventSource.CODEX,
+        actor="codex",
+        visibility=Visibility.USER,
+        payload={"decision": "cancel"},
+        occurred_at=now_iso(),
+        agent_run_id=701,
+        task_id=task.id,
+    ))
+
+    restarted = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="codex",
+    )
+    assert asyncio.run(restarted.reconcile_task_lifecycle(task.id, runtime_store))
+    execution = restarted._store.lifecycle.round_execution(task.id, 1)
+    assert execution["confirmation"]["source"] == ""
+    assert execution["pending_approval_count"] == 0
+    assert restarted.get_task(task.id).task.status == "interrupted"
+    assert not any(call[0] == "resolve_approval" for call in provider.calls)
+
+
+def test_native_approval_transient_claim_rejects_stale_round_control(tmp_path) -> None:
+    """A button cannot bypass an in-flight resolve/supersede CAS claim."""
+    ledger = Ledger.open(tmp_path / "relay.sqlite3")
+    ledger.migrate()
+    provider = FakeCodexProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="codex",
+    )
+    task = service.create_task(
+        title="Native stale action",
+        prompt="Run guarded commands",
+        workspace="/repo",
+        provider="codex",
+    )
+    asyncio.run(service.dispatch_role(task.id, "director"))
+    event = RuntimeEventStore(ledger._conn).append(RuntimeEvent(
+        schema_version=1,
+        event_type=EventType.APPROVAL_REQUESTED,
+        aggregate_type=AggregateType.APPROVAL,
+        aggregate_id="req-claim",
+        correlation_id="approval-claim",
+        source=EventSource.CODEX,
+        actor="codex",
+        visibility=Visibility.USER,
+        payload={"codexRequestId": "req-claim", "turnId": "turn-codex-1"},
+        occurred_at=now_iso(),
+        agent_run_id=701,
+        task_id=task.id,
+    ))
+    asyncio.run(service.handle_runtime_event(event))
+    assert service._store.lifecycle.claim_provider_native_approval_action(
+        task.id,
+        1,
+        provider_request_id="req-claim",
+        runtime_event_id=event.id,
+        action="resolving",
+    )
+
+    with pytest.raises(ValueError, match="already in progress"):
+        asyncio.run(
+            service.apply_round_control(
+                task.id,
+                1,
+                decision="continue",
+                dispatch_next=False,
+            )
+        )
+    assert not any(call[0] == "resolve_approval" for call in provider.calls)
 
 
 def test_round_control_continue_records_selected_confirmation_option(tmp_path) -> None:
@@ -5834,6 +6650,7 @@ def test_goal_mode_director_final_summary_requires_acceptance_evidence(tmp_path)
         provider="claude",
         execution_mode="goal",
         execution_goal="完成这个目标并通过验收",
+        acceptance_criteria=["完成目标"],
     )
 
     asyncio.run(

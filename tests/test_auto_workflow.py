@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 
 from wlcodex.auto_workflow import (
     AUTO_CLAUDE_DONE,
     AUTO_CLAUDE_RUNNING,
     AUTO_COLLECTING_CONTEXT,
-    AUTO_CODEX_TAKEOVER_RUNNING,
     AUTO_COMPLETED,
     AUTO_DRAFT_READY,
     AUTO_RETRY_READY,

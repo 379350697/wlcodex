@@ -1,5 +1,8 @@
 # WLCodex Worker Live Stream Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Status
 
 Drafted on 2026-05-29 as the first implementation slice for the Virtual
@@ -277,4 +280,3 @@ After Worker Live Stream is stable:
 3. Worker Registry: role/backend/model labels.
 4. Relay: secure remote access from phone outside local network.
 5. Bidirectional Control: approve, steer, pause, resume, stop from web.
-

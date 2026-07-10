@@ -11,7 +11,6 @@ Covers replay reconstructing:
 
 from __future__ import annotations
 
-import pytest
 
 from wlcodex.runtime_events import (
     AggregateType,
@@ -22,7 +21,6 @@ from wlcodex.runtime_events import (
     now_iso,
 )
 from wlcodex.runtime_state import (
-    WorkbenchRuntimeState,
     replay_workbench_events,
 )
 

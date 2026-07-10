@@ -4,13 +4,13 @@ from pathlib import Path
 import tomllib
 
 
-def test_default_pytest_policy_excludes_slow_integration_and_live() -> None:
+def test_default_pytest_policy_runs_integration_but_excludes_slow_and_live() -> None:
     data = tomllib.loads(Path("pyproject.toml").read_text())
     pytest_options = data["tool"]["pytest"]["ini_options"]
 
     addopts = pytest_options["addopts"]
     assert "not slow" in addopts
-    assert "not integration" in addopts
+    assert "not integration" not in addopts
     assert "not live" in addopts
 
     markers = "\n".join(pytest_options["markers"])

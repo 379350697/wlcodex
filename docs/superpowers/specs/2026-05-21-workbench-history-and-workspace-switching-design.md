@@ -1,5 +1,8 @@
 # Workbench History and Workspace Switching Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Goal
 
 Make long-running WLCodex operation practical by adding a user-visible historical Workbench list and a clear project switching flow for local repositories under `/media/wl/新加卷/codex`.

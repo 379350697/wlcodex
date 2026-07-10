@@ -318,7 +318,7 @@ async def test_native_agent_steer_route_reports_disabled_capability(
 
 
 @pytest.mark.asyncio
-async def test_native_agent_sessions_route(tmp_path: Path) -> None:
+async def test_native_agent_sessions_get_uses_read_only_cache(tmp_path: Path) -> None:
     response, provider = await _request_native_agent(
         tmp_path,
         "GET /api/native/claude/sessions HTTP/1.1\r\n"
@@ -327,13 +327,18 @@ async def test_native_agent_sessions_route(tmp_path: Path) -> None:
 
     assert "HTTP/1.1 200 OK" in response
     payload = _json_body(response)
-    assert payload["sessions"][0]["native_session_id"] == "session-1"
-    assert payload["sessions"][0]["provider_engine"] == "sdk-deepseek"
-    assert provider.calls == [("list_sessions", 50)]
+    assert payload == {
+        "sessions": [],
+        "native_refresh_pending": False,
+        "native_session_source": "cache",
+    }
+    assert provider.calls == []
 
 
 @pytest.mark.asyncio
-async def test_native_agent_read_missing_session_returns_404(tmp_path: Path) -> None:
+async def test_native_agent_missing_session_get_returns_stale_read_only_snapshot(
+    tmp_path: Path,
+) -> None:
     provider = FakeMissingSessionProvider()
     response, provider = await _request_native_agent(
         tmp_path,
@@ -342,9 +347,13 @@ async def test_native_agent_read_missing_session_returns_404(tmp_path: Path) -> 
         provider=provider,
     )
 
-    assert "HTTP/1.1 404 Not Found" in response
-    assert _json_body(response) == {"error": "native session not found"}
-    assert provider.calls == [("read_session", "thread-test")]
+    assert "HTTP/1.1 200 OK" in response
+    payload = _json_body(response)
+    assert payload["native_thread_id"] == "thread-test"
+    assert payload["native_session_source"] == "stub"
+    assert payload["presentation"]["state"] == "stale"
+    assert payload["presentation"]["next_action"] == "重新同步"
+    assert provider.calls == []
 
 
 @pytest.mark.asyncio
@@ -376,6 +385,42 @@ async def test_native_agent_start_session_route(tmp_path: Path) -> None:
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_native_start_mutation_replays_same_idempotency_key_without_second_turn(
+    tmp_path: Path,
+) -> None:
+    """A lost HTTP response must not create a second provider-owned turn."""
+
+    body = json.dumps({"cwd": "/repo", "prompt": "fix it"})
+    request = (
+        "POST /api/native/claude/sessions/start HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        "Idempotency-Key: native-start-replay-1\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}"
+    )
+    provider = FakeProvider()
+    server = WorkerLiveStreamServer(
+        host="127.0.0.1",
+        port=0,
+        hub=WorkerLiveStreamHub(_store(tmp_path)),
+        native_registry=NativeAgentRegistry([provider]),
+    )
+    await server.start()
+    try:
+        first = await _read_response(server.host, server.port, request)
+        replay = await _read_response(server.host, server.port, request)
+    finally:
+        await server.stop()
+
+    assert "HTTP/1.1 200 OK" in first
+    assert "HTTP/1.1 200 OK" in replay
+    assert _json_body(replay) == _json_body(first)
+    assert [call[0] for call in provider.calls] == ["start_session"]
 
 
 @pytest.mark.asyncio
@@ -661,7 +706,7 @@ async def test_native_root_lists_providers(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_root_provider_links_preserve_query_token(
+async def test_native_root_provider_links_preserve_query_token_without_legacy_council_entry(
     tmp_path: Path,
 ) -> None:
     response, _provider = await _request_native_agent(
@@ -673,7 +718,7 @@ async def test_native_root_provider_links_preserve_query_token(
 
     assert "HTTP/1.1 200 OK" in response
     assert 'href="/native/claude?token=secret"' in response
-    assert 'href="/council?token=secret"' in response
+    assert 'href="/council?token=secret"' not in response
 
 
 @pytest.mark.asyncio

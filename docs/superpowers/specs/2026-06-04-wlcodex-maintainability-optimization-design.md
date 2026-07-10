@@ -1,5 +1,8 @@
 # WLCodex Maintainability Optimization Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 > Review date: 2026-06-04
 > Scope: maintainability-focused optimization of frontend delivery, controller boundaries, persistence boundaries, event processing, and Telegram command organization.
 

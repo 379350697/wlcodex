@@ -98,6 +98,11 @@ class CodexAppServerProvider:
     async def read_session(self, native_session_id: str) -> dict[str, Any]:
         return await self._controller.read_session(native_session_id)
 
+    async def peek_session(self, native_session_id: str) -> dict[str, Any]:
+        """Read a live session without projecting or persisting it locally."""
+
+        return await self._controller.peek_session(native_session_id)
+
     async def attach_session(self, native_session_id: str) -> NativeAgentControlResult:
         return _result_from_codex(await self._controller.attach_session(native_session_id))
 

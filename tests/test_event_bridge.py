@@ -218,6 +218,41 @@ def _button_actions(buttons: object) -> set[str]:
 
 
 @pytest.mark.asyncio
+async def test_startup_drain_invokes_workspace_queue_consumer_for_each_workspace(
+    tmp_path: Path,
+) -> None:
+    """A restart must not wait for another terminal backend event to drain."""
+
+    ledger = Ledger.open(tmp_path / "db.sqlite3")
+    ledger.migrate()
+    service = TaskService(
+        ledger,
+        [
+            WorkspaceConfig(alias="alpha", path=tmp_path, allow_write=True),
+            WorkspaceConfig(alias="beta", path=tmp_path, allow_write=True),
+        ],
+    )
+    consumed_workspaces: list[str] = []
+
+    async def consume_queue(workspace_alias: str) -> None:
+        consumed_workspaces.append(workspace_alias)
+
+    bridge = EventBridge(
+        task_service=service,
+        backend=IdleBackend(),
+        ledger=ledger,
+        send_telegram=_send_telegram,
+        edit_telegram=_edit_telegram,
+        approval_service=ApprovalSpy(),
+        on_workspace_freed=consume_queue,
+    )
+
+    await bridge._drain_available_workspaces_on_startup()
+
+    assert consumed_workspaces == ["alpha", "beta"]
+
+
+@pytest.mark.asyncio
 async def test_expiry_scan_runs_without_backend_events(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "wlcodex.event_bridge.EXPIRY_SCAN_INTERVAL_SECONDS", 0.01
@@ -2437,7 +2472,6 @@ async def test_auto_final_plan_stage_uses_llm_digest_when_available(
 ) -> None:
     from wlcodex.auto_workflow import (
         AUTO_COLLECTING_CONTEXT,
-        AUTO_DRAFT_READY,
         ROLE_AUTO_FINAL_PLAN,
     )
 

@@ -1,5 +1,8 @@
 # WLCodex Interaction Layer Natural Streaming Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 > Superseded in user semantics by the 2026-05-20 Remote Workbench repair.
 > "new conversation" and task-led copy below is historical context. Current
 > normal Telegram copy must say Workbench/Cockpit/Onsite and must not expose

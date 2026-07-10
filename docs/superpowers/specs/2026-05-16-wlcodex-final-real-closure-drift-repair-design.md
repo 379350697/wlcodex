@@ -1,5 +1,8 @@
 # WLCodex Final Real Closure Drift Repair Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 > Superseded: the 2026-05-20 Remote Workbench repair replaces this task-led
 > product model. References to `/task`, `/continue`, `/steer`, task queues,
 > task ids, and user-managed session/thread ids are legacy diagnostics only and

@@ -3,7 +3,7 @@
 No Telegram, no backend adapters — just data definitions.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

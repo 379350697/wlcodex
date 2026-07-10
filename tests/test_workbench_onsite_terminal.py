@@ -8,9 +8,8 @@ Tests cover:
 - pause_delivery / resume_delivery toggles delivery state
 """
 
-import pytest
 
-from wlcodex.surfaces.terminal.models import TerminalFrame, TerminalSessionRef
+from wlcodex.surfaces.terminal.models import TerminalFrame
 from wlcodex.surfaces.terminal.manager import (
     TerminalSessionManager,
     OnsiteDecisionKind,
@@ -21,7 +20,6 @@ from wlcodex.surfaces.terminal.renderer import (
     render_start_card,
 )
 from wlcodex.surfaces.terminal.router import (
-    TerminalCommand,
     TerminalCommandKind,
     route_terminal_command,
 )

@@ -104,6 +104,7 @@ class EventType:
     RUN_PHASE_CHANGED = "run.phase.changed"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
+    RUN_RECOVERY_REQUIRED = "run.recovery.required"
     RUN_CANCEL_REQUESTED = "run.cancel.requested"
     RUN_CANCELLED = "run.cancelled"
 
@@ -228,6 +229,8 @@ class EventType:
     WORKSPACE_BUSY_USER_CHOICE_REQUESTED = "workspace.busy.user_choice.requested"
     WORKSPACE_BUSY_USER_CHOICE_RECORDED = "workspace.busy.user_choice.recorded"
     RUN_QUEUED = "run.queued"
+    RUN_QUEUED_CLAIMED = "run.queued.claimed"
+    RUN_QUEUED_RELEASED = "run.queued.released"
     RUN_QUEUED_CONSUMED = "run.queued.consumed"
 
     # Approval supersession

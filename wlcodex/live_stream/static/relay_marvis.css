@@ -9,7 +9,6 @@ body[data-marvis-relay-view] {
   background: #FAF8F5 !important;
   color: #111;
   color-scheme: light only;
-  forced-color-adjust: none;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -193,7 +192,7 @@ body[data-marvis-relay-view] .marvis-relay-device {
   align-items: center;
   gap: 6px;
   margin-top: 5px;
-  color: #909090;
+  color: #686868;
   font-size: var(--marvis-s25-device-size);
   line-height: 1.2;
 }
@@ -800,6 +799,40 @@ body[data-marvis-relay-view] .marvis-relay-mode-strip input:checked + span {
   color: #fff;
 }
 
+body[data-marvis-relay-view] .marvis-relay-execution-contract,
+body[data-marvis-relay-view] .marvis-relay-goal-contract,
+body[data-marvis-relay-view] .marvis-relay-mutation-status {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #525252;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+body[data-marvis-relay-view] .marvis-relay-goal-contract {
+  display: grid;
+  gap: 8px;
+  padding: 8px 0 2px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-goal-contract label {
+  display: grid;
+  gap: 4px;
+  color: #383838;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+body[data-marvis-relay-view] .marvis-relay-goal-contract textarea {
+  height: auto;
+  min-height: 72px;
+  padding: 8px 0;
+}
+
+body[data-marvis-relay-view] .marvis-relay-mutation-status.is-error {
+  color: #9c1c1c;
+}
+
 body[data-marvis-relay-view] .marvis-relay-mode-strip select {
   flex: 0 0 auto;
   outline: 0;
@@ -1083,10 +1116,10 @@ body[data-marvis-relay-view] .marvis-relay-confirmation-page header {
 }
 
 body[data-marvis-relay-view] .marvis-relay-confirmation-page header button {
-  width: 38px;
-  min-height: 38px;
+  width: 44px;
+  min-height: 44px;
   border: 0;
-  border-radius: 19px;
+  border-radius: 22px;
   background: #f4f1ec;
   color: #111;
   font-size: 28px;
@@ -1500,17 +1533,20 @@ body[data-marvis-relay-view] .marvis-relay-submit svg {
   stroke-width: 2.4;
 }
 
-body[data-marvis-relay-view] .marvis-relay-submit-stop {
-  display: none;
+body[data-marvis-relay-view] .marvis-relay-interrupt[data-marvis-interrupt-button] {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid #9c1c1c;
+  border-radius: 10px;
+  background: #fff5f4;
+  color: #741515;
+  font-size: 14px;
+  font-weight: 800;
 }
 
-body[data-marvis-relay-view] .marvis-relay-submit.is-stop .marvis-relay-submit-arrow {
+body[data-marvis-relay-view] .marvis-relay-interrupt[data-marvis-interrupt-button]::before {
   display: none;
-}
-
-body[data-marvis-relay-view] .marvis-relay-submit.is-stop .marvis-relay-submit-stop {
-  display: grid;
-  place-items: center;
 }
 
 body[data-marvis-relay-view] .marvis-relay-bottom-nav {
@@ -1662,8 +1698,8 @@ body[data-marvis-relay-view] .marvis-relay-attachment-close {
   top: 29px;
   display: grid;
   place-items: center;
-  width: 31px;
-  height: 31px;
+  width: 44px;
+  height: 44px;
   border: 0;
   background: transparent;
   color: #111;
@@ -1789,16 +1825,20 @@ body[data-marvis-relay-view] .marvis-work-log {
   transition: transform .24s ease;
 }
 
+body[data-marvis-relay-view] .marvis-work-log[hidden] {
+  display: none;
+}
+
 body[data-marvis-relay-view] .marvis-work-log.open {
   transform: translate(-50%, 0);
 }
 
 body[data-marvis-relay-view] .marvis-work-log-close {
   position: absolute;
-  right: 22px;
-  top: 19px;
-  width: 34px;
-  height: 34px;
+  right: 17px;
+  top: 14px;
+  width: 44px;
+  height: 44px;
   border: 0;
   background: transparent;
   color: #111;
@@ -2047,7 +2087,23 @@ body[data-marvis-relay-view="office"] {
   background: #f7f7f7 !important;
   color: #111 !important;
   color-scheme: light only;
-  forced-color-adjust: none;
+}
+
+@media (forced-colors: active) {
+  html,
+  body[data-marvis-relay-view],
+  body[data-marvis-relay-view="office"] {
+    forced-color-adjust: auto;
+    background: Canvas !important;
+    color: CanvasText !important;
+  }
+
+  body[data-marvis-relay-view] button,
+  body[data-marvis-relay-view] a,
+  body[data-marvis-relay-view] input,
+  body[data-marvis-relay-view] textarea {
+    border: 1px solid CanvasText;
+  }
 }
 
 body[data-marvis-relay-view="office"] .marvis-office-shell {

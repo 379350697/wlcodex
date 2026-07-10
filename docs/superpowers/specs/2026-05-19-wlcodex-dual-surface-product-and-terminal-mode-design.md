@@ -1,5 +1,8 @@
 # WLCodex Dual Surface Product And Terminal Mode Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 > Superseded: the 2026-05-20 Remote Workbench repair replaces the product vs.
 > terminal mode framing with Cockpit and Onsite views over one Workbench.
 > Raw task/session ids and task-led user flows below are legacy diagnostics only.

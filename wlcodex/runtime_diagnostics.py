@@ -6,7 +6,6 @@ from the append-only runtime_events log without mutating state silently.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -21,7 +20,6 @@ from wlcodex.runtime_events import (
 )
 
 if TYPE_CHECKING:
-    import sqlite3
     from wlcodex.runtime_event_store import RuntimeEventStore
 
 # ---------------------------------------------------------------------------
@@ -51,6 +49,7 @@ _MEANINGFUL_EVENT_TYPES = frozenset({
     EventType.RUN_PHASE_CHANGED,
     EventType.RUN_COMPLETED,
     EventType.RUN_FAILED,
+    EventType.RUN_RECOVERY_REQUIRED,
     EventType.RUN_CANCELLED,
     EventType.AGENT_RUN_STARTED,
     EventType.AGENT_RUN_COMPLETED,
@@ -108,6 +107,8 @@ class RuntimeStatus:
     active_agent_run_id: int | None = None
     phase: str = ""
     status: str = ""
+    blocking_reason: str = ""
+    next_action: str = ""
     last_event_type: str = ""
     last_event_at: str = ""
     last_event_id: int = 0
@@ -230,6 +231,15 @@ def build_runtime_status(
             status.status = "completed"
         elif ev.event_type == EventType.RUN_FAILED:
             status.status = "failed"
+        elif ev.event_type == EventType.RUN_RECOVERY_REQUIRED:
+            status.status = "needs_recovery"
+            status.phase = "needs_recovery"
+            status.blocking_reason = str(
+                ev.payload.get("blocking_reason")
+                or ev.payload.get("reason")
+                or "运行需要恢复"
+            )
+            status.next_action = str(ev.payload.get("next_action") or "")
         elif ev.event_type == EventType.RUN_CANCELLED:
             status.status = "cancelled"
 
@@ -292,6 +302,11 @@ def format_status_display(status: RuntimeStatus) -> str:
 
     if status.phase:
         lines.append(f"阶段：{_phase_cn(status.phase)}")
+
+    if status.blocking_reason:
+        lines.append(f"阻塞原因：{status.blocking_reason}")
+    if status.next_action:
+        lines.append(f"下一步：{status.next_action}")
 
     if status.active_agent:
         agent_line = f"活跃 Agent：{status.active_agent}"
@@ -709,6 +724,107 @@ def append_recovery_events(
     return persisted
 
 
+def find_queued_handoffs_without_executor_activity(
+    store: "RuntimeEventStore",
+    *,
+    active_task_ids: list[int],
+) -> list[RuntimeEvent]:
+    """Return durable queue hand-offs whose executor never began.
+
+    ``run.started`` is intentionally persisted before the background
+    coroutine gets a timeslice so an expired lease cannot cause a duplicate
+    launch.  The companion ``run.phase.changed`` activity marker is emitted
+    as the first instruction inside that coroutine.  On restart, a hand-off
+    without that marker is not safe to replay: it must be presented for
+    recovery while retaining the workspace lease.
+    """
+
+    task_ids = sorted(
+        {int(task_id) for task_id in active_task_ids if int(task_id) > 0}
+    )
+    if not task_ids:
+        return []
+    placeholders = ", ".join("?" for _ in task_ids)
+    rows = store._conn.execute(  # type: ignore[attr-defined]
+        f"""
+        SELECT started.id
+        FROM runtime_events AS started
+        JOIN runtime_events AS queued
+          ON queued.id = started.causation_id
+         AND queued.event_type = ?
+         AND queued.conversation_id = started.conversation_id
+        WHERE started.event_type = ?
+          AND started.task_id IN ({placeholders})
+          AND NOT EXISTS (
+              SELECT 1
+              FROM runtime_events AS activity
+              WHERE activity.causation_id = started.causation_id
+                AND activity.event_type = ?
+                AND activity.id > started.id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM runtime_events AS later_start
+              WHERE later_start.task_id = started.task_id
+                AND later_start.event_type = ?
+                AND later_start.id > started.id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM runtime_events AS recovery
+              WHERE recovery.causation_id = started.id
+                AND recovery.event_type = ?
+          )
+        ORDER BY started.id ASC
+        """,
+        (
+            EventType.RUN_QUEUED,
+            EventType.RUN_STARTED,
+            *task_ids,
+            EventType.RUN_PHASE_CHANGED,
+            EventType.RUN_STARTED,
+            EventType.RUN_RECOVERY_REQUIRED,
+        ),
+    ).fetchall()
+    return [store.get_by_id(int(row["id"])) for row in rows]
+
+
+_WEB_ONLY_LEGACY_QUEUE_BLOCKING_REASON = (
+    "历史 Telegram 排队任务需要 Telegram 编排后端按工作区安全领取；"
+    "当前正式 Web-only 服务未启动该后端，因此不会自动派发。"
+)
+_WEB_ONLY_LEGACY_QUEUE_NEXT_ACTION = (
+    "请在 Native/Relay 中根据原目标新建任务；如必须保留原历史任务，"
+    "请由运维在带 Telegram 编排后端的实例中进行受控恢复。"
+)
+
+
+def append_web_only_legacy_queue_recovery_events(
+    store: "RuntimeEventStore",
+) -> list[RuntimeEvent]:
+    """Persist a recovery projection for legacy queues in formal web-only mode.
+
+    ``run.queued`` belongs to the historical Telegram orchestration path.  A
+    tokenless Native/Relay deployment deliberately does not construct that
+    controller or its backend dependencies, so dispatching the item here
+    would create an unowned execution.  Instead, append a causal
+    ``run.recovery.required`` event with an explicit user-facing reason and
+    next action.  The event also makes the queue item non-claimable until an
+    operator chooses a real recovery path.
+
+    Selection and marking are one idempotent SQLite transaction: entries that
+    already have a durable start, consume, or recovery marker are excluded.
+    A failed transaction writes no partial marker, so the next web-only
+    startup safely retries the complete selection.
+    """
+
+    return store.mark_unconsumed_legacy_queued_runs_needing_recovery(
+        reason="legacy_telegram_queue_unavailable_in_web_only_mode",
+        blocking_reason=_WEB_ONLY_LEGACY_QUEUE_BLOCKING_REASON,
+        next_action=_WEB_ONLY_LEGACY_QUEUE_NEXT_ACTION,
+    )
+
+
 def append_startup_recovery_events(
     store: "RuntimeEventStore",
     ledger: object,
@@ -741,6 +857,25 @@ def append_startup_recovery_events(
     task_ids = [int(row["id"]) for row in task_rows]
     orch_ids = [int(row["id"]) for row in orch_rows]
     agent_ids = [int(row["id"]) for row in agent_rows]
+    queued_handoffs = find_queued_handoffs_without_executor_activity(
+        store,
+        active_task_ids=[
+            int(row["id"])
+            for row in task_rows
+            if str(row["status"]) == "running"
+        ],
+    )
+    handoff_by_task_id = {
+        int(event.task_id): event
+        for event in queued_handoffs
+        if event.task_id is not None
+    }
+    handoff_orchestration_ids = {
+        int(event.orchestration_run_id)
+        for event in queued_handoffs
+        if event.orchestration_run_id is not None
+    }
+    needs_recovery_task_ids = sorted(handoff_by_task_id)
 
     started = store.append(RuntimeEvent(
         schema_version=1,
@@ -767,6 +902,7 @@ def append_startup_recovery_events(
             "task_ids": task_ids,
             "orchestration_run_ids": orch_ids,
             "agent_run_ids": agent_ids,
+            "needs_recovery_task_ids": needs_recovery_task_ids,
         },
         occurred_at=ts,
         causation_id=started.id,
@@ -774,6 +910,35 @@ def append_startup_recovery_events(
 
     last_id = recovery_started.id
     for row in task_rows:
+        task_id = int(row["id"])
+        handoff = handoff_by_task_id.get(task_id)
+        if handoff is not None:
+            ev = store.append(RuntimeEvent(
+                schema_version=1,
+                event_type=EventType.RUN_RECOVERY_REQUIRED,
+                aggregate_type=AggregateType.ORCHESTRATION_RUN,
+                aggregate_id=str(
+                    handoff.orchestration_run_id or f"task-{task_id}"
+                ),
+                correlation_id=correlation_id,
+                source=EventSource.SYSTEM,
+                actor="system",
+                visibility=Visibility.OPERATOR,
+                payload={
+                    "reason": "queued_handoff_without_executor_activity",
+                    "previous_status": str(row["status"]),
+                    "recovery_state": "needs_recovery",
+                    "queued_event_id": handoff.causation_id,
+                    "handoff_runtime_event_id": handoff.id,
+                },
+                occurred_at=ts,
+                conversation_id=handoff.conversation_id,
+                orchestration_run_id=handoff.orchestration_run_id,
+                task_id=task_id,
+                causation_id=handoff.id,
+            ))
+            last_id = ev.id
+            continue
         ev = store.append(RuntimeEvent(
             schema_version=1,
             event_type=EventType.RUN_FAILED,
@@ -789,12 +954,16 @@ def append_startup_recovery_events(
                 "last_active_agent": "unknown",
             },
             occurred_at=ts,
-            task_id=int(row["id"]),
+            task_id=task_id,
             causation_id=last_id,
         ))
         last_id = ev.id
 
     for row in orch_rows:
+        if int(row["id"]) in handoff_orchestration_ids:
+            # The matching task-scoped recovery event has already projected
+            # this orchestration run to ``needs_user``.
+            continue
         ev = store.append(RuntimeEvent(
             schema_version=1,
             event_type=EventType.RUN_FAILED,
@@ -872,6 +1041,7 @@ def append_startup_recovery_events(
             "task_count": len(task_ids),
             "orchestration_run_count": len(orch_ids),
             "agent_run_count": len(agent_ids),
+            "needs_recovery_task_count": len(needs_recovery_task_ids),
             "completed_at": ts,
         },
         occurred_at=ts,
@@ -881,6 +1051,7 @@ def append_startup_recovery_events(
         "task_ids": task_ids,
         "orchestration_run_ids": orch_ids,
         "agent_run_ids": agent_ids,
+        "needs_recovery_task_ids": needs_recovery_task_ids,
     }
 
 
@@ -957,6 +1128,7 @@ def _status_cn(status: str) -> str:
         "running": "运行中",
         "completed": "已完成",
         "failed": "已失败",
+        "needs_recovery": "需要恢复",
         "cancelled": "已取消",
         "idle": "空闲",
         "unknown": "未知",
@@ -970,6 +1142,7 @@ def _phase_cn(phase: str) -> str:
         "running_implementation": "开发工程师实施",
         "running_verification": "审计工程师验收",
         "retrying_implementation": "重新实施",
+        "needs_recovery": "需要恢复",
         "analysis": "分析",
         "implementation": "实施",
         "verification": "验收",
@@ -984,6 +1157,7 @@ def _event_cn(event_type: str) -> str:
         EventType.RUN_PHASE_CHANGED: "阶段变更",
         EventType.RUN_COMPLETED: "运行完成",
         EventType.RUN_FAILED: "运行失败",
+        EventType.RUN_RECOVERY_REQUIRED: "需要恢复",
         EventType.RUN_CANCELLED: "运行取消",
         EventType.AGENT_RUN_QUEUED: "Agent 排队",
         EventType.AGENT_RUN_STARTED: "Agent 启动",

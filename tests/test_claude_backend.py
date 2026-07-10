@@ -286,9 +286,9 @@ async def test_claude_streaming_uses_stream_json_and_refreshes_idle_timeout_on_e
 
     backend = ClaudeBackend(
         ClaudeConfig(
-            enabled=True,
-            binary=str(fake_claude),
-            request_timeout_seconds=0.3,
+                enabled=True,
+                binary=str(fake_claude),
+                request_timeout_seconds=2.0,
             stream_idle_timeout_seconds=0.06,
         )
     )
@@ -329,7 +329,11 @@ async def test_claude_streaming_idle_timeout_errors_when_output_goes_quiet(
 ) -> None:
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text(
-        "#!/bin/sh\nsleep 0.2\nprintf 'late\\n'\n",
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import time\n"
+        "print(json.dumps({'type': 'system', 'subtype': 'init'}), flush=True)\n"
+        "time.sleep(0.2)\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)
@@ -1183,7 +1187,14 @@ async def test_streaming_emits_watchdog_events_on_idle_timeout(tmp_path: Path) -
     from wlcodex.agent_backend import AgentRequest
 
     fake_claude = tmp_path / "fake-claude"
-    fake_claude.write_text("#!/bin/sh\nsleep 0.3\n", encoding="utf-8")
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import time\n"
+        "print(json.dumps({'type': 'system', 'subtype': 'init'}), flush=True)\n"
+        "time.sleep(0.3)\n",
+        encoding="utf-8",
+    )
     fake_claude.chmod(0o755)
 
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")

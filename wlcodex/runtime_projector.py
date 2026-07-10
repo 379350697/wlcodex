@@ -166,6 +166,7 @@ class RuntimeProjector:
             EventType.RUN_PHASE_CHANGED,
             EventType.RUN_COMPLETED,
             EventType.RUN_FAILED,
+            EventType.RUN_RECOVERY_REQUIRED,
             EventType.RUN_CANCELLED,
             EventType.RUN_CANCEL_REQUESTED,
         ):
@@ -228,6 +229,19 @@ class RuntimeProjector:
             status = "failed"
             phase = "failed"
             error = str(event.payload.get("reason", "runtime run failed"))
+        elif event.event_type == EventType.RUN_RECOVERY_REQUIRED:
+            # Preserve the workspace lease and require an explicit recovery
+            # action.  Re-queuing here would risk starting a second executor
+            # after a crash at the durable queue hand-off boundary.
+            status = "paused"
+            phase = "needs_recovery"
+            summary = "runtime hand-off requires recovery"
+            error = str(
+                event.payload.get(
+                    "reason",
+                    "runtime hand-off has no executor activity",
+                )
+            )
         elif event.event_type == EventType.RUN_CANCELLED:
             status = "aborted"
             phase = "cancelled"
@@ -455,6 +469,20 @@ class RuntimeProjector:
             self._upsert_orchestration_run(event)
             self._conn.execute(
                 "UPDATE orchestration_runs SET status = 'failed', updated_at = ? WHERE id = ?",
+                (_now(), orch_run_id),
+            )
+
+        elif etype == EventType.RUN_RECOVERY_REQUIRED:
+            # This is not a failed execution result: no executor activity was
+            # observed after a durable queue hand-off.  Keep the projection in
+            # a user-recoverable state instead of risking a duplicate launch.
+            self._upsert_orchestration_run(event)
+            self._conn.execute(
+                """
+                UPDATE orchestration_runs
+                SET status = 'needs_user', current_step = 'needs_recovery', updated_at = ?
+                WHERE id = ?
+                """,
                 (_now(), orch_run_id),
             )
 
@@ -881,6 +909,7 @@ _TASK_EVENT_COMPAT_TYPES: dict[str, str] = {
     EventType.RUN_PHASE_CHANGED: "run_phase_changed",
     EventType.RUN_COMPLETED: "run_completed",
     EventType.RUN_FAILED: "run_failed",
+    EventType.RUN_RECOVERY_REQUIRED: "run_recovery_required",
     EventType.RUN_CANCELLED: "run_cancelled",
     EventType.APPROVAL_REQUESTED: "approval_requested",
     EventType.APPROVAL_RESOLVED: "approval_resolved",
@@ -953,6 +982,8 @@ def _event_summary(event: RuntimeEvent) -> str:
         return f"Approval resolved: {payload.get('decision', '?')}"
     if etype == EventType.RUN_PHASE_CHANGED:
         return f"Phase → {payload.get('phase', '?')}"
+    if etype == EventType.RUN_RECOVERY_REQUIRED:
+        return f"Run requires recovery: {payload.get('reason', '?')}"
     if etype == EventType.CONVERSATION_MODE_SWITCHED:
         return f"Mode {payload.get('from_mode', '?')} → {payload.get('to_mode', '?')} (agent: {payload.get('active_agent', '?')})"
     if etype == EventType.SURFACE_CURSOR_ADVANCED:

@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 from wlcodex.telegram_app import build_application, is_authorized
+
+pytestmark = pytest.mark.integration
 
 
 def test_all_v1_commands_registered_in_built_app(tmp_path: Path) -> None:
@@ -74,6 +74,7 @@ allow_write = true
         "tail", "events", "diff", "files", "pause", "abort", "archive",
         "fork", "codex_sessions", "sessions", "health",
         "mode", "product", "terminal",
+        "native", "relay",
         "new", "codex", "claude", "auto", "stop", "switch", "model",
         "claude_mode", "claude_permission", "verify",
         "workbenches", "history", "workspaces",
@@ -257,7 +258,7 @@ async def test_edit_telegram_ignores_message_not_modified() -> None:
 async def test_send_telegram_returns_send_failed_on_timeout() -> None:
     """send_telegram must return SEND_FAILED on TimedOut, not crash."""
     from telegram.error import TimedOut
-    from wlcodex.telegram_app import WlCodexHandlers, SEND_FAILED
+    from wlcodex.telegram_app import SEND_FAILED, WlCodexHandlers
 
     class Bot:
         async def send_message(self, **kwargs):
@@ -278,7 +279,7 @@ async def test_send_telegram_returns_send_failed_on_timeout() -> None:
 async def test_send_telegram_returns_send_failed_on_network_error() -> None:
     """send_telegram must return SEND_FAILED on NetworkError."""
     from telegram.error import NetworkError
-    from wlcodex.telegram_app import WlCodexHandlers, SEND_FAILED
+    from wlcodex.telegram_app import SEND_FAILED, WlCodexHandlers
 
     class Bot:
         async def send_message(self, **kwargs):
@@ -456,7 +457,7 @@ class _FakeUpdateForAutoAck:
 @pytest.mark.asyncio
 async def test_auto_cmd_sends_ack_before_controller_call() -> None:
     """auto_cmd must send an ACK message BEFORE calling controller.handle()."""
-    from wlcodex.telegram_app import WlCodexHandlers, SEND_FAILED
+    from wlcodex.telegram_app import WlCodexHandlers
 
     send_order: list[str] = []
     sent_messages: list[str] = []
@@ -501,7 +502,7 @@ async def test_auto_cmd_sends_ack_before_controller_call() -> None:
 async def test_auto_cmd_survives_ack_send_failure() -> None:
     """auto_cmd must still run orchestration even when ACK send fails."""
     from telegram.error import TimedOut
-    from wlcodex.telegram_app import WlCodexHandlers, SEND_FAILED
+    from wlcodex.telegram_app import WlCodexHandlers
 
     controller = _FakeControllerForAutoAck()
 
@@ -1002,6 +1003,9 @@ async def test_claude_cmd_routes_to_claude_direct_streaming_without_chief_engine
                 active_codex_task_id=None, active_claude_run_id=None,
             )
 
+        def get_conversation(self, conversation_id):
+            return self.get_active_conversation(0)
+
         def create_conversation(self, **kw):
             return SimpleNamespace(id=1, title="test")
 
@@ -1076,6 +1080,9 @@ async def test_claude_cmd_starts_claude_direct_without_renderer() -> None:
                 workspace_alias="demo", conversation_summary="",
                 active_codex_task_id=None, active_claude_run_id=None,
             )
+
+        def get_conversation(self, conversation_id):
+            return self.get_active_conversation(0)
 
         def create_conversation(self, **kw):
             return SimpleNamespace(id=1, title="test")

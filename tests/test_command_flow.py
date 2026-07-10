@@ -2,8 +2,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 from wlcodex.codex_backend import FakeCodexBackend
 from wlcodex.config import WorkspaceConfig
 from wlcodex.controller import CommandController
@@ -11,6 +9,9 @@ from wlcodex.db import Ledger
 from wlcodex.inspection import TaskInspector
 from wlcodex.models import TaskStatus
 from wlcodex.task_service import TaskService
+
+
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture

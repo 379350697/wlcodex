@@ -9,7 +9,6 @@ from wlcodex.codex_native import transport as transport_module
 from wlcodex.codex_native.transport import (
     CodexAppServerWebSocketTransport,
     CodexDaemonTransport,
-    CodexProxyTransport,
     WebSocketJsonFramer,
     create_codex_native_transport,
 )
@@ -352,6 +351,11 @@ async def test_app_server_websocket_transport_resolves_macos_app_binary(
     import websockets
 
     monkeypatch.setattr(transport_module.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(
+        transport_module,
+        "_MACOS_CHATGPT_APP_CODEX_BINARY",
+        tmp_path / "missing-ChatGPT.app" / "codex",
+    )
     monkeypatch.setattr(transport_module, "_MACOS_CODEX_APP_BINARY", macos_binary)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(websockets, "connect", fake_connect)
@@ -362,6 +366,50 @@ async def test_app_server_websocket_transport_resolves_macos_app_binary(
 
     assert spawned_args is not None
     assert spawned_args[0] == str(macos_binary)
+
+
+@pytest.mark.asyncio
+async def test_app_server_websocket_transport_prefers_chatgpt_app_binary_when_codex_is_not_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    spawned_args: tuple[object, ...] | None = None
+    chatgpt_binary = tmp_path / "ChatGPT.app" / "Contents" / "Resources" / "codex"
+    chatgpt_binary.parent.mkdir(parents=True)
+    chatgpt_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        nonlocal spawned_args
+        spawned_args = args
+        return _FakeProcess()
+
+    async def fake_connect(endpoint: str, max_size: object = None) -> _FakeWebSocket:
+        assert endpoint == "ws://127.0.0.1:18742"
+        assert max_size is None
+        return _FakeWebSocket()
+
+    import websockets
+
+    monkeypatch.setattr(transport_module.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(
+        transport_module,
+        "_MACOS_CHATGPT_APP_CODEX_BINARY",
+        chatgpt_binary,
+    )
+    monkeypatch.setattr(
+        transport_module,
+        "_MACOS_CODEX_APP_BINARY",
+        tmp_path / "missing-Codex.app" / "codex",
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    transport = CodexAppServerWebSocketTransport("codex")
+    await transport.start(lambda _message: None)
+    await transport.close()
+
+    assert spawned_args is not None
+    assert spawned_args[0] == str(chatgpt_binary)
 
 
 @pytest.mark.asyncio

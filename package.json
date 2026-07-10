@@ -1,0 +1,11 @@
+{
+  "name": "wlcodex-browser-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "test:e2e": "playwright test --config=playwright.config.cjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}

@@ -1,5 +1,8 @@
 # WLCodex Multi-Agent Workflow Design
 
+> **SUPERSEDED — historical design only.** Do not use this document as current
+> product fact; use [the current semantic contract](../../product-semantics.md).
+
 ## Status
 
 Drafted on 2026-06-04 after the user selected the workflow-first option for

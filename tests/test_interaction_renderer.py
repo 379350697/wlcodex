@@ -762,7 +762,6 @@ async def test_run_failed_treats_runtime_state_cancelled_as_interrupt():
 
 def test_interaction_renderer_accepts_surface_policy():
     """InteractionRenderer must accept surface_policy and use it for output params."""
-    from types import SimpleNamespace
     from wlcodex.surfaces.core.models import SurfacePolicy, TerminalPolicy, ProductPolicy
 
     policy = SurfacePolicy(

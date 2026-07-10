@@ -129,6 +129,13 @@ class AntigravitySdkProvider:
             limit=limit,
         )
 
+    async def list_cached_sessions(self, limit: int = 50) -> list[NativeAgentSession]:
+        return self._session_store.list_recent(
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            limit=limit,
+        )
+
     async def list_models(self) -> list[dict[str, Any]]:
         return antigravity_model_catalog()
 
@@ -177,6 +184,9 @@ class AntigravitySdkProvider:
     async def read_session(self, native_session_id: str) -> dict[str, Any]:
         session = self._lookup_session(native_session_id)
         return {"thread": session.to_json_dict(), "turns": []}
+
+    async def peek_session(self, native_session_id: str) -> dict[str, Any]:
+        return await self.read_session(native_session_id)
 
     async def attach_session(self, native_session_id: str) -> NativeAgentControlResult:
         session = self._lookup_session(native_session_id)

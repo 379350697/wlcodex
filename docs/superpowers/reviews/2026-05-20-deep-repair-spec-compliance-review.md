@@ -1,5 +1,8 @@
 # Deep Repair Spec Compliance Review
 
+> **SUPERSEDED — historical review only.** It is not a current release result;
+> use [the current semantic contract](../../product-semantics.md) and current tests.
+
 Verdict: PASS
 
 Date: 2026-05-20

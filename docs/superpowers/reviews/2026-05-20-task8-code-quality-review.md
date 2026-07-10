@@ -1,5 +1,8 @@
 # Code Quality Review — Task 8: `tests/test_workbench_remote_integration.py`
 
+> **SUPERSEDED — historical review only.** It is not a current release result;
+> use [the current semantic contract](../../product-semantics.md) and current tests.
+
 **Reviewer**: Code Quality Reviewer (independent)
 **Date**: 2026-05-20
 **Verdict**: **PASS** (2 non-blocking advisories)

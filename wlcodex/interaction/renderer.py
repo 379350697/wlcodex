@@ -397,7 +397,6 @@ def _runtime_progress_text_for_surface(state, surface: str) -> str:
     """
     if surface == "terminal":
         from wlcodex.surfaces.terminal.renderer import render_onsite_header
-        from wlcodex.interaction.runtime_renderer import RuntimeRenderer
 
         agent = getattr(state, "active_agent", "")
         phase = getattr(state, "phase", "")

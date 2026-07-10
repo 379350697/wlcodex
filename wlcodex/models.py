@@ -188,6 +188,9 @@ class ConversationSession:
     codex_thread_id: str = ""
     codex_thread_policy: str = ""
     claude_session_id: str = ""
+    # Existing Telegram Workbench conversations are retained as a compatibility
+    # surface.  New Telegram traffic is routed to Native/Relay instead.
+    legacy_compatible: bool = False
 
 
 @dataclass(frozen=True)
