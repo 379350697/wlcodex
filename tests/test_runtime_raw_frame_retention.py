@@ -64,6 +64,17 @@ def _retention(store: RuntimeEventStore, tmp_path: Path, *, now: datetime = NOW)
     )
 
 
+def test_raw_frame_retention_scan_index_is_migrated(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    indexes = {
+        str(row[1])
+        for row in store._conn.execute("PRAGMA index_list('provider_raw_frames')").fetchall()
+    }
+
+    assert "idx_provider_raw_frames_retention_scan" in indexes
+
+
 def test_raw_frame_is_redacted_before_it_reaches_sqlite(tmp_path: Path) -> None:
     store = _store(tmp_path)
 

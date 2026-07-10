@@ -848,6 +848,11 @@ class Ledger:
                 );
             CREATE INDEX IF NOT EXISTS idx_provider_raw_frames_agent_run
                 ON provider_raw_frames(agent_run_id, id);
+            -- Retention walks old frames in this exact order.  Without this
+            -- cursor index, the first large migration repeatedly sorts the
+            -- entire hot table for each 250-frame page.
+            CREATE INDEX IF NOT EXISTS idx_provider_raw_frames_retention_scan
+                ON provider_raw_frames(occurred_at, id);
 
             CREATE TABLE IF NOT EXISTS workbench_carryovers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
