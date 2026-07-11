@@ -102,6 +102,7 @@ from wlcodex.live_stream.relay_sse_projection import (
     relay_active_worker_jobs as _relay_active_worker_jobs,
     relay_worker_payload as _relay_worker_payload,
 )
+from wlcodex.live_stream.workflow_routes import handle_workflow_route
 from wlcodex.live_stream.routing import (
     agent_id_from_path as _agent_id_from_path,
     native_login_provider_from_path as _native_login_provider_from_path,
@@ -3285,75 +3286,26 @@ class WorkerLiveStreamServer:
         headers: dict[str, str],
         query: dict[str, list[str]],
     ) -> None:
-        if self._workflow_service is None:
-            await self._send_json(
-                writer,
-                503,
-                {"error": "workflow service unavailable"},
-            )
-            return
-        if not self._is_authorized(
+        await handle_workflow_route(
+            reader,
             writer,
+            method,
+            path,
             headers,
-            query,
+            workflow_service=self._workflow_service,
+            authorized=lambda request_writer, request_headers, *, require_token: self._is_authorized(
+                request_writer,
+                request_headers,
+                query,
+                require_token=require_token,
+            ),
             require_token=(
                 self._native_registry is not None or self._native_controller is not None
             ),
-        ):
-            await self._send_json(writer, 401, {"error": "unauthorized"})
-            return
-
-        if path not in (
-            "/api/native/workflows/handoffs/preview",
-            "/api/native/workflows/handoffs/execute",
-        ):
-            await self._send_json(writer, 404, {"error": "not found"})
-            return
-        if method != "POST":
-            await self._send_json(writer, 405, {"error": "method not allowed"})
-            return
-        body = await self._read_request_json(writer, reader, headers)
-        if body is None:
-            return
-
-        try:
-            if path == "/api/native/workflows/handoffs/preview":
-                result = await self._workflow_service.preview_handoff(
-                    source_provider=str(
-                        body.get("source_provider") or body.get("sourceProvider") or ""
-                    ),
-                    source_thread_id=str(
-                        body.get("source_thread_id") or body.get("sourceThreadId") or ""
-                    ),
-                    source_turn_id=str(
-                        body.get("source_turn_id") or body.get("sourceTurnId") or ""
-                    ),
-                    target_provider=str(
-                        body.get("target_provider") or body.get("targetProvider") or ""
-                    ),
-                    cwd=str(body.get("cwd") or ""),
-                    intent=str(body.get("intent") or ""),
-                    user_note=str(body.get("user_note") or body.get("userNote") or ""),
-                )
-            else:
-                result = await self._workflow_service.execute_handoff(
-                    workflow_run_id=str(
-                        body.get("workflow_run_id") or body.get("workflowRunId") or ""
-                    ),
-                    preview_id=str(body.get("preview_id") or body.get("previewId") or ""),
-                    target_provider=str(
-                        body.get("target_provider") or body.get("targetProvider") or ""
-                    ),
-                    cwd=str(body.get("cwd") or ""),
-                    prompt=str(body.get("prompt") or ""),
-                )
-        except KeyError as exc:
-            await self._send_json(writer, 404, {"error": str(exc)})
-            return
-        except ValueError as exc:
-            await self._send_json(writer, 409, {"error": str(exc)})
-            return
-        await self._send_json(writer, 200, _json_object(result))
+            send_json=self._send_json,
+            read_request_json=self._read_request_json,
+            json_object=_json_object,
+        )
 
     async def _handle_council_route(
         self,
