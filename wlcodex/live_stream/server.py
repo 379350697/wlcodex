@@ -89,6 +89,7 @@ from wlcodex.live_stream.relay_composer import (
     _marvis_relay_workspace_dock,
 )
 from wlcodex.live_stream.relay_chat_page import render_relay_chat_home_page
+from wlcodex.live_stream.relay_collection_routes import handle_relay_collection_route
 from wlcodex.live_stream.relay_conversation_view import render_conversation_rows
 from wlcodex.live_stream.relay_config_page import render_relay_config_page
 from wlcodex.live_stream.relay_list_views import (
@@ -2275,139 +2276,29 @@ class WorkerLiveStreamServer:
                 mutation_store.abandon(claim.key)
 
         try:
-            if normalized_path == "/api/relay/token-stats":
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                await self._send_json(writer, 200, self._relay_service.today_token_stats())
-                return
-            if normalized_path == "/api/relay/config":
-                if method == "GET":
-                    await self._send_json(writer, 200, self._relay_service.config())
-                    return
-                if method == "POST":
-                    body = await self._read_request_json(writer, reader, headers)
-                    if body is None:
-                        return
-                    assignments = body.get("assignments", body)
-                    if not isinstance(assignments, dict):
-                        await self._send_json(
-                            writer,
-                            400,
-                            {"error": "assignments must be an object"},
-                        )
-                        return
-                    mutation = await begin_mutation("relay.config.save", None, body)
-                    if mutation is None:
-                        return
-                    try:
-                        config = self._relay_service.save_config(
-                            {str(role): str(provider) for role, provider in assignments.items()}
-                        )
-                    except (MaintenanceWindowError, ValueError) as exc:
-                        abandon_mutation(mutation)
-                        await self._send_json(
-                            writer,
-                            423 if isinstance(exc, MaintenanceWindowError) else 400,
-                            {"error": str(exc)},
-                        )
-                        return
-                    await finish_mutation(mutation, 200, config)
-                    return
-                await self._send_json(writer, 405, {"error": "method not allowed"})
-                return
-            if normalized_path == "/api/relay/tasks":
-                if method == "GET":
-                    status_filter = _relay_presentation_state_filter(
-                        str((query.get("status") or [""])[0] or "")
-                    )
-                    page = _relay_page_number(str((query.get("page") or ["1"])[0] or "1"))
-                    page_size = min(
-                        100,
-                        max(1, _safe_int((query.get("page_size") or ["20"])[0], default=20)),
-                    )
-                    summaries, total, state_counts = self._relay_service.list_tasks_page_readonly(
-                        workspace=_optional_nonempty_string((query.get("workspace") or [""])[0]),
-                        presentation_state=status_filter or None,
-                        page=page,
-                        page_size=page_size,
-                    )
-                    await self._send_json(
-                        writer,
-                        200,
-                        {
-                            "tasks": [summary.to_dict() for summary in summaries],
-                            "total": total,
-                            "page": page,
-                            "page_size": page_size,
-                            "status": status_filter,
-                            "state_counts": state_counts,
-                        },
-                    )
-                    return
-                if method == "POST":
-                    body = await self._read_request_json(writer, reader, headers)
-                    if body is None:
-                        return
-                    workspace = str(body.get("workspace") or "").strip()
-                    if not workspace:
-                        await self._send_json(
-                            writer,
-                            400,
-                            {"error": "relay task workspace is required"},
-                        )
-                        return
-                    mutation = await begin_mutation("relay.task.create", None, body)
-                    if mutation is None:
-                        return
-                    try:
-                        task = self._relay_service.create_task(
-                            title=str(body.get("title") or body.get("prompt") or "Relay Task"),
-                            prompt=str(body.get("prompt") or ""),
-                            workspace=workspace,
-                            provider=str(body.get("provider") or ""),
-                            role_providers=(
-                                {
-                                    str(role): str(provider)
-                                    for role, provider in body.get("role_providers", {}).items()
-                                }
-                                if isinstance(body.get("role_providers"), dict)
-                                else None
-                            ),
-                            images=_safe_image_attachments(body.get("images")),
-                            files=_safe_relay_file_attachments(body.get("files")),
-                            execution_mode=str(body.get("execution_mode") or "standard"),
-                            execution_goal=str(body.get("execution_goal") or ""),
-                            acceptance_criteria=_relay_acceptance_criteria_from_body(body),
-                            # Legacy clients may still send these values.  The
-                            # service maps them into the automatic contract;
-                            # the user-facing manual toggle no longer exists.
-                            allow_subagents=str(body.get("allow_subagents") or "auto"),
-                            team_strategy=str(body.get("team_strategy") or "none"),
-                        )
-                    except (MaintenanceWindowError, ValueError) as exc:
-                        abandon_mutation(mutation)
-                        await self._send_json(
-                            writer,
-                            423 if isinstance(exc, MaintenanceWindowError) else 400,
-                            {"error": str(exc)},
-                        )
-                        return
-                    mutation_store, claim = mutation
-                    if claim is not None:
-                        mutation_store.bind_task(claim.key, task.id)
-                    await self._relay_service.dispatch_role(task.id, "director")
-                    detail = await self._relay_task_detail(task.id)
-                    await finish_mutation(
-                        mutation,
-                        200,
-                        {
-                            "task": detail.task.to_dict(),
-                            "presentation": detail.presentation.to_dict(),
-                        },
-                    )
-                    return
-                await self._send_json(writer, 405, {"error": "method not allowed"})
+            if await handle_relay_collection_route(
+                normalized_path=normalized_path,
+                method=method,
+                query=query,
+                reader=reader,
+                writer=writer,
+                headers=headers,
+                service=self._relay_service,
+                send_json=self._send_json,
+                read_request_json=self._read_request_json,
+                begin_mutation=begin_mutation,
+                finish_mutation=finish_mutation,
+                abandon_mutation=abandon_mutation,
+                presentation_state_filter=_relay_presentation_state_filter,
+                page_number=_relay_page_number,
+                safe_int=_safe_int,
+                optional_nonempty_string=_optional_nonempty_string,
+                safe_images=_safe_image_attachments,
+                safe_files=_safe_relay_file_attachments,
+                acceptance_criteria=_relay_acceptance_criteria_from_body,
+                task_detail=self._relay_task_detail,
+                maintenance_error_type=MaintenanceWindowError,
+            ):
                 return
 
             task_id, suffix = _relay_task_api_parts(normalized_path)
