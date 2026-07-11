@@ -56,6 +56,7 @@ class RelayStore:
         workspace: str,
         provider: str,
         role_providers: dict[str, str] | None = None,
+        creation_idempotency_key: str = "",
     ) -> RelayTask:
         role_provider_snapshot = _normalize_role_providers(
             role_providers,
@@ -70,6 +71,7 @@ class RelayStore:
                 workspace=workspace,
                 provider=provider,
                 role_providers=role_provider_snapshot,
+                creation_idempotency_key=creation_idempotency_key,
             ),
             route="relay",
             risk_level="medium",
@@ -96,6 +98,52 @@ class RelayStore:
             board.to_json_dict(),
             summary="RelayBoard initialized",
         )
+        return task
+
+    def recover_task_creation(self, task_id: int) -> RelayTask:
+        """Repair the idempotent creation kernel after a process loss.
+
+        Each write is idempotent. This intentionally performs no dispatch and
+        no user-visible event emission; the caller resumes dispatch only after
+        the durable task shape has been restored.
+        """
+
+        team_run = self._ledger.get_team_run(task_id)
+        if team_run is None or str(team_run.route or "") != "relay":
+            raise KeyError(f"unknown relay task id: {task_id}")
+        task = self._task_from_run(team_run)
+        existing_roles = {
+            str(row[0])
+            for row in self._ledger._conn.execute(
+                "SELECT role FROM team_agent_jobs WHERE team_run_id = ?", (task.id,)
+            ).fetchall()
+        }
+        for role in RELAY_ROLE_IDS:
+            if role not in existing_roles:
+                self._ledger.create_team_agent_job(
+                    team_run_id=task.id,
+                    role=role,
+                    model_profile=task.role_providers.get(role, task.provider),
+                    status="queued" if role == "director" else "idle",
+                )
+        self.lifecycle.create_initial_round(task.id)
+        if not any(
+            str(artifact.get("artifact_type") or "") == "relay_board"
+            for artifact in self._relay_artifacts(task.id)
+        ):
+            board = build_relay_board(
+                task,
+                latest_user_input=task.prompt,
+                current_dispatch="director",
+                next_step="director review",
+            )
+            self.save_artifact(
+                task.id,
+                "director",
+                "relay_board",
+                board.to_json_dict(),
+                summary="RelayBoard recovered after interrupted creation",
+            )
         return task
 
     def list_tasks(
@@ -2095,6 +2143,7 @@ def _encode_goal(
     workspace: str,
     provider: str,
     role_providers: dict[str, str] | None = None,
+    creation_idempotency_key: str = "",
     phase: str = "director",
 ) -> str:
     return "relay:" + __import__("json").dumps(
@@ -2108,6 +2157,7 @@ def _encode_goal(
                 role_providers,
                 fallback=provider,
             ),
+            "creation_idempotency_key": str(creation_idempotency_key or ""),
         },
         ensure_ascii=False,
     )

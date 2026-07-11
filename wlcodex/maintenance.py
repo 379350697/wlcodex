@@ -47,6 +47,21 @@ CREATE TABLE IF NOT EXISTS runtime_maintenance_native_turn_probes (
 
 CREATE INDEX IF NOT EXISTS idx_runtime_maintenance_native_turn_probes_window
     ON runtime_maintenance_native_turn_probes(maintenance_opened_at, verdict);
+
+-- Freeze the candidate set at the instant submissions are frozen. Querying
+-- the mutable session index later would allow a stale ``running`` row to
+-- disappear before it receives the required provider observation.
+CREATE TABLE IF NOT EXISTS runtime_maintenance_native_turn_candidates (
+    maintenance_opened_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    native_thread_id TEXT NOT NULL,
+    captured_status TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY (maintenance_opened_at, provider, native_thread_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_maintenance_native_turn_candidates_window
+    ON runtime_maintenance_native_turn_candidates(maintenance_opened_at);
 """
 
 
@@ -322,11 +337,20 @@ def _native_turn_probe_work(
     *,
     maintenance_opened_at: str,
 ) -> dict[str, int]:
-    candidates = native_turn_probe_candidates(conn)
-    if not candidates:
-        return {}
-    placeholders = ",".join("?" for _ in candidates)
     try:
+        candidate_rows = conn.execute(
+            """
+            SELECT native_thread_id
+            FROM runtime_maintenance_native_turn_candidates
+            WHERE maintenance_opened_at = ? AND provider = 'codex'
+            ORDER BY native_thread_id ASC
+            """,
+            (maintenance_opened_at,),
+        ).fetchall()
+        candidates = [str(row[0]) for row in candidate_rows if str(row[0] or "").strip()]
+        if not candidates:
+            return {}
+        placeholders = ",".join("?" for _ in candidates)
         rows = conn.execute(
             f"""
             SELECT native_thread_id, verdict
@@ -339,7 +363,9 @@ def _native_turn_probe_work(
         ).fetchall()
     except sqlite3.OperationalError as exc:
         if _is_missing_table(exc):
-            return {"native Codex turn probes pending": len(candidates)}
+            # A missing snapshot table on an old database is never treated as
+            # approval to archive; fail closed until migration/begin runs.
+            return {"native Codex turn probes pending": 1}
         raise
     verdicts = {str(row[0]): str(row[1]) for row in rows}
     active = sum(1 for candidate in candidates if verdicts.get(candidate) == "active")
@@ -435,6 +461,30 @@ def begin_maintenance_window(
                 updated_at = excluded.updated_at
             """,
             (now, str(operator_note or "").strip()[:1000], now),
+        )
+        window_row = _window_row(conn)
+        opened_at = (
+            str(_row_value(window_row, "opened_at", 1) or "")
+            if window_row is not None
+            else now
+        )
+        # Capture exactly the sessions which looked in-flight *at freeze*.
+        # ``notLoaded``/idle history never enters this table, while each
+        # captured candidate remains probe-required even if its cache status
+        # changes before the operator runs maintenance-probe-native.
+        placeholders = ",".join("?" for _ in _NATIVE_TURN_CANDIDATE_STATUSES)
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO runtime_maintenance_native_turn_candidates (
+                maintenance_opened_at, provider, native_thread_id,
+                captured_status, captured_at
+            )
+            SELECT ?, 'codex', native_thread_id, lower(status), ?
+            FROM native_codex_sessions
+            WHERE lower(status) IN ({placeholders})
+              AND trim(native_thread_id) != ''
+            """,
+            (opened_at, now, *_NATIVE_TURN_CANDIDATE_STATUSES),
         )
         status = maintenance_window_status(conn, include_active_work=True)
         _finish_transaction(conn, owns_transaction)

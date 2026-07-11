@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from wlcodex.relay.errors import ActiveRelayTasksDecisionRequired
+
 
 async def handle_relay_collection_route(
     *,
@@ -105,8 +107,48 @@ async def handle_relay_collection_route(
     mutation = await begin_mutation("relay.task.create", None, body)
     if mutation is None:
         return True
+    mutation_store, claim = mutation
+    if claim is not None and claim.can_resume_task_creation:
+        # The task was committed before a prior response/dispatch could be
+        # completed.  Reuse its durable identity and let dispatch's own claim
+        # decide whether there is still queued work; never create a second task.
+        service.recover_task_creation(
+            int(claim.task_id),
+            execution_mode=str(body.get("execution_mode") or "standard"),
+            execution_goal=str(body.get("execution_goal") or ""),
+            acceptance_criteria=acceptance_criteria(body),
+            images=safe_images(body.get("images")),
+            files=safe_files(body.get("files")),
+        )
+        detail = await task_detail(int(claim.task_id))
+        try:
+            dispatched = await service.dispatch_role(detail.task.id, "director")
+        except Exception as exc:
+            service.record_initial_dispatch_indeterminate(detail.task.id, error=str(exc))
+            await finish_mutation(
+                mutation,
+                202,
+                {
+                    "task": detail.task.to_dict(),
+                    "presentation": detail.presentation.to_dict(),
+                    "dispatch_pending": True,
+                    "dispatch_status": "recovery_required",
+                },
+            )
+            return True
+        await finish_mutation(
+            mutation,
+            200,
+            {
+                "task": detail.task.to_dict(),
+                "presentation": detail.presentation.to_dict(),
+                "dispatch_pending": False,
+                "dispatch_status": "started" if dispatched else "not_started",
+            },
+        )
+        return True
     try:
-        task = service.create_task(
+        task = await service.create_task_after_workspace_decision(
             title=str(body.get("title") or body.get("prompt") or "Relay Task"),
             prompt=str(body.get("prompt") or ""),
             workspace=workspace,
@@ -121,25 +163,68 @@ async def handle_relay_collection_route(
             execution_mode=str(body.get("execution_mode") or "standard"),
             execution_goal=str(body.get("execution_goal") or ""),
             acceptance_criteria=acceptance_criteria(body),
-            allow_subagents=str(body.get("allow_subagents") or "auto"),
+            # Kept out of the new API contract.  Historic stored values remain
+            # readable but callers cannot disable system-selected subagents.
+            allow_subagents="auto",
             team_strategy=str(body.get("team_strategy") or "none"),
+            creation_idempotency_key=claim.key if claim is not None else "",
+            active_task_policy=str(body.get("active_task_policy") or ""),
         )
-    except (maintenance_error_type, ValueError) as exc:
+    except ActiveRelayTasksDecisionRequired as exc:
         abandon_mutation(mutation)
         await send_json(
             writer,
-            423 if isinstance(exc, maintenance_error_type) else 400,
+            409,
+            {
+                "error": "当前工作区有进行中的任务，请明确选择后台继续或真实中断后新建。",
+                "code": "active_tasks_require_decision",
+                "active_tasks": [summary.to_dict() for summary in exc.tasks],
+                "allowed_policies": ["continue_background", "interrupt_active"],
+            },
+        )
+        return True
+    except (maintenance_error_type, ValueError, RuntimeError) as exc:
+        abandon_mutation(mutation)
+        await send_json(
+            writer,
+            423
+            if isinstance(exc, maintenance_error_type)
+            else 409
+            if isinstance(exc, RuntimeError)
+            else 400,
             {"error": str(exc)},
         )
         return True
-    mutation_store, claim = mutation
     if claim is not None:
         mutation_store.bind_task(claim.key, task.id)
-    await service.dispatch_role(task.id, "director")
+    try:
+        dispatched = await service.dispatch_role(task.id, "director")
+    except Exception as exc:
+        # The task and its durable idempotency binding already exist.  Finish
+        # the request as accepted so retrying the same key cannot create a
+        # duplicate; the queued role is recoverable by the lifecycle worker.
+        service.record_initial_dispatch_indeterminate(task.id, error=str(exc))
+        detail = await task_detail(task.id)
+        await finish_mutation(
+            mutation,
+            202,
+            {
+                "task": detail.task.to_dict(),
+                "presentation": detail.presentation.to_dict(),
+                "dispatch_pending": True,
+                "dispatch_status": "recovery_required",
+            },
+        )
+        return True
     detail = await task_detail(task.id)
     await finish_mutation(
         mutation,
-        200,
-        {"task": detail.task.to_dict(), "presentation": detail.presentation.to_dict()},
+        200 if dispatched else 202,
+        {
+            "task": detail.task.to_dict(),
+            "presentation": detail.presentation.to_dict(),
+            "dispatch_pending": False,
+            "dispatch_status": "started" if dispatched else "not_started",
+        },
     )
     return True

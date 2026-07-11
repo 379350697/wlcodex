@@ -86,6 +86,21 @@ async def handle_relay_api_route(
                 dict(claim.response_payload or {}),
             )
             return None
+        if (
+            claim.status == "in_progress"
+            and claim.operation == "relay.task.create"
+            and claim.task_id is None
+        ):
+            recovered_task_id = mutation_store.recover_task_create_binding(claim.key)
+            if recovered_task_id is not None:
+                claim = RelayMutationClaim(
+                    key=claim.key,
+                    status="in_progress",
+                    operation=claim.operation,
+                    task_id=recovered_task_id,
+                )
+        if claim.can_resume_task_creation:
+            return mutation_store, claim
         if not claim.should_execute:
             await deps.send_json(
                 writer,

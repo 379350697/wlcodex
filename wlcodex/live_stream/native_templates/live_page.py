@@ -4,24 +4,24 @@ from __future__ import annotations
 
 import json
 from html import escape
-from typing import Any
 from urllib.parse import quote
 
+from wlcodex.live_stream.native_templates.dependencies import NativePageDependencies
 
 def render_live_page(
     agent_run_id: int,
     *,
     native_provider: str = "codex",
     theme: str = "",
-    helpers: dict[str, Any],
+    deps: NativePageDependencies,
 ) -> str:
-    _native_provider_display_name = helpers["_native_provider_display_name"]
-    _replace_html_icons = helpers["_replace_html_icons"]
-    _NATIVE_APP_HEAD = helpers["_NATIVE_APP_HEAD"]
-    turn_semantics_json = helpers["turn_semantics_json"]
-    _native_permission_presets = helpers["_native_permission_presets"]
-    _codex_plugin_menu_items = helpers["_codex_plugin_menu_items"]
-    _ICONS_JS_LITERAL = helpers["_ICONS_JS_LITERAL"]
+    _native_provider_display_name = deps.provider_display_name
+    _replace_html_icons = deps.replace_html_icons
+    _NATIVE_APP_HEAD = deps.app_head
+    turn_semantics_json = deps.turn_semantics_json
+    _native_permission_presets = deps.permission_presets
+    _codex_plugin_menu_items = deps.plugin_menu_items
+    _ICONS_JS_LITERAL = deps.icons_js_literal
     stream_path = f"/api/workers/{agent_run_id}/stream"
     native_provider = native_provider.strip() or "codex"
     provider_label = _native_provider_display_name(native_provider)

@@ -24,6 +24,7 @@ class RelayUiRouteDependencies:
     selected_workspace: Callable[[str, list[Any]], str]
     project_rows: Callable[[Any], list[dict[str, Any]]]
     settings_href: Callable[[str, str], str]
+    compose_href: Callable[[str, str], str]
     chat_home_page: Callable[..., str]
     blocked_inbox_page: Callable[..., str]
     page_number: Callable[[str], int]
@@ -101,11 +102,7 @@ async def handle_relay_ui_route(
         await deps.send_redirect(writer, deps.settings_href(selected_workspace, token))
         return
     if path == "/native/workflows/relay/chat":
-        await deps.send_html(
-            writer,
-            200,
-            deps.chat_home_page(selected_workspace=selected_workspace, access_token=token),
-        )
+        await deps.send_redirect(writer, deps.compose_href(selected_workspace, token))
         return
     if path == "/native/workflows/relay/inbox":
         summaries = (
@@ -122,6 +119,15 @@ async def handle_relay_ui_route(
         )
         return
     if path == "/native/workflows/relay":
+        if str((query.get("compose") or [""])[0] or "") == "1":
+            # Composition is a transient task-workspace state, not a third
+            # Relay home. The canonical path remains /native/workflows/relay.
+            await deps.send_html(
+                writer,
+                200,
+                deps.chat_home_page(selected_workspace=selected_workspace, access_token=token),
+            )
+            return
         requested_page = deps.page_number(str((query.get("page") or ["1"])[0] or "1"))
         status_filter = deps.presentation_state_filter(
             str((query.get("status") or [""])[0] or "")

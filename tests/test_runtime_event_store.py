@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -632,3 +633,19 @@ def test_redact_payload_content_redacts_textual_payload_fields() -> None:
     assert "abc123" not in result["text"]
     assert "secret123" not in result["text"]
     assert result["note"] == "plain status stays visible"
+
+
+def test_redact_payload_recurses_through_lists_and_tuples() -> None:
+    payload = {
+        "events": [
+            {"token": "list-secret", "text": "password=also-secret"},
+            ("api_key=tuple-secret", {"authorization": "Bearer nested-secret"}),
+        ]
+    }
+
+    result = redact_payload(payload)
+
+    serialized = json.dumps(result, ensure_ascii=False)
+    for secret in ("list-secret", "also-secret", "tuple-secret", "nested-secret"):
+        assert secret not in serialized
+    assert result["events"][0]["token"] == REDACTED_PLACEHOLDER

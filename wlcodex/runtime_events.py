@@ -384,24 +384,37 @@ def redact_payload(payload: dict[str, Any], *, max_str_len: int = MAX_PAYLOAD_ST
     String values longer than *max_str_len* are truncated and suffixed with
     ``...<truncated>``.
     """
-    result: dict[str, Any] = {}
-    for k, v in payload.items():
-        if _is_sensitive_key(k):
-            result[k] = REDACTED_PLACEHOLDER
-        elif isinstance(v, dict):
-            result[k] = redact_payload(v, max_str_len=max_str_len)
-        elif isinstance(v, list):
-            result[k] = [
-                redact_payload(item, max_str_len=max_str_len) if isinstance(item, dict)
-                else _cap_string(redact_text_content(item), max_str_len) if isinstance(item, str)
-                else item
-                for item in v
-            ]
-        elif isinstance(v, str):
-            result[k] = _cap_string(redact_text_content(v), max_str_len)
-        else:
-            result[k] = v
-    return result
+    redacted = _redact_payload_value(payload, max_str_len=max_str_len)
+    # The public ingress contract is an object.  Keep this defensive guard so
+    # a future change to the helper cannot turn a malformed caller payload
+    # into a non-object runtime envelope.
+    return redacted if isinstance(redacted, dict) else {"value": redacted}
+
+
+def _redact_payload_value(value: Any, *, max_str_len: int) -> Any:
+    """Recursively redact arbitrary JSON-shaped provider payloads.
+
+    Providers routinely nest tool/result batches as arrays within arrays.  A
+    shallow list walk would leave secret-bearing objects in those inner arrays
+    untouched, which is especially dangerous because raw frames are retained
+    for diagnostics and archived later.  Keep one recursive implementation
+    for hot-row ingress and archive-time defence in depth.
+    """
+
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            key_text = str(key)
+            if _is_sensitive_key(key_text):
+                result[key_text] = REDACTED_PLACEHOLDER
+            else:
+                result[key_text] = _redact_payload_value(child, max_str_len=max_str_len)
+        return result
+    if isinstance(value, list | tuple):
+        return [_redact_payload_value(child, max_str_len=max_str_len) for child in value]
+    if isinstance(value, str):
+        return _cap_string(redact_text_content(value), max_str_len)
+    return value
 
 
 def _cap_string(value: str, max_len: int) -> str:

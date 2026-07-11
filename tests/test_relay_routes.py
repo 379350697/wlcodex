@@ -15,6 +15,7 @@ from wlcodex.native_agents.models import NativeAgentControlResult
 from wlcodex.native_agents.provider import NativeAgentRegistry
 from wlcodex.relay.service import RelayService
 from wlcodex.relay.store import RelayStore
+from wlcodex.relay.mutations import RelayMutationStore
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import (
     AggregateType,
@@ -75,6 +76,12 @@ class FailingInterruptProvider(FakeProvider):
     async def interrupt_session(self, native_session_id: str, turn_id: str = ""):
         self.calls.append(("interrupt_session", native_session_id, turn_id))
         raise RuntimeError("provider interrupt transport failed")
+
+
+class FailingStartProvider(FakeProvider):
+    async def start_session(self, cwd: str, prompt: str, **kwargs: Any):
+        self.calls.append(("start_session", cwd, prompt, kwargs))
+        raise RuntimeError("provider start transport failed")
 
 
 class FakeCodexProvider(FakeProvider):
@@ -339,7 +346,7 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
             "execution_mode": "goal",
             "execution_goal": "ship relay lifecycle",
             "acceptance_criteria": ["relay lifecycle is delivered"],
-            "allow_subagents": "auto",
+            "allow_subagents": "off",
         }
     )
     service = _relay_service(tmp_path)
@@ -398,6 +405,132 @@ async def test_create_and_get_relay_task_routes(tmp_path: Path) -> None:
         "tester",
         "auditor",
     ]
+
+
+@pytest.mark.asyncio
+async def test_task_create_retry_recovers_task_before_mutation_binding(tmp_path: Path) -> None:
+    """A retry after the earliest durable task write never duplicates it."""
+
+    payload = {
+        "title": "Resume created task",
+        "prompt": "Resume the durable task instead of duplicating it.",
+        "workspace": "/repo",
+        "provider": "claude",
+    }
+    body = json.dumps(payload)
+    service = _relay_service(tmp_path)
+    mutation_store = RelayMutationStore.from_relay_service(service)
+    claim = mutation_store.claim(
+        key="create-response-lost",
+        operation="relay.task.create",
+        task_id=None,
+        payload=payload,
+    )
+    assert claim is not None and claim.should_execute
+    task = service.create_task(
+        title=payload["title"],
+        prompt=payload["prompt"],
+        workspace=payload["workspace"],
+        provider=payload["provider"],
+        creation_idempotency_key=claim.key,
+    )
+
+    response = await _request_relay(
+        tmp_path,
+        "POST /api/relay/tasks HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Idempotency-Key: create-response-lost\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 200 OK" in response
+    assert _json_body(response)["task"]["id"] == task.id
+    assert len(service.list_tasks_readonly(workspace="/repo")) == 1
+    saved = service._store._ledger._conn.execute(
+        "SELECT status, task_id FROM relay_mutation_idempotency WHERE idempotency_key = ?",
+        ("create-response-lost",),
+    ).fetchone()
+    assert tuple(saved) == ("completed", task.id)
+
+
+@pytest.mark.asyncio
+async def test_task_create_requires_explicit_active_workspace_decision(tmp_path: Path) -> None:
+    service = _relay_service(tmp_path)
+    service.create_task(
+        title="Existing task",
+        prompt="Keep working",
+        workspace="/repo",
+        provider="claude",
+    )
+    payload = {
+        "title": "New task",
+        "prompt": "Do not silently decide what happens to the old task",
+        "workspace": "/repo",
+        "provider": "claude",
+    }
+    body = json.dumps(payload)
+    request = (
+        "POST /api/relay/tasks HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}"
+    )
+
+    blocked = await _request_relay(tmp_path, request, relay_service=service)
+
+    assert "HTTP/1.1 409" in blocked
+    blocked_payload = _json_body(blocked)
+    assert blocked_payload["code"] == "active_tasks_require_decision"
+    assert blocked_payload["active_tasks"]
+    assert len(service.list_tasks_readonly(workspace="/repo")) == 1
+
+    payload["active_task_policy"] = "continue_background"
+    allowed_body = json.dumps(payload)
+    allowed_request = request.replace(body, allowed_body).replace(
+        f"Content-Length: {len(body.encode('utf-8'))}",
+        f"Content-Length: {len(allowed_body.encode('utf-8'))}",
+    )
+    allowed = await _request_relay(tmp_path, allowed_request, relay_service=service)
+    assert "HTTP/1.1 200 OK" in allowed
+    assert len(service.list_tasks_readonly(workspace="/repo")) == 2
+
+
+@pytest.mark.asyncio
+async def test_task_create_exposes_failed_dispatch_as_recovery_required(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([FailingStartProvider()]),
+        default_provider="claude",
+    )
+    body = json.dumps(
+        {"title": "Dispatch failure", "prompt": "Verify provider first", "workspace": "/repo"}
+    )
+    response = await _request_relay(
+        tmp_path,
+        "POST /api/relay/tasks HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 202" in response
+    payload = _json_body(response)
+    assert payload["dispatch_pending"] is False
+    assert payload["dispatch_status"] == "not_started"
+    detail = service.get_task_readonly(payload["task"]["id"])
+    assert detail.presentation.state == "blocked"
+    assert detail.presentation.allowed_actions == ["resume", "add_input", "archive"]
 
 
 @pytest.mark.asyncio
@@ -1608,6 +1741,39 @@ async def test_relay_interrupt_provider_failure_releases_idempotency_key(tmp_pat
         "SELECT 1 FROM relay_mutation_idempotency WHERE idempotency_key = 'interrupt-failure'"
     ).fetchone() is None
     assert service.get_task_readonly(task.id).task.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_relay_terminal_presentation_blocks_interrupt_before_provider_control(
+    tmp_path: Path,
+) -> None:
+    service = _relay_service(tmp_path)
+    task = service.create_task(
+        title="Completed task",
+        prompt="No provider control is safe after completion.",
+        workspace="/repo",
+        provider="claude",
+    )
+    service._store.update_task_status(task.id, "completed")
+    body = "{}"
+
+    response = await _request_relay(
+        tmp_path,
+        f"POST /api/relay/tasks/{task.id}/interrupt HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "HTTP/1.1 409" in response
+    payload = _json_body(response)
+    assert payload["state"] == "completed"
+    assert payload["allowed_actions"] == ["add_input", "archive"]
+    provider = service._registry.get("claude")
+    assert provider.calls == []
 
 
 @pytest.mark.asyncio

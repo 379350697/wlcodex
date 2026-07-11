@@ -64,12 +64,21 @@ def render_relay_chat_home_page(
 <head>
 {document_head}
 </head>
-<body data-marvis-relay-view="chat">
+<body data-marvis-relay-view="compose">
   <div class="marvis-relay-phone">
     {topbar_html}
     <main class="marvis-relay-chat-home">
       <span class="marvis-relay-avatar marvis-relay-avatar-marvis marvis-relay-hero-avatar" aria-hidden="true"></span>
       <h2>你好，今天想做什么？</h2>
+      <section class="marvis-relay-active-task-decision" data-relay-active-task-decision hidden role="region" aria-labelledby="relay-active-task-decision-title">
+        <strong id="relay-active-task-decision-title">当前工作区已有进行中的任务</strong>
+        <p data-relay-active-task-copy>请选择新任务如何处理现有工作。</p>
+        <ul data-relay-active-task-list></ul>
+        <div>
+          <button type="button" data-relay-active-task-policy="continue_background">后台继续，并新建任务</button>
+          <button type="button" data-relay-active-task-policy="interrupt_active">真实中断后新建</button>
+        </div>
+      </section>
     </main>
     {composer_html}
     <nav class="marvis-relay-bottom-nav" aria-label="Marvis relay navigation">
@@ -83,6 +92,9 @@ def render_relay_chat_home_page(
     const mutationStatus = marvisComposer?.querySelector("[data-relay-mutation-status]");
     const goalContract = marvisComposer?.querySelector("[data-relay-goal-contract]");
     const executionContract = marvisComposer?.querySelector("[data-relay-execution-contract]");
+    const activeTaskDecision = document.querySelector("[data-relay-active-task-decision]");
+    const activeTaskList = activeTaskDecision?.querySelector("[data-relay-active-task-list]");
+    const activeTaskPolicyInput = marvisComposer?.querySelector("[data-relay-active-task-policy]");
     const setComposerStatus = (text, isError = false) => {{
       if (!mutationStatus) return;
       mutationStatus.textContent = text;
@@ -99,6 +111,27 @@ def render_relay_chat_home_page(
     }};
     marvisComposer?.querySelectorAll("input[name=execution_mode]").forEach((input) => input.addEventListener("change", updateExecutionContract));
     updateExecutionContract();
+    function showActiveTaskDecision(tasks) {{
+      if (!activeTaskDecision || !activeTaskList) return;
+      activeTaskList.replaceChildren();
+      (Array.isArray(tasks) ? tasks : []).forEach((task) => {{
+        const item = document.createElement("li");
+        const presentation = task?.presentation || {{}};
+        const state = String(presentation.state || task?.status || "进行中");
+        item.textContent = `${{String(task?.title || "未命名任务")}}（${{state}}）`;
+        activeTaskList.appendChild(item);
+      }});
+      activeTaskDecision.hidden = false;
+    }}
+    activeTaskDecision?.addEventListener("click", (event) => {{
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const policy = target.getAttribute("data-relay-active-task-policy");
+      if (!policy || !activeTaskPolicyInput) return;
+      activeTaskPolicyInput.value = policy;
+      activeTaskDecision.hidden = true;
+      marvisComposer?.requestSubmit();
+    }});
     marvisComposer?.addEventListener("submit", async (event) => {{
       event.preventDefault();
       const data = Object.fromEntries(new FormData(marvisComposer).entries());
@@ -128,8 +161,22 @@ def render_relay_chat_home_page(
           body: JSON.stringify(data),
         }});
         const payload = await response.json().catch(() => ({{}}));
+        if (response.status === 409 && payload?.code === "active_tasks_require_decision") {{
+          if (submit) delete submit.dataset.idempotencyKey;
+          showActiveTaskDecision(payload.active_tasks);
+          setComposerStatus(payload.error || "请选择如何处理现有任务。", true);
+          return;
+        }}
         if (!response.ok) throw new Error(payload.error || "创建任务失败，请重试。");
         if (!payload?.task?.id) throw new Error("服务未返回任务标识，请重试。");
+        if (payload.dispatch_pending || payload.dispatch_status === "not_started") {{
+          if (submit) delete submit.dataset.idempotencyKey;
+          setComposerStatus("任务已保存，但执行尚未确认；正在打开详情查看恢复指引。", true);
+          window.setTimeout(() => {{
+            window.location.href = `/native/workflows/relay/tasks/${{encodeURIComponent(payload.task.id)}}${{TOKEN_SUFFIX}}`;
+          }}, 700);
+          return;
+        }}
         if (submit) delete submit.dataset.idempotencyKey;
         window.marvisRelayAttachments?.clear();
         window.location.href = `/native/workflows/relay/tasks/${{encodeURIComponent(payload.task.id)}}${{TOKEN_SUFFIX}}`;

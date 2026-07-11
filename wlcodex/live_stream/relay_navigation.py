@@ -11,10 +11,18 @@ from html import escape
 from urllib.parse import quote
 
 
-def relay_workspace_href(workspace: str, access_token: str, *, status: str = "") -> str:
+def relay_workspace_href(
+    workspace: str,
+    access_token: str,
+    *,
+    status: str = "",
+    compose: bool = False,
+) -> str:
     params = _relay_params(access_token, workspace)
     if status:
         params.append(f"status={quote(status)}")
+    if compose:
+        params.append("compose=1")
     suffix = "?" + "&".join(params) if params else ""
     return f"/native/workflows/relay{suffix}"
 
@@ -26,9 +34,9 @@ def relay_inbox_href(workspace: str, access_token: str) -> str:
 
 
 def relay_chat_href(workspace: str, access_token: str) -> str:
-    return _relay_path_with_workspace(
-        "/native/workflows/relay/chat", workspace, access_token, safe=""
-    )
+    """Open the task composer as a transient state of the task workspace."""
+
+    return relay_workspace_href(workspace, access_token, compose=True)
 
 
 def relay_task_list_href(

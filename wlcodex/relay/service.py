@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from wlcodex.live_stream.models import stream_event_from_runtime
+from wlcodex.relay.errors import ActiveRelayTasksDecisionRequired
 from wlcodex.relay.context import build_role_context_packet
 from wlcodex.relay.display import (
     followup_response_display_text,
@@ -107,6 +108,9 @@ _RELAY_MAX_TOTAL_TEXT_ATTACHMENT_CHARS = 180_000
 # A dispatch claim protects an external provider side effect. A second worker
 # must never retake it while the first may still be inside ``start_session``.
 _RELAY_DISPATCH_CLAIM_STALE_SECONDS = 300
+_ACTIVE_WORKSPACE_PRESENTATION_STATES = frozenset(
+    {"running", "waiting_user", "waiting_approval", "stale"}
+)
 
 
 def _role_requires_indeterminate_provider_override(job: Any) -> bool:
@@ -273,9 +277,11 @@ def _subagent_execution_strategy(
     allow_subagents: str = "auto",
     legacy_team_strategy: str = "none",
 ) -> dict[str, Any]:
-    allow = _clean_allow_subagents(allow_subagents)
-    if _clean_team_strategy(legacy_team_strategy) != "none":
-        allow = "auto"
+    # The public Relay contract is system-selected delegation.  ``off`` is
+    # retained only as historical data; it is never a live control for new
+    # tasks or provider attempts.
+    del allow_subagents, legacy_team_strategy
+    allow = "auto"
     return {
         "allow_subagents": allow,
         "subagent_decision_json": {},
@@ -288,11 +294,8 @@ def _subagent_decision_for_provider(
     allow_subagents: str,
 ) -> dict[str, Any]:
     provider_key = str(provider_name or "").strip().lower()
-    allow = _clean_allow_subagents(allow_subagents)
-    if allow == "off":
-        capability = "disabled_by_relay"
-        allowed = False
-    elif provider_key == "codex":
+    del allow_subagents
+    if provider_key == "codex":
         capability = "explicit_subagents"
         allowed = True
     elif provider_key.startswith("claude"):
@@ -314,9 +317,7 @@ def _merge_subagent_decision_into_strategy(
     provider_mode: dict[str, Any],
 ) -> dict[str, Any]:
     strategy = dict(execution_strategy) if isinstance(execution_strategy, dict) else {}
-    strategy["allow_subagents"] = _clean_allow_subagents(
-        str(provider_mode.get("allow_subagents") or strategy.get("allow_subagents") or "auto")
-    )
+    strategy["allow_subagents"] = "auto"
     decision = provider_mode.get("subagent_decision_json")
     strategy["subagent_decision_json"] = decision if isinstance(decision, dict) else {}
     return strategy
@@ -334,7 +335,9 @@ def _provider_mode_for_attempt(
     strategy = round_execution.get("execution_strategy")
     if not isinstance(strategy, dict):
         strategy = {}
-    allow_subagents = _clean_allow_subagents(str(strategy.get("allow_subagents") or "auto"))
+    # Legacy strategies may contain ``off``.  That value is display-only
+    # history and cannot change a live dispatch.
+    allow_subagents = "auto"
     subagent_decision = _subagent_decision_for_provider(
         provider_name=provider_name,
         allow_subagents=allow_subagents,
@@ -412,6 +415,9 @@ def _packet_with_execution_contract(
         if packet.role in {"tester", "auditor"}:
             expected_output["goal_acceptance"] = {
                 "implementation_run_id": "positive integer for the implementation report being verified",
+                "criteria": [
+                    "every stated acceptance criterion, copied verbatim from the execution contract"
+                ],
                 "test": {
                     "kind": "pytest | unittest | npm_test | pnpm_test",
                     "args": ["approved structured arguments only"],
@@ -419,7 +425,7 @@ def _packet_with_execution_contract(
                 },
             }
             constraints.append(
-                "For goal acceptance, return a structured goal_acceptance object that binds this verifier evidence to the concrete implementation_run_id. Do not emit a command string, shell syntax, redirects, or arbitrary argv."
+                "For goal acceptance, return a structured goal_acceptance object that binds this verifier evidence to the concrete implementation_run_id and explicitly lists every stated acceptance criterion in criteria. Do not emit a command string, shell syntax, redirects, or arbitrary argv."
             )
             if packet.role == "tester":
                 constraints.append(
@@ -556,6 +562,11 @@ class RelayService:
         # claims, so duplicate runtime frames cannot race each other between
         # reading the current confirmation and resolving it at the provider.
         self._approval_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        # New-task disposition has a user-visible concurrency contract.  Hold
+        # one process-local lock across observation, verified interruption and
+        # durable creation so two browser submits cannot both observe an empty
+        # workspace and silently start parallel work.
+        self._workspace_creation_locks: dict[str, asyncio.Lock] = {}
         self._role_provider_defaults = self._normalize_assignments(
             role_provider_defaults or {},
             allow_partial=True,
@@ -581,6 +592,56 @@ class RelayService:
             self._approval_locks[key] = lock
         return lock
 
+    def _workspace_creation_lock(self, workspace: str) -> asyncio.Lock:
+        key = str(workspace or "").strip()
+        lock = self._workspace_creation_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._workspace_creation_locks[key] = lock
+        return lock
+
+    def active_workspace_tasks_readonly(self, workspace: str) -> list[Any]:
+        """Return only tasks whose visible state can still affect new work."""
+
+        return [
+            summary
+            for summary in self.list_tasks_readonly(workspace=str(workspace or "").strip())
+            if str(getattr(getattr(summary, "presentation", None), "state", ""))
+            in _ACTIVE_WORKSPACE_PRESENTATION_STATES
+        ]
+
+    async def create_task_after_workspace_decision(
+        self,
+        *,
+        active_task_policy: str = "",
+        **create_kwargs: Any,
+    ) -> RelayTask:
+        """Create a task only after an explicit decision about existing work.
+
+        ``continue_background`` preserves the observed tasks.  ``interrupt_active``
+        verifies their provider interrupts before committing the new task.  An
+        omitted policy is intentionally not guessed: the API returns the live
+        task summaries so the UI can make the business decision visible.
+        """
+
+        workspace = str(create_kwargs.get("workspace") or "").strip()
+        policy = str(active_task_policy or "").strip().lower()
+        if policy and policy not in {"continue_background", "interrupt_active"}:
+            raise ValueError("active_task_policy must be continue_background or interrupt_active")
+        async with self._workspace_creation_lock(workspace):
+            active_tasks = self.active_workspace_tasks_readonly(workspace)
+            if active_tasks and not policy:
+                raise ActiveRelayTasksDecisionRequired(active_tasks)
+            if active_tasks and policy == "interrupt_active":
+                for summary in active_tasks:
+                    await self.interrupt(int(summary.task_id))
+                remaining = self.active_workspace_tasks_readonly(workspace)
+                if remaining:
+                    raise RuntimeError(
+                        "existing Relay tasks could not be verified as interrupted"
+                    )
+            return self.create_task(**create_kwargs)
+
     def create_task(
         self,
         *,
@@ -596,6 +657,7 @@ class RelayService:
         acceptance_criteria: list[str] | tuple[str, ...] | None = None,
         allow_subagents: str = "auto",
         team_strategy: str = "none",
+        creation_idempotency_key: str = "",
     ) -> RelayTask:
         self._store.assert_submissions_open()
         clean_images = _relay_clean_image_attachments(images)
@@ -627,6 +689,7 @@ class RelayService:
             workspace=workspace,
             provider=base_provider,
             role_providers=assignments,
+            creation_idempotency_key=creation_idempotency_key,
         )
         self._store.lifecycle.set_round_execution(
             task.id,
@@ -686,6 +749,62 @@ class RelayService:
             job_id=director_job.id,
             payload={"artifact_type": "relay_board"},
         )
+        return task
+
+    def recover_task_creation(
+        self,
+        task_id: int,
+        *,
+        execution_mode: str = "standard",
+        execution_goal: str = "",
+        acceptance_criteria: list[str] | tuple[str, ...] | None = None,
+        images: list[dict[str, Any]] | None = None,
+        files: list[dict[str, Any]] | None = None,
+    ) -> RelayTask:
+        """Restore all durable creation prerequisites from a retry payload.
+
+        This is intentionally separate from dispatch: a crash may happen at
+        any commit inside initial creation, but retrying the same key must
+        converge the original task before a provider call is attempted.
+        """
+
+        task = self._store.recover_task_creation(task_id)
+        clean_execution_mode = _clean_execution_mode(execution_mode)
+        clean_execution_goal = str(execution_goal or "").strip()
+        clean_criteria = normalize_acceptance_criteria(acceptance_criteria)
+        if clean_execution_mode == "goal" and not clean_execution_goal:
+            raise ValueError("goal execution_mode requires execution_goal")
+        if clean_execution_mode == "goal" and not clean_criteria:
+            raise ValueError("goal execution_mode requires acceptance_criteria")
+        execution_strategy = _subagent_execution_strategy()
+        if clean_criteria:
+            execution_strategy["acceptance_criteria"] = clean_criteria
+        execution_strategy["execution_contract_version"] = 1
+        self._store.lifecycle.set_round_execution(
+            task.id,
+            1,
+            execution_mode=clean_execution_mode,
+            execution_goal=clean_execution_goal,
+            execution_strategy=execution_strategy,
+        )
+        clean_images = _relay_clean_image_attachments(images)
+        clean_files = _relay_clean_text_file_attachments(files)
+        if (clean_images or clean_files) and not any(
+            str(artifact.get("artifact_type") or "") == "user_attachments"
+            and str(artifact.get("source") or "") == "initial_task"
+            for artifact in self._store.get_task_detail_readonly(task.id).artifacts
+        ):
+            self._store.save_artifact(
+                task.id,
+                "director",
+                "user_attachments",
+                {
+                    "source": "initial_task",
+                    "text": task.prompt,
+                    **_relay_attachment_payload(images=clean_images, files=clean_files),
+                },
+                summary="任务创建恢复的用户附件",
+            )
         return task
 
     def list_tasks(self, **kwargs: Any):
@@ -2440,6 +2559,11 @@ class RelayService:
         declaration, declaration_error = normalize_goal_acceptance_declaration(
             raw_payload.get("goal_acceptance")
         )
+        required_criteria = normalize_acceptance_criteria(
+            execution_contract.get("execution_strategy", {}).get("acceptance_criteria")
+            if isinstance(execution_contract.get("execution_strategy"), dict)
+            else []
+        )
         detail = self._store.get_task_detail_readonly(task_id)
         implementation = self._current_goal_implementation_artifact(
             detail,
@@ -2456,6 +2580,32 @@ class RelayService:
                 verifier_artifact=saved_artifact,
                 verifier_role=role,
                 declaration={},
+                execution=self._goal_not_run_execution(reason),
+                status="not_run",
+                evidence_status="not_run",
+                reason=reason,
+            )
+            return reason if envelope.status == "passed" else ""
+
+        declared_criteria = normalize_acceptance_criteria(declaration.get("criteria"))
+        # Older single-criterion tasks did not carry explicit coverage. Keep
+        # them readable while making all multi-criterion completions name the
+        # exact immutable contract they prove.
+        if not declared_criteria and len(required_criteria) == 1:
+            declared_criteria = list(required_criteria)
+            declaration["criteria"] = declared_criteria
+        if not required_criteria or set(declared_criteria) != set(required_criteria):
+            reason = (
+                "goal acceptance declaration must cover every stated acceptance criterion"
+            )
+            self._persist_goal_acceptance_record(
+                task_id=task_id,
+                round_id=round_id,
+                implementation_artifact=None,
+                implementation_run_id=None,
+                verifier_artifact=saved_artifact,
+                verifier_role=role,
+                declaration=declaration,
                 execution=self._goal_not_run_execution(reason),
                 status="not_run",
                 evidence_status="not_run",
@@ -2666,6 +2816,11 @@ class RelayService:
                     if isinstance(record.test_declaration, dict)
                     else {}
                 )
+                declared_criteria = normalize_acceptance_criteria(
+                    test_declaration.get("criteria")
+                )
+                if set(declared_criteria) != set(criteria):
+                    continue
                 if verifier_role == "tester":
                     if (
                         str(record.status) != "passed"
@@ -5432,6 +5587,35 @@ class RelayService:
                 "failed_role": failed_job.role,
                 "error": blocked_reason,
             },
+        )
+
+    def record_initial_dispatch_indeterminate(
+        self,
+        task_id: int,
+        *,
+        role: str = "director",
+        error: str = "",
+    ) -> None:
+        """Persist a recoverable truth when request-time dispatch crashes."""
+
+        reason = (
+            "派发结果无法验证：服务在启动 Provider 时发生异常。"
+            "系统不会自动重复执行；请检查 Provider 侧证据后恢复。"
+        )
+        if str(error or "").strip():
+            reason += f"（{str(error).strip()[:300]}）"
+        self._block_role_with_error(
+            task_id,
+            role,
+            reason,
+            retry_kind="dispatch_indeterminate",
+            guardrail_action="manual_provider_verification_required",
+        )
+        self._events.emit(
+            task_id,
+            "dispatch.indeterminate",
+            role=role,
+            payload={"role": role, "error": reason},
         )
 
     async def _mark_role_fallback(

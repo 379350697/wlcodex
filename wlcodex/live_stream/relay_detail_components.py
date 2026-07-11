@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from html import escape
+import json
 from typing import Any
 
 
@@ -19,26 +20,37 @@ def render_followup_composer(
     workspace: str,
     access_token: str,
     task_status: str,
+    presentation: dict[str, Any] | None,
     current_round_id: int,
     pending_inputs: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
     render_workspace_dock: Callable[..., str],
     render_attachment_sheet: Callable[[], str],
 ) -> str:
     workspace_dock = render_workspace_dock(workspace, access_token=access_token)
+    presentation_payload = dict(presentation or {})
+    allowed_actions = [
+        str(action)
+        for action in presentation_payload.get("allowed_actions", [])
+        if str(action).strip()
+    ]
+    presentation_state = str(presentation_payload.get("state") or "stale")
+    can_add_input = "add_input" in allowed_actions
+    can_interrupt = "interrupt" in allowed_actions
+    allowed_actions_json = escape(json.dumps(allowed_actions, ensure_ascii=False), quote=True)
     pending_visible = any(
         str(item.get("status") or "") in {"pending", "steered"} for item in (pending_inputs or [])
     )
     return f"""
     {workspace_dock}
     <div class="marvis-relay-pending-inputs" data-marvis-pending-inputs{" hidden" if not pending_visible else ""}></div>
-    <form class="marvis-relay-composer" data-marvis-followup-composer data-task-status-value="{escape(task_status)}" data-current-round-id="{int(current_round_id)}" method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
-      <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
-      <textarea name="text" placeholder="{escape(placeholder)}" aria-label="继续补充给总工程师"></textarea>
-      <button class="marvis-relay-submit" type="submit" aria-label="发送补充" data-marvis-submit>
+    <form class="marvis-relay-composer" data-marvis-followup-composer data-task-status-value="{escape(task_status)}" data-presentation-state-value="{escape(presentation_state)}" data-allowed-actions-value="{allowed_actions_json}" data-current-round-id="{int(current_round_id)}" method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
+      <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open{" disabled" if not can_add_input else ""}>+</button>
+      <textarea name="text" placeholder="{escape(placeholder)}" aria-label="继续补充给总工程师"{" disabled" if not can_add_input else ""}></textarea>
+      <button class="marvis-relay-submit" type="submit" aria-label="发送补充" data-marvis-submit{" disabled" if not can_add_input else ""}>
         <span class="marvis-relay-submit-arrow" aria-hidden="true">↑</span>
       </button>
       <div class="marvis-relay-composer-attachments" data-marvis-attachment-strip hidden></div>
-      <button class="marvis-relay-interrupt" type="button" data-marvis-interrupt-button data-interrupt-url="/api/relay/tasks/{task_id}/interrupt">中断当前执行</button>
+      <button class="marvis-relay-interrupt" type="button" data-marvis-interrupt-button data-interrupt-url="/api/relay/tasks/{task_id}/interrupt"{" hidden disabled" if not can_interrupt else ""}>中断当前执行</button>
       <p class="marvis-relay-mutation-status" data-relay-mutation-status role="status" aria-live="polite"></p>
     </form>
     {render_attachment_sheet()}

@@ -97,6 +97,28 @@ def test_raw_frame_is_redacted_before_it_reaches_sqlite(tmp_path: Path) -> None:
     assert "also-secret" not in str(stored["raw_payload_json"])
 
 
+def test_nested_raw_frame_secrets_are_redacted_in_hot_store_and_archive(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    frame = _append_frame(
+        store,
+        occurred_at=NOW - timedelta(days=8),
+        payload={"events": [{"token": "hot-list-secret", "text": "api_key=archive-secret"}]},
+    )
+
+    stored = store._conn.execute(
+        "SELECT raw_payload_json FROM provider_raw_frames WHERE id = ?", (frame.id,)
+    ).fetchone()
+    assert "hot-list-secret" not in str(stored["raw_payload_json"])
+    assert "archive-secret" not in str(stored["raw_payload_json"])
+
+    assert _retention(store, tmp_path).run(apply=True).archived_frames == 1
+    archived = store.get_provider_raw_frame(frame.id).raw_payload
+    serialized = json.dumps(archived, ensure_ascii=False)
+    assert "hot-list-secret" not in serialized
+    assert "archive-secret" not in serialized
+    assert archived["events"][0]["token"] == "[REDACTED]"
+
+
 def test_apply_archives_expired_frame_and_lookup_falls_back_to_gzip(
     tmp_path: Path,
 ) -> None:

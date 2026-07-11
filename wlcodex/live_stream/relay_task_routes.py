@@ -46,6 +46,47 @@ async def handle_relay_task_route(
     if task_id is None:
         await deps.send_json(writer, 404, {"error": "not found"})
         return True
+
+    async def require_presentation_action(action: str) -> Any | None:
+        """Authorize mutations from the same read-only presentation contract.
+
+        A raw lifecycle status is transport detail, not a user permission.  In
+        particular a stale or provider-recovery task can still have a raw
+        ``running`` row while only refresh is safe.  Keep every mutation on
+        this guard so a stale DOM/SSE snapshot cannot issue a provider control.
+        """
+
+        try:
+            detail = service.get_task_readonly(task_id)
+        except KeyError:
+            await deps.send_json(writer, 404, {"error": "relay task not found"})
+            return None
+        presentation = getattr(detail, "presentation", None)
+        allowed = list(getattr(presentation, "allowed_actions", []) or [])
+        if action not in allowed:
+            freshness = getattr(presentation, "freshness", {}) or {}
+            recovery_required = bool(
+                freshness.get("recovery_required") if isinstance(freshness, dict) else False
+            )
+            await deps.send_json(
+                writer,
+                409,
+                {
+                    # Preserve the historic machine-readable recovery wording
+                    # for old clients while the presentation explains the
+                    # user-facing reason and exact safe next action.
+                    "error": (
+                        "native approval recovery is pending; wait for the lifecycle worker"
+                        if recovery_required
+                        else "该任务当前状态不允许此操作；请按下一步指引处理。"
+                    ),
+                    "state": str(getattr(presentation, "state", "stale") or "stale"),
+                    "allowed_actions": allowed,
+                    "presentation": presentation.to_dict() if hasattr(presentation, "to_dict") else {},
+                },
+            )
+            return None
+        return detail
     if suffix == "":
         if method != "GET":
             await deps.send_json(writer, 405, {"error": "method not allowed"})
@@ -62,6 +103,8 @@ async def handle_relay_task_route(
     if suffix == "/inputs":
         if method != "POST":
             await deps.send_json(writer, 405, {"error": "method not allowed"})
+            return True
+        if await require_presentation_action("add_input") is None:
             return True
         body = await deps.read_request_json(writer, reader, headers)
         if body is None:
@@ -92,6 +135,8 @@ async def handle_relay_task_route(
         pending_id, action = int(parts[1]), parts[2]
         if method != "POST":
             await deps.send_json(writer, 405, {"error": "method not allowed"})
+            return True
+        if await require_presentation_action("add_input") is None:
             return True
         mutation = await deps.begin_mutation(
             f"relay.input.{action}", task_id, {"pending_id": pending_id, "action": action}
@@ -129,6 +174,8 @@ async def handle_relay_task_route(
             return True
         if method != "POST":
             await deps.send_json(writer, 405, {"error": "method not allowed"})
+            return True
+        if await require_presentation_action("resolve") is None:
             return True
         body = await deps.read_request_json(writer, reader, headers)
         if body is None:
@@ -174,6 +221,8 @@ async def handle_relay_task_route(
         if method != "POST":
             await deps.send_json(writer, 405, {"error": "method not allowed"})
             return True
+        if await require_presentation_action("add_input") is None:
+            return True
         body = await deps.read_request_json(writer, reader, headers)
         if body is None:
             return True
@@ -198,6 +247,8 @@ async def handle_relay_task_route(
     if suffix == "/resume":
         if method != "POST":
             await deps.send_json(writer, 405, {"error": "method not allowed"})
+            return True
+        if await require_presentation_action("resume") is None:
             return True
         body = await deps.read_request_json(writer, reader, headers)
         if body is None:
@@ -232,6 +283,8 @@ async def handle_relay_task_route(
         if method != "POST":
             await deps.send_json(writer, 405, {"error": "method not allowed"})
             return True
+        if await require_presentation_action("archive") is None:
+            return True
         body = await deps.read_request_json(writer, reader, headers)
         if body is None:
             return True
@@ -263,6 +316,8 @@ async def handle_relay_task_route(
         if method != "POST":
             await deps.send_json(writer, 405, {"error": "method not allowed"})
             return True
+        if await require_presentation_action("refresh") is None:
+            return True
         body = await deps.read_request_json(writer, reader, headers)
         if body is None:
             return True
@@ -281,6 +336,8 @@ async def handle_relay_task_route(
     if suffix == "/interrupt":
         if method != "POST":
             await deps.send_json(writer, 405, {"error": "method not allowed"})
+            return True
+        if await require_presentation_action("interrupt") is None:
             return True
         body = await deps.read_request_json(writer, reader, headers)
         if body is None:

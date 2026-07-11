@@ -115,13 +115,21 @@ def normalize_goal_acceptance_declaration(
 
     if not isinstance(value, dict):
         return {}, "goal_acceptance must be an object"
-    unknown = sorted(set(value) - {"implementation_run_id", "test"})
+    unknown = sorted(set(value) - {"implementation_run_id", "test", "criteria"})
     if unknown:
         return {}, "goal_acceptance has unsupported fields: " + ", ".join(unknown)
     raw_run_id = value.get("implementation_run_id")
     if isinstance(raw_run_id, bool) or not isinstance(raw_run_id, int) or raw_run_id <= 0:
         return {}, "goal_acceptance requires a positive implementation_run_id"
     normalized: dict[str, Any] = {"implementation_run_id": int(raw_run_id)}
+    if "criteria" in value:
+        raw_criteria = value.get("criteria")
+        if not isinstance(raw_criteria, list) or not raw_criteria:
+            return {}, "goal_acceptance.criteria must be a non-empty list"
+        criteria = normalize_acceptance_criteria(raw_criteria)
+        if len(criteria) != len(raw_criteria) or len(criteria) > 64:
+            return {}, "goal_acceptance.criteria must contain at most 64 unique non-empty strings"
+        normalized["criteria"] = criteria
     if "test" not in value or value.get("test") is None:
         return normalized, ""
     raw_test = value.get("test")
@@ -592,9 +600,9 @@ def _presentation_allowed_actions(
     if state in {"waiting_user", "waiting_approval"}:
         return ["add_input", "resolve"]
     if state in {"blocked", "failed"}:
-        return ["resume", "add_input"]
+        return ["resume", "add_input", "archive"]
     if state in {"completed", "interrupted"}:
-        return ["add_input"]
+        return ["add_input", "archive"]
     return ["refresh"]
 
 

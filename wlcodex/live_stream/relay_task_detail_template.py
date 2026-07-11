@@ -3,8 +3,53 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from html import escape
 from typing import Any
+
+
+@dataclass(frozen=True)
+class RelayTaskDetailPageDependencies:
+    """Typed page boundary between the HTTP server and Relay presentation.
+
+    The detail template deliberately receives rendering capabilities rather
+    than importing ``server``.  A dataclass makes that boundary explicit and
+    fails at construction time if an extraction changes a required helper,
+    instead of failing later with a string-key ``KeyError`` in production.
+    """
+
+    task_detail_view: Any
+    token_suffix: Any
+    latest_event_sequence: Any
+    task_events_suffix: Any
+    canonical_payloads_by_role: Any
+    conversation_html: Any
+    canonical_payload_sequence: Any
+    workspace_href: Any
+    topbar: Any
+    settings_href: Any
+    bottom_nav: Any
+    token_int: Any
+    format_token_count: Any
+    work_log_html: Any
+    work_log_body_html: Any
+    max_event_id_from_events: Any
+    plan_control_html: Any
+    followup_composer: Any
+    replace_html_icons: Any
+    mobile_web_head: Any
+    attachment_script: Any
+    relay_role_ids: Any
+    role_label: Any
+    public_role: Any
+    handoff_role_label: Any
+    legacy_role_label_parts: Any
+    legacy_role_slug_parts: Any
+    native_provider_display_name: Any
+    native_app_head: Any
+    native_permission_presets: Any
+    codex_plugin_menu_items: Any
+    icons_js_literal: Any
 
 
 def render_relay_task_detail_page(
@@ -15,43 +60,43 @@ def render_relay_task_detail_page(
     events: list[Any] | tuple[Any, ...] | None = None,
     hub: Any = None,
     token_stats: dict[str, Any] | None = None,
-    helpers: dict[str, Any],
+    deps: RelayTaskDetailPageDependencies,
 ) -> str:
     # The caller provides the semantic render helpers explicitly.  Keeping the
     # page in this module removes transport coupling without duplicating the
     # established Relay projection vocabulary during the extraction.
-    _relay_task_detail_view = helpers["_relay_task_detail_view"]
-    _token_suffix = helpers["_token_suffix"]
-    _relay_latest_event_sequence = helpers["_relay_latest_event_sequence"]
-    _relay_task_events_suffix = helpers["_relay_task_events_suffix"]
-    _relay_role_canonical_payloads_by_role = helpers["_relay_role_canonical_payloads_by_role"]
-    _marvis_relay_conversation_html = helpers["_marvis_relay_conversation_html"]
-    _relay_role_canonical_payload_sequence = helpers["_relay_role_canonical_payload_sequence"]
-    _relay_workspace_href = helpers["_relay_workspace_href"]
-    _marvis_relay_topbar = helpers["_marvis_relay_topbar"]
-    _relay_settings_href = helpers["_relay_settings_href"]
-    _marvis_relay_bottom_nav = helpers["_marvis_relay_bottom_nav"]
-    _marvis_token_int = helpers["_marvis_token_int"]
-    _format_marvis_relay_token_count = helpers["_format_marvis_relay_token_count"]
-    _marvis_relay_work_log_html = helpers["_marvis_relay_work_log_html"]
-    _marvis_relay_work_log_body_html = helpers["_marvis_relay_work_log_body_html"]
-    _marvis_relay_max_event_id_from_events = helpers["_marvis_relay_max_event_id_from_events"]
-    _marvis_relay_plan_control_html = helpers["_marvis_relay_plan_control_html"]
-    _marvis_relay_followup_composer = helpers["_marvis_relay_followup_composer"]
-    _replace_html_icons = helpers["_replace_html_icons"]
-    _relay_mobile_web_head = helpers["_relay_mobile_web_head"]
-    _marvis_relay_attachment_script = helpers["_marvis_relay_attachment_script"]
-    RELAY_ROLE_IDS = helpers["RELAY_ROLE_IDS"]
-    _relay_role_label = helpers["_relay_role_label"]
-    _marvis_relay_public_role = helpers["_marvis_relay_public_role"]
-    _marvis_relay_handoff_role_label = helpers["_marvis_relay_handoff_role_label"]
-    _MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS = helpers["_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS"]
-    _MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS = helpers["_MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS"]
-    _native_provider_display_name = helpers["_native_provider_display_name"]
-    _NATIVE_APP_HEAD = helpers["_NATIVE_APP_HEAD"]
-    _native_permission_presets = helpers["_native_permission_presets"]
-    _codex_plugin_menu_items = helpers["_codex_plugin_menu_items"]
-    _ICONS_JS_LITERAL = helpers["_ICONS_JS_LITERAL"]
+    _relay_task_detail_view = deps.task_detail_view
+    _token_suffix = deps.token_suffix
+    _relay_latest_event_sequence = deps.latest_event_sequence
+    _relay_task_events_suffix = deps.task_events_suffix
+    _relay_role_canonical_payloads_by_role = deps.canonical_payloads_by_role
+    _marvis_relay_conversation_html = deps.conversation_html
+    _relay_role_canonical_payload_sequence = deps.canonical_payload_sequence
+    _relay_workspace_href = deps.workspace_href
+    _marvis_relay_topbar = deps.topbar
+    _relay_settings_href = deps.settings_href
+    _marvis_relay_bottom_nav = deps.bottom_nav
+    _marvis_token_int = deps.token_int
+    _format_marvis_relay_token_count = deps.format_token_count
+    _marvis_relay_work_log_html = deps.work_log_html
+    _marvis_relay_work_log_body_html = deps.work_log_body_html
+    _marvis_relay_max_event_id_from_events = deps.max_event_id_from_events
+    _marvis_relay_plan_control_html = deps.plan_control_html
+    _marvis_relay_followup_composer = deps.followup_composer
+    _replace_html_icons = deps.replace_html_icons
+    _relay_mobile_web_head = deps.mobile_web_head
+    _marvis_relay_attachment_script = deps.attachment_script
+    RELAY_ROLE_IDS = deps.relay_role_ids
+    _relay_role_label = deps.role_label
+    _marvis_relay_public_role = deps.public_role
+    _marvis_relay_handoff_role_label = deps.handoff_role_label
+    _MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS = deps.legacy_role_label_parts
+    _MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS = deps.legacy_role_slug_parts
+    _native_provider_display_name = deps.native_provider_display_name
+    _NATIVE_APP_HEAD = deps.native_app_head
+    _native_permission_presets = deps.native_permission_presets
+    _codex_plugin_menu_items = deps.codex_plugin_menu_items
+    _ICONS_JS_LITERAL = deps.icons_js_literal
     view = _relay_task_detail_view(view)
     token_suffix = _token_suffix(access_token)
     event_history = list(events or [])
@@ -108,6 +153,11 @@ def render_relay_task_detail_page(
         workspace=str(task.workspace or ""),
         access_token=access_token,
         task_status=str(task.status or ""),
+        presentation=(
+            detail.presentation.to_dict()
+            if hasattr(getattr(detail, "presentation", None), "to_dict")
+            else dict(getattr(detail, "presentation", {}) or {})
+        ),
         current_round_id=int(getattr(detail, "current_round_id", 1) or 1),
         pending_inputs=[
             item.to_dict() if hasattr(item, "to_dict") else dict(item)
@@ -1871,16 +1921,21 @@ def render_relay_task_detail_page(
     const pendingInputsContainer = document.querySelector("[data-marvis-pending-inputs]");
     const followupTextInput = followupComposer?.querySelector("textarea[name='text']");
     const followupSubmitButton = followupComposer?.querySelector("[data-marvis-submit]");
+    const followupAttachButton = followupComposer?.querySelector("[data-marvis-attach-open]");
     const followupInterruptButton = followupComposer?.querySelector("[data-marvis-interrupt-button]");
     const relayMutationStatus = followupComposer?.querySelector("[data-relay-mutation-status]");
     const pendingInputs = new Map();
     let relayTaskStatus = followupComposer?.dataset.taskStatusValue || "";
-    let waitingControlInput = "";
-    function relayTaskIsRunning() {{
-      return ["queued", "running", "streaming"].includes(String(relayTaskStatus || "").trim());
+    let relayAllowedActions = new Set();
+    try {{
+      const actions = JSON.parse(followupComposer?.dataset.allowedActionsValue || "[]");
+      if (Array.isArray(actions)) relayAllowedActions = new Set(actions.map((item) => String(item || "").trim()));
+    }} catch (_error) {{
+      relayAllowedActions = new Set();
     }}
-    function relayTaskAcceptsPendingInput() {{
-      return relayTaskIsRunning() || String(relayTaskStatus || "").trim() === "waiting_user";
+    let waitingControlInput = "";
+    function relayAllowsAction(action) {{
+      return relayAllowedActions.has(String(action || ""));
     }}
     function relayFollowupHasText() {{
       return Boolean(String(followupTextInput?.value || "").trim());
@@ -1891,8 +1946,12 @@ def render_relay_task_detail_page(
     function updateRelayComposerAction() {{
       if (!followupSubmitButton) return;
       followupSubmitButton.setAttribute("aria-label", "发送补充");
+      const canAddInput = relayAllowsAction("add_input");
+      if (followupTextInput) followupTextInput.disabled = !canAddInput;
+      followupSubmitButton.disabled = !canAddInput;
+      if (followupAttachButton) followupAttachButton.disabled = !canAddInput;
       if (followupInterruptButton) {{
-        const canInterrupt = relayTaskIsRunning();
+        const canInterrupt = relayAllowsAction("interrupt");
         followupInterruptButton.hidden = !canInterrupt;
         followupInterruptButton.disabled = !canInterrupt;
       }}
@@ -1969,6 +2028,17 @@ def render_relay_task_detail_page(
       }});
       updateRelayComposerAction();
     }}
+    function applyRelayPresentation(presentation) {{
+      if (!presentation || typeof presentation !== "object") return;
+      const actions = presentation.allowed_actions;
+      if (Array.isArray(actions)) {{
+        relayAllowedActions = new Set(actions.map((item) => String(item || "").trim()));
+        if (followupComposer) followupComposer.dataset.allowedActionsValue = JSON.stringify(Array.from(relayAllowedActions));
+      }}
+      const state = String(presentation.state || "");
+      if (state) updateTaskStatus(state);
+      else updateRelayComposerAction();
+    }}
     pendingInputsContainer?.addEventListener("click", async (event) => {{
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
@@ -1976,6 +2046,10 @@ def render_relay_task_detail_page(
       const cancelId = target.getAttribute("data-pending-cancel");
       const pendingId = steerId || cancelId;
       if (!pendingId) return;
+      if (!relayAllowsAction("add_input")) {{
+        setRelayMutationStatus("当前任务不接受补充输入。", true);
+        return;
+      }}
       const action = steerId ? "steer" : "cancel";
       try {{
         const payload = await relayMutation(
@@ -2223,8 +2297,7 @@ def render_relay_task_detail_page(
       const payload = parseRelayEvent(event);
       const presentation = payload.presentation;
       if (!presentation || typeof presentation !== "object") return;
-      const state = String(presentation.state || "");
-      if (state) updateTaskStatus(state);
+      applyRelayPresentation(presentation);
       const actor = presentation.current_actor;
       if (actor && typeof actor === "object" && actor.role && actor.status) {{
         setRoleStatus(String(actor.role), String(actor.status), {{ force: true }});
@@ -2446,7 +2519,7 @@ def render_relay_task_detail_page(
       setRelayMutationStatus("正在发送…");
       let localKey = "";
       try {{
-        if (String(relayTaskStatus || "").trim() === "waiting_user" && waitingControlInput) {{
+        if (relayAllowsAction("resolve") && waitingControlInput) {{
           const roundId = activeRelayRoundId || form.dataset.currentRoundId || CURRENT_ROUND_ID;
           await relayMutation(
             `/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/rounds/${{encodeURIComponent(roundId)}}/control${{TOKEN_SUFFIX}}`,
@@ -2461,7 +2534,7 @@ def render_relay_task_detail_page(
           setRelayMutationStatus("已提交，任务继续执行。");
           return;
         }}
-        if (relayTaskAcceptsPendingInput()) {{
+        if (relayAllowsAction("add_input")) {{
           const payload = await relayMutation(
             `/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/inputs${{TOKEN_SUFFIX}}`,
             data,
@@ -2489,20 +2562,7 @@ def render_relay_task_detail_page(
           window.marvisRelayAttachments?.clear();
           return;
         }}
-        localKey = `local-followup:${{Date.now()}}`;
-        clearMarvisConversationPausedRows();
-        appendMarvisConversationUser(data.text || "已添加附件", localKey, true, attachments);
-        appendMarvisConversationWaiting();
-        updateTaskStatus("running");
-        setRoleStatus("director", "queued", {{ force: true }});
-        await relayMutation(
-          `/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/message${{TOKEN_SUFFIX}}`,
-          data,
-          followupSubmitButton,
-        );
-        form.reset();
-        window.marvisRelayAttachments?.clear();
-        setRelayMutationStatus("已发送给总工程师。");
+        setRelayMutationStatus("当前任务不接受补充输入。", true);
       }} catch (error) {{
         setRelayMutationStatus(error?.message || "发送失败，请重试。", true);
         if (localKey) {{
@@ -2515,7 +2575,7 @@ def render_relay_task_detail_page(
     }});
     followupInterruptButton?.addEventListener("click", async (event) => {{
       event.preventDefault();
-      if (!relayTaskIsRunning()) return;
+      if (!relayAllowsAction("interrupt")) return;
       setRelayMutationStatus("正在中断当前执行…");
       try {{
         await relayMutation(`${{followupInterruptButton.dataset.interruptUrl}}${{TOKEN_SUFFIX}}`, {{}}, followupInterruptButton);

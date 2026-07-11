@@ -716,7 +716,7 @@ async def test_marvis_relay_composer_has_real_attachment_sheet(
 ) -> None:
     response, _service = await _request(
         tmp_path,
-        "GET /native/workflows/relay/chat?token=secret HTTP/1.1\r\n"
+        "GET /native/workflows/relay?token=secret&compose=1 HTTP/1.1\r\n"
         "Host: test\r\nConnection: close\r\n\r\n",
     )
 
@@ -733,7 +733,26 @@ async def test_marvis_relay_composer_has_real_attachment_sheet(
     assert "/static/marvis/attachment-icon-local-file-marvis.png" in response
     assert "/static/marvis/attachment-icon-skills-marvis.png" not in response
     assert "readRelayImageAttachment" in response
-    assert "readRelayTextAttachment" in response
+
+
+@pytest.mark.asyncio
+async def test_legacy_relay_chat_route_redirects_to_task_workspace_compose(
+    tmp_path: Path,
+) -> None:
+    response, _service = await _request(
+        tmp_path,
+        "GET /native/workflows/relay/chat?token=secret&workspace=%2Frepo HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+
+    assert "HTTP/1.1 303 See Other" in response
+    assert "Location: /native/workflows/relay?token=secret&workspace=/repo&compose=1" in response
+    compose_response, _service = await _request(
+        tmp_path,
+        "GET /native/workflows/relay?token=secret&workspace=%2Frepo&compose=1 HTTP/1.1\r\n"
+        "Host: test\r\nConnection: close\r\n\r\n",
+    )
+    assert "readRelayTextAttachment" in compose_response
     css_response, _service = await _request(
         tmp_path,
         "GET /static/relay_marvis.css HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
@@ -1993,7 +2012,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         in response
     )
     assert (
-        'href="/native/workflows/relay/chat?token=secret&amp;workspace=%2FUsers%2Fwl%2Fprojects%2Fwlcodex"'
+        'href="/native/workflows/relay?token=secret&amp;workspace=/Users/wl/projects/wlcodex&amp;compose=1"'
         in response
     )
     assert (
@@ -2059,7 +2078,7 @@ async def test_relay_task_list_is_workspace_not_session_list(tmp_path: Path) -> 
         "Host: test\r\nConnection: close\r\n\r\n",
         relay_service=service,
     )
-    assert 'href="/native/workflows/relay/chat?token=secret&amp;workspace=%2Frepo"' in populated
+    assert 'href="/native/workflows/relay?token=secret&amp;workspace=/repo&amp;compose=1"' in populated
     assert "Default workspace relay" not in populated
     assert "Other workspace relay" not in populated
 
@@ -2164,10 +2183,10 @@ async def test_relay_surfaces_use_mobile_web_head_without_pwa_shell(tmp_path: Pa
             "GET /native/workflows/relay?token=secret HTTP/1.1\r\n"
             "Host: test\r\nConnection: close\r\n\r\n",
         )
-        chat_response = await _read_response(
+        compose_response = await _read_response(
             server.host,
             server.port,
-            "GET /native/workflows/relay/chat?token=secret HTTP/1.1\r\n"
+            "GET /native/workflows/relay?token=secret&compose=1 HTTP/1.1\r\n"
             "Host: test\r\nConnection: close\r\n\r\n",
         )
         detail_response = await _read_response(
@@ -2191,7 +2210,7 @@ async def test_relay_surfaces_use_mobile_web_head_without_pwa_shell(tmp_path: Pa
     finally:
         await server.stop()
 
-    for response in (list_response, chat_response, detail_response):
+    for response in (list_response, compose_response, detail_response):
         assert "HTTP/1.1 200 OK" in response
         assert (
             '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
@@ -2307,17 +2326,17 @@ async def test_relay_task_list_paginates_ten_tasks_per_page(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_marvis_relay_chat_home_is_the_only_new_task_entry(
+async def test_marvis_relay_compose_state_is_the_only_new_task_entry(
     tmp_path: Path,
 ) -> None:
     response, _service = await _request(
         tmp_path,
-        "GET /native/workflows/relay/chat?token=secret&workspace=%2Frepo HTTP/1.1\r\n"
+        "GET /native/workflows/relay?token=secret&workspace=%2Frepo&compose=1 HTTP/1.1\r\n"
         "Host: test\r\nConnection: close\r\n\r\n",
     )
 
     assert "HTTP/1.1 200 OK" in response
-    assert 'data-marvis-relay-view="chat"' in response
+    assert 'data-marvis-relay-view="compose"' in response
     assert '<meta name="color-scheme" content="light only">' in response
     assert 'class="marvis-relay-topbar"' in response
     assert (
@@ -2951,8 +2970,9 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "setRoleStatus(role, status, options = {})" in response
     assert "options.force" in response
     assert 'reason === "new_followup_turn"' in response
-    assert "function relayTaskIsRunning()" in response
-    assert "!relayTaskIsRunning()) return;" in response
+    assert "function relayAllowsAction(action)" in response
+    assert "relayAllowsAction(\"interrupt\")" in response
+    assert "data-allowed-actions-value" in response
     assert 'addRelayEventListener("role.native_event"' in response
     assert 'document.querySelectorAll("[data-native-key]")' in response
     assert "nativeTranscriptNodes.set(node.dataset.nativeKey" in response

@@ -35,6 +35,7 @@ def _marvis_relay_task_composer(
         <label>验收条件<textarea name="acceptance_criteria" rows="3" placeholder="每行一条：实现证据、独立测试或审计证据"></textarea></label>
       </div>
       <input type="hidden" name="workspace" value="{escape(selected_workspace)}">
+      <input type="hidden" name="active_task_policy" value="" data-relay-active-task-policy>
       <button class="marvis-relay-submit" type="submit" aria-label="发送任务" data-marvis-submit>
         <span class="marvis-relay-submit-arrow" aria-hidden="true">↑</span>
       </button>
@@ -310,4 +311,3 @@ def _marvis_relay_attachment_script() -> str:
     }
     setupMarvisRelayAttachments();
     """
-

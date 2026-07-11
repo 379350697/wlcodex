@@ -66,6 +66,17 @@ class RelayMutationClaim:
     def is_replay(self) -> bool:
         return self.status == "completed"
 
+    @property
+    def can_resume_task_creation(self) -> bool:
+        """Whether a previously-created Relay task can safely be resumed.
+
+        Creation has a durable task identity before the provider is contacted.
+        A process loss after that point must resume that identity rather than
+        turn a client retry into either a permanent 409 or a duplicate task.
+        """
+
+        return self.status == "in_progress" and self.operation == "relay.task.create" and self.task_id is not None
+
 
 class MutationStore:
     """Compare-and-set persistence for HTTP mutations and Relay archives.
@@ -144,7 +155,14 @@ class MutationStore:
                 )
             elif (
                 str(row["operation"] or "") != normalized_operation
-                or row["task_id"] != normalized_task_id
+                or (
+                    row["task_id"] != normalized_task_id
+                    and not (
+                        normalized_operation == "relay.task.create"
+                        and normalized_task_id is None
+                        and row["task_id"] is not None
+                    )
+                )
                 or str(row["request_fingerprint"] or "") != fingerprint
             ):
                 claim = RelayMutationClaim(
@@ -189,6 +207,32 @@ class MutationStore:
             (int(task_id), _now(), key),
         )
         self._conn.commit()
+
+    def recover_task_create_binding(self, key: str) -> int | None:
+        """Bind a task whose creation marker survived before ``bind_task``.
+
+        The marker is written in the first durable team-run record. This
+        closes the crash window between task creation and mutation binding
+        without using a fuzzy title/prompt lookup.
+        """
+
+        rows = self._conn.execute(
+            "SELECT id, goal FROM team_runs WHERE route = 'relay' ORDER BY id DESC"
+        ).fetchall()
+        for row in rows:
+            goal = str(row["goal"] or "")
+            if not goal.startswith("relay:"):
+                continue
+            try:
+                payload = json.loads(goal.removeprefix("relay:"))
+            except json.JSONDecodeError:
+                continue
+            if str(payload.get("creation_idempotency_key") or "") != key:
+                continue
+            task_id = int(row["id"])
+            self.bind_task(key, task_id)
+            return task_id
+        return None
 
     def complete(self, key: str, *, status: int, payload: dict[str, Any]) -> None:
         self._conn.execute(

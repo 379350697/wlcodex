@@ -66,6 +66,7 @@ from wlcodex.live_stream.native_templates.auth_pages import (
     render_native_token_entry_page,
 )
 from wlcodex.live_stream.native_templates.codex_page import render_native_codex_page
+from wlcodex.live_stream.native_templates.dependencies import NativePageDependencies
 from wlcodex.live_stream.native_templates.live_page import render_live_page
 from wlcodex.live_stream.native_templates.legacy_live_page import render_legacy_live_page
 from wlcodex.live_stream.native_message_projection import (
@@ -125,6 +126,7 @@ from wlcodex.live_stream.relay_api_route import (
     handle_relay_api_route,
 )
 from wlcodex.live_stream.relay_task_detail_template import (
+    RelayTaskDetailPageDependencies,
     render_relay_task_detail_page,
 )
 from wlcodex.live_stream.relay_ui_routes import (
@@ -166,6 +168,8 @@ from wlcodex.live_stream.relay_work_log_views import (
     render_work_log_segment as _render_work_log_segment,
 )
 from wlcodex.live_stream.relay_workspace_pages import (
+    RelayInboxPageDependencies,
+    RelayTaskListPageDependencies,
     render_relay_blocked_inbox_page,
     render_relay_task_list_page,
 )
@@ -1827,6 +1831,7 @@ class WorkerLiveStreamServer:
                 selected_workspace=_relay_selected_workspace,
                 project_rows=_relay_project_rows,
                 settings_href=_relay_settings_href,
+                compose_href=_relay_chat_href,
                 chat_home_page=_relay_chat_home_page,
                 blocked_inbox_page=_relay_blocked_inbox_page,
                 page_number=_relay_page_number,
@@ -4127,21 +4132,13 @@ def _relay_task_list_page(
         active_count=active_count,
         state_counts=state_counts,
         status_filter=status_filter,
-        helpers={
-            "_token_suffix": _token_suffix,
-            "_relay_task_pagination_html": _relay_task_pagination_html,
-            "_relay_workspace_nav_html": _relay_workspace_nav_html,
-            "_marvis_relay_topbar": _marvis_relay_topbar,
-            "_relay_settings_href": _relay_settings_href,
-            "_marvis_relay_bottom_nav": _marvis_relay_bottom_nav,
-            "_replace_html_icons": _replace_html_icons,
-            "_relay_mobile_web_head": _relay_mobile_web_head,
-            "_relay_inbox_href": _relay_inbox_href,
-            "_relay_chat_href": _relay_chat_href,
-            "_relay_task_list_href": _relay_task_list_href,
-            "_relay_task_card_html": _relay_task_card_html,
-            "_relay_task_status_label": _relay_task_status_label,
-        },
+        deps=RelayTaskListPageDependencies(
+            _token_suffix, _relay_task_pagination_html, _relay_workspace_nav_html,
+            _marvis_relay_topbar, _relay_settings_href, _marvis_relay_bottom_nav,
+            _replace_html_icons, _relay_mobile_web_head, _relay_inbox_href,
+            _relay_chat_href, _relay_task_list_href, _relay_task_card_html,
+            _relay_task_status_label,
+        ),
     )
 
 
@@ -4155,21 +4152,13 @@ def _relay_blocked_inbox_page(
         summaries,
         selected_workspace=selected_workspace,
         access_token=access_token,
-        helpers={
-            "_token_suffix": _token_suffix,
-            "_relay_summary_presentation_state": _relay_summary_presentation_state,
-            "_marvis_relay_topbar": _marvis_relay_topbar,
-            "_relay_workspace_href": _relay_workspace_href,
-            "_relay_settings_href": _relay_settings_href,
-            "_marvis_relay_bottom_nav": _marvis_relay_bottom_nav,
-            "_replace_html_icons": _replace_html_icons,
-            "_relay_mobile_web_head": _relay_mobile_web_head,
-            "_relay_activity_label": _relay_activity_label,
-            "_relay_status_class_name": _relay_status_class_name,
-            "_relay_summary_presentation": _relay_summary_presentation,
-            "_relay_task_status_label": _relay_task_status_label,
-            "_relay_task_view_href": _relay_task_view_href,
-        },
+        deps=RelayInboxPageDependencies(
+            _token_suffix, _relay_summary_presentation_state, _marvis_relay_topbar,
+            _relay_workspace_href, _relay_settings_href, _marvis_relay_bottom_nav,
+            _replace_html_icons, _relay_mobile_web_head, _relay_activity_label,
+            _relay_status_class_name, _relay_summary_presentation,
+            _relay_task_status_label, _relay_task_view_href,
+        ),
     )
 
 
@@ -4414,6 +4403,7 @@ def _marvis_relay_followup_composer(
     workspace: str = "",
     access_token: str = "",
     task_status: str = "",
+    presentation: dict[str, Any] | None = None,
     current_round_id: int = 1,
     pending_inputs: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> str:
@@ -4423,6 +4413,7 @@ def _marvis_relay_followup_composer(
         workspace=workspace,
         access_token=access_token,
         task_status=task_status,
+        presentation=presentation,
         current_round_id=current_round_id,
         pending_inputs=pending_inputs,
         render_workspace_dock=_marvis_relay_workspace_dock,
@@ -5155,40 +5146,40 @@ def _relay_task_detail_page(
         events=events,
         hub=hub,
         token_stats=token_stats,
-        helpers={
-            "_relay_task_detail_view": _relay_task_detail_view,
-            "_token_suffix": _token_suffix,
-            "_relay_latest_event_sequence": _relay_latest_event_sequence,
-            "_relay_task_events_suffix": _relay_task_events_suffix,
-            "_relay_role_canonical_payloads_by_role": _relay_role_canonical_payloads_by_role,
-            "_marvis_relay_conversation_html": _marvis_relay_conversation_html,
-            "_relay_role_canonical_payload_sequence": _relay_role_canonical_payload_sequence,
-            "_relay_workspace_href": _relay_workspace_href,
-            "_marvis_relay_topbar": _marvis_relay_topbar,
-            "_relay_settings_href": _relay_settings_href,
-            "_marvis_relay_bottom_nav": _marvis_relay_bottom_nav,
-            "_marvis_token_int": _marvis_token_int,
-            "_format_marvis_relay_token_count": _format_marvis_relay_token_count,
-            "_marvis_relay_work_log_html": _marvis_relay_work_log_html,
-            "_marvis_relay_work_log_body_html": _marvis_relay_work_log_body_html,
-            "_marvis_relay_max_event_id_from_events": _marvis_relay_max_event_id_from_events,
-            "_marvis_relay_plan_control_html": _marvis_relay_plan_control_html,
-            "_marvis_relay_followup_composer": _marvis_relay_followup_composer,
-            "_replace_html_icons": _replace_html_icons,
-            "_relay_mobile_web_head": _relay_mobile_web_head,
-            "_marvis_relay_attachment_script": _marvis_relay_attachment_script,
-            "RELAY_ROLE_IDS": RELAY_ROLE_IDS,
-            "_relay_role_label": _relay_role_label,
-            "_marvis_relay_public_role": _marvis_relay_public_role,
-            "_marvis_relay_handoff_role_label": _marvis_relay_handoff_role_label,
-            "_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS": _MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS,
-            "_MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS": _MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS,
-            "_native_provider_display_name": _native_provider_display_name,
-            "_NATIVE_APP_HEAD": _NATIVE_APP_HEAD,
-            "_native_permission_presets": _native_permission_presets,
-            "_codex_plugin_menu_items": _codex_plugin_menu_items,
-            "_ICONS_JS_LITERAL": _ICONS_JS_LITERAL,
-        },
+        deps=RelayTaskDetailPageDependencies(
+            task_detail_view=_relay_task_detail_view,
+            token_suffix=_token_suffix,
+            latest_event_sequence=_relay_latest_event_sequence,
+            task_events_suffix=_relay_task_events_suffix,
+            canonical_payloads_by_role=_relay_role_canonical_payloads_by_role,
+            conversation_html=_marvis_relay_conversation_html,
+            canonical_payload_sequence=_relay_role_canonical_payload_sequence,
+            workspace_href=_relay_workspace_href,
+            topbar=_marvis_relay_topbar,
+            settings_href=_relay_settings_href,
+            bottom_nav=_marvis_relay_bottom_nav,
+            token_int=_marvis_token_int,
+            format_token_count=_format_marvis_relay_token_count,
+            work_log_html=_marvis_relay_work_log_html,
+            work_log_body_html=_marvis_relay_work_log_body_html,
+            max_event_id_from_events=_marvis_relay_max_event_id_from_events,
+            plan_control_html=_marvis_relay_plan_control_html,
+            followup_composer=_marvis_relay_followup_composer,
+            replace_html_icons=_replace_html_icons,
+            mobile_web_head=_relay_mobile_web_head,
+            attachment_script=_marvis_relay_attachment_script,
+            relay_role_ids=RELAY_ROLE_IDS,
+            role_label=_relay_role_label,
+            public_role=_marvis_relay_public_role,
+            handoff_role_label=_marvis_relay_handoff_role_label,
+            legacy_role_label_parts=_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS,
+            legacy_role_slug_parts=_MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS,
+            native_provider_display_name=_native_provider_display_name,
+            native_app_head=_NATIVE_APP_HEAD,
+            native_permission_presets=_native_permission_presets,
+            codex_plugin_menu_items=_codex_plugin_menu_items,
+            icons_js_literal=_ICONS_JS_LITERAL,
+        ),
     )
 
 
@@ -6257,15 +6248,15 @@ def _native_codex_page(provider_name: str = "codex", *, theme: str = "") -> str:
     return render_native_codex_page(
         provider_name,
         theme=theme,
-        helpers={
-            "_native_provider_display_name": _native_provider_display_name,
-            "_replace_html_icons": _replace_html_icons,
-            "_NATIVE_APP_HEAD": _NATIVE_APP_HEAD,
-            "turn_semantics_json": turn_semantics_json,
-            "_native_permission_presets": _native_permission_presets,
-            "_codex_plugin_menu_items": _codex_plugin_menu_items,
-            "_ICONS_JS_LITERAL": _ICONS_JS_LITERAL,
-        },
+        deps=NativePageDependencies(
+            provider_display_name=_native_provider_display_name,
+            replace_html_icons=_replace_html_icons,
+            app_head=_NATIVE_APP_HEAD,
+            turn_semantics_json=turn_semantics_json,
+            permission_presets=_native_permission_presets,
+            plugin_menu_items=_codex_plugin_menu_items,
+            icons_js_literal=_ICONS_JS_LITERAL,
+        ),
     )
 
 
@@ -6274,15 +6265,15 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex", theme: str 
         agent_run_id,
         native_provider=native_provider,
         theme=theme,
-        helpers={
-            "_native_provider_display_name": _native_provider_display_name,
-            "_replace_html_icons": _replace_html_icons,
-            "_NATIVE_APP_HEAD": _NATIVE_APP_HEAD,
-            "turn_semantics_json": turn_semantics_json,
-            "_native_permission_presets": _native_permission_presets,
-            "_codex_plugin_menu_items": _codex_plugin_menu_items,
-            "_ICONS_JS_LITERAL": _ICONS_JS_LITERAL,
-        },
+        deps=NativePageDependencies(
+            provider_display_name=_native_provider_display_name,
+            replace_html_icons=_replace_html_icons,
+            app_head=_NATIVE_APP_HEAD,
+            turn_semantics_json=turn_semantics_json,
+            permission_presets=_native_permission_presets,
+            plugin_menu_items=_codex_plugin_menu_items,
+            icons_js_literal=_ICONS_JS_LITERAL,
+        ),
     )
 
 

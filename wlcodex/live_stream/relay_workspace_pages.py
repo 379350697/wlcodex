@@ -3,9 +3,44 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from typing import Any
+
+
+@dataclass(frozen=True)
+class RelayTaskListPageDependencies:
+    token_suffix: Any
+    pagination_html: Any
+    workspace_nav_html: Any
+    topbar: Any
+    settings_href: Any
+    bottom_nav: Any
+    replace_html_icons: Any
+    mobile_web_head: Any
+    inbox_href: Any
+    chat_href: Any
+    task_list_href: Any
+    task_card_html: Any
+    task_status_label: Any
+
+
+@dataclass(frozen=True)
+class RelayInboxPageDependencies:
+    token_suffix: Any
+    summary_presentation_state: Any
+    topbar: Any
+    workspace_href: Any
+    settings_href: Any
+    bottom_nav: Any
+    replace_html_icons: Any
+    mobile_web_head: Any
+    activity_label: Any
+    status_class_name: Any
+    summary_presentation: Any
+    task_status_label: Any
+    task_view_href: Any
 
 
 def render_relay_task_list_page(
@@ -22,21 +57,21 @@ def render_relay_task_list_page(
     active_count: int = 0,
     state_counts: dict[str, int] | None = None,
     status_filter: str = "",
-    helpers: dict[str, Any],
+    deps: RelayTaskListPageDependencies,
 ) -> str:
-    _token_suffix = helpers["_token_suffix"]
-    _relay_task_pagination_html = helpers["_relay_task_pagination_html"]
-    _relay_workspace_nav_html = helpers["_relay_workspace_nav_html"]
-    _marvis_relay_topbar = helpers["_marvis_relay_topbar"]
-    _relay_settings_href = helpers["_relay_settings_href"]
-    _marvis_relay_bottom_nav = helpers["_marvis_relay_bottom_nav"]
-    _replace_html_icons = helpers["_replace_html_icons"]
-    _relay_mobile_web_head = helpers["_relay_mobile_web_head"]
-    _relay_inbox_href = helpers["_relay_inbox_href"]
-    _relay_chat_href = helpers["_relay_chat_href"]
-    _relay_task_list_href = helpers["_relay_task_list_href"]
-    _relay_task_card_html = helpers["_relay_task_card_html"]
-    _relay_task_status_label = helpers["_relay_task_status_label"]
+    _token_suffix = deps.token_suffix
+    _relay_task_pagination_html = deps.pagination_html
+    _relay_workspace_nav_html = deps.workspace_nav_html
+    _marvis_relay_topbar = deps.topbar
+    _relay_settings_href = deps.settings_href
+    _marvis_relay_bottom_nav = deps.bottom_nav
+    _replace_html_icons = deps.replace_html_icons
+    _relay_mobile_web_head = deps.mobile_web_head
+    _relay_inbox_href = deps.inbox_href
+    _relay_chat_href = deps.chat_href
+    _relay_task_list_href = deps.task_list_href
+    _relay_task_card_html = deps.task_card_html
+    _relay_task_status_label = deps.task_status_label
     token_suffix = _token_suffix(access_token)
     relay_config = relay_config or {}
     selected_workspace = str(selected_workspace or "")
@@ -198,21 +233,21 @@ def render_relay_blocked_inbox_page(
     *,
     selected_workspace: str = "",
     access_token: str = "",
-    helpers: dict[str, Any],
+    deps: RelayInboxPageDependencies,
 ) -> str:
-    _token_suffix = helpers["_token_suffix"]
-    _relay_summary_presentation_state = helpers["_relay_summary_presentation_state"]
-    _marvis_relay_topbar = helpers["_marvis_relay_topbar"]
-    _relay_workspace_href = helpers["_relay_workspace_href"]
-    _relay_settings_href = helpers["_relay_settings_href"]
-    _marvis_relay_bottom_nav = helpers["_marvis_relay_bottom_nav"]
-    _replace_html_icons = helpers["_replace_html_icons"]
-    _relay_mobile_web_head = helpers["_relay_mobile_web_head"]
-    _relay_activity_label = helpers["_relay_activity_label"]
-    _relay_status_class_name = helpers["_relay_status_class_name"]
-    _relay_summary_presentation = helpers["_relay_summary_presentation"]
-    _relay_task_status_label = helpers["_relay_task_status_label"]
-    _relay_task_view_href = helpers["_relay_task_view_href"]
+    _token_suffix = deps.token_suffix
+    _relay_summary_presentation_state = deps.summary_presentation_state
+    _marvis_relay_topbar = deps.topbar
+    _relay_workspace_href = deps.workspace_href
+    _relay_settings_href = deps.settings_href
+    _marvis_relay_bottom_nav = deps.bottom_nav
+    _replace_html_icons = deps.replace_html_icons
+    _relay_mobile_web_head = deps.mobile_web_head
+    _relay_activity_label = deps.activity_label
+    _relay_status_class_name = deps.status_class_name
+    _relay_summary_presentation = deps.summary_presentation
+    _relay_task_status_label = deps.task_status_label
+    _relay_task_view_href = deps.task_view_href
     """Render the actionable Relay Inbox from the shared read-only projection.
 
     This intentionally groups *presentation* states rather than raw task

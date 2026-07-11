@@ -832,6 +832,49 @@ body[data-marvis-relay-view] .marvis-relay-mutation-status.is-error {
   color: #9c1c1c;
 }
 
+body[data-marvis-relay-view] .marvis-relay-active-task-decision {
+  width: min(100%, 560px);
+  box-sizing: border-box;
+  border: 1px solid #d4c29f;
+  border-radius: 14px;
+  background: #fffaf0;
+  color: #3d3423;
+  padding: 14px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-active-task-decision p,
+body[data-marvis-relay-view] .marvis-relay-active-task-decision ul {
+  margin: 8px 0;
+}
+
+body[data-marvis-relay-view] .marvis-relay-active-task-decision ul {
+  padding-left: 20px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-active-task-decision div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+body[data-marvis-relay-view] .marvis-relay-active-task-decision button {
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid #51452f;
+  border-radius: 9px;
+  background: #fff;
+  color: #2f281d;
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+body[data-marvis-relay-view] .marvis-relay-active-task-decision button:last-child {
+  border-color: #8d2929;
+  color: #8d2929;
+}
+
 body[data-marvis-relay-view] .marvis-relay-mode-strip select {
   flex: 0 0 auto;
   outline: 0;

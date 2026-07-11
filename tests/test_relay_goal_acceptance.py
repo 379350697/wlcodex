@@ -91,7 +91,11 @@ def _route() -> str:
     )
 
 
-def _start_goal_task(tmp_path: Path) -> tuple[RelayService, Any, Path, int]:
+def _start_goal_task(
+    tmp_path: Path,
+    *,
+    acceptance_criteria: list[str] | None = None,
+) -> tuple[RelayService, Any, Path, int]:
     service = _service(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -102,7 +106,7 @@ def _start_goal_task(tmp_path: Path) -> tuple[RelayService, Any, Path, int]:
         provider="claude",
         execution_mode="goal",
         execution_goal="A run-bound controlled test proves the implementation.",
-        acceptance_criteria=["controlled acceptance succeeds"],
+        acceptance_criteria=acceptance_criteria or ["controlled acceptance succeeds"],
     )
     asyncio.run(
         service.handle_role_output(
@@ -147,14 +151,18 @@ def _unittest_declaration(
     run_id: int,
     *,
     pattern: str = "test_goal_contract.py",
+    criteria: list[str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    declaration: dict[str, Any] = {
         "implementation_run_id": run_id,
         "test": {
             "kind": "unittest",
             "args": ["discover", "-s", ".", "-p", pattern],
         },
     }
+    if criteria is not None:
+        declaration["criteria"] = criteria
+    return declaration
 
 
 def _write_unittest(
@@ -214,6 +222,36 @@ def test_goal_acceptance_executes_run_bound_controlled_test_and_persists_it(
     assert detail_payload["goal_acceptance_records"][0]["implementation_run_id"] == (
         implementation_run_id
     )
+    assert detail_payload["goal_acceptance_records"][0]["test_declaration"]["criteria"] == [
+        "controlled acceptance succeeds"
+    ]
+
+
+def test_goal_acceptance_requires_every_criterion_to_be_declared(tmp_path: Path) -> None:
+    criteria = ["first observable outcome", "second observable outcome"]
+    service, task, workspace, implementation_run_id = _start_goal_task(
+        tmp_path,
+        acceptance_criteria=criteria,
+    )
+    _write_unittest(workspace, passing=True)
+
+    asyncio.run(
+        service.handle_role_output(
+            task.id,
+            "tester",
+            _envelope(
+                role="tester",
+                artifact_type="test_report",
+                handoff_to="auditor",
+                goal_acceptance=_unittest_declaration(implementation_run_id),
+            ),
+            dispatch_next=False,
+        )
+    )
+
+    record = service.get_task_readonly(task.id).goal_acceptance_records[-1]
+    assert record.status == "not_run"
+    assert "cover every stated acceptance criterion" in record.reason
 
 
 def test_goal_acceptance_failed_test_blocks_then_retry_is_append_only(tmp_path: Path) -> None:

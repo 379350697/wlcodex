@@ -61,6 +61,27 @@ def test_historical_native_sessions_do_not_block_maintenance_drain(tmp_path: Pat
     assert assert_maintenance_window_ready(ledger._conn).active_work == {}
 
 
+def test_native_probe_candidates_are_frozen_when_maintenance_begins(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    _native_session(ledger, "captured-running", status="running")
+
+    status = ledger.begin_maintenance_window()
+    ledger._conn.execute(
+        "UPDATE native_codex_sessions SET status = 'idle' WHERE native_thread_id = ?",
+        ("captured-running",),
+    )
+    ledger._conn.commit()
+
+    assert ledger.maintenance_window_status().active_work == {
+        "native Codex turn probes pending": 1
+    }
+    captured = ledger._conn.execute(
+        "SELECT native_thread_id, captured_status FROM runtime_maintenance_native_turn_candidates"
+    ).fetchone()
+    assert tuple(captured) == ("captured-running", "running")
+    assert status.opened_at
+
+
 def test_blocked_relay_and_native_session_history_do_not_block_drain(tmp_path: Path) -> None:
     from wlcodex.native_agents.session_store import NativeAgentSessionStore
 
@@ -450,3 +471,9 @@ def test_retention_cli_native_probe_requires_open_window_and_reports_status(
     payload = json.loads(capsys.readouterr().out)
     assert payload["terminal"] == 1
     assert payload["maintenance"]["submissions_frozen"] is True
+
+    async def active_probe(_conn, _config):
+        return {"probed": 1, "active": 1, "terminal": 0, "unknown": 0}
+
+    monkeypatch.setattr(retention_module, "_probe_native_turns", active_probe)
+    assert retention_main([*argv, "maintenance-probe-native"]) == 1

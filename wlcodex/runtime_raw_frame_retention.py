@@ -646,7 +646,13 @@ class RuntimeRawFrameRetention:
         self._policy = policy
         self._now = now or (lambda: datetime.now(UTC))
 
-    def run(self, *, apply: bool, compact: bool = False) -> RetentionResult:
+    def run(
+        self,
+        *,
+        apply: bool,
+        compact: bool = False,
+        require_maintenance: bool = False,
+    ) -> RetentionResult:
         """Run one retention pass.
 
         ``apply=False`` is a completely non-mutating dry run.  ``compact`` is
@@ -655,7 +661,8 @@ class RuntimeRawFrameRetention:
         has committed.
         """
 
-        if compact:
+        require_maintenance = bool(require_maintenance or compact)
+        if require_maintenance:
             # Compaction is one maintenance transaction from archive through
             # database swap.  Check before archival starts so a caller cannot
             # mutate retention state and only then discover that swapping is
@@ -692,6 +699,7 @@ class RuntimeRawFrameRetention:
                     by_date[archive_date],
                     archive_date=archive_date,
                     now=now,
+                    require_maintenance=require_maintenance,
                 )
                 archived_frames += count
                 archived_bytes += byte_count
@@ -703,6 +711,11 @@ class RuntimeRawFrameRetention:
                 skipped_active_frames=skipped_active,
             )
 
+        # Archive expiry is destructive too.  A maintenance migration must
+        # not continue cleanup after its drain gate becomes non-ready; normal
+        # periodic retention deliberately remains available without a freeze.
+        if require_maintenance:
+            assert_maintenance_window_ready(self._conn)
         purged = self._purge_expired_archives(now)
         compacted = False
         if compact:
@@ -726,6 +739,10 @@ class RuntimeRawFrameRetention:
     def compact(self) -> CompactResult:
         """Compact with a verified copy and atomic swap, never in-place VACUUM."""
 
+        # Re-check immediately before handing SQLite to the swap operation.
+        # CLI callers may have spent substantial time verifying archives after
+        # their earlier maintenance-status check.
+        assert_maintenance_window_ready(self._conn)
         return compact_sqlite_database(
             self._conn,
             database_path=_sqlite_database_path(self._conn),
@@ -973,6 +990,7 @@ class RuntimeRawFrameRetention:
         *,
         archive_date: str,
         now: datetime,
+        require_maintenance: bool = False,
     ) -> tuple[int, int, int]:
         frame_ids = [int(row["id"]) for row in metadata_rows]
         if not frame_ids:
@@ -1024,7 +1042,14 @@ class RuntimeRawFrameRetention:
             self._conn.execute("BEGIN IMMEDIATE")
             # The immediate write lease prevents a later status update from
             # committing while we decide whether deletion is safe.  Re-check
-            # after taking it so an active turn always remains hot.
+            # the complete maintenance gate after taking it for an explicit
+            # maintenance migration, so activity cannot race a destructive
+            # hot-row deletion. Periodic retention still uses its active-frame
+            # guard without imposing a global submission freeze.
+            if require_maintenance:
+                assert_maintenance_window_ready(self._conn)
+            # A second, frame-specific check guards provider activity that is
+            # not represented by a higher-level maintenance count.
             newly_active = self._active_frame_ids(safe_rows)
             if newly_active:
                 self._conn.rollback()
@@ -1740,7 +1765,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = asyncio.run(_probe_native_turns(conn, config))
             payload["maintenance"] = maintenance_window_status(conn).to_dict()
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-            return 0 if int(payload["unknown"]) == 0 else 1
+            return 0 if int(payload["unknown"]) == 0 and int(payload["active"]) == 0 else 1
         if args.command == "maintenance-status":
             status = maintenance_window_status(conn)
             print(json.dumps(status.to_dict(), ensure_ascii=False, sort_keys=True))
@@ -1777,7 +1802,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "apply":
             assert_maintenance_window_ready(conn)
-            result = retention.run(apply=True)
+            result = retention.run(apply=True, require_maintenance=True)
             verification = retention.verify()
             payload = asdict(result)
             payload["verification"] = asdict(verification)

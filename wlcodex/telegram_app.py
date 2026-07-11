@@ -1084,7 +1084,7 @@ class WlCodexHandlers:
 
         await self.send_telegram(
             chat_id,
-            "当前还没有工作台。发送 /new 开始一个新的工作台。",
+            "当前还没有可接管的历史工作台。使用 /native 创建直接会话，或使用 /relay 创建接力任务。",
         )
 
     async def health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
