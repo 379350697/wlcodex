@@ -45,6 +45,13 @@ from wlcodex.live_stream.collapse import (
 )
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
+from wlcodex.live_stream.native_pages import (
+    native_app_icon_svg as _render_native_app_icon_svg,
+    native_app_manifest as _render_native_app_manifest,
+    native_provider_display_name as _render_native_provider_display_name,
+    render_native_provider_index_page,
+    render_native_workflows_page,
+)
 from wlcodex.live_stream.native_templates.registry import render_native_template
 from wlcodex.live_stream.native_message_projection import (
     format_native_message_sse_event,
@@ -89,6 +96,12 @@ from wlcodex.live_stream.relay_list_views import (
     relay_task_pagination_html as _relay_task_pagination_html,
     relay_workspace_nav_html as _relay_workspace_nav_html,
 )
+from wlcodex.live_stream.relay_sse_projection import (
+    compact_relay_sse_payload as _compact_relay_sse_payload,
+    offer_json_queue as _offer_json_queue,
+    relay_active_worker_jobs as _relay_active_worker_jobs,
+    relay_worker_payload as _relay_worker_payload,
+)
 from wlcodex.live_stream.routing import (
     agent_id_from_path as _agent_id_from_path,
     native_login_provider_from_path as _native_login_provider_from_path,
@@ -130,7 +143,6 @@ from wlcodex.relay.display import (
 from wlcodex.relay.envelopes import parse_role_envelope
 from wlcodex.relay.graph import build_marvis_relay_state
 from wlcodex.relay.marvis_interaction import (
-    project_relay_event_to_marvis_typed_event,
     project_relay_rows_to_marvis_typed_events,
 )
 from wlcodex.relay.mutations import (
@@ -4525,39 +4537,6 @@ async def _write_json_sse(
     await writer.drain()
 
 
-def _offer_json_queue(
-    queue: asyncio.Queue[dict[str, Any]],
-    payload: dict[str, Any],
-) -> None:
-    try:
-        queue.put_nowait(payload)
-        return
-    except asyncio.QueueFull:
-        pass
-    try:
-        queue.get_nowait()
-    except asyncio.QueueEmpty:
-        pass
-    try:
-        queue.put_nowait(payload)
-    except asyncio.QueueFull:
-        pass
-
-
-def _relay_active_worker_jobs(detail: Any | None) -> list[Any]:
-    if detail is None:
-        return []
-    active_statuses = {"queued", "streaming", "waiting"}
-    jobs: list[Any] = []
-    for job in getattr(detail, "role_jobs", []) or []:
-        if getattr(job, "agent_run_id", None) is None:
-            continue
-        status = str(getattr(job, "status", "") or "").strip().lower()
-        if status in active_statuses or bool(getattr(job, "turn_running", False)):
-            jobs.append(job)
-    return jobs
-
-
 async def _send_relay_sse(
     writer: asyncio.StreamWriter,
     events: list[Any],
@@ -4890,98 +4869,6 @@ async def _write_relay_sse_payload(
     await writer.drain()
 
 
-def _compact_relay_sse_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-    if event_type != "role.native_event":
-        return _with_marvis_typed_event(event_type, payload)
-    compacted = dict(payload)
-    nested = compacted.get("payload")
-    if isinstance(nested, dict) and (
-        "native_event" in nested or "payload" in nested or "runtime_event_id" in nested
-    ):
-        compacted["payload"] = _compact_relay_native_event_payload(nested)
-        return compacted
-    return _compact_relay_native_event_payload(compacted)
-
-
-def _with_marvis_typed_event(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-    marvis_event = project_relay_event_to_marvis_typed_event(event_type, payload)
-    if marvis_event is None:
-        return payload
-    compacted = dict(payload)
-    compacted.setdefault("marvis_event", marvis_event)
-    nested = compacted.get("payload")
-    if isinstance(nested, dict):
-        nested_payload = dict(nested)
-        nested_payload.setdefault("marvis_event", marvis_event)
-        compacted["payload"] = nested_payload
-    return compacted
-
-
-def _compact_relay_native_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    compacted: dict[str, Any] = {}
-    native_event = payload.get("native_event")
-    native_payload = native_event.get("payload") if isinstance(native_event, dict) else None
-    raw_payload = payload.get("payload")
-    source_payload = raw_payload if isinstance(raw_payload, dict) else {}
-    if isinstance(native_payload, dict):
-        source_payload = {**native_payload, **source_payload}
-    for key in (
-        "role",
-        "agent_run_id",
-        "runtime_event_id",
-        "round_id",
-        "kind",
-        "itemId",
-        "item_id",
-        "stream_key",
-        "native_message_id",
-        "message_id",
-        "native_turn_id",
-        "turnId",
-        "turn_id",
-        "active_turn_id",
-    ):
-        value = payload.get(key)
-        if value in (None, "") and isinstance(native_event, dict):
-            if key == "runtime_event_id":
-                value = native_event.get("id")
-            else:
-                value = native_event.get(key)
-        if value in (None, ""):
-            value = source_payload.get(key)
-        if value not in (None, ""):
-            compacted[key] = value
-    kind = str(compacted.get("kind") or "").strip()
-    text = _relay_native_display_text(source_payload)
-    if text:
-        if kind in {"text_delta", "reasoning_delta", "command_output"}:
-            compacted["delta"] = text
-        else:
-            compacted["text"] = text
-    for key in (
-        "status",
-        "title",
-        "command",
-        "exit_code",
-        "approval_id",
-        "request_id",
-        "codexRequestId",
-        "provider",
-    ):
-        value = source_payload.get(key)
-        if isinstance(value, (str, int, float, bool)) and value not in ("", None):
-            compacted.setdefault(key, value)
-    return compacted
-
-
-def _relay_native_display_text(payload: dict[str, Any]) -> str:
-    for key in ("delta", "text", "summary", "content", "message", "output", "chunk", "body"):
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return ""
-
-
 async def _write_relay_worker_event(
     writer: asyncio.StreamWriter,
     *,
@@ -5010,24 +4897,6 @@ async def _write_relay_worker_event(
         payload=payload,
     )
     return 0
-
-
-def _relay_worker_payload(
-    task_id: int,
-    role: str,
-    worker_event: WorkerStreamEvent,
-) -> tuple[str, dict[str, Any]] | None:
-    payload = dict(worker_event.payload)
-    return "role.native_event", {
-        "event_type": "role.native_event",
-        "task_id": task_id,
-        "role": role,
-        "runtime_event_id": worker_event.id,
-        "agent_run_id": worker_event.agent_run_id,
-        "kind": worker_event.kind,
-        "payload": payload,
-        "native_event": worker_event.to_json_dict(),
-    }
 
 
 def _uses_chunked_transfer(headers: dict[str, str]) -> bool:
@@ -5190,37 +5059,11 @@ def _plugin_icon_data_url(manifest: Path, icon_path: object) -> str:
 
 
 def _native_app_manifest() -> str:
-    payload = {
-        "name": "WLCodex Native",
-        "short_name": "WLCodex",
-        "description": "Native mobile workspace for WLCodex sessions.",
-        # Start from the surface boundary, not an implicitly selected provider.
-        "start_url": "/native",
-        "scope": "/",
-        "display": "standalone",
-        "display_override": ["standalone", "fullscreen", "browser"],
-        "orientation": "portrait",
-        "theme_color": "#000000",
-        "background_color": "#000000",
-        "icons": [
-            {
-                "src": "/native/icon.svg",
-                "sizes": "any",
-                "type": "image/svg+xml",
-                "purpose": "any maskable",
-            }
-        ],
-    }
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ": "))
+    return _render_native_app_manifest()
 
 
 def _native_app_icon_svg() -> str:
-    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#000000"/>
-  <rect x="72" y="76" width="368" height="360" rx="72" fill="#111214"/>
-  <path d="M312 160 216 256l96 96" fill="none" stroke="#f4f4f5" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="370" cy="136" r="24" fill="#58a6ff"/>
-</svg>"""
+    return _render_native_app_icon_svg()
 
 
 def _codex_plugin_sort_key(name: str, manifest: Path) -> tuple[int, str, str]:
@@ -5656,13 +5499,7 @@ def _council_projects_payload(
 
 
 def _native_provider_display_name(provider: str) -> str:
-    names = {
-        "codex": "Codex",
-        "claude": "Claude",
-        "antigravity": "Antigravity",
-    }
-    provider_name = str(provider or "").strip()
-    return names.get(provider_name, provider_name.replace("-", " ").title() or "Native")
+    return _render_native_provider_display_name(provider)
 
 
 def _native_provider_index_html(
@@ -5670,77 +5507,20 @@ def _native_provider_index_html(
     *,
     access_token: str = "",
 ) -> str:
-    token_suffix = _token_suffix(access_token)
-    council_links = """
-      <a class="provider workflow" data-native-entry="workflows" href="/native/workflows__TOKEN_SUFFIX__">
-        <span>工作流</span>
-        <small>进入 Relay 大任务与已支持的协作工作流</small>
-      </a>
-    """.replace("__TOKEN_SUFFIX__", token_suffix)
-    if providers:
-        links = "\n".join(
-            (
-                f'<a class="provider" href="/native/'
-                f'{quote(str(provider["provider"]), safe="")}{token_suffix}">'
-                f"<span>{escape(_native_provider_display_name(str(provider['provider'])))}</span>"
-                f"<small>{escape(str(provider.get('provider_engine', '')))}</small>"
-                "</a>"
-            )
-            for provider in providers
-        )
-    else:
-        links = '<div class="empty">No native providers configured.</div>'
-    return _replace_html_icons(f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Native Agents</title>
-  <link rel="stylesheet" href="/static/native_index_bundle.css">
-</head>
-<body class="aurora-bg noise-overlay">
-  <main>
-    <div class="native-index-topbar">
-      <button class="circle native-back" id="back" aria-label="back" aria-disabled="true" disabled>‹</button>
-      <h1>Native Agents</h1>
-      <span class="native-back-spacer" aria-hidden="true"></span>
-    </div>
-    {council_links}
-    {links}
-  </main>
-</body>
-</html>""")
+    return render_native_provider_index_page(
+        providers,
+        access_token=access_token,
+        token_suffix=_token_suffix,
+        replace_icons=_replace_html_icons,
+    )
 
 
 def _native_workflows_page(*, access_token: str = "") -> str:
-    token_suffix = _token_suffix(access_token)
-    return _replace_html_icons(f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>工作流</title>
-  <link rel="stylesheet" href="/static/native_index_bundle.css">
-</head>
-<body class="aurora-bg noise-overlay">
-  <main>
-    <div class="native-index-topbar">
-      <a class="circle native-back" href="/native{token_suffix}" aria-label="back">‹</a>
-      <h1>工作流</h1>
-      <span class="native-back-spacer" aria-hidden="true"></span>
-    </div>
-    <a class="provider workflow" data-native-entry="marvis-relay" href="/native/workflows/relay{token_suffix}">
-      <span>Marvis 接力</span>
-      <small>对话式发布任务，总工程师调度多角色实时协作。</small>
-    </a>
-    <a class="provider council" href="/council{token_suffix}">
-      <span>议会审核</span>
-      <small>沿用现有五席审核入口。</small>
-    </a>
-    <p class="native-workflow-note">未实现的 Skills、Profile、Dev Flow 与工作树不会作为可操作入口展示。</p>
-  </main>
-</body>
-</html>""")
+    return render_native_workflows_page(
+        access_token=access_token,
+        token_suffix=_token_suffix,
+        replace_icons=_replace_html_icons,
+    )
 
 
 def _relay_task_list_page(
