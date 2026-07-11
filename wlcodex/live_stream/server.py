@@ -102,6 +102,10 @@ from wlcodex.live_stream.relay_sse_projection import (
     relay_active_worker_jobs as _relay_active_worker_jobs,
     relay_worker_payload as _relay_worker_payload,
 )
+from wlcodex.live_stream.relay_work_log_views import (
+    render_work_log_entry as _render_work_log_entry,
+    render_work_log_segment as _render_work_log_segment,
+)
 from wlcodex.live_stream.workflow_routes import handle_workflow_route
 from wlcodex.live_stream.routing import (
     agent_id_from_path as _agent_id_from_path,
@@ -7351,48 +7355,15 @@ def _marvis_relay_finalize_work_log_segments(segments: list[WorkLogSegment]) -> 
 
 
 def _marvis_relay_work_log_segment_html(segment: WorkLogSegment, *, index: int = 0) -> str:
-    timeline_items = "".join(
-        _marvis_relay_work_log_entry_html(entry)
-        for entry in segment.entries
-        if entry.text or entry.chip or entry.output
+    return _render_work_log_segment(
+        segment,
+        index=index,
+        render_avatar=_marvis_relay_avatar_html,
     )
-    if not timeline_items:
-        return ""
-    return f"""
-      <section class="marvis-work-log-role marvis-work-log-segment" data-marvis-work-log-role="{escape(segment.role)}" data-marvis-work-log-segment="{escape(segment.role)}" data-marvis-work-log-segment-index="{index}">
-        {_marvis_relay_avatar_html(segment.persona, label=segment.display_name)}
-        <div class="marvis-work-log-role-main">
-          <h3>{escape(segment.display_name)}</h3>
-          <div class="marvis-work-log-line">{timeline_items}</div>
-        </div>
-      </section>
-    """
 
 
 def _marvis_relay_work_log_entry_html(entry: WorkLogEntry) -> str:
-    classes = ["marvis-work-log-entry"]
-    if entry.failed:
-        classes.append("is-failed")
-    key_attr = f' data-marvis-work-log-entry-key="{escape(entry.key)}"' if entry.key else ""
-    chip = _relay_replace_legacy_role_identifiers(entry.chip)
-    text = _relay_replace_legacy_role_identifiers(entry.text)
-    output = _relay_replace_legacy_role_identifiers(entry.output)
-    chip_html = f'<span class="marvis-work-log-tool-chip">{escape(chip)}</span>' if chip else ""
-    output_html = ""
-    if output:
-        output_html = (
-            '<details class="marvis-work-log-output" data-marvis-work-log-output>'
-            "<summary>查看输出</summary>"
-            f"<pre>{escape(output)}</pre>"
-            "</details>"
-        )
-    return f"""
-      <div class="{" ".join(classes)}" data-marvis-work-log-entry="{escape(entry.kind)}"{key_attr}>
-        {chip_html}
-        <p>{escape(text)}</p>
-        {output_html}
-      </div>
-    """
+    return _render_work_log_entry(entry)
 
 
 def _marvis_relay_work_log_text_item(text: str, *, chip: str = "") -> str:
