@@ -727,11 +727,11 @@ async def test_marvis_relay_composer_has_real_attachment_sheet(
     assert "添加到对话" in response
     assert "相册" in response
     assert "本地文件" in response
-    assert "我的技能" in response
-    assert "添加技能" in response
+    assert "我的技能" not in response
+    assert "添加技能" not in response
     assert "/static/marvis/attachment-icon-album-marvis.png" in response
     assert "/static/marvis/attachment-icon-local-file-marvis.png" in response
-    assert "/static/marvis/attachment-icon-skills-marvis.png" in response
+    assert "/static/marvis/attachment-icon-skills-marvis.png" not in response
     assert "readRelayImageAttachment" in response
     assert "readRelayTextAttachment" in response
     css_response, _service = await _request(
@@ -741,7 +741,7 @@ async def test_marvis_relay_composer_has_real_attachment_sheet(
     assert "--marvis-s25-bottom-nav-item-gap: 1px" in css_response
     assert "--marvis-s25-attachment-sheet-height: 487px" in css_response
     assert "--marvis-s25-attachment-tile-height: 121px" in css_response
-    assert "--marvis-s25-attachment-skill-icon: 82px" in css_response
+    assert "marvis-relay-skill-section" not in css_response
     assert "background: rgba(0, 0, 0, .45)" in css_response
     assert ".marvis-relay-sheet-icon-native" in css_response
     assert ".marvis-relay-sheet-icon-album::before" not in css_response

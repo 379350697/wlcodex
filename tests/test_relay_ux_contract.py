@@ -152,9 +152,7 @@ def test_relay_mutation_surfaces_keep_idempotency_keys_and_interrupt_isolated() 
         assert _post_count(page) == _idempotency_header_count(page)
     # The detail page deliberately delegates mutation mechanics to the shared
     # surface runtime, so it cannot silently drift from Native retries.
-    runtime = Path("wlcodex/live_stream/static/surface_runtime.js").read_text(
-        encoding="utf-8"
-    )
+    runtime = Path("wlcodex/live_stream/static/surface_runtime.js").read_text(encoding="utf-8")
     assert "surface_runtime.js" in detail_page
     assert 'surface_runtime.js?v=20260710-semantic-closure"></script>' in detail_page
     assert 'surface_runtime.js?v=20260710-semantic-closure" defer' not in detail_page
@@ -176,12 +174,27 @@ def test_relay_mutation_surfaces_keep_idempotency_keys_and_interrupt_isolated() 
     assert "fetch(" not in attachment_script
 
 
+def test_relay_detail_markup_and_shared_head_are_not_owned_by_http_server() -> None:
+    """Routes stay dispatch-only; presentation components own Relay markup."""
+
+    server_source = Path("wlcodex/live_stream/server.py").read_text(encoding="utf-8")
+    detail_components = Path("wlcodex/live_stream/relay_detail_components.py").read_text(
+        encoding="utf-8"
+    )
+    page_assets = Path("wlcodex/live_stream/relay_page_assets.py").read_text(encoding="utf-8")
+
+    assert "marvis-relay-confirmation-card" not in server_source
+    assert "marvis-relay-composer" not in server_source
+    assert "marvis-work-log" not in server_source
+    assert "marvis-relay-confirmation-card" in detail_components
+    assert "marvis-relay-composer" in detail_components
+    assert "surface_runtime.js" in page_assets
+
+
 def test_relay_attachment_dialog_has_standard_keyboard_focus_and_inert_contract() -> None:
     sheet = _marvis_relay_attachment_sheet_html()
     script = _marvis_relay_attachment_script()
-    runtime = Path("wlcodex/live_stream/static/surface_runtime.js").read_text(
-        encoding="utf-8"
-    )
+    runtime = Path("wlcodex/live_stream/static/surface_runtime.js").read_text(encoding="utf-8")
 
     assert 'role="dialog"' in sheet
     assert 'aria-modal="true"' in sheet
@@ -222,7 +235,7 @@ def test_relay_work_log_and_confirmation_pages_preserve_modal_a11y_contract() ->
     assert "document.body.appendChild(page);" in page
     assert "setMarvisModalBackground(page, true);" in page
     assert "setMarvisModalBackground(page, false);" in page
-    assert "page.addEventListener(\"keydown\"" in page
+    assert 'page.addEventListener("keydown"' in page
     assert "trapMarvisDialogFocus(page, event);" in page
 
 
@@ -235,8 +248,8 @@ def test_native_plan_dialog_has_standard_keyboard_focus_and_inert_contract() -> 
     assert "nativeAppShell.inert = true;" in native_page
     assert "nativeAppShell.inert = false;" in native_page
     assert "planPageClose?.focus()" in native_page
-    assert "event.key !== \"Tab\"" in native_page
-    assert "event.key !== \"Escape\"" in native_page
+    assert 'event.key !== "Tab"' in native_page
+    assert 'event.key !== "Escape"' in native_page
     assert "planPagePreviouslyFocused.focus({preventScroll: true});" in native_page
 
 
@@ -256,7 +269,7 @@ def test_native_session_page_surfaces_presentation_freshness_and_explicit_recove
     assert "function nativePresentationSourceLabel(value)" in native_page
     assert "freshness.source" in native_page
     assert 'source: "unavailable"' in native_page
-    assert "nativePresentationRetry.addEventListener(\"click\"" in native_page
+    assert 'nativePresentationRetry.addEventListener("click"' in native_page
     assert "await syncNativeTranscript();" in native_page
     assert "await loadNativeSessionInfo();" in native_page
 
@@ -332,9 +345,7 @@ def test_relay_and_native_pages_allow_zoom_and_keep_touch_high_contrast_support(
     native_page = _live_page(42, native_provider="codex")
     timeline_v2 = render_timeline_v2_template("codex", {"initial_events": []})
     base_css = Path("wlcodex/live_stream/static/base.css").read_text(encoding="utf-8")
-    relay_css = Path("wlcodex/live_stream/static/relay_marvis.css").read_text(
-        encoding="utf-8"
-    )
+    relay_css = Path("wlcodex/live_stream/static/relay_marvis.css").read_text(encoding="utf-8")
 
     for page in (relay_page, native_home, native_page, timeline_v2):
         assert "user-scalable=no" not in page
@@ -352,9 +363,7 @@ def test_sse_connection_owns_live_updates_and_hidden_pages_suspend_polling() -> 
     native_home = _native_codex_page("codex")
     native_page = _live_page(42, native_provider="codex")
 
-    runtime = Path("wlcodex/live_stream/static/surface_runtime.js").read_text(
-        encoding="utf-8"
-    )
+    runtime = Path("wlcodex/live_stream/static/surface_runtime.js").read_text(encoding="utf-8")
     # Relay uses the shared EventSource lifecycle, which suspends while hidden
     # and reconnects from the rendered cursor.  There is no fast status poll.
     assert "createSseConnection" in detail_page
@@ -368,7 +377,7 @@ def test_sse_connection_owns_live_updates_and_hidden_pages_suspend_polling() -> 
     assert "NATIVE_TRANSCRIPT_FALLBACK_INTERVAL_MS = 30000" in native_page
     assert "stopNativeTranscriptFallback();" in native_page
     assert "startNativeTranscriptFallback();" in native_page
-    assert "document.visibilityState === \"hidden\"" in native_page
+    assert 'document.visibilityState === "hidden"' in native_page
     assert "closeLiveEventSource();" in native_page
     assert "createSseConnection" in native_page
     assert "onOpen: () => {" in native_page
@@ -382,7 +391,7 @@ def test_sse_connection_owns_live_updates_and_hidden_pages_suspend_polling() -> 
     assert "stopSessionsFallbackPoll();" in native_home
     assert "startSessionsFallbackPoll();" in native_home
     assert "resumeSessionsLiveConnection" in native_home
-    assert "document.visibilityState === \"hidden\"" in native_home
+    assert 'document.visibilityState === "hidden"' in native_home
     assert "sessionsEventSource || sessionsFallbackPollTimer" in native_home
     assert "source.onopen = () => {\n          stopSessionsFallbackPoll();" in native_home
 

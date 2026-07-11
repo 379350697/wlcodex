@@ -115,12 +115,27 @@ from wlcodex.live_stream.relay_ui_routes import (
     handle_relay_ui_route,
 )
 from wlcodex.live_stream.relay_conversation_view import render_conversation_rows
+from wlcodex.live_stream.relay_detail_components import (
+    render_empty_conversation as _render_empty_conversation,
+    render_empty_work_log as _render_empty_work_log,
+    render_followup_composer as _render_followup_composer,
+    render_handoff as _render_handoff,
+    render_message as _render_relay_message,
+    render_native_empty_conversation as _render_native_empty_conversation,
+    render_native_message as _render_native_message,
+    render_plan_control as _render_plan_control,
+    render_waiting_message as _render_waiting_message,
+    render_work_log_shell as _render_work_log_shell,
+)
 from wlcodex.live_stream.relay_config_page import render_relay_config_page
 from wlcodex.live_stream.relay_list_views import (
     marvis_relay_avatar_html as _marvis_relay_avatar_html,
     relay_task_card_html as _relay_task_card_html,
     relay_task_pagination_html as _relay_task_pagination_html,
     relay_workspace_nav_html as _relay_workspace_nav_html,
+)
+from wlcodex.live_stream.relay_page_assets import (
+    render_relay_mobile_web_head as _relay_mobile_web_head,
 )
 from wlcodex.live_stream.relay_sse_projection import (
     compact_relay_sse_payload as _compact_relay_sse_payload,
@@ -307,28 +322,12 @@ _STATIC_CSS_BUNDLES = {
         "components.css",
     ),
 }
-_RELAY_MARVIS_CSS_HREF = "/static/relay_marvis.css?v=20260710-dialog-a11y"
-_RELAY_MOBILE_JS_HREF = "/static/relay_mobile.js?v=20260701-mobile-web"
-
 _NATIVE_APP_HEAD = """  <link rel="manifest" href="/native/manifest.webmanifest">
   <meta name="theme-color" content="#000000">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="WLCodex">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">"""
-
-
-def _relay_mobile_web_head(title: str) -> str:
-    return f"""  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="color-scheme" content="light only">
-  <meta name="theme-color" content="#FAF8F5">
-  <title>{escape(title)}</title>
-  <link rel="stylesheet" href="/static/base.css">
-  <link rel="stylesheet" href="{_RELAY_MARVIS_CSS_HREF}">
-  <script src="/static/surface_runtime.js?v=20260710-semantic-closure"></script>
-  <script src="{_RELAY_MOBILE_JS_HREF}" defer></script>"""
-
 # Inline SVG icons — 24×24 viewBox, currentColor, Lucide-style (stroke-width 2)
 _ICON_ATTRS = 'width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
 _ICON_SVG = {
@@ -424,17 +423,20 @@ class RequestBodyTooLarge(ValueError):
 
 
 _NATIVE_THREAD_NOT_FOUND_ERROR = (
-    "历史会话已不在当前 Codex 后台中，无法继续发送。"
-    "请回到会话列表选择可恢复会话，或新建会话继续。"
+    "历史会话已不在当前 Codex 后台中，无法继续发送。请回到会话列表选择可恢复会话，或新建会话继续。"
 )
 
 
 def _is_native_thread_not_found_error(exc: JsonRpcError) -> bool:
-    return exc.code == -32600 and re.match(
-        r"^thread not found:\s*\S+\s*$",
-        str(exc.rpc_message or ""),
-        flags=re.IGNORECASE,
-    ) is not None
+    return (
+        exc.code == -32600
+        and re.match(
+            r"^thread not found:\s*\S+\s*$",
+            str(exc.rpc_message or ""),
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
 
 
 def _native_json_rpc_error_payload(exc: JsonRpcError) -> dict[str, Any]:
@@ -644,7 +646,9 @@ class WorkerLiveStreamServer:
             if task is not asyncio.current_task()
         )
         tasks.extend(task for task in self._council_run_tasks if task is not asyncio.current_task())
-        tasks.extend(task for task in self._relay_dispatch_tasks if task is not asyncio.current_task())
+        tasks.extend(
+            task for task in self._relay_dispatch_tasks if task is not asyncio.current_task()
+        )
         if (
             self._relay_lifecycle_task is not None
             and self._relay_lifecycle_task is not asyncio.current_task()
@@ -936,11 +940,7 @@ class WorkerLiveStreamServer:
                     default=0,
                 )
                 before_value = query.get("before", [""])[0]
-                before = (
-                    _safe_int(before_value, default=0)
-                    if str(before_value).strip()
-                    else None
-                )
+                before = _safe_int(before_value, default=0) if str(before_value).strip() else None
                 limit = _safe_int(query.get("limit", ["100"])[0], default=100)
                 await self._send_native_messages_json(
                     writer,
@@ -976,11 +976,7 @@ class WorkerLiveStreamServer:
                     return
                 after = _safe_int(query.get("after", ["0"])[0], default=0)
                 before_value = query.get("before", [""])[0]
-                before = (
-                    _safe_int(before_value, default=0)
-                    if str(before_value).strip()
-                    else None
-                )
+                before = _safe_int(before_value, default=0) if str(before_value).strip() else None
                 limit = _safe_int(query.get("limit", ["100"])[0], default=100)
                 await self._send_native_timeline_json(
                     writer,
@@ -1595,8 +1591,7 @@ class WorkerLiveStreamServer:
             # into SQLite/timeline as a side effect.  Explicit /sync and the
             # background watcher remain the write owners.
             payload["native_sync_pending"] = bool(
-                (task := self._native_background_tasks.get(key)) is not None
-                and not task.done()
+                (task := self._native_background_tasks.get(key)) is not None and not task.done()
             )
             if native_sync_error:
                 payload["native_sync_error"] = native_sync_error
@@ -1613,9 +1608,7 @@ class WorkerLiveStreamServer:
                 # GET must never fall back to it: third-party providers that
                 # have not opted into the read-only contract get a transparent
                 # stale snapshot instead of an accidental database mutation.
-                raise RuntimeError(
-                    "native provider does not expose a read-only session snapshot"
-                )
+                raise RuntimeError("native provider does not expose a read-only session snapshot")
             result = await asyncio.wait_for(
                 read_only_session(native_thread_id),
                 timeout=self._native_sessions_timeout_seconds,
@@ -2245,11 +2238,13 @@ class WorkerLiveStreamServer:
             path,
             headers,
             workflow_service=self._workflow_service,
-            authorized=lambda request_writer, request_headers, *, require_token: self._is_authorized(
-                request_writer,
-                request_headers,
-                query,
-                require_token=require_token,
+            authorized=lambda request_writer, request_headers, *, require_token: (
+                self._is_authorized(
+                    request_writer,
+                    request_headers,
+                    query,
+                    require_token=require_token,
+                )
             ),
             require_token=(
                 self._native_registry is not None or self._native_controller is not None
@@ -2684,10 +2679,12 @@ class WorkerLiveStreamServer:
                 _native_token_entry_page(f"/native/{safe_provider}-v2"),
             )
             return
-        native_thread_id = _optional_nonempty_string(
-            query.get("native_thread_id", [""])[0]
-            or query.get("thread_id", [""])[0]
-        ) or ""
+        native_thread_id = (
+            _optional_nonempty_string(
+                query.get("native_thread_id", [""])[0] or query.get("thread_id", [""])[0]
+            )
+            or ""
+        )
         initial_events: list[NativeTimelineEvent] = []
         if native_thread_id and self._native_timeline is not None:
             initial_events = self._native_timeline.list_item_events(
@@ -3133,9 +3130,7 @@ class WorkerLiveStreamServer:
                     ):
                         if event.sequence <= latest:
                             continue
-                        item = self._native_timeline.get_conversation_item(
-                            event.item_row_id
-                        )
+                        item = self._native_timeline.get_conversation_item(event.item_row_id)
                         if item is None:
                             latest = event.sequence
                             continue
@@ -4433,6 +4428,7 @@ def _relay_blocked_inbox_page(
         },
     )
 
+
 def _relay_chat_home_page(
     *,
     selected_workspace: str = "",
@@ -4474,11 +4470,7 @@ def _relay_page_number(raw_page: str) -> int:
 
 def _relay_project_rows(workspaces: Any = None) -> list[dict[str, Any]]:
     payload = _council_projects_payload(workspaces=workspaces)
-    return [
-        project
-        for project in payload.get("projects", [])
-        if str(project.get("cwd", "") or "")
-    ]
+    return [project for project in payload.get("projects", []) if str(project.get("cwd", "") or "")]
 
 
 def _relay_default_workspace(projects: list[Any]) -> str:
@@ -4681,222 +4673,21 @@ def _marvis_relay_followup_composer(
     current_round_id: int = 1,
     pending_inputs: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> str:
-    workspace_dock = _marvis_relay_workspace_dock(
-        workspace,
+    return _render_followup_composer(
+        task_id=task_id,
+        placeholder=placeholder,
+        workspace=workspace,
         access_token=access_token,
+        task_status=task_status,
+        current_round_id=current_round_id,
+        pending_inputs=pending_inputs,
+        render_workspace_dock=_marvis_relay_workspace_dock,
+        render_attachment_sheet=_marvis_relay_attachment_sheet_html,
     )
-    pending_visible = bool(
-        [
-            item
-            for item in (pending_inputs or [])
-            if str(item.get("status") or "") in {"pending", "steered"}
-        ]
-    )
-    return f"""
-    {workspace_dock}
-    <div class="marvis-relay-pending-inputs" data-marvis-pending-inputs{" hidden" if not pending_visible else ""}></div>
-    <form class="marvis-relay-composer" data-marvis-followup-composer data-task-status-value="{escape(task_status)}" data-current-round-id="{int(current_round_id)}" method="post" action="/api/relay/tasks/{task_id}/message" onsubmit="return false">
-      <button class="marvis-relay-plus" type="button" aria-label="添加" data-marvis-attach-open>+</button>
-      <textarea name="text" placeholder="{escape(placeholder)}" aria-label="继续补充给总工程师"></textarea>
-      <button class="marvis-relay-submit" type="submit" aria-label="发送补充" data-marvis-submit>
-        <span class="marvis-relay-submit-arrow" aria-hidden="true">↑</span>
-      </button>
-      <div class="marvis-relay-composer-attachments" data-marvis-attachment-strip hidden></div>
-      <button class="marvis-relay-interrupt" type="button" data-marvis-interrupt-button data-interrupt-url="/api/relay/tasks/{task_id}/interrupt">中断当前执行</button>
-      <p class="marvis-relay-mutation-status" data-relay-mutation-status role="status" aria-live="polite"></p>
-    </form>
-    {_marvis_relay_attachment_sheet_html()}
-    """
 
 
 def _marvis_relay_plan_control_html(detail: Any) -> str:
-    if str(getattr(getattr(detail, "task", None), "status", "") or "") != "waiting_user":
-        return ""
-    round_id = int(getattr(detail, "current_round_id", 1) or 1)
-    round_execution = getattr(detail, "round_execution", {}) or {}
-    confirmation = round_execution.get("confirmation") if isinstance(round_execution, dict) else {}
-    if not isinstance(confirmation, dict):
-        confirmation = {}
-    waiting_artifact: dict[str, Any] | None = None
-    for artifact in reversed(getattr(detail, "artifacts", []) or []):
-        if str(artifact.get("artifact_type") or "") != "architecture_plan":
-            continue
-        if int(artifact.get("round_id") or round_id) != round_id:
-            continue
-        if str(artifact.get("status") or "") != "waiting":
-            continue
-        waiting_artifact = artifact
-        break
-    if waiting_artifact is None:
-        for artifact in reversed(getattr(detail, "artifacts", []) or []):
-            if int(artifact.get("round_id") or round_id) != round_id:
-                continue
-            if str(artifact.get("status") or "") != "waiting":
-                continue
-            waiting_artifact = artifact
-            break
-    if waiting_artifact is None:
-        waiting_artifact = {
-            "id": 0,
-            "artifact_type": "",
-            "status": "waiting",
-            "summary": "当前接力需要你确认下一步。",
-            "open_questions": [],
-            "confirmation_options": [],
-        }
-    confirmation_source = str(
-        waiting_artifact.get("confirmation_source")
-        or confirmation.get("source")
-        or ""
-    )
-    confirmation_provider = str(
-        waiting_artifact.get("provider")
-        or confirmation.get("provider")
-        or ""
-    )
-    confirmation_kind = str(
-        waiting_artifact.get("confirmation_kind")
-        or confirmation.get("kind")
-        or ""
-    )
-    waiting_reason = str(
-        waiting_artifact.get("waiting_reason")
-        or round_execution.get("waiting_reason", "")
-        if isinstance(round_execution, dict)
-        else ""
-    )
-    source_label = str(waiting_artifact.get("confirmation_source_label") or "").strip()
-    if not source_label:
-        if confirmation_source in {"provider_native_plan", "provider_native_approval"}:
-            if confirmation_provider == "codex":
-                source_label = "Codex 原生确认"
-            elif confirmation_provider.startswith("claude"):
-                source_label = "Claude 原生确认"
-            else:
-                source_label = "Provider 原生确认"
-        elif confirmation_source == "relay_prompt_fallback" or not confirmation_source:
-            source_label = "Relay 澄清确认"
-    artifact_type = str(waiting_artifact.get("artifact_type") or "")
-    is_plan = artifact_type == "architecture_plan"
-    artifact_id = int(waiting_artifact.get("id") or 0)
-    title = "计划等待确认" if is_plan else "等待确认"
-    primary_label = "执行计划" if is_plan else "选择执行"
-    primary_decision = "approve_plan" if is_plan else "continue"
-    summary = str(waiting_artifact.get("summary") or "当前接力需要你确认下一步。").strip()
-    questions = [
-        str(item).strip()
-        for item in list(waiting_artifact.get("open_questions") or [])
-        if str(item).strip()
-    ]
-    options = _marvis_relay_confirmation_options(
-        waiting_artifact.get("confirmation_options")
-    )
-    option_html = "".join(
-        f"""
-        <button class="marvis-relay-confirmation-option" type="button"
-          data-confirmation-option-id="{escape(option["id"])}"
-          data-confirmation-option-label="{escape(option["label"])}"
-          data-confirmation-option-instruction="{escape(option["instruction"])}"
-          aria-pressed="{'true' if index == 0 else 'false'}">
-          <strong>{escape(option["label"])}</strong>
-          <span>{escape(option["summary"] or option["instruction"])}</span>
-        </button>
-        """
-        for index, option in enumerate(options)
-    )
-    question_html = "".join(
-        f"<li>{escape(question)}</li>" for question in questions
-    )
-    detail_body = summary
-    if questions:
-        detail_body = f"{summary}\n\n待确认：\n" + "\n".join(f"- {item}" for item in questions)
-    meta_parts = [
-        f"来源：{source_label}",
-        f"请求类型：{confirmation_kind or 'relay_question'}",
-    ]
-    if waiting_reason:
-        meta_parts.append(f"等待原因：{waiting_reason}")
-    provider_request_id = str(
-        waiting_artifact.get("provider_request_id")
-        or confirmation.get("provider_request_id")
-        or ""
-    )
-    if provider_request_id:
-        meta_parts.append(f"请求 ID：{provider_request_id}")
-    meta_text = "\n".join(meta_parts)
-    return f"""
-    <section class="marvis-relay-confirmation-card" data-marvis-confirmation-card data-marvis-plan-control data-round-id="{round_id}" data-artifact-id="{artifact_id}" aria-label="{escape(title)}">
-      <button class="marvis-relay-confirmation-thumb" type="button" data-marvis-confirmation-open aria-label="查看确认详情">
-        <em>{escape(source_label)}</em>
-        <span>{escape(title)}</span>
-        <strong>{escape(summary)}</strong>
-      </button>
-      <div class="marvis-relay-confirmation-options"{" hidden" if not option_html else ""}>
-        {option_html}
-      </div>
-      <div class="marvis-relay-confirmation-actions">
-        <button type="button" data-plan-decision="{escape(primary_decision)}">{escape(primary_label)}</button>
-        <button type="button" data-waiting-input>补充内容</button>
-        <button type="button" data-plan-decision="cancel_plan">停止</button>
-      </div>
-    </section>
-    <section class="marvis-relay-confirmation-page" data-marvis-confirmation-page data-round-id="{round_id}" data-artifact-id="{artifact_id}" role="dialog" aria-modal="true" aria-label="{escape(title)}" hidden>
-      <div class="marvis-relay-confirmation-page-shell">
-        <header>
-          <button type="button" data-marvis-confirmation-close aria-label="返回">‹</button>
-          <strong>{escape(title)}</strong>
-        </header>
-        <main>
-          <small>{escape(meta_text)}</small>
-          <h2>{escape(summary)}</h2>
-          <p>{escape(detail_body)}</p>
-          <ul{" hidden" if not question_html else ""}>{question_html}</ul>
-        </main>
-      </div>
-    </section>
-    """
-
-
-def _marvis_relay_confirmation_options(raw: Any) -> list[dict[str, str]]:
-    if not isinstance(raw, list):
-        return []
-    options: list[dict[str, str]] = []
-    for index, item in enumerate(raw[:6], start=1):
-        if isinstance(item, str):
-            label = item.strip()
-            summary = ""
-            instruction = label
-            option_id = f"option_{index}"
-        elif isinstance(item, dict):
-            option_id = str(item.get("id") or f"option_{index}").strip()
-            label = str(
-                item.get("label")
-                or item.get("title")
-                or item.get("name")
-                or item.get("summary")
-                or option_id
-            ).strip()
-            summary = str(item.get("summary") or item.get("description") or "").strip()
-            instruction = str(
-                item.get("instruction")
-                or item.get("prompt")
-                or item.get("value")
-                or item.get("text")
-                or label
-            ).strip()
-        else:
-            continue
-        if not label and not instruction:
-            continue
-        options.append(
-            {
-                "id": option_id or f"option_{index}",
-                "label": label or instruction,
-                "summary": summary,
-                "instruction": instruction or label,
-            }
-        )
-    return options
+    return _render_plan_control(detail)
 
 
 @dataclass
@@ -4925,27 +4716,12 @@ def _marvis_relay_work_log_html(
     token_total: int = 0,
     max_event_id: int = 0,
 ) -> str:
-    return f"""
-    <div class="marvis-relay-backdrop" data-marvis-work-log-backdrop hidden></div>
-    <section class="marvis-work-log" data-marvis-work-log data-marvis-work-log-max-event-id="{max(0, int(max_event_id))}" aria-label="工作日志" hidden>
-      <button class="marvis-work-log-close" type="button" data-marvis-close-log aria-label="关闭">×</button>
-      <div class="marvis-work-log-tabs">
-        <button class="marvis-work-log-tab active" type="button">工作日志</button>
-      </div>
-      <div class="marvis-work-log-hero">
-        <div class="marvis-work-log-desks" aria-hidden="true">
-          <img src="/static/marvis/office-desk-worker-1.png" alt="">
-          <img src="/static/marvis/office-desk-empty-slot.png" alt="">
-          <img src="/static/marvis/office-desk-empty-slot.png" alt="">
-        </div>
-        <div class="marvis-work-log-metrics">
-          <span>空闲中...</span>
-          <strong data-marvis-work-log-token-value data-token-total="{max(0, int(token_total))}">{escape(token_text)} ☕</strong>
-        </div>
-      </div>
-      <div class="marvis-work-log-body" data-marvis-work-log-body>{body_html}</div>
-    </section>
-    """
+    return _render_work_log_shell(
+        body_html=body_html,
+        token_text=token_text,
+        token_total=token_total,
+        max_event_id=max_event_id,
+    )
 
 
 def _marvis_relay_token_total_from_events(
@@ -5046,7 +4822,7 @@ def _marvis_relay_work_log_body_html(
     for index, segment in enumerate(segments):
         rows.append(_marvis_relay_work_log_segment_html(segment, index=index))
     if not rows:
-        return '<p class="marvis-work-log-empty">暂无工作日志</p>'
+        return _render_empty_work_log()
     return "\n".join(rows)
 
 
@@ -5138,11 +4914,7 @@ def _marvis_relay_work_log_segments(
         artifact_keys_added.add(key)
 
     round_execution = getattr(detail, "round_execution", {}) or {}
-    confirmation = (
-        round_execution.get("confirmation")
-        if isinstance(round_execution, dict)
-        else {}
-    )
+    confirmation = round_execution.get("confirmation") if isinstance(round_execution, dict) else {}
     if not isinstance(confirmation, dict):
         confirmation = {}
     confirmation_source = str(confirmation.get("source") or "").strip()
@@ -5160,10 +4932,13 @@ def _marvis_relay_work_log_segments(
                 ),
                 "director",
             )
-        label = _marvis_relay_confirmation_source_label(
-            confirmation_source,
-            str(confirmation.get("provider") or ""),
-        ) or "等待确认"
+        label = (
+            _marvis_relay_confirmation_source_label(
+                confirmation_source,
+                str(confirmation.get("provider") or ""),
+            )
+            or "等待确认"
+        )
         kind = str(confirmation.get("kind") or "relay_question")
         provider_request_id = str(confirmation.get("provider_request_id") or "")
         waiting_reason = str(round_execution.get("waiting_reason") or "")
@@ -5933,13 +5708,10 @@ def _relay_projected_conversation_rows(
     for _occurred_at, _event_id, role, display_name, worker_event in events:
         kind = str(worker_event.kind or "event")
         text = _relay_native_event_text(worker_event)
-        if (
-            kind in {"text_delta", "message_completed"}
-            and (
-                _relay_text_is_structured_artifact_placeholder(text)
-                or text_contains_relay_protocol_payload(text)
-                or _relay_parse_role_envelope_payload(text) is not None
-            )
+        if kind in {"text_delta", "message_completed"} and (
+            _relay_text_is_structured_artifact_placeholder(text)
+            or text_contains_relay_protocol_payload(text)
+            or _relay_parse_role_envelope_payload(text) is not None
         ):
             continue
         if kind == "text_delta":
@@ -6567,7 +6339,9 @@ def _marvis_relay_conversation_html(
     rows = _marvis_chat_rows_from_relay_rows(rows)
     waiting_html = (
         _marvis_relay_waiting_message_html()
-        if any(str(getattr(job, "status", "") or "") in {"queued", "streaming"} for job in role_jobs)
+        if any(
+            str(getattr(job, "status", "") or "") in {"queued", "streaming"} for job in role_jobs
+        )
         else ""
     )
     return render_conversation_rows(
@@ -6583,21 +6357,10 @@ def _marvis_relay_conversation_html(
 
 
 def _marvis_relay_handoff_html(row: dict[str, str]) -> str:
-    pair = _marvis_relay_handoff_pair(row)
-    if pair is None:
-        return ""
-    from_role, to_role = pair
-    key = str(row.get("key") or "")
-    round_id = str(row.get("round_id") or "1")
-    text = _marvis_relay_handoff_text(from_role, to_role)
-    return (
-        '<div class="marvis-relay-handoff" data-marvis-handoff '
-        f'data-native-kind="handoff" data-native-from-role="{escape(from_role)}" '
-        f'data-native-to-role="{escape(to_role)}" data-native-role="{escape(to_role)}" '
-        f'data-native-round-id="{escape(round_id)}" '
-        f'data-native-key="{escape(key)}">'
-        f"{escape(text)}"
-        "</div>"
+    return _render_handoff(
+        row,
+        handoff_pair=_marvis_relay_handoff_pair,
+        handoff_text=_marvis_relay_handoff_text,
     )
 
 
@@ -6632,93 +6395,22 @@ def _marvis_relay_handoff_semantic_action(from_role: str, to_role: str) -> str:
 
 
 def _marvis_relay_empty_conversation_html() -> str:
-    return """
-      <article class="marvis-relay-agent-step marvis-relay-waiting" data-native-role="director" data-native-kind="status" data-native-empty>
-        <span class="marvis-relay-avatar marvis-relay-avatar-marvis" aria-label="Marvis"></span>
-        <div>
-          <div class="marvis-relay-agent-head"><strong>Marvis</strong></div>
-          <div class="marvis-relay-agent-bubble">等待总工程师接收任务。</div>
-        </div>
-      </article>
-    """
+    return _render_empty_conversation()
 
 
 def _marvis_relay_waiting_message_html() -> str:
-    return """
-      <article class="marvis-relay-agent-step marvis-relay-waiting" data-native-role="director" data-native-kind="waiting">
-        <span class="marvis-relay-avatar marvis-relay-avatar-marvis" aria-label="Marvis"></span>
-        <div>
-          <div class="marvis-relay-agent-head"><strong>Marvis</strong></div>
-          <div class="marvis-relay-agent-bubble">...</div>
-        </div>
-      </article>
-    """
+    return _render_waiting_message()
 
 
 def _marvis_relay_message_html(row: dict[str, str]) -> str:
-    role = str(row.get("role") or "system")
-    kind = str(row.get("kind") or "event")
-    body = str(row.get("body") or "")
-    key = str(row.get("key") or "")
-    if kind == "user_message":
-        attachment_html = _marvis_relay_attachment_list_html(row)
-        bubble_html = (
-            f'<div class="marvis-relay-user-bubble" data-native-message-body>{escape(body)}</div>'
-            if body
-            else ""
-        )
-        return f"""
-      <article class="marvis-relay-user-message" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(key)}">
-        {bubble_html}
-        {attachment_html}
-      </article>
-        """
-    if kind == "waiting":
-        persona, display_name = _marvis_relay_public_role("director")
-        return f"""
-      <article class="marvis-relay-agent-step marvis-relay-waiting" data-native-role="director" data-native-kind="waiting" data-native-key="{escape(key)}" data-marvis-followup-waiting="true">
-        {_marvis_relay_avatar_html(persona, label=display_name)}
-        <div class="marvis-relay-agent-content">
-          <div class="marvis-relay-agent-head"><strong>{escape(display_name)}</strong></div>
-          <div class="marvis-relay-agent-bubble" data-native-message-body>{escape(body or "...")}</div>
-        </div>
-      </article>
-    """
-    persona, display_name = _marvis_relay_public_role(role)
-    meta = str(row.get("meta") or row.get("status") or "")
-    status_label = _marvis_relay_role_status_label(meta)
-    action = _marvis_relay_action_label(role, row)
-    role_final_attr = (
-        f' data-conversation-role-final="{escape(role)}"' if kind == "role_envelope" else ""
+    return _render_relay_message(
+        row,
+        public_role=_marvis_relay_public_role,
+        render_avatar=_marvis_relay_avatar_html,
+        role_status_label=_marvis_relay_role_status_label,
+        action_label=_marvis_relay_action_label,
+        render_attachment_list=_marvis_relay_attachment_list_html,
     )
-    role_stream_attr = (
-        f' data-conversation-role-stream="{escape(role)}"' if kind == "text_delta" else ""
-    )
-    stream_event_ids = str(row.get("preview_event_ids") or "")
-    stream_event_ids_attr = (
-        f' data-stream-event-ids="{escape(stream_event_ids)}"'
-        if kind == "text_delta" and stream_event_ids
-        else ""
-    )
-    show_action = kind in {"role_envelope", "role_process", "text_delta"} or role == "director"
-    if show_action and action:
-        action_html = (
-            f'<span class="marvis-relay-agent-action">| {escape(action)} '
-            f"{escape(status_label)}</span>"
-        )
-    elif show_action and status_label:
-        action_html = f'<span class="marvis-relay-agent-action">| {escape(status_label)}</span>'
-    else:
-        action_html = ""
-    return f"""
-      <article class="marvis-relay-agent-step" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(key)}"{role_final_attr}{role_stream_attr}{stream_event_ids_attr}>
-        {_marvis_relay_avatar_html(persona, label=display_name)}
-        <div class="marvis-relay-agent-content">
-          <div class="marvis-relay-agent-head"><strong>{escape(display_name)}</strong> {action_html}</div>
-          <div class="marvis-relay-agent-bubble" data-native-message-body>{escape(body)}</div>
-        </div>
-      </article>
-    """
 
 
 def _marvis_relay_attachment_list_html(row: dict[str, Any]) -> str:
@@ -6757,12 +6449,7 @@ def _marvis_relay_attachment_list_html(row: dict[str, Any]) -> str:
 
 
 def _relay_native_empty_conversation_html() -> str:
-    return """
-      <article class="relay-message" data-native-role="system" data-native-kind="status" data-native-empty>
-        <div class="relay-message-head"><strong>系统</strong></div>
-        <div class="relay-message-body" data-native-message-body>等待原生会话输出。</div>
-      </article>
-    """
+    return _render_native_empty_conversation()
 
 
 def _relay_native_event_row(
@@ -7027,32 +6714,7 @@ def _relay_protocol_output_hidden_text(role: str) -> str:
 
 
 def _relay_native_message_html(row: dict[str, str]) -> str:
-    meta = str(row.get("meta") or "")
-    meta_html = f'<span class="relay-message-meta">{escape(meta)}</span>' if meta else ""
-    role = str(row.get("role", "") or "system")
-    kind = str(row.get("kind", "") or "event")
-    role_final_attr = (
-        f' data-conversation-role-final="{escape(role)}"' if kind == "role_envelope" else ""
-    )
-    role_stream_attr = (
-        f' data-conversation-role-stream="{escape(role)}"' if kind == "text_delta" else ""
-    )
-    stream_event_ids = str(row.get("preview_event_ids") or "")
-    stream_event_ids_attr = (
-        f' data-stream-event-ids="{escape(stream_event_ids)}"'
-        if kind == "text_delta" and stream_event_ids
-        else ""
-    )
-    return f"""
-      <article class="relay-message" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(row.get("key", "") or "")}"{role_final_attr}{role_stream_attr}{stream_event_ids_attr}>
-        {_marvis_relay_avatar_html(role, label=str(row.get("speaker", "") or "系统"))}
-        <div class="relay-message-head">
-          <strong>{escape(row.get("speaker", "") or "系统")}</strong>
-          {meta_html}
-        </div>
-        <div class="relay-message-body" data-native-message-body>{escape(row.get("body", "") or "")}</div>
-      </article>
-    """
+    return _render_native_message(row, render_avatar=_marvis_relay_avatar_html)
 
 
 def _relay_native_event_text(worker_event: WorkerStreamEvent) -> str:
@@ -7169,12 +6831,16 @@ def _council_review_page() -> str:
 
 def _council_seats_page() -> str:
     return render_council_seats_page(replace_html_icons=_replace_html_icons)
+
+
 def _native_token_entry_page(return_to: str = "/native/codex") -> str:
     return render_native_token_entry_page(return_to)
 
 
 def _native_login_ticket_page(ticket: str, provider_name: str = "codex") -> str:
     return render_native_login_ticket_page(ticket, provider_name)
+
+
 def _native_codex_page(provider_name: str = "codex", *, theme: str = "") -> str:
     return render_native_codex_page(
         provider_name,
@@ -7189,6 +6855,7 @@ def _native_codex_page(provider_name: str = "codex", *, theme: str = "") -> str:
             "_ICONS_JS_LITERAL": _ICONS_JS_LITERAL,
         },
     )
+
 
 def _live_page(agent_run_id: int, *, native_provider: str = "codex", theme: str = "") -> str:
     return render_live_page(

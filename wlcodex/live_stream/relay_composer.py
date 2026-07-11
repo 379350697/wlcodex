@@ -77,17 +77,6 @@ def _marvis_relay_attachment_sheet_html() -> str:
           <span>本地文件</span>
         </button>
       </div>
-      <div class="marvis-relay-skill-section">
-        <p>我的技能</p>
-        <button class="marvis-relay-skill-row" type="button" aria-label="添加技能">
-          <img class="marvis-relay-sheet-icon-native marvis-relay-sheet-icon-native-skill" src="/static/marvis/attachment-icon-skills-marvis.png" alt="" aria-hidden="true">
-          <span class="marvis-relay-skill-text">
-            <strong>添加技能</strong>
-            <small>有200+技能可供使用</small>
-          </span>
-          <span class="marvis-relay-skill-chevron" aria-hidden="true">›</span>
-        </button>
-      </div>
       <input type="file" accept="image/*" multiple hidden data-marvis-image-input>
       <input type="file" accept=".txt,.md,.markdown,.json,.jsonl,.log,.csv,.tsv,.yaml,.yml,.toml,.ini,.py,.js,.ts,.tsx,.jsx,.css,.html,.xml,.sh,.zsh,.sql,text/*,application/json" multiple hidden data-marvis-file-input>
     </section>
@@ -321,5 +310,4 @@ def _marvis_relay_attachment_script() -> str:
     }
     setupMarvisRelayAttachments();
     """
-
 
