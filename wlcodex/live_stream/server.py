@@ -91,6 +91,10 @@ from wlcodex.live_stream.relay_composer import (
 from wlcodex.live_stream.relay_chat_page import render_relay_chat_home_page
 from wlcodex.live_stream.relay_collection_routes import handle_relay_collection_route
 from wlcodex.live_stream.relay_event_route import handle_relay_task_events_route
+from wlcodex.live_stream.relay_ui_routes import (
+    RelayUiRouteDependencies,
+    handle_relay_ui_route,
+)
 from wlcodex.live_stream.relay_conversation_view import render_conversation_rows
 from wlcodex.live_stream.relay_config_page import render_relay_config_page
 from wlcodex.live_stream.relay_list_views import (
@@ -2001,200 +2005,38 @@ class WorkerLiveStreamServer:
         headers: dict[str, str],
         query: dict[str, list[str]],
     ) -> None:
-        if method != "GET":
-            await self._send_json(writer, 405, {"error": "method not allowed"})
-            return
-        if not self._is_authorized(
-            writer,
-            headers,
-            query,
-            require_token=(
-                self._native_registry is not None
-                or self._native_controller is not None
-                or self._relay_service is not None
+        await handle_relay_ui_route(
+            deps=RelayUiRouteDependencies(
+                is_authorized=self._is_authorized,
+                send_json=self._send_json,
+                send_html=self._send_html,
+                send_redirect=self._send_redirect,
+                token_entry_page=_native_token_entry_page,
+                native_workflows_page=_native_workflows_page,
+                selected_workspace=_relay_selected_workspace,
+                project_rows=_relay_project_rows,
+                settings_href=_relay_settings_href,
+                chat_home_page=_relay_chat_home_page,
+                blocked_inbox_page=_relay_blocked_inbox_page,
+                page_number=_relay_page_number,
+                presentation_state_filter=_relay_presentation_state_filter,
+                task_list_page=_relay_task_list_page,
+                config_page=_relay_config_page,
+                task_id_from_path=_relay_task_id_from_ui_path,
+                task_detail_view=_relay_task_detail_view,
+                task_detail_page=_relay_task_detail_page,
+                task_detail=self._relay_task_detail,
             ),
-        ):
-            await self._send_html(writer, 401, _native_token_entry_page(path))
-            return
-        token = str((query.get("token") or [""])[0] or "")
-        if path == "/native/workflows":
-            await self._send_html(writer, 200, _native_workflows_page(access_token=token))
-            return
-        if path == "/native/workflows/relay/office":
-            # Office was a visual promise with no distinct task operation.
-            # Keep old bookmarks useful, but do not present a third Relay
-            # destination beside the product's Tasks and Settings surfaces.
-            selected_workspace = _relay_selected_workspace(
-                str((query.get("workspace") or [""])[0] or ""),
-                _relay_project_rows(self._workspace_catalog),
-            )
-            await self._send_redirect(
-                writer,
-                _relay_settings_href(selected_workspace, token),
-            )
-            return
-        if path in (
-            "/native/workflows/relay",
-            "/native/workflows/relay/inbox",
-            "/native/workflows/relay/chat",
-            "/native/workflows/relay/config",
-            "/native/workflows/relay/skills",
-            "/native/workflows/relay/profile",
-        ):
-            project_rows = _relay_project_rows(self._workspace_catalog)
-            selected_workspace = _relay_selected_workspace(
-                str((query.get("workspace") or [""])[0] or ""),
-                project_rows,
-            )
-        if path in ("/native/workflows/relay/skills", "/native/workflows/relay/profile"):
-            # These were navigation promises rather than working product
-            # surfaces.  Keep old URLs understandable without presenting a
-            # dead control as an available capability.
-            await self._send_redirect(
-                writer,
-                _relay_settings_href(selected_workspace, token),
-            )
-            return
-        if path == "/native/workflows/relay/chat":
-            await self._send_html(
-                writer,
-                200,
-                _relay_chat_home_page(
-                    selected_workspace=selected_workspace,
-                    access_token=token,
-                ),
-            )
-            return
-        if path == "/native/workflows/relay/inbox":
-            summaries = (
-                self._relay_service.list_tasks_readonly(workspace=selected_workspace)
-                if self._relay_service is not None
-                else []
-            )
-            await self._send_html(
-                writer,
-                200,
-                _relay_blocked_inbox_page(
-                    summaries,
-                    selected_workspace=selected_workspace,
-                    access_token=token,
-                ),
-            )
-            return
-        if path == "/native/workflows/relay":
-            requested_page = _relay_page_number(str((query.get("page") or ["1"])[0] or "1"))
-            status_filter = _relay_presentation_state_filter(
-                str((query.get("status") or [""])[0] or "")
-            )
-            relay_states = (
-                "running",
-                "waiting_user",
-                "waiting_approval",
-                "blocked",
-                "failed",
-                "completed",
-                "interrupted",
-                "stale",
-            )
-            page_size = 10
-            if self._relay_service is not None:
-                summaries, total, queried_state_counts = (
-                    self._relay_service.list_tasks_page_readonly(
-                        workspace=selected_workspace,
-                        presentation_state=status_filter or None,
-                        page=requested_page,
-                        page_size=page_size,
-                    )
-                )
-            else:
-                summaries, total, queried_state_counts = [], 0, {}
-            state_counts = {
-                state: int(queried_state_counts.get(state, 0))
-                for state in relay_states
-            }
-            total_pages = max(1, (total + page_size - 1) // page_size)
-            current_page = min(max(1, requested_page), total_pages)
-            if current_page != requested_page and self._relay_service is not None:
-                summaries, _, _ = self._relay_service.list_tasks_page_readonly(
-                    workspace=selected_workspace,
-                    presentation_state=status_filter or None,
-                    page=current_page,
-                    page_size=page_size,
-                )
-            active_count = sum(
-                state_counts.get(state, 0)
-                for state in ("running", "waiting_user", "waiting_approval", "blocked", "stale")
-            )
-            providers = (
-                self._native_registry.list_provider_summaries()
-                if self._native_registry is not None
-                else []
-            )
-            relay_config = self._relay_service.config() if self._relay_service is not None else {}
-            await self._send_html(
-                writer,
-                200,
-                _relay_task_list_page(
-                    summaries,
-                    providers=providers,
-                    relay_config=relay_config,
-                    projects=project_rows,
-                    selected_workspace=selected_workspace,
-                    access_token=token,
-                    page=current_page,
-                    total=total,
-                    total_pages=total_pages,
-                    active_count=active_count,
-                    state_counts=state_counts,
-                    status_filter=status_filter,
-                ),
-            )
-            return
-        if path == "/native/workflows/relay/config":
-            providers = (
-                self._native_registry.list_provider_summaries()
-                if self._native_registry is not None
-                else []
-            )
-            relay_config = self._relay_service.config() if self._relay_service is not None else {}
-            await self._send_html(
-                writer,
-                200,
-                _relay_config_page(
-                    providers=providers,
-                    relay_config=relay_config,
-                    selected_workspace=selected_workspace,
-                    access_token=token,
-                ),
-            )
-            return
-        task_id = _relay_task_id_from_ui_path(path)
-        if task_id is None:
-            await self._send_json(writer, 404, {"error": "not found"})
-            return
-        if self._relay_service is None:
-            await self._send_json(writer, 503, {"error": "relay service unavailable"})
-            return
-        try:
-            detail = await self._relay_task_detail(task_id)
-        except KeyError:
-            await self._send_json(writer, 404, {"error": "relay task not found"})
-            return
-        events = self._relay_service.events_for_task(task_id)
-        detail_view = _relay_task_detail_view(
-            str((query.get("view") or ["conversation"])[0] or "conversation")
-        )
-        await self._send_html(
-            writer,
-            200,
-            _relay_task_detail_page(
-                detail,
-                access_token=token,
-                view=detail_view,
-                events=events,
-                hub=self._hub,
-                token_stats=self._relay_service.task_token_stats(task_id),
-            ),
+            writer=writer,
+            method=method,
+            path=path,
+            headers=headers,
+            query=query,
+            native_registry=self._native_registry,
+            native_controller=self._native_controller,
+            relay_service=self._relay_service,
+            workspace_catalog=self._workspace_catalog,
+            hub=self._hub,
         )
 
     async def _handle_relay_route(
