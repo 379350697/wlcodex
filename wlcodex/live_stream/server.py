@@ -9,8 +9,6 @@ import re
 import secrets
 import shlex
 import time
-from dataclasses import dataclass
-from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -68,7 +66,6 @@ from wlcodex.live_stream.native_templates.auth_pages import (
 from wlcodex.live_stream.native_templates.codex_page import render_native_codex_page
 from wlcodex.live_stream.native_templates.dependencies import NativePageDependencies
 from wlcodex.live_stream.native_templates.live_page import render_live_page
-from wlcodex.live_stream.native_templates.legacy_live_page import render_legacy_live_page
 from wlcodex.live_stream.native_message_projection import (
     format_native_message_sse_event,
     format_native_timeline_sse_event,
@@ -94,11 +91,11 @@ from wlcodex.live_stream.relay_work_log_projection import (
     build_relay_work_log_segments,
     render_relay_work_log_body,
 )
+from wlcodex.live_stream.relay_work_log_models import WorkLogEntry, WorkLogSegment
 from wlcodex.live_stream.presentation import (
     activity_label as _relay_activity_label,
     presentation_state_filter as _relay_presentation_state_filter,
     role_label as _relay_role_label,
-    role_status_label as _relay_role_status_label,
     status_class_name as _relay_status_class_name,
     summary_presentation as _relay_summary_presentation,
     summary_presentation_state as _relay_summary_presentation_state,
@@ -141,8 +138,6 @@ from wlcodex.live_stream.relay_detail_components import (
     render_handoff as _render_handoff,
     render_message as _render_relay_message,
     render_relay_attachment_list as _render_relay_attachment_list,
-    render_native_empty_conversation as _render_native_empty_conversation,
-    render_native_message as _render_native_message,
     render_plan_control as _render_plan_control,
     render_waiting_message as _render_waiting_message,
     render_work_log_shell as _render_work_log_shell,
@@ -156,6 +151,22 @@ from wlcodex.live_stream.relay_list_views import (
 )
 from wlcodex.live_stream.relay_page_assets import (
     render_relay_mobile_web_head as _relay_mobile_web_head,
+)
+from wlcodex.live_stream.relay_role_presentation import (
+    RELAY_LEGACY_ROLE_LABEL_PARTS as _MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS,
+    RELAY_LEGACY_ROLE_SLUG_PARTS as _MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS,
+    action_label as _marvis_relay_action_label,
+    confirmation_source_label as _marvis_relay_confirmation_source_label,
+    handoff_role_label as _marvis_relay_handoff_role_label,
+    handoff_text as _marvis_relay_handoff_text,
+    public_role as _marvis_relay_public_role,
+    replace_legacy_role_names as _relay_replace_legacy_role_identifiers,
+    role_status_label as _marvis_relay_role_status_label,
+)
+from wlcodex.live_stream.relay_artifact_lifecycle import (
+    lifecycle_status_for_payload as _relay_lifecycle_status_for_payload,
+    payload_status_is_success as _relay_payload_status_is_success,
+    payload_status_is_terminal_failure as _relay_payload_status_is_terminal_failure,
 )
 from wlcodex.live_stream.relay_sse_projection import (
     compact_relay_sse_payload as _compact_relay_sse_payload,
@@ -202,12 +213,6 @@ from wlcodex.relay.display import (
     followup_response_display_text,
     humanize_display_text,
     humanize_role_envelope,
-    join_text_list,
-    protocol_output_hidden_text,
-    replace_legacy_role_identifiers,
-    role_output_error_text,
-    routing_risk_label,
-    routing_route_label,
     sanitize_protocol_leak_text,
     text_contains_relay_protocol_payload,
     text_needs_chinese_fallback,
@@ -3579,12 +3584,6 @@ def _native_permission_kwargs_from_body(
     return dict(preset)
 
 
-def _codex_permission_kwargs_from_body(body: dict[str, Any]) -> dict[str, object]:
-    mode = str(body.get("permission_mode") or body.get("permissionMode") or "default")
-    preset = _CODEX_PERMISSION_PRESETS.get(mode.strip(), {})
-    return dict(preset)
-
-
 def _codex_collaboration_kwargs_from_body(
     provider: str,
     body: dict[str, Any],
@@ -4224,169 +4223,12 @@ def _relay_selected_workspace(requested_workspace: str, projects: list[Any]) -> 
     return requested or _relay_default_workspace(projects)
 
 
-def _relay_role_summary_html(
-    relay_config: dict[str, Any],
-    providers: list[Any],
-) -> str:
-    assignments = relay_config.get("assignments")
-    assignment_map = assignments if isinstance(assignments, dict) else {}
-    provider_rows = providers or [{"provider": "codex", "provider_engine": ""}]
-    fallback = str(provider_rows[0].get("provider") or "codex")
-    return "\n".join(
-        f'<span class="relay-chip">{escape(_relay_role_label(role))} · '
-        f"{escape(_native_provider_display_name(str(assignment_map.get(role) or fallback)))}</span>"
-        for role in RELAY_ROLE_IDS
-    )
-
-
-_MARVIS_RELAY_ROLE_PERSONAS: dict[str, tuple[str, str]] = {
-    "director": ("marvis", "Marvis"),
-    "implementer": ("implementer", "开发工程师"),
-    "architect": ("architect", "架构工程师"),
-    "tester": ("tester", "测试工程师"),
-    "auditor": ("auditor", "审核工程师"),
-}
-
-_MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS: dict[str, tuple[tuple[str, str], ...]] = {
-    "implementer": (("App", "Agent"),),
-    "architect": (("Computer", "Agent"),),
-    "tester": (("Search", "Agent"),),
-    "auditor": (("File", "Agent"), ("Browser", "Agent")),
-}
-
-_MARVIS_RELAY_LEGACY_ROLE_SLUG_PARTS: dict[str, tuple[tuple[str, str], ...]] = {
-    "implementer": (("app", "agent"),),
-    "architect": (("computer", "agent"),),
-    "tester": (("search", "agent"),),
-    "auditor": (("file", "agent"), ("browser", "agent")),
-}
-
-
-def _marvis_relay_public_role(role: str) -> tuple[str, str]:
-    return _MARVIS_RELAY_ROLE_PERSONAS.get(
-        str(role or "").strip(),
-        ("marvis", "Marvis"),
-    )
-
-
-def _marvis_relay_handoff_role_label(role: str) -> str:
-    return _marvis_relay_public_role(role)[1]
-
-
-def _marvis_relay_handoff_text(from_role: str, to_role: str) -> str:
-    to_name = _marvis_relay_handoff_role_label(to_role)
-    if from_role == "director":
-        return f"Marvis 拍了拍 {to_name} 说， 别等了，这就开始"
-    from_name = _marvis_relay_handoff_role_label(from_role)
-    if to_role == "auditor":
-        return f"{from_name}交给{to_name}复核"
-    if from_role == "auditor" and to_role == "director":
-        return f"{from_name}交回Marvis收尾"
-    if from_role == "auditor":
-        return f"{from_name}退回{to_name}继续处理"
-    return f"{from_name}交给{to_name}继续处理"
-
-
-def _marvis_relay_legacy_persona_label(role: str) -> str:
-    labels = _MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS.get(str(role or "").strip(), ())
-    return " ".join(labels[0]) if labels else ""
-
-
-def _relay_replace_legacy_role_display_names(text: str) -> str:
-    value = str(text or "")
-    for role in RELAY_ROLE_IDS:
-        current_label = _marvis_relay_public_role(role)[1]
-        for label_parts in _MARVIS_RELAY_LEGACY_ROLE_LABEL_PARTS.get(role, ()):
-            legacy_label = " ".join(label_parts)
-            if legacy_label and legacy_label != current_label:
-                value = value.replace(legacy_label, current_label)
-    return value
-
-
-def _relay_replace_legacy_role_identifiers(text: str) -> str:
-    return replace_legacy_role_identifiers(text)
-
-
-def _marvis_relay_role_status_label(status: str) -> str:
-    value = str(status or "").strip()
-    if value in {"passed", "completed", "success", "succeeded"}:
-        return "已完成"
-    if value in {"failed", "blocked", "error"}:
-        return "调用失败"
-    if value in {"queued", "streaming", "started", "progress"}:
-        return "进行中"
-    if value == "waiting_user":
-        return "等待中"
-    if value == "interrupted":
-        return "已中断"
-    return _relay_role_status_label(value) if value else "进行中"
-
-
-def _marvis_relay_action_label(role: str, payload: dict[str, Any] | None = None) -> str:
-    artifact_type = str((payload or {}).get("artifact_type") or "").strip()
-    confirmation_source = str((payload or {}).get("confirmation_source") or "").strip()
-    confirmation_label = _marvis_relay_confirmation_source_label(
-        confirmation_source,
-        str((payload or {}).get("provider") or ""),
-    )
-    if confirmation_label:
-        return confirmation_label
-    if role == "director":
-        kind = str((payload or {}).get("kind") or "").strip()
-        handoff_to = str((payload or {}).get("handoff_to") or "").strip()
-        if (
-            artifact_type == "routing_decision"
-            or kind in {"text_delta", "waiting"}
-            or (artifact_type == "final_summary" and handoff_to)
-        ):
-            return "任务分配"
-        return ""
-    artifact_labels = {
-        "architecture_plan": "架构计划",
-        "implementation_report": "执行反馈",
-        "test_report": "测试反馈",
-        "audit_report": "审核反馈",
-    }
-    if artifact_type in artifact_labels:
-        return artifact_labels[artifact_type]
-    if artifact_type:
-        return (
-            _marvis_relay_role_status_label(artifact_type)
-            if artifact_type in {"passed", "failed", "blocked", "completed"}
-            else artifact_type.replace("_", " ")
-        )
-    return "任务"
-
-
-def _marvis_relay_confirmation_source_label(source: str, provider: str = "") -> str:
-    clean_source = str(source or "").strip()
-    provider_name = str(provider or "").strip().lower()
-    if clean_source in {"provider_native_plan", "provider_native_approval"}:
-        if provider_name == "codex":
-            return "Codex 原生确认"
-        if provider_name.startswith("claude"):
-            return "Claude 原生确认"
-        return "Provider 原生确认"
-    if clean_source == "relay_prompt_fallback":
-        return "Relay 澄清确认"
-    return ""
-
-
 def _marvis_token_int(raw: Any) -> int:
     try:
         value = int(raw)
     except (TypeError, ValueError):
         return 0
     return max(0, value)
-
-
-def _format_marvis_token_count(value: int) -> str:
-    count = max(0, int(value))
-    if count >= 100_000_000:
-        return f"{count / 100_000_000:.1f}".removesuffix(".0") + "亿"
-    if count >= 10_000:
-        return f"{count / 10_000:.1f}".removesuffix(".0") + "万"
-    return f"{count:,}"
 
 
 def _format_marvis_relay_token_count(value: int) -> str:
@@ -4425,25 +4267,6 @@ def _marvis_relay_plan_control_html(detail: Any) -> str:
     return _render_plan_control(detail)
 
 
-@dataclass
-class WorkLogEntry:
-    kind: str
-    key: str
-    text: str = ""
-    chip: str = ""
-    output: str = ""
-    failed: bool = False
-    replace_text: bool = False
-
-
-@dataclass
-class WorkLogSegment:
-    role: str
-    persona: str
-    display_name: str
-    entries: list[WorkLogEntry]
-
-
 def _marvis_relay_work_log_html(
     *,
     body_html: str,
@@ -4457,26 +4280,6 @@ def _marvis_relay_work_log_html(
         token_total=token_total,
         max_event_id=max_event_id,
     )
-
-
-def _marvis_relay_token_total_from_events(
-    role_jobs: list[Any],
-    *,
-    hub: WorkerLiveStreamHub | None,
-) -> int:
-    total = 0
-    for (
-        _occurred_at,
-        _event_id,
-        _role,
-        _display_name,
-        worker_event,
-    ) in _relay_worker_events_for_roles(
-        role_jobs,
-        hub=hub,
-    ):
-        total += _marvis_relay_usage_event_total(dict(worker_event.payload or {}))
-    return total
 
 
 def _marvis_relay_max_event_id_from_events(
@@ -4497,49 +4300,6 @@ def _marvis_relay_max_event_id_from_events(
     ):
         max_event_id = max(max_event_id, int(event_id))
     return max_event_id
-
-
-def _marvis_relay_token_text_from_events(
-    role_jobs: list[Any],
-    *,
-    hub: WorkerLiveStreamHub | None,
-) -> str:
-    return _format_marvis_relay_token_count(
-        _marvis_relay_token_total_from_events(role_jobs, hub=hub)
-    )
-
-
-def _marvis_relay_usage_event_total(payload: dict[str, Any]) -> int:
-    usage = payload.get("usage")
-    total_usage = payload.get("total")
-    candidates = [payload]
-    if isinstance(usage, dict):
-        candidates.append(usage)
-        nested_total = usage.get("total")
-        if isinstance(nested_total, dict):
-            candidates.append(nested_total)
-    if isinstance(total_usage, dict):
-        candidates.append(total_usage)
-
-    for candidate in candidates:
-        for key in ("total_tokens", "tokens", "consumed_tokens"):
-            value = candidate.get(key)
-            if isinstance(value, bool):
-                continue
-            if isinstance(value, (int, float)) and value > 0:
-                return int(value)
-
-    fallback_total = 0
-    for candidate in candidates:
-        for key in ("input_tokens", "output_tokens", "reasoning_output_tokens"):
-            value = candidate.get(key)
-            if isinstance(value, bool):
-                continue
-            if isinstance(value, (int, float)) and value > 0:
-                fallback_total += int(value)
-        if fallback_total > 0:
-            return fallback_total
-    return 0
 
 
 def _marvis_relay_work_log_body_html(
@@ -4737,17 +4497,6 @@ def _marvis_relay_work_log_segment_html(segment: WorkLogSegment, *, index: int =
 
 def _marvis_relay_work_log_entry_html(entry: WorkLogEntry) -> str:
     return _render_work_log_entry(entry)
-
-
-def _marvis_relay_work_log_text_item(text: str, *, chip: str = "") -> str:
-    return _marvis_relay_work_log_entry_html(
-        WorkLogEntry(kind="text", key="", text=text, chip=chip)
-    )
-
-
-def _marvis_relay_work_log_event_item(worker_event: WorkerStreamEvent) -> str:
-    entry = _marvis_relay_work_log_entry_from_event("", worker_event)
-    return _marvis_relay_work_log_entry_html(entry) if entry is not None else ""
 
 
 def _marvis_relay_protocol_archive_text(text: str) -> str:
@@ -5078,20 +4827,12 @@ def _marvis_relay_command_label_from_text(value: str) -> str:
     return Path(parts[0]).name if parts else value
 
 
-def _relay_routing_route_label(route: str) -> str:
-    return routing_route_label(route)
-
-
 def _relay_humanize_display_text(text: str, *, english_fallback: str = "") -> str:
     return humanize_display_text(text, english_fallback=english_fallback)
 
 
 def _relay_text_needs_chinese_fallback(text: str) -> bool:
     return text_needs_chinese_fallback(text)
-
-
-def _relay_routing_risk_label(risk: str) -> str:
-    return routing_risk_label(risk)
 
 
 def _relay_event_dict(event: Any) -> dict[str, Any]:
@@ -5336,50 +5077,6 @@ def _relay_current_round_id_from_artifacts(
     for artifact in artifacts or ():
         current = max(current, _relay_round_id_sort_value(artifact.get("round_id")))
     return str(current or 1)
-
-
-def _relay_payload_status_is_success(status: str) -> bool:
-    return str(status or "").strip() in {"passed", "completed", "success", "succeeded", "done"}
-
-
-def _relay_payload_status_is_terminal_failure(status: str) -> bool:
-    return str(status or "").strip() in {"failed", "blocked", "error", "interrupted"}
-
-
-def _relay_lifecycle_status_for_payload(
-    payload: dict[str, Any],
-    success_roles_in_round: set[str] | None = None,
-) -> str:
-    status = str(payload.get("status") or "").strip()
-    role = str(payload.get("role") or payload.get("relay_role") or "").strip()
-    artifact_type = str(payload.get("artifact_type") or "").strip()
-    handoff_to = str(payload.get("handoff_to") or "").strip()
-    if (
-        role == "director"
-        and artifact_type == "final_summary"
-        and status == "waiting"
-        and not handoff_to
-        and "auditor" in (success_roles_in_round or set())
-    ):
-        return "passed"
-    if not status and artifact_type in {"followup_response", "final_summary"} and not handoff_to:
-        return "passed"
-    return status or "passed"
-
-
-def _relay_conversation_artifact_meta(payload: dict[str, Any]) -> str:
-    status = _relay_lifecycle_status_for_payload(payload)
-    role = str(payload.get("role") or payload.get("relay_role") or "").strip()
-    artifact_type = str(payload.get("artifact_type") or "").strip()
-    handoff_to = str(payload.get("handoff_to") or "").strip()
-    if (
-        role == "director"
-        and artifact_type == "final_summary"
-        and status == "waiting"
-        and handoff_to
-    ):
-        return "passed"
-    return status
 
 
 def _relay_normalize_conversation_lifecycle_rows(rows: list[dict[str, str]]) -> None:
@@ -5804,10 +5501,6 @@ def _marvis_relay_attachment_list_html(row: dict[str, Any]) -> str:
     )
 
 
-def _relay_native_empty_conversation_html() -> str:
-    return _render_native_empty_conversation()
-
-
 def _relay_native_event_row(
     role: str,
     display_name: str,
@@ -6057,22 +5750,6 @@ def _relay_humanize_role_envelope(payload: dict[str, Any]) -> str:
     return humanize_role_envelope(payload)
 
 
-def _relay_join_text_list(value: Any) -> str:
-    return join_text_list(value)
-
-
-def _relay_role_output_error_text(role: str, error: str) -> str:
-    return role_output_error_text(role, error)
-
-
-def _relay_protocol_output_hidden_text(role: str) -> str:
-    return protocol_output_hidden_text(role)
-
-
-def _relay_native_message_html(row: dict[str, str]) -> str:
-    return _render_native_message(row, render_avatar=_marvis_relay_avatar_html)
-
-
 def _relay_native_event_text(worker_event: WorkerStreamEvent) -> str:
     payload = dict(worker_event.payload or {})
     return str(
@@ -6275,7 +5952,3 @@ def _live_page(agent_run_id: int, *, native_provider: str = "codex", theme: str 
             icons_js_literal=_ICONS_JS_LITERAL,
         ),
     )
-
-
-def _legacy_live_page(agent_run_id: int) -> str:
-    return render_legacy_live_page(agent_run_id)

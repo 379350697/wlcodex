@@ -208,6 +208,10 @@ _ACTIVE_WORK_QUERIES: tuple[tuple[str, str], ...] = (
         "SELECT COUNT(*) FROM relay_workspace_queue_locks",
     ),
     (
+        "Relay workspace creation leases",
+        "SELECT COUNT(*) FROM relay_workspace_creation_leases",
+    ),
+    (
         "Relay completion claims",
         "SELECT COUNT(*) FROM relay_completion_claims WHERE status = 'claimed'",
     ),

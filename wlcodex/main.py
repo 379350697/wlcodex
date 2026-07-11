@@ -566,6 +566,7 @@ def _run_configured_runtime_retention_once(config: object) -> object:
         RuntimeRetentionPolicy,
         apply_retention_schema,
         initial_retention_migration_verified,
+        observe_native_turns_for_retention,
     )
     from wlcodex.maintenance import maintenance_window_status
 
@@ -607,6 +608,12 @@ def _run_configured_runtime_retention_once(config: object) -> object:
                 archive_retention_days=retention_config.archive_retention_days,
                 interval_seconds=retention_config.interval_seconds,
                 batch_size=retention_config.batch_size,
+            ),
+            # A stale local Native-session cache is not provider truth.  The
+            # scheduler makes a read-only ``thread/read`` observation once per
+            # pass and retains Codex frames when that observation is unknown.
+            native_turn_observer=lambda: asyncio.run(
+                observe_native_turns_for_retention(ledger._conn, config)
             ),
         )
         return retention.run(apply=True)

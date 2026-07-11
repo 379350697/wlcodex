@@ -188,6 +188,21 @@ class RetentionResult:
 
 
 @dataclass(frozen=True)
+class NativeTurnGuardObservation:
+    """Read-only provider truth protecting a scheduled archive pass.
+
+    A terminal observation overrides only the same cached turn id that was
+    inspected.  If a local turn changes before deletion, the ordinary local
+    guard takes precedence.  A failed read retains the whole session.
+    """
+
+    observed_codex_turns: tuple[tuple[str, str], ...] = ()
+    active_codex_turns: tuple[tuple[str, str], ...] = ()
+    unverified_codex_sessions: tuple[str, ...] = ()
+    all_codex_sessions_unverified: bool = False
+
+
+@dataclass(frozen=True)
 class ArchiveVerification:
     archive_count: int
     frame_count: int
@@ -336,6 +351,108 @@ async def _probe_native_turns(
     finally:
         await client.close()
     return results
+
+
+async def observe_native_turns_for_retention(
+    conn: sqlite3.Connection,
+    config: Any,
+) -> NativeTurnGuardObservation:
+    """Read active Codex turns for the periodic archive scheduler.
+
+    This is deliberately observation-only: it sends ``thread/read`` requests
+    to an already available daemon/app-server and never resumes, starts,
+    steers, interrupts, or projects a session.  Any connection or provider
+    ambiguity is raised to the scheduler wrapper, which then fails closed for
+    all Codex raw frames in that pass.
+    """
+
+    from wlcodex.codex_native.client import CodexNativeClient
+    from wlcodex.codex_native.controller import _active_turn_id, _latest_turn, _turns
+    from wlcodex.codex_native.transport import (
+        CodexAppServerWebSocketTransport,
+        CodexDaemonTransport,
+    )
+
+    rows = conn.execute(
+        """
+        SELECT native_thread_id, last_turn_id
+        FROM native_codex_sessions
+        WHERE lower(status) IN ('running', 'active', 'waiting_user',
+                                'waiting_approval', 'paused')
+          AND trim(native_thread_id) != ''
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    candidates = [
+        (str(row["native_thread_id"]), str(row["last_turn_id"] or "").strip())
+        for row in rows
+    ]
+    if not candidates:
+        return NativeTurnGuardObservation()
+
+    native_config = config.codex_native
+    configured_transport = str(native_config.transport or "daemon").strip().lower()
+    sock_path = native_config.sock_path.expanduser() if native_config.sock_path else None
+    if configured_transport in {"daemon", "proxy"} and sock_path is not None and sock_path.exists():
+        transport = CodexDaemonTransport(
+            binary=config.codex.binary,
+            sock_path=sock_path,
+            fallback_app_server=None,
+        )
+    else:
+        transport = CodexAppServerWebSocketTransport(
+            binary=config.codex.binary,
+            listen_endpoint=native_config.listen_endpoint,
+            connect_endpoint=native_config.listen_endpoint,
+            startup_timeout_seconds=config.backend.startup_timeout_seconds,
+            remote_control=native_config.remote_control,
+            spawn_process=False,
+        )
+    client = CodexNativeClient(
+        send_json=transport.send_json,
+        close=transport.close,
+        request_timeout_seconds=config.backend.request_timeout_seconds,
+        metadata=transport.describe,
+    )
+
+    async def on_message(message: dict[str, Any]) -> None:
+        await client.rpc.receive_message(message)
+
+    observed: list[tuple[str, str]] = []
+    active: list[tuple[str, str]] = []
+    unverified: list[str] = []
+    try:
+        await transport.start(on_message)
+        for native_thread_id, cached_turn_id in candidates:
+            try:
+                detail = await client.read_session(native_thread_id, include_turns=True)
+                active_turn_id = _active_turn_id(detail)
+                current_turn = _latest_turn(_turns(detail))
+                observed_status = ""
+                if isinstance(current_turn, dict):
+                    observed_status = str(current_turn.get("status") or "").strip().lower()
+                if not observed_status:
+                    thread = detail.get("thread")
+                    if isinstance(thread, dict):
+                        observed_status = str(thread.get("status") or "").strip().lower()
+                if active_turn_id:
+                    active.append((native_thread_id, active_turn_id))
+                elif observed_status in {
+                    "completed", "complete", "done", "failed", "error", "cancelled",
+                    "canceled", "interrupted", "aborted", "idle", "notloaded", "not_loaded",
+                }:
+                    observed.append((native_thread_id, cached_turn_id))
+                else:
+                    unverified.append(native_thread_id)
+            except Exception:
+                unverified.append(native_thread_id)
+    finally:
+        await client.close()
+    return NativeTurnGuardObservation(
+        observed_codex_turns=tuple(observed),
+        active_codex_turns=tuple(active),
+        unverified_codex_sessions=tuple(unverified),
+    )
 
 
 def _record_native_probe_connection_failure(
@@ -640,11 +757,14 @@ class RuntimeRawFrameRetention:
         policy: RuntimeRetentionPolicy,
         *,
         now: Callable[[], datetime] | None = None,
+        native_turn_observer: Callable[[], NativeTurnGuardObservation] | None = None,
     ) -> None:
         self._store = runtime_store
         self._conn: sqlite3.Connection = runtime_store._conn
         self._policy = policy
         self._now = now or (lambda: datetime.now(UTC))
+        self._native_turn_observer = native_turn_observer
+        self._native_turn_observation: NativeTurnGuardObservation | None = None
 
     def run(
         self,
@@ -669,6 +789,10 @@ class RuntimeRawFrameRetention:
             # forbidden.
             _assert_maintenance_quiescent(self._conn)
             assert_maintenance_window_ready(self._conn)
+        self._native_turn_observation = self._native_observation_for_run(
+            apply=apply,
+            require_maintenance=require_maintenance,
+        )
         now = _as_utc(self._now())
         cutoff = now - timedelta(days=self._policy.hot_retention_days)
         candidate_frames = 0
@@ -734,6 +858,74 @@ class RuntimeRawFrameRetention:
             purged_archives=purged,
             archived_bytes=archived_bytes,
             compacted=compacted,
+        )
+
+    def _native_observation_for_run(
+        self,
+        *,
+        apply: bool,
+        require_maintenance: bool,
+    ) -> NativeTurnGuardObservation | None:
+        if require_maintenance:
+            return self._maintenance_native_turn_observation()
+        if not apply or self._native_turn_observer is None:
+            return None
+        try:
+            return self._native_turn_observer()
+        except Exception as exc:
+            logger.warning(
+                "Native turn observation failed; retaining Codex raw frames: %s",
+                type(exc).__name__,
+            )
+            return NativeTurnGuardObservation(all_codex_sessions_unverified=True)
+
+    def _maintenance_native_turn_observation(self) -> NativeTurnGuardObservation:
+        """Use persisted maintenance probes rather than a stale UI cache."""
+
+        try:
+            window = self._conn.execute(
+                "SELECT opened_at FROM runtime_maintenance_window "
+                "WHERE singleton = 1 AND submissions_frozen = 1"
+            ).fetchone()
+            opened_at = str(window["opened_at"] or "") if window is not None else ""
+            if not opened_at:
+                return NativeTurnGuardObservation(all_codex_sessions_unverified=True)
+            rows = self._conn.execute(
+                """
+                SELECT candidate.native_thread_id, session.last_turn_id, probe.verdict,
+                       probe.native_turn_id
+                FROM runtime_maintenance_native_turn_candidates AS candidate
+                LEFT JOIN native_codex_sessions AS session
+                  ON session.native_thread_id = candidate.native_thread_id
+                LEFT JOIN runtime_maintenance_native_turn_probes AS probe
+                  ON probe.maintenance_opened_at = candidate.maintenance_opened_at
+                 AND probe.provider = candidate.provider
+                 AND probe.native_thread_id = candidate.native_thread_id
+                WHERE candidate.maintenance_opened_at = ?
+                  AND candidate.provider = 'codex'
+                """,
+                (opened_at,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return NativeTurnGuardObservation(all_codex_sessions_unverified=True)
+        observed: list[tuple[str, str]] = []
+        active: list[tuple[str, str]] = []
+        unverified: list[str] = []
+        for row in rows:
+            thread_id = str(row["native_thread_id"] or "").strip()
+            verdict = str(row["verdict"] or "").strip().lower()
+            if not thread_id:
+                continue
+            if verdict == "terminal":
+                observed.append((thread_id, str(row["last_turn_id"] or "").strip()))
+            elif verdict == "active":
+                active.append((thread_id, str(row["native_turn_id"] or "").strip()))
+            else:
+                unverified.append(thread_id)
+        return NativeTurnGuardObservation(
+            observed_codex_turns=tuple(observed),
+            active_codex_turns=tuple(active),
+            unverified_codex_sessions=tuple(unverified),
         )
 
     def compact(self) -> CompactResult:
@@ -945,6 +1137,20 @@ class RuntimeRawFrameRetention:
             else:
                 active_sessions_without_turn.add(session_identity)
 
+        observation = self._native_turn_observation
+        observed_codex_turns = (
+            dict(observation.observed_codex_turns) if observation is not None else {}
+        )
+        observed_active_codex_turns = (
+            dict(observation.active_codex_turns) if observation is not None else {}
+        )
+        unverified_codex_sessions = (
+            set(observation.unverified_codex_sessions) if observation is not None else set()
+        )
+        all_codex_sessions_unverified = bool(
+            observation is not None and observation.all_codex_sessions_unverified
+        )
+
         try:
             rows = self._conn.execute(
                 f"""
@@ -976,11 +1182,35 @@ class RuntimeRawFrameRetention:
         except sqlite3.OperationalError:
             codex_rows = []
         for row in codex_rows:
+            native_thread_id = str(row["native_thread_id"])
+            cached_turn_id = str(row["last_turn_id"] or "").strip()
+            if all_codex_sessions_unverified or native_thread_id in unverified_codex_sessions:
+                add_row(
+                    provider="codex",
+                    provider_engine="app-server",
+                    native_session_id=native_thread_id,
+                    native_turn_id="",
+                )
+                continue
+            if native_thread_id in observed_active_codex_turns:
+                active_turn_id = observed_active_codex_turns[native_thread_id]
+                add_row(
+                    provider="codex",
+                    provider_engine="app-server",
+                    native_session_id=native_thread_id,
+                    native_turn_id=active_turn_id,
+                )
+                continue
+            observed_turn_id = observed_codex_turns.get(native_thread_id)
+            if observed_turn_id is not None and observed_turn_id == cached_turn_id:
+                # The provider confirmed this exact cached turn is terminal.
+                # A later local turn id will not match and remains protected.
+                continue
             add_row(
                 provider="codex",
                 provider_engine="app-server",
-                native_session_id=str(row["native_thread_id"]),
-                native_turn_id=row["last_turn_id"],
+                native_session_id=native_thread_id,
+                native_turn_id=cached_turn_id,
             )
         return active_turns, active_sessions_without_turn
 

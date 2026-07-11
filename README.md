@@ -69,6 +69,9 @@ scheduled_apply_enabled = false
 首次大历史迁移必须在维护窗口中完成；不要在 GET、启动恢复或普通后台请求中做。
 即使误把 `scheduled_apply_enabled` 设为 `true`，scheduler 在维护窗口 `apply` 成功且
 archive `verify` 通过、持久化首迁完成标记前也只会拒绝运行，不会开始清理历史库。
+新部署仍应从 `false` 开始；本仓库当前正式运行配置已完成首迁校验，因此显式设为
+`true`，每 6 小时执行一次只读 Native turn 探测后再处理到期 raw frame。探测失败或
+状态不明时，该次会 fail-closed，保留对应 Codex frame，不会按缓存状态猜测删除。
 完整的 dry-run、apply、verify、compact、`VACUUM INTO`、原子交换和回滚流程见
 [Raw frame 维护手册](docs/operations/raw-frame-retention.md)。
 

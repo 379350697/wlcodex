@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -47,6 +48,69 @@ class RelayStore:
         assert_open = getattr(self._ledger, "assert_submissions_open", None)
         if callable(assert_open):
             assert_open()
+
+    def claim_workspace_creation_lease(
+        self,
+        workspace: str,
+        *,
+        lease_owner: str,
+        lease_seconds: int = 300,
+    ) -> bool:
+        """Claim a short, cross-process workspace creation lease.
+
+        The transaction contains only the lease mutation.  Callers must
+        release it in ``finally`` and must not keep a database transaction open
+        while interrupting a provider-owned task.
+        """
+
+        clean_workspace = str(workspace or "").strip()
+        clean_owner = str(lease_owner or "").strip()
+        if not clean_workspace or not clean_owner:
+            raise ValueError("workspace and lease_owner are required")
+        now = datetime.now(timezone.utc)
+        now_value = now.isoformat()
+        expires_at = (now + timedelta(seconds=max(1, int(lease_seconds)))).isoformat()
+        conn = self._ledger._conn
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                return False
+            raise
+        try:
+            conn.execute(
+                "DELETE FROM relay_workspace_creation_leases "
+                "WHERE workspace = ? AND lease_expires_at <= ?",
+                (clean_workspace, now_value),
+            )
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO relay_workspace_creation_leases (
+                    workspace, lease_owner, lease_expires_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (clean_workspace, clean_owner, expires_at, now_value, now_value),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                return False
+            raise
+        except Exception:
+            conn.rollback()
+            raise
+
+    def release_workspace_creation_lease(self, workspace: str, *, lease_owner: str) -> None:
+        """Release only the lease owned by this request."""
+
+        self._ledger._conn.execute(
+            "DELETE FROM relay_workspace_creation_leases "
+            "WHERE workspace = ? AND lease_owner = ?",
+            (str(workspace or "").strip(), str(lease_owner or "").strip()),
+        )
+        self._ledger._conn.commit()
 
     def create_task(
         self,

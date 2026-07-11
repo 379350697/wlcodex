@@ -11,3 +11,11 @@ class ActiveRelayTasksDecisionRequired(ValueError):
     def __init__(self, tasks: list[Any]) -> None:
         super().__init__("active Relay tasks require an explicit new-task decision")
         self.tasks = list(tasks)
+
+
+class RelayWorkspaceCreationInProgress(RuntimeError):
+    """Another process is deciding how to create work in this workspace."""
+
+    def __init__(self, workspace: str) -> None:
+        super().__init__("workspace task creation is already in progress; retry shortly")
+        self.workspace = str(workspace)

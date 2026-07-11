@@ -17,6 +17,7 @@ from wlcodex.relay.service import (
     _plain_followup_visible_text,
     _provider_approval_confirmation_kind,
 )
+from wlcodex.relay.errors import RelayWorkspaceCreationInProgress
 from wlcodex.relay.store import RelayStore
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_events import (
@@ -270,6 +271,52 @@ def _service(tmp_path) -> tuple[RelayService, FakeProvider]:
         default_provider="claude",
     )
     return service, provider
+
+
+@pytest.mark.asyncio
+async def test_workspace_creation_lease_is_exclusive_across_service_processes(tmp_path) -> None:
+    """A second service instance must not race the new-task disposition."""
+
+    first_ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    first_ledger.migrate()
+    second_ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    first = RelayService(
+        store=RelayStore(first_ledger),
+        registry=NativeAgentRegistry([FakeProvider()]),
+        default_provider="claude",
+    )
+    second = RelayService(
+        store=RelayStore(second_ledger),
+        registry=NativeAgentRegistry([FakeProvider()]),
+        default_provider="claude",
+    )
+    workspace = "/shared-workspace"
+    assert first._store.claim_workspace_creation_lease(
+        workspace,
+        lease_owner="other-process",
+    )
+
+    with pytest.raises(RelayWorkspaceCreationInProgress):
+        await second.create_task_after_workspace_decision(
+            title="must retry",
+            prompt="do not create",
+            workspace=workspace,
+            provider="claude",
+            active_task_policy="continue_background",
+        )
+
+    assert first._store._ledger._conn.execute(
+        "SELECT COUNT(*) FROM team_runs WHERE route = 'relay'"
+    ).fetchone()[0] == 0
+    first._store.release_workspace_creation_lease(workspace, lease_owner="other-process")
+    task = await second.create_task_after_workspace_decision(
+        title="created after lease release",
+        prompt="create once",
+        workspace=workspace,
+        provider="claude",
+        active_task_policy="continue_background",
+    )
+    assert task.workspace == workspace
 
 
 @pytest.mark.asyncio

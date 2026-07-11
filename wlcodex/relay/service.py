@@ -8,7 +8,10 @@ from typing import Any
 from uuid import uuid4
 
 from wlcodex.live_stream.models import stream_event_from_runtime
-from wlcodex.relay.errors import ActiveRelayTasksDecisionRequired
+from wlcodex.relay.errors import (
+    ActiveRelayTasksDecisionRequired,
+    RelayWorkspaceCreationInProgress,
+)
 from wlcodex.relay.context import build_role_context_packet
 from wlcodex.relay.display import (
     followup_response_display_text,
@@ -629,18 +632,30 @@ class RelayService:
         if policy and policy not in {"continue_background", "interrupt_active"}:
             raise ValueError("active_task_policy must be continue_background or interrupt_active")
         async with self._workspace_creation_lock(workspace):
-            active_tasks = self.active_workspace_tasks_readonly(workspace)
-            if active_tasks and not policy:
-                raise ActiveRelayTasksDecisionRequired(active_tasks)
-            if active_tasks and policy == "interrupt_active":
-                for summary in active_tasks:
-                    await self.interrupt(int(summary.task_id))
-                remaining = self.active_workspace_tasks_readonly(workspace)
-                if remaining:
-                    raise RuntimeError(
-                        "existing Relay tasks could not be verified as interrupted"
-                    )
-            return self.create_task(**create_kwargs)
+            lease_owner = f"relay-create-{uuid4().hex}"
+            claim_lease = getattr(self._store, "claim_workspace_creation_lease", None)
+            release_lease = getattr(self._store, "release_workspace_creation_lease", None)
+            if callable(claim_lease) and not claim_lease(
+                workspace,
+                lease_owner=lease_owner,
+            ):
+                raise RelayWorkspaceCreationInProgress(workspace)
+            try:
+                active_tasks = self.active_workspace_tasks_readonly(workspace)
+                if active_tasks and not policy:
+                    raise ActiveRelayTasksDecisionRequired(active_tasks)
+                if active_tasks and policy == "interrupt_active":
+                    for summary in active_tasks:
+                        await self.interrupt(int(summary.task_id))
+                    remaining = self.active_workspace_tasks_readonly(workspace)
+                    if remaining:
+                        raise RuntimeError(
+                            "existing Relay tasks could not be verified as interrupted"
+                        )
+                return self.create_task(**create_kwargs)
+            finally:
+                if callable(release_lease):
+                    release_lease(workspace, lease_owner=lease_owner)
 
     def create_task(
         self,

@@ -20,7 +20,9 @@ hot_retention_days = 7
 archive_retention_days = 90
 interval_seconds = 21600
 batch_size = 250
-scheduled_apply_enabled = false
+# The initial historical migration was verified on 2026-07-10.  Keep the
+# ordinary 7-day retention pass running after that one-off maintenance window.
+scheduled_apply_enabled = true
 
 [display]
 status_update_min_interval_seconds = 2

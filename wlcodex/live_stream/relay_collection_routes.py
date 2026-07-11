@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from wlcodex.relay.errors import ActiveRelayTasksDecisionRequired
+from wlcodex.relay.errors import (
+    ActiveRelayTasksDecisionRequired,
+    RelayWorkspaceCreationInProgress,
+)
 
 
 async def handle_relay_collection_route(
@@ -180,6 +183,18 @@ async def handle_relay_collection_route(
                 "code": "active_tasks_require_decision",
                 "active_tasks": [summary.to_dict() for summary in exc.tasks],
                 "allowed_policies": ["continue_background", "interrupt_active"],
+            },
+        )
+        return True
+    except RelayWorkspaceCreationInProgress as exc:
+        abandon_mutation(mutation)
+        await send_json(
+            writer,
+            409,
+            {
+                "error": str(exc),
+                "code": "workspace_creation_in_progress",
+                "retryable": True,
             },
         )
         return True

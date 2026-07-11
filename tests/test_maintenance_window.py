@@ -50,6 +50,20 @@ def test_maintenance_begin_freezes_new_relay_submissions_until_cancelled(tmp_pat
     store.assert_submissions_open()
 
 
+def test_workspace_creation_lease_blocks_maintenance_readiness(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    store = RelayStore(ledger)
+    assert store.claim_workspace_creation_lease("/repo", lease_owner="request-in-flight")
+
+    status = ledger.begin_maintenance_window()
+
+    assert status.active_work == {"Relay workspace creation leases": 1}
+    with pytest.raises(MaintenanceWindowError, match="workspace creation leases"):
+        assert_maintenance_window_ready(ledger._conn)
+    store.release_workspace_creation_lease("/repo", lease_owner="request-in-flight")
+    assert assert_maintenance_window_ready(ledger._conn).active_work == {}
+
+
 def test_historical_native_sessions_do_not_block_maintenance_drain(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path)
     _native_session(ledger, "not-loaded", status="notLoaded")

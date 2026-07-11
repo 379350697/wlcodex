@@ -644,6 +644,22 @@ class Ledger:
             CREATE INDEX IF NOT EXISTS idx_relay_workspace_queue_locks_expiry
                 ON relay_workspace_queue_locks(lease_expires_at, workspace);
 
+            -- Task creation needs the same cross-process workspace fence as
+            -- queued follow-ups.  This lease covers only the short critical
+            -- section from observing active work through an optional verified
+            -- interrupt and durable task creation; provider calls never run
+            -- inside its SQLite transaction.
+            CREATE TABLE IF NOT EXISTS relay_workspace_creation_leases (
+                workspace TEXT PRIMARY KEY,
+                lease_owner TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relay_workspace_creation_leases_expiry
+                ON relay_workspace_creation_leases(lease_expires_at, workspace);
+
             -- Archiving is a view preference, not a lifecycle transition.
             -- It hides a finished or stale Relay task from the default inbox
             -- while retaining every task, event, artifact and timeline row.

@@ -16,6 +16,7 @@ from wlcodex.db import Ledger
 from wlcodex.maintenance import MaintenanceWindowError
 from wlcodex.runtime_event_store import RuntimeEventStore
 from wlcodex.runtime_raw_frame_retention import (
+    NativeTurnGuardObservation,
     RawFrameArchiveError,
     RuntimeRawFrameRetention,
     RuntimeRetentionPolicy,
@@ -461,6 +462,82 @@ def test_active_native_turn_does_not_pin_prior_turns_in_the_same_session(
     }
     assert store._conn.execute(
         "SELECT 1 FROM provider_raw_frames WHERE id = ?", (active.id,)
+    ).fetchone()
+
+
+def test_provider_terminal_observation_releases_only_the_observed_stale_turn(
+    tmp_path: Path,
+) -> None:
+    """Periodic retention must prefer fresh provider truth over stale cache."""
+
+    store = _store(tmp_path)
+    store._conn.execute(
+        """
+        INSERT INTO native_codex_sessions (
+            native_thread_id, agent_run_id, conversation_id, status, last_turn_id,
+            created_at, updated_at
+        ) VALUES ('thread-terminal', 1, 1, 'running', 'old-turn', ?, ?)
+        """,
+        (NOW.isoformat(), NOW.isoformat()),
+    )
+    store._conn.commit()
+    frame = store.append_provider_raw_frame(
+        provider="codex",
+        provider_engine="app-server",
+        native_session_id="thread-terminal",
+        native_turn_id="old-turn",
+        sequence=1,
+        raw_kind="codex.event",
+        raw_payload={"delta": "complete"},
+        occurred_at=(NOW - timedelta(days=8)).isoformat(),
+    )
+    retention = RuntimeRawFrameRetention(
+        store,
+        RuntimeRetentionPolicy(archive_dir=tmp_path / "provider-raw-frame-archives"),
+        now=lambda: NOW,
+        native_turn_observer=lambda: NativeTurnGuardObservation(
+            observed_codex_turns=(("thread-terminal", "old-turn"),),
+        ),
+    )
+
+    assert retention.run(apply=True).archived_frames == 1
+    assert store.get_provider_raw_frame(frame.id).id == frame.id
+
+
+def test_unverified_provider_observation_keeps_native_raw_frames_hot(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store._conn.execute(
+        """
+        INSERT INTO native_codex_sessions (
+            native_thread_id, agent_run_id, conversation_id, status, last_turn_id,
+            created_at, updated_at
+        ) VALUES ('thread-unknown', 1, 1, 'running', 'unknown-turn', ?, ?)
+        """,
+        (NOW.isoformat(), NOW.isoformat()),
+    )
+    store._conn.commit()
+    frame = store.append_provider_raw_frame(
+        provider="codex",
+        provider_engine="app-server",
+        native_session_id="thread-unknown",
+        native_turn_id="unknown-turn",
+        sequence=1,
+        raw_kind="codex.event",
+        raw_payload={"delta": "waiting"},
+        occurred_at=(NOW - timedelta(days=8)).isoformat(),
+    )
+    retention = RuntimeRawFrameRetention(
+        store,
+        RuntimeRetentionPolicy(archive_dir=tmp_path / "provider-raw-frame-archives"),
+        now=lambda: NOW,
+        native_turn_observer=lambda: NativeTurnGuardObservation(
+            unverified_codex_sessions=("thread-unknown",),
+        ),
+    )
+
+    assert retention.run(apply=True).skipped_active_frames == 1
+    assert store._conn.execute(
+        "SELECT 1 FROM provider_raw_frames WHERE id = ?", (frame.id,)
     ).fetchone()
 
 
