@@ -24,6 +24,8 @@ scheduled_apply_enabled = false
   任何中断都不能形成“先删后归档”。
 - manifest 记录 archive ID、格式版本、路径、SHA-256、frame 数量、ID/时间范围
   和到期时间；索引让按 frame ID 的读取先查热库、再回查归档，语义保持一致。
+- `verify` 与按 frame ID 回查均流式读取 gzip JSONL；首次大历史迁移的归档校验
+  不会把整份 archive 或它的 index 一次性装入内存。
 - sequence cursor 不依赖热表 `MAX(sequence)`，因此归档后序列仍连续。
 - 活跃 agent run 或活跃 Native turn 的 frame 必须跳过，留在热库等待下一轮。
 - archive 超过 90 天后可由 retention worker 清理；语义摘要和其他运行证据不清理。

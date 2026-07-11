@@ -732,7 +732,13 @@ class RuntimeRawFrameRetention:
         )
 
     def verify(self) -> ArchiveVerification:
-        """Verify every indexed archive file and its frame index."""
+        """Verify every indexed archive file and its frame index.
+
+        Archives are deliberately allowed to contain a large historical
+        migration.  Do not materialize either the decompressed JSONL payload
+        or its SQLite index here: verification is an operational safety gate,
+        so it must remain usable on the very database it is meant to protect.
+        """
 
         errors: list[str] = []
         archive_count = 0
@@ -762,43 +768,44 @@ class RuntimeRawFrameRetention:
                     fields=_ARCHIVE_MANIFEST_FIELDS,
                     context="sidecar manifest does not match SQLite manifest",
                 )
-                records = _read_archive_records(
-                    archive_path,
-                    expected_archive_id=archive_id,
+                expected_count = int(manifest["frame_count"])
+                index_rows = self._conn.execute(
+                    """
+                    SELECT frame_id, archive_line
+                    FROM provider_raw_frame_archive_index
+                    WHERE archive_id = ?
+                    ORDER BY archive_line
+                    """,
+                    (archive_id,),
                 )
+                indexed = iter(index_rows)
+                found_count = 0
+                for expected_line, record in enumerate(
+                    _iter_archive_records(archive_path, expected_archive_id=archive_id), start=1
+                ):
+                    found_count = expected_line
+                    index = next(indexed, None)
+                    if index is None:
+                        raise RawFrameArchiveError(
+                            f"archive index ends before archive line {expected_line}"
+                        )
+                    if int(index["archive_line"]) != expected_line or int(
+                        index["frame_id"]
+                    ) != int(record["id"]):
+                        raise RawFrameArchiveError(
+                            f"archive index mismatch at line {expected_line}"
+                        )
+                if found_count != expected_count:
+                    raise RawFrameArchiveError(
+                        f"expected {expected_count} frames, found {found_count}"
+                    )
+                extra_index = next(indexed, None)
+                if extra_index is not None:
+                    raise RawFrameArchiveError("archive index has rows beyond archive payload")
             except RawFrameArchiveError as exc:
                 errors.append(f"{archive_id}: {exc}")
                 continue
-            expected_count = int(manifest["frame_count"])
-            if len(records) != expected_count:
-                errors.append(
-                    f"{archive_id}: expected {expected_count} frames, found {len(records)}"
-                )
-                continue
-            index_rows = self._conn.execute(
-                """
-                SELECT frame_id, archive_line
-                FROM provider_raw_frame_archive_index
-                WHERE archive_id = ?
-                ORDER BY archive_line
-                """,
-                (archive_id,),
-            ).fetchall()
-            if len(index_rows) != len(records):
-                errors.append(
-                    f"{archive_id}: index count {len(index_rows)} does not match archive"
-                )
-                continue
-            for expected_line, (record, index) in enumerate(
-                zip(records, index_rows, strict=True), start=1
-            ):
-                if int(index["archive_line"]) != expected_line or int(index["frame_id"]) != int(
-                    record["id"]
-                ):
-                    errors.append(f"{archive_id}: archive index mismatch at line {expected_line}")
-                    break
-            else:
-                frame_count += len(records)
+            frame_count += found_count
         return ArchiveVerification(archive_count, frame_count, tuple(errors))
 
     def _eligible_frame_page(
@@ -1284,9 +1291,10 @@ def read_archived_provider_raw_frame(
             expected_archive_id=archive_id,
             expected_relative_path=str(row["relative_path"]),
         )
-        records = _read_archive_records(
+        record = _read_archive_record_at(
             archive_path,
             expected_archive_id=archive_id,
+            line_number=int(row["archive_line"]),
         )
     except RawFrameArchiveError:
         # A reader can race the retention worker between its initial SQLite
@@ -1296,10 +1304,6 @@ def read_archived_provider_raw_frame(
         if _archive_is_retired_or_missing(conn, archive_id):
             return None
         raise
-    line = int(row["archive_line"])
-    if line <= 0 or line > len(records):
-        raise RawFrameArchiveError(f"indexed archive line {line} is out of range")
-    record = records[line - 1]
     if int(record.get("id", -1)) != frame_id:
         raise RawFrameArchiveError("archive index points to a different frame")
     raw_payload = record.get("raw_payload")
@@ -1377,7 +1381,11 @@ def _ensure_archive_files(
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     expected_archive_id = str(manifest["archive_id"])
     if archive_path.exists():
-        _read_archive_records(archive_path, expected_archive_id=expected_archive_id)
+        # A retry can encounter an archive left by a crash after the durable
+        # file write.  Validate it without allocating the whole historical
+        # payload before deciding whether it can be reused.
+        for _ in _iter_archive_records(archive_path, expected_archive_id=expected_archive_id):
+            pass
     else:
         _atomic_write_gzip(archive_path, raw_bytes)
     manifest_path = _manifest_path(archive_path)
@@ -1473,26 +1481,65 @@ def _read_archive_records(
     *,
     expected_archive_id: str,
 ) -> list[dict[str, Any]]:
+    """Compatibility helper for callers that genuinely need every record.
+
+    Production verification and indexed reads use the streaming helpers
+    below.  Keeping this wrapper makes the format helper convenient in small
+    tests without making a multi-GB archive a mandatory in-memory object.
+    """
+
+    return list(_iter_archive_records(archive_path, expected_archive_id=expected_archive_id))
+
+
+def _iter_archive_records(
+    archive_path: Path,
+    *,
+    expected_archive_id: str,
+) -> Iterable[dict[str, Any]]:
+    """Yield archive records while validating the uncompressed payload hash."""
+
     if not archive_path.is_file():
         raise RawFrameArchiveError(f"archive file is missing: {archive_path}")
+    digest = hashlib.sha256()
     try:
         with gzip.open(archive_path, "rb") as handle:
-            raw_bytes = handle.read()
+            for line_number, line in enumerate(handle, start=1):
+                digest.update(line)
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise RawFrameArchiveError(
+                        f"invalid JSON at archive line {line_number}"
+                    ) from exc
+                if not isinstance(record, dict):
+                    raise RawFrameArchiveError(f"archive line {line_number} is not an object")
+                yield record
     except (OSError, EOFError) as exc:
         raise RawFrameArchiveError(f"cannot read gzip archive: {archive_path}") from exc
-    actual_archive_id = hashlib.sha256(raw_bytes).hexdigest()
+    actual_archive_id = digest.hexdigest()
     if actual_archive_id != expected_archive_id:
         raise RawFrameArchiveError("archive sha256 does not match manifest")
-    records: list[dict[str, Any]] = []
-    for line_number, line in enumerate(raw_bytes.splitlines(), start=1):
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise RawFrameArchiveError(f"invalid JSON at archive line {line_number}") from exc
-        if not isinstance(record, dict):
-            raise RawFrameArchiveError(f"archive line {line_number} is not an object")
-        records.append(record)
-    return records
+
+
+def _read_archive_record_at(
+    archive_path: Path,
+    *,
+    expected_archive_id: str,
+    line_number: int,
+) -> dict[str, Any]:
+    """Return one indexed record while still validating the entire archive."""
+
+    if line_number <= 0:
+        raise RawFrameArchiveError(f"indexed archive line {line_number} is out of range")
+    selected: dict[str, Any] | None = None
+    for current_line, record in enumerate(
+        _iter_archive_records(archive_path, expected_archive_id=expected_archive_id), start=1
+    ):
+        if current_line == line_number:
+            selected = record
+    if selected is None:
+        raise RawFrameArchiveError(f"indexed archive line {line_number} is out of range")
+    return selected
 
 
 def _archive_relative_path(

@@ -611,10 +611,27 @@ def test_archived_frame_read_race_with_purge_is_consistently_absent(
         store._conn.commit()
         raise RawFrameArchiveError("archive file disappeared during read")
 
-    monkeypatch.setattr(retention_module, "_read_archive_records", retire_during_read)
+    monkeypatch.setattr(retention_module, "_read_archive_record_at", retire_during_read)
 
     with pytest.raises(KeyError):
         store.get_provider_raw_frame(frame.id)
+
+
+def test_verify_streams_archive_records_without_list_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    _append_frame(store, occurred_at=NOW - timedelta(days=8))
+    retention = _retention(store, tmp_path)
+    retention.run(apply=True)
+
+    def list_materialization_is_forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("verify must stream archive records")
+
+    monkeypatch.setattr(retention_module, "_read_archive_records", list_materialization_is_forbidden)
+
+    assert retention.verify().ok is True
 
 
 def test_verify_rejects_a_sidecar_manifest_with_a_wrong_payload_hash(tmp_path: Path) -> None:
