@@ -89,6 +89,7 @@ from wlcodex.live_stream.relay_composer import (
     _marvis_relay_workspace_dock,
 )
 from wlcodex.live_stream.relay_chat_page import render_relay_chat_home_page
+from wlcodex.live_stream.relay_conversation_view import render_conversation_rows
 from wlcodex.live_stream.relay_config_page import render_relay_config_page
 from wlcodex.live_stream.relay_list_views import (
     marvis_relay_avatar_html as _marvis_relay_avatar_html,
@@ -11001,101 +11002,21 @@ def _marvis_relay_conversation_html(
         artifacts=artifacts,
     )
     rows = _marvis_chat_rows_from_relay_rows(rows)
-    if not rows:
-        if any(
-            str(getattr(job, "status", "") or "") in {"queued", "streaming"} for job in role_jobs
-        ):
-            return _marvis_relay_waiting_message_html()
-        return _marvis_relay_empty_conversation_html()
-    current_round_id = _relay_current_round_id_from_artifacts(artifacts)
-
-    def is_current_round_row(row: dict[str, str]) -> bool:
-        round_id = str(row.get("round_id") or "").strip()
-        return not round_id or round_id == current_round_id
-
-    html_rows: list[str] = []
-    previous_role = ""
-    previous_round_id = ""
-    handoffs_by_role: dict[str, list[dict[str, str]]] = {}
-    for row in rows:
-        if str(row.get("kind") or "") != "handoff":
-            continue
-        if not is_current_round_row(row):
-            continue
-        to_role = str(row.get("to_role") or row.get("role") or "")
-        if to_role:
-            handoffs_by_role.setdefault(to_role, []).append(row)
-    rendered_handoffs: set[str] = set()
-    rendered_handoff_identities: set[tuple[str, str, str, str]] = set()
-
-    def append_handoff_once(handoff: dict[str, str]) -> bool:
-        if not is_current_round_row(handoff):
-            return False
-        key = str(handoff.get("key") or "")
-        pair = _marvis_relay_handoff_pair(handoff)
-        if pair is None:
-            return False
-        identity = _marvis_relay_handoff_identity(handoff)
-        if identity in rendered_handoff_identities:
-            return True
-        if key and key in rendered_handoffs:
-            return True
-        html = _marvis_relay_handoff_html(handoff)
-        if not html:
-            return False
-        html_rows.append(html)
-        rendered_handoff_identities.add(identity)
-        if key:
-            rendered_handoffs.add(key)
-        return True
-
-    for row in rows:
-        role = str(row.get("role") or "")
-        kind = str(row.get("kind") or "")
-        row_round_id = str(row.get("round_id") or current_round_id)
-        if row_round_id != previous_round_id:
-            previous_role = ""
-            previous_round_id = row_round_id
-        if kind == "handoff":
-            if is_current_round_row(row):
-                append_handoff_once(row)
-            continue
-        if kind == "user_message":
-            html_rows.append(_marvis_relay_message_html(row))
-            previous_role = ""
-            continue
-        if kind == "role_process" and not is_current_round_row(row):
-            continue
-        if role:
-            for handoff in handoffs_by_role.get(role, []):
-                append_handoff_once(handoff)
-        if kind in {"role_envelope", "role_process"} and previous_role and role and role != previous_role:
-            for handoff in handoffs_by_role.get(role, []):
-                if _marvis_relay_handoff_pair(handoff) == (previous_role, role):
-                    append_handoff_once(handoff)
-        if (
-            kind in {"role_envelope", "role_process"}
-            and is_current_round_row(row)
-            and previous_role == "director"
-            and role
-            and role != "director"
-            and _marvis_relay_handoff_identity({**row, "from_role": previous_role, "to_role": role})
-            not in rendered_handoff_identities
-        ):
-            synthetic_key = f"synthetic-handoff:{previous_role}:{role}"
-            append_handoff_once(
-                {
-                    "from_role": previous_role,
-                    "to_role": role,
-                    "role": role,
-                    "round_id": str(row.get("round_id") or ""),
-                    "key": synthetic_key,
-                }
-            )
-        html_rows.append(_marvis_relay_message_html(row))
-        if kind in {"role_envelope", "role_process"}:
-            previous_role = role
-    return "\n".join(html_rows)
+    waiting_html = (
+        _marvis_relay_waiting_message_html()
+        if any(str(getattr(job, "status", "") or "") in {"queued", "streaming"} for job in role_jobs)
+        else ""
+    )
+    return render_conversation_rows(
+        rows,
+        current_round_id=_relay_current_round_id_from_artifacts(artifacts),
+        empty_html=_marvis_relay_empty_conversation_html(),
+        waiting_html=waiting_html,
+        render_handoff=_marvis_relay_handoff_html,
+        render_message=_marvis_relay_message_html,
+        handoff_pair=_marvis_relay_handoff_pair,
+        handoff_identity=_marvis_relay_handoff_identity,
+    )
 
 
 def _marvis_relay_handoff_html(row: dict[str, str]) -> str:
