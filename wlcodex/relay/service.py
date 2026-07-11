@@ -104,6 +104,19 @@ _HIGH_RISK_INTENT_KEYWORDS = (
 _RELAY_MAX_TEXT_ATTACHMENTS = 5
 _RELAY_MAX_TEXT_ATTACHMENT_CHARS = 80_000
 _RELAY_MAX_TOTAL_TEXT_ATTACHMENT_CHARS = 180_000
+# A dispatch claim protects an external provider side effect. A second worker
+# must never retake it while the first may still be inside ``start_session``.
+_RELAY_DISPATCH_CLAIM_STALE_SECONDS = 300
+
+
+def _role_requires_indeterminate_provider_override(job: Any) -> bool:
+    """Whether resuming this role could duplicate an unverified side effect."""
+
+    message = str(getattr(job, "error_message", "") or "")
+    return (
+        "派发结果无法验证：" in message
+        or "任务只完成了部分中断：" in message
+    )
 
 
 def _relay_clean_image_attachments(
@@ -823,7 +836,32 @@ class RelayService:
         self._store.lifecycle.sync_legacy_projection(task_id)
         runtime_store = runtime_store or RuntimeEventStore(self._store._ledger._conn)
         round_id = self._store.current_round_id(task_id)
-        changed = self._recover_inflight_provider_native_approval(
+        quarantined_dispatch_roles = self._store.lifecycle.quarantine_stale_unverified_dispatches(
+            task_id,
+            round_id,
+            stale_after_seconds=_RELAY_DISPATCH_CLAIM_STALE_SECONDS,
+        )
+        dispatch_quarantined = False
+        for role in quarantined_dispatch_roles:
+            reason = (
+                "派发结果无法验证：服务可能在 Provider 接受启动后崩溃。"
+                "为避免重复执行，系统未自动重派；请先检查 Provider 侧证据。"
+            )
+            self._block_role_with_error(
+                task_id,
+                role,
+                reason,
+                retry_kind="dispatch_indeterminate",
+                guardrail_action="manual_provider_verification_required",
+            )
+            self._events.emit(
+                task_id,
+                "dispatch.indeterminate",
+                role=role,
+                payload={"role": role, "round_id": round_id, "error": reason},
+            )
+            dispatch_quarantined = True
+        changed = dispatch_quarantined or self._recover_inflight_provider_native_approval(
             task_id,
             round_id,
             runtime_store,
@@ -1071,7 +1109,14 @@ class RelayService:
     def role_for_agent_run(self, agent_run_id: int) -> tuple[int, str] | None:
         return self._store.find_role_by_agent_run_id(agent_run_id)
 
-    async def resume_role(self, task_id: int, role: str, *, force: bool = False) -> None:
+    async def resume_role(
+        self,
+        task_id: int,
+        role: str,
+        *,
+        force: bool = False,
+        override_indeterminate_provider_state: bool = False,
+    ) -> None:
         self._store.assert_submissions_open()
         if role not in RELAY_ROLE_IDS:
             raise ValueError(f"unknown relay role: {role}")
@@ -1090,6 +1135,11 @@ class RelayService:
         job = next((candidate for candidate in detail.role_jobs if candidate.role == role), None)
         if job is None:
             raise ValueError(f"unknown relay role: {role}")
+        if _role_requires_indeterminate_provider_override(job) and not override_indeterminate_provider_state:
+            raise ValueError(
+                "provider state is indeterminate; verify provider-side evidence and "
+                "set override_indeterminate_provider_state=true before creating a new turn"
+            )
         if job.status in {"streaming", "queued"} and not force:
             return
         self._store.update_task_status(task_id, "running")
@@ -1115,13 +1165,38 @@ class RelayService:
         role: str,
         *,
         prefer_continue: bool = True,
-    ) -> None:
+    ) -> bool:
+        """Start exactly one provider attempt for a queued Relay role.
+
+        The claim is acquired before constructing a context packet or calling
+        a provider. Browser retries, lifecycle replay, and concurrent workers
+        therefore cannot create a second native session for one attempt.
+        """
+
+        try:
+            self._store.assert_submissions_open()
+        except RuntimeError:
+            # This can be a dispatch scheduled immediately before maintenance
+            # began. Leave it queued; no background path may start a new turn.
+            return False
         detail = self._store.get_task_detail(task_id)
         round_id = int(getattr(detail, "current_round_id", 1) or 1)
         job = next(
             (candidate for candidate in detail.role_jobs if candidate.role == role),
             None,
         )
+        if job is None:
+            raise ValueError(f"unknown relay role: {role}")
+        # Direct service callers may start an untouched role for the first
+        # time. Product flows queue handoffs explicitly, but preserving this
+        # narrow idle-to-queued transition keeps that compatible without ever
+        # reopening a live role for a second provider dispatch.
+        if job.status == "idle":
+            self._store.update_role_status(task_id, role, "queued")
+        elif job.status != "queued":
+            return False
+        if not self._store.lifecycle.claim_queued_attempt_dispatch(task_id, round_id, role):
+            return False
         provider_name = (
             detail.task.role_providers.get(role) or detail.task.provider or self._default_provider
         )
@@ -1135,7 +1210,7 @@ class RelayService:
                 provider_engine="",
                 reason=str(exc),
             )
-            return
+            return False
         capabilities = provider.capabilities()
         can_start = bool(getattr(capabilities, "can_start_session", False))
         can_continue = bool(getattr(capabilities, "can_continue_session", False))
@@ -1218,7 +1293,7 @@ class RelayService:
                     provider_engine=str(getattr(provider, "provider_engine", "")),
                     reason="provider cannot start native sessions",
                 )
-                return
+                return False
             try:
                 result = await provider.start_session(
                     detail.task.workspace,
@@ -1233,7 +1308,7 @@ class RelayService:
                     provider_engine=str(getattr(provider, "provider_engine", "")),
                     reason=str(exc) or "provider failed to start native session",
                 )
-                return
+                return False
         native_session_id = (
             str(getattr(result, "native_session_id", "") or "") or existing_native_session_id
         )
@@ -1246,7 +1321,7 @@ class RelayService:
                 provider_engine=str(getattr(provider, "provider_engine", "")),
                 reason=_control_result_failure_reason(result),
             )
-            return
+            return False
         self._store.update_role_metadata(
             task_id,
             role,
@@ -1282,6 +1357,7 @@ class RelayService:
                 "round_id": round_id,
             },
         )
+        return True
 
     def _available_providers(self) -> set[str]:
         return {
@@ -4313,35 +4389,14 @@ class RelayService:
             except RuntimeError:
                 self._store.release_pending_input_claim(claim, error="maintenance freeze")
                 return None
-            if not self._store.lifecycle.attempt_has_provider_dispatch(
-                task_id,
-                next_round_id,
-                "director",
-            ):
-                dispatch_claimed = self._store.lifecycle.claim_queued_attempt_dispatch(
-                    task_id,
-                    next_round_id,
-                    "director",
-                    recover_stale_claim=True,
-                )
-                if dispatch_claimed:
-                    renewed = self._store.renew_pending_input_claim(claim)
-                    if renewed is None:
-                        return None
-                    claim = renewed
-                    await self.dispatch_role(task_id, "director", prefer_continue=False)
-                else:
-                    attempt = self._store.lifecycle.latest_attempt(
-                        task_id,
-                        next_round_id,
-                        "director",
-                    )
-                    if attempt.status in {"queued", "dispatching"}:
-                        self._store.release_pending_input_claim(
-                            claim,
-                            error="provider dispatch is still claimed",
-                        )
-                        return None
+            renewed = self._store.renew_pending_input_claim(claim)
+            if renewed is None:
+                return None
+            claim = renewed
+            # ``dispatch_role`` owns the provider-facing CAS. Keeping it in
+            # one boundary prevents a pending-input worker from pre-claiming
+            # an attempt and then making the actual dispatch look duplicate.
+            await self.dispatch_role(task_id, "director", prefer_continue=False)
 
         renewed = self._store.renew_pending_input_claim(claim)
         if renewed is None:
@@ -5281,11 +5336,32 @@ class RelayService:
         detail = self._store.get_task_detail(task_id)
         if detail.task.status not in {"queued", "running", "streaming", "waiting_user"}:
             return
-        self._store.update_task_status(task_id, "interrupted")
-        for job in detail.role_jobs:
-            if job.status in {"queued", "streaming", "waiting"}:
+        active_jobs = [
+            job
+            for job in detail.role_jobs
+            if job.status in {"queued", "streaming", "waiting"}
+        ]
+        # Provider controls are independent external side effects.  Persist
+        # every verified acknowledgement before proceeding to the next role;
+        # otherwise a later failure would make an already-stopped role look
+        # live and cause an unsafe duplicate interrupt on retry.
+        interrupted_jobs: list[Any] = []
+        for job in active_jobs:
+            try:
                 await self._interrupt_native_job(job)
-                self._store.update_role_status(task_id, job.role, "interrupted")
+            except RuntimeError as exc:
+                if interrupted_jobs:
+                    self._record_partial_interrupt(
+                        task_id,
+                        interrupted_jobs=interrupted_jobs,
+                        failed_job=job,
+                        reason=str(exc) or "native provider interrupt failed",
+                    )
+                raise
+            interrupted_jobs.append(job)
+        self._store.update_task_status(task_id, "interrupted")
+        for job in interrupted_jobs:
+            self._store.update_role_status(task_id, job.role, "interrupted")
         transition = transition_from_round_control(
             decision="cancel_plan",
             round_id=round_id,
@@ -5297,6 +5373,64 @@ class RelayService:
                 "round_id": round_id,
                 "relay_transition": transition.to_json_dict(),
                 "marvis_relay_state": self._marvis_relay_state_payload(task_id, round_id),
+            },
+        )
+
+    def _record_partial_interrupt(
+        self,
+        task_id: int,
+        *,
+        interrupted_jobs: list[Any],
+        failed_job: Any,
+        reason: str,
+    ) -> None:
+        """Persist a truthful, recoverable partial task interruption.
+
+        Provider controls cannot be atomically committed together.  A failure
+        after one acknowledgement is not a normal retry: the stopped roles are
+        final, while the failing role needs verification before any new turn is
+        allowed to start.
+        """
+
+        round_id = self._store.current_round_id(task_id)
+        for job in interrupted_jobs:
+            self._store.update_role_status(task_id, job.role, "interrupted")
+            self._events.emit(
+                task_id,
+                "role.status",
+                role=job.role,
+                payload={
+                    "status": "interrupted",
+                    "round_id": round_id,
+                    "interrupt_verified": True,
+                },
+            )
+        blocked_reason = (
+            "任务只完成了部分中断："
+            f"{RELAY_ROLE_DISPLAY_NAMES.get(failed_job.role, failed_job.role)}的中断回执未验证（{reason}）。"
+            "已停止的角色不会再次中断；请检查该 Provider 后恢复。"
+        )
+        self._store.save_artifact(
+            task_id,
+            failed_job.role,
+            "role_error",
+            {
+                "error": blocked_reason,
+                "round_id": round_id,
+                "retry_kind": "partial_interrupt",
+                "guardrail_action": "verify_provider_interrupt",
+            },
+            summary=blocked_reason,
+        )
+        self._store.update_task_status(task_id, "blocked")
+        self._events.emit(
+            task_id,
+            "task.interrupt_partial",
+            payload={
+                "round_id": round_id,
+                "interrupted_roles": [job.role for job in interrupted_jobs],
+                "failed_role": failed_job.role,
+                "error": blocked_reason,
             },
         )
 
@@ -5336,12 +5470,20 @@ class RelayService:
             return
         try:
             provider = self._registry.get(job.provider)
-        except KeyError:
-            return
+        except KeyError as exc:
+            raise RuntimeError(f"native provider is unavailable: {job.provider}") from exc
         interrupt = getattr(provider, "interrupt_session", None)
         if not callable(interrupt):
-            return
-        await interrupt(job.native_session_id)
+            raise RuntimeError(f"native provider has no interrupt control: {job.provider}")
+        try:
+            result = await interrupt(
+                job.native_session_id,
+                str(job.active_turn_id or job.turn_id or ""),
+            )
+        except Exception as exc:
+            raise RuntimeError(str(exc) or "native provider interrupt failed") from exc
+        if not _control_result_verified(result):
+            raise RuntimeError(_control_result_failure_reason(result))
 
     def _runtime_event_round_id(
         self,

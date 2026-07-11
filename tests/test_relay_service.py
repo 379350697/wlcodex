@@ -221,6 +221,45 @@ class UnverifiedStartProvider(FakeProvider):
         )
 
 
+class BlockingStartProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def start_session(self, cwd: str, prompt: str, **kwargs: Any):
+        self.calls.append(("start_session", cwd, prompt, kwargs))
+        self.started.set()
+        await self.release.wait()
+        return NativeAgentControlResult(
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            native_session_id="native-once",
+            agent_run_id=901,
+            status="started",
+        )
+
+
+class FailingInterruptProvider(FakeProvider):
+    async def interrupt_session(self, native_session_id: str, turn_id: str = ""):
+        self.calls.append(("interrupt_session", native_session_id, turn_id))
+        raise RuntimeError("provider control unavailable")
+
+
+class SecondInterruptProvider(FakeProvider):
+    async def interrupt_session(self, native_session_id: str, turn_id: str = ""):
+        self.calls.append(("interrupt_session", native_session_id, turn_id))
+        if native_session_id == "native-2":
+            raise RuntimeError("second provider control unavailable")
+        return NativeAgentControlResult(
+            provider=self.provider,
+            provider_engine=self.provider_engine,
+            native_session_id=native_session_id,
+            agent_run_id=101,
+            status="interrupted",
+        )
+
+
 def _service(tmp_path) -> tuple[RelayService, FakeProvider]:
     ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
     ledger.migrate()
@@ -231,6 +270,118 @@ def _service(tmp_path) -> tuple[RelayService, FakeProvider]:
         default_provider="claude",
     )
     return service, provider
+
+
+@pytest.mark.asyncio
+async def test_concurrent_dispatch_claim_starts_one_native_session(tmp_path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    provider = BlockingStartProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    )
+    task = service.create_task(title="Claim once", prompt="Do it once", workspace="/repo")
+
+    first = asyncio.create_task(service.dispatch_role(task.id, "director"))
+    await provider.started.wait()
+    second = await service.dispatch_role(task.id, "director")
+    provider.release.set()
+
+    assert await first is True
+    assert second is False
+    assert [call[0] for call in provider.calls] == ["start_session"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_scheduled_before_maintenance_freeze_never_starts_a_turn(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(title="Drain", prompt="Do not start", workspace="/repo")
+    service._store._ledger.begin_maintenance_window()
+
+    assert await service.dispatch_role(task.id, "director") is False
+    assert provider.calls == []
+    assert service.get_task_readonly(task.id).role_jobs[0].status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_quarantines_an_aged_unverified_dispatch_claim(tmp_path) -> None:
+    service, provider = _service(tmp_path)
+    task = service.create_task(title="Crash recovery", prompt="Recover once", workspace="/repo")
+    assert service._store.lifecycle.claim_queued_attempt_dispatch(task.id, 1, "director")
+    service._store._ledger._conn.execute(
+        """
+        UPDATE relay_role_attempts
+        SET updated_at = '2000-01-01T00:00:00+00:00'
+        WHERE team_run_id = ? AND round_id = 1 AND role = 'director'
+        """,
+        (task.id,),
+    )
+    service._store._ledger._conn.commit()
+
+    await service.reconcile_task_lifecycle(task.id)
+
+    assert provider.calls == []
+    detail = service.get_task_readonly(task.id)
+    assert detail.task.status == "blocked"
+    assert detail.presentation.freshness["recovery_required"] is True
+    assert detail.presentation.allowed_actions == ["refresh"]
+    assert "派发结果无法验证" in detail.presentation.blocking_reason
+    with pytest.raises(ValueError, match="provider state is indeterminate"):
+        await service.resume_role(task.id, "director", force=True)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_provider_failure_preserves_running_truth_for_retry(tmp_path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    provider = FailingInterruptProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    )
+    task = service.create_task(title="Interrupt truth", prompt="Keep truth", workspace="/repo")
+    assert await service.dispatch_role(task.id, "director") is True
+
+    with pytest.raises(RuntimeError, match="provider control unavailable"):
+        await service.interrupt(task.id)
+
+    detail = service.get_task_readonly(task.id)
+    assert detail.task.status == "running"
+    assert next(job for job in detail.role_jobs if job.role == "director").status == "streaming"
+
+
+@pytest.mark.asyncio
+async def test_partial_interrupt_persists_each_verified_provider_acknowledgement(tmp_path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    provider = SecondInterruptProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    )
+    task = service.create_task(title="Partial interrupt", prompt="Stop safely", workspace="/repo")
+    assert await service.dispatch_role(task.id, "director") is True
+    service._store.update_role_status(task.id, "architect", "queued")
+    assert await service.dispatch_role(task.id, "architect") is True
+
+    with pytest.raises(RuntimeError, match="second provider control unavailable"):
+        await service.interrupt(task.id)
+
+    detail = service.get_task_readonly(task.id)
+    jobs = {job.role: job for job in detail.role_jobs}
+    assert detail.task.status == "blocked"
+    assert jobs["director"].status == "interrupted"
+    assert jobs["architect"].status == "blocked"
+    assert "部分中断" in detail.presentation.blocking_reason
+    assert detail.presentation.freshness["recovery_required"] is True
+    assert [call for call in provider.calls if call[0] == "interrupt_session"] == [
+        ("interrupt_session", "native-1", ""),
+        ("interrupt_session", "native-2", ""),
+    ]
 
 
 def _active_turn_service(tmp_path) -> tuple[RelayService, ActiveTurnProvider]:

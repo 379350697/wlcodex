@@ -1314,9 +1314,10 @@ class RelayLifecycleStore:
         """Compare-and-set a queued Relay attempt before provider dispatch.
 
         Pending-input leases guard the queue record; this second claim guards
-        the provider-facing side effect if a worker expires or crashes after
-        creating the follow-up round.  A recovery can retake ``dispatching``
-        only when no provider identity was ever persisted.
+        the provider-facing side effect. Recovery is deliberately handled by
+        :meth:`quarantine_stale_unverified_dispatches`: an ordinary caller
+        must never retake a fresh ``dispatching`` claim while a provider start
+        may still be in flight.
         """
 
         owns_transaction = not self._conn.in_transaction
@@ -1329,15 +1330,10 @@ class RelayLifecycleStore:
                     self._conn.commit()
                 return False
             status = str(row["status"] or "")
-            has_provider_identity = bool(
-                str(row["native_session_id"] or "").strip()
-                or _coerce_optional_int(row["agent_run_id"])
-            )
-            can_claim = status == "queued" or (
-                recover_stale_claim
-                and status == "dispatching"
-                and not has_provider_identity
-            )
+            # Keep the parameter for compatibility with callers from earlier
+            # releases, but do not let it bypass the provider-side-effect
+            # claim. A crash-only recovery has an explicit age threshold.
+            can_claim = status == "queued"
             if not can_claim:
                 if owns_transaction:
                     self._conn.commit()
@@ -1355,6 +1351,73 @@ class RelayLifecycleStore:
             if owns_transaction:
                 self._conn.commit()
             return int(updated.rowcount or 0) == 1
+        except Exception:
+            if owns_transaction:
+                self._conn.rollback()
+            raise
+
+    def quarantine_stale_unverified_dispatches(
+        self,
+        team_run_id: int,
+        round_id: int,
+        *,
+        stale_after_seconds: int,
+    ) -> list[str]:
+        """Quarantine an indeterminate external dispatch after a crash.
+
+        A SQLite claim cannot make ``provider.start_session`` transactional.
+        If the process dies after the provider accepted the request but before
+        its session identity is committed, automatically returning the attempt
+        to ``queued`` can create a second real turn.  At-most-once execution is
+        the only truthful default for an unprovable outcome: mark it blocked,
+        preserve the evidence, and require an explicit operator recovery.
+        """
+
+        if stale_after_seconds <= 0:
+            raise ValueError("stale_after_seconds must be positive")
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)).isoformat()
+        owns_transaction = not self._conn.in_transaction
+        if owns_transaction:
+            self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT id, role
+                FROM relay_role_attempts
+                WHERE team_run_id = ?
+                  AND round_id = ?
+                  AND status = 'dispatching'
+                  AND COALESCE(native_session_id, '') = ''
+                  AND agent_run_id IS NULL
+                  AND updated_at <= ?
+                ORDER BY id ASC
+                """,
+                (team_run_id, round_id, cutoff),
+            ).fetchall()
+            if not rows:
+                if owns_transaction:
+                    self._conn.commit()
+                return []
+            now = _now()
+            quarantined: list[str] = []
+            for row in rows:
+                updated = self._conn.execute(
+                    """
+                    UPDATE relay_role_attempts
+                    SET status = 'blocked', updated_at = ?, closed_at = ?
+                    WHERE id = ?
+                      AND status = 'dispatching'
+                      AND COALESCE(native_session_id, '') = ''
+                      AND agent_run_id IS NULL
+                      AND updated_at <= ?
+                    """,
+                    (now, now, int(row["id"]), cutoff),
+                )
+                if int(updated.rowcount or 0) == 1:
+                    quarantined.append(str(row["role"]))
+            if owns_transaction:
+                self._conn.commit()
+            return quarantined
         except Exception:
             if owns_transaction:
                 self._conn.rollback()

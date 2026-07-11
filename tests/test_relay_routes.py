@@ -71,6 +71,12 @@ class FakeProvider:
         )
 
 
+class FailingInterruptProvider(FakeProvider):
+    async def interrupt_session(self, native_session_id: str, turn_id: str = ""):
+        self.calls.append(("interrupt_session", native_session_id, turn_id))
+        raise RuntimeError("provider interrupt transport failed")
+
+
 class FakeCodexProvider(FakeProvider):
     provider = "codex"
     provider_engine = "app-server"
@@ -1564,6 +1570,44 @@ async def test_relay_events_stream_does_not_worker_snapshot_terminal_task(
     assert "old terminal worker delta" not in response
     assert "event: role.native_event" not in response
     assert hub.subscriber_count(agent_run_id=agent_run_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_relay_interrupt_provider_failure_releases_idempotency_key(tmp_path: Path) -> None:
+    ledger = Ledger.open(tmp_path / "wlcodex.sqlite3")
+    ledger.migrate()
+    provider = FailingInterruptProvider()
+    service = RelayService(
+        store=RelayStore(ledger),
+        registry=NativeAgentRegistry([provider]),
+        default_provider="claude",
+    )
+    task = service.create_task(
+        title="Interrupt failure",
+        prompt="Do not claim success",
+        workspace="/repo",
+        provider="claude",
+    )
+    assert await service.dispatch_role(task.id, "director") is True
+    body = "{}"
+    response = await _request_relay(
+        tmp_path,
+        f"POST /api/relay/tasks/{task.id}/interrupt HTTP/1.1\r\n"
+        "Host: test\r\n"
+        "Idempotency-Key: interrupt-failure\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n\r\n"
+        f"{body}",
+        relay_service=service,
+    )
+
+    assert "503 Service Unavailable" in response
+    assert '"retryable": true' in response
+    assert ledger._conn.execute(
+        "SELECT 1 FROM relay_mutation_idempotency WHERE idempotency_key = 'interrupt-failure'"
+    ).fetchone() is None
+    assert service.get_task_readonly(task.id).task.status == "running"
 
 
 @pytest.mark.asyncio

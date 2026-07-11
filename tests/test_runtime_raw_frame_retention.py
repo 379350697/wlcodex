@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import wlcodex.runtime_raw_frame_retention as retention_module
 from wlcodex.db import Ledger
 from wlcodex.maintenance import MaintenanceWindowError
 from wlcodex.runtime_event_store import RuntimeEventStore
@@ -548,6 +549,72 @@ def test_expired_archive_is_removed_after_archive_retention_window(tmp_path: Pat
         pass
     else:
         raise AssertionError("expired raw archive must no longer be retrievable")
+
+
+def test_expired_archive_file_removal_failure_keeps_manifest_for_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    frame = _append_frame(store, occurred_at=NOW - timedelta(days=8))
+    _retention(store, tmp_path).run(apply=True)
+    archive_path = tmp_path / "provider-raw-frame-archives" / str(
+        store._conn.execute(
+            "SELECT relative_path FROM provider_raw_frame_archives"
+        ).fetchone()["relative_path"]
+    )
+    original_unlink = Path.unlink
+
+    def fail_manifest_unlink(self: Path, *, missing_ok: bool = False) -> None:
+        if self == Path(f"{archive_path}.manifest.json"):
+            raise OSError("simulated archive filesystem failure")
+        original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_manifest_unlink)
+    future = NOW + timedelta(days=91)
+
+    result = _retention(store, tmp_path, now=future).run(apply=True)
+
+    assert result.purged_archives == 0
+    assert store._conn.execute(
+        "SELECT 1 FROM provider_raw_frame_archives"
+    ).fetchone() is not None
+    with pytest.raises(KeyError):
+        store.get_provider_raw_frame(frame.id)
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    retried = _retention(store, tmp_path, now=future).run(apply=True)
+    assert retried.purged_archives == 1
+    assert store._conn.execute(
+        "SELECT 1 FROM provider_raw_frame_archives"
+    ).fetchone() is None
+
+
+def test_archived_frame_read_race_with_purge_is_consistently_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    frame = _append_frame(store, occurred_at=NOW - timedelta(days=8))
+    _retention(store, tmp_path).run(apply=True)
+    archive_id = str(
+        store._conn.execute(
+            "SELECT archive_id FROM provider_raw_frame_archives"
+        ).fetchone()["archive_id"]
+    )
+
+    def retire_during_read(*_args, **_kwargs):
+        store._conn.execute(
+            "UPDATE provider_raw_frame_archives SET purge_pending_at = ? WHERE archive_id = ?",
+            (NOW.isoformat(), archive_id),
+        )
+        store._conn.commit()
+        raise RawFrameArchiveError("archive file disappeared during read")
+
+    monkeypatch.setattr(retention_module, "_read_archive_records", retire_during_read)
+
+    with pytest.raises(KeyError):
+        store.get_provider_raw_frame(frame.id)
 
 
 def test_verify_rejects_a_sidecar_manifest_with_a_wrong_payload_hash(tmp_path: Path) -> None:

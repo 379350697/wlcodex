@@ -97,7 +97,8 @@ CREATE TABLE IF NOT EXISTS provider_raw_frame_archives (
     min_occurred_at TEXT NOT NULL,
     max_occurred_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    expires_at TEXT NOT NULL,
+    purge_pending_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_provider_raw_frame_archives_expires
@@ -215,6 +216,15 @@ def apply_retention_schema(conn: sqlite3.Connection) -> None:
     """
 
     conn.executescript(RETENTION_SCHEMA_SQL)
+    columns = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+        for row in conn.execute("PRAGMA table_info(provider_raw_frame_archives)").fetchall()
+    }
+    if "purge_pending_at" not in columns:
+        conn.execute(
+            "ALTER TABLE provider_raw_frame_archives "
+            "ADD COLUMN purge_pending_at TEXT NOT NULL DEFAULT ''"
+        )
     conn.commit()
 
 
@@ -1181,6 +1191,40 @@ class RuntimeRawFrameRetention:
         for row in rows:
             archive_id = str(row["archive_id"])
             relative_path = str(row["relative_path"])
+            archive_path = _archive_path(self._policy.archive_dir, relative_path)
+            # File deletion and SQLite deletion cannot share one transaction.
+            # Publish a durable tombstone first, so a reader never follows a
+            # still-live index into a half-deleted gzip or manifest.
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.execute(
+                    """
+                    UPDATE provider_raw_frame_archives
+                    SET purge_pending_at = CASE
+                        WHEN purge_pending_at = '' THEN ?
+                        ELSE purge_pending_at
+                    END
+                    WHERE archive_id = ?
+                    """,
+                    (now.isoformat(), archive_id),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            removal_failed = False
+            # Keep the manifest/index until both files have been removed.  The
+            # previous order committed the database delete first, so an I/O
+            # failure orphaned an archive forever: the scheduler no longer had
+            # a durable record from which to retry it.
+            for path in (archive_path, _manifest_path(archive_path)):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    removal_failed = True
+                    logger.warning("Could not remove expired raw frame archive %s", path)
+            if removal_failed:
+                continue
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
                 self._conn.execute(
@@ -1195,12 +1239,6 @@ class RuntimeRawFrameRetention:
             except Exception:
                 self._conn.rollback()
                 raise
-            archive_path = _archive_path(self._policy.archive_dir, relative_path)
-            for path in (archive_path, _manifest_path(archive_path)):
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    logger.warning("Could not remove expired raw frame archive %s", path)
             purged += 1
         return purged
 
@@ -1217,7 +1255,7 @@ def read_archived_provider_raw_frame(
         row = conn.execute(
             """
             SELECT index_row.archive_line, archive.relative_path, archive.archive_id,
-                   archive.sha256
+                   archive.sha256, archive.purge_pending_at
             FROM provider_raw_frame_archive_index AS index_row
             JOIN provider_raw_frame_archives AS archive
               ON archive.archive_id = index_row.archive_id
@@ -1231,19 +1269,33 @@ def read_archived_provider_raw_frame(
         raise
     if row is None:
         return None
+    if str(row["purge_pending_at"] or ""):
+        # The retention worker published this terminal tombstone before touching
+        # either file.  A frame past retention is therefore consistently absent
+        # even if an interrupted filesystem removal is awaiting a retry.
+        return None
     archive_id = str(row["archive_id"])
     if str(row["sha256"]) != archive_id:
         raise RawFrameArchiveError("SQLite archive manifest sha256 does not match archive id")
     archive_path = _archive_path(archive_dir, str(row["relative_path"]))
-    _read_archive_manifest(
-        _manifest_path(archive_path),
-        expected_archive_id=archive_id,
-        expected_relative_path=str(row["relative_path"]),
-    )
-    records = _read_archive_records(
-        archive_path,
-        expected_archive_id=archive_id,
-    )
+    try:
+        _read_archive_manifest(
+            _manifest_path(archive_path),
+            expected_archive_id=archive_id,
+            expected_relative_path=str(row["relative_path"]),
+        )
+        records = _read_archive_records(
+            archive_path,
+            expected_archive_id=archive_id,
+        )
+    except RawFrameArchiveError:
+        # A reader can race the retention worker between its initial SQLite
+        # lookup and opening the files.  Re-read the durable tombstone before
+        # reporting corruption: an archive that was deliberately retired is
+        # absent, never an index-to-missing-file failure.
+        if _archive_is_retired_or_missing(conn, archive_id):
+            return None
+        raise
     line = int(row["archive_line"])
     if line <= 0 or line > len(records):
         raise RawFrameArchiveError(f"indexed archive line {line} is out of range")
@@ -1259,6 +1311,23 @@ def read_archived_provider_raw_frame(
     record = dict(record)
     record["raw_payload"] = raw_payload
     return record
+
+
+def _archive_is_retired_or_missing(conn: sqlite3.Connection, archive_id: str) -> bool:
+    try:
+        row = conn.execute(
+            """
+            SELECT purge_pending_at
+            FROM provider_raw_frame_archives
+            WHERE archive_id = ?
+            """,
+            (archive_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return True
+        raise
+    return row is None or bool(str(row["purge_pending_at"] or ""))
 
 
 def _archive_record(row: sqlite3.Row) -> dict[str, Any]:

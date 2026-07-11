@@ -73,6 +73,12 @@ from wlcodex.live_stream.relay_composer import (
     _marvis_relay_task_composer,
     _marvis_relay_workspace_dock,
 )
+from wlcodex.live_stream.relay_list_views import (
+    marvis_relay_avatar_html as _marvis_relay_avatar_html,
+    relay_task_card_html as _relay_task_card_html,
+    relay_task_pagination_html as _relay_task_pagination_html,
+    relay_workspace_nav_html as _relay_workspace_nav_html,
+)
 from wlcodex.live_stream.routing import (
     agent_id_from_path as _agent_id_from_path,
     native_login_provider_from_path as _native_login_provider_from_path,
@@ -2613,6 +2619,9 @@ class WorkerLiveStreamServer:
                         task_id,
                         role,
                         force=bool(body.get("force")),
+                        override_indeterminate_provider_state=bool(
+                            body.get("override_indeterminate_provider_state")
+                        ),
                     )
                 except (KeyError, MaintenanceWindowError, ValueError) as exc:
                     abandon_mutation(mutation)
@@ -2728,9 +2737,13 @@ class WorkerLiveStreamServer:
                         task_id,
                         role=_optional_nonempty_string(body.get("role")),
                     )
-                except (KeyError, ValueError) as exc:
+                except (KeyError, ValueError, RuntimeError) as exc:
                     abandon_mutation(mutation)
-                    await self._send_json(writer, 400, {"error": str(exc)})
+                    await self._send_json(
+                        writer,
+                        503 if isinstance(exc, RuntimeError) else 400,
+                        {"error": str(exc), "retryable": isinstance(exc, RuntimeError)},
+                    )
                     return
                 detail = await self._relay_task_detail(task_id)
                 await finish_mutation(
@@ -6453,99 +6466,11 @@ def _relay_config_page(
 </html>""")
 
 
-def _relay_workspace_nav_html(
-    projects: list[Any],
-    *,
-    selected_workspace: str,
-    access_token: str,
-) -> str:
-    rows: list[tuple[str, str, str]] = []
-    seen: set[str] = set()
-    for project in projects:
-        cwd = str(project.get("cwd", "") or "")
-        if not cwd or cwd in seen:
-            continue
-        seen.add(cwd)
-        rows.append(
-            (
-                cwd,
-                str(project.get("name") or Path(cwd).name or cwd),
-                cwd,
-            )
-        )
-    if selected_workspace and selected_workspace not in seen:
-        rows.insert(
-            0,
-            (
-                selected_workspace,
-                Path(selected_workspace).name or selected_workspace,
-                selected_workspace,
-            ),
-        )
-    links = "\n".join(
-        '<a class="relay-workspace-link'
-        f'{" active" if workspace == selected_workspace else ""}" '
-        f'data-workspace-value="{escape(workspace)}" '
-        f'href="{escape(_relay_workspace_href(workspace, access_token))}">'
-        f"{escape(label)}</a>"
-        for workspace, label, _path in rows
-    )
-    current = selected_workspace
-    return f"""
-      <section class="relay-workspace-nav" aria-label="relay workspace picker">
-        <div class="relay-history-head">
-          <div class="relay-history-title">
-            <h2>工作区</h2>
-            <span class="relay-muted">当前：{escape(Path(current).name or current)}</span>
-          </div>
-        </div>
-        <div class="relay-workspace-row">{links}</div>
-      </section>
-    """
-
-
 def _relay_page_number(raw_page: str) -> int:
     try:
         return max(1, int(raw_page))
     except (TypeError, ValueError):
         return 1
-
-
-def _relay_task_pagination_html(
-    *,
-    current_page: int,
-    total_pages: int,
-    selected_workspace: str,
-    access_token: str,
-    status_filter: str = "",
-) -> str:
-    if total_pages <= 1:
-        return ""
-    previous_html: str
-    next_html: str
-    if current_page > 1:
-        previous_html = (
-            '<a class="relay-page-link" '
-            f'href="{escape(_relay_task_list_href(selected_workspace, access_token, current_page - 1, status=status_filter))}">'
-            "上一页</a>"
-        )
-    else:
-        previous_html = '<span class="relay-page-disabled" aria-disabled="true">上一页</span>'
-    if current_page < total_pages:
-        next_html = (
-            '<a class="relay-page-link" '
-            f'href="{escape(_relay_task_list_href(selected_workspace, access_token, current_page + 1, status=status_filter))}">'
-            "下一页</a>"
-        )
-    else:
-        next_html = '<span class="relay-page-disabled" aria-disabled="true">下一页</span>'
-    return f"""
-      <nav class="relay-pagination" aria-label="任务分页">
-        {previous_html}
-        <span class="relay-page-indicator">第 {current_page} / {total_pages} 页</span>
-        {next_html}
-      </nav>
-    """
 
 
 def _relay_project_rows(workspaces: Any = None) -> list[dict[str, Any]]:
@@ -6587,15 +6512,6 @@ def _relay_role_summary_html(
         f'<span class="relay-chip">{escape(_relay_role_label(role))} · '
         f"{escape(_native_provider_display_name(str(assignment_map.get(role) or fallback)))}</span>"
         for role in RELAY_ROLE_IDS
-    )
-
-
-def _marvis_relay_avatar_html(role: str, *, label: str = "") -> str:
-    role_name = str(role or "marvis").strip() or "marvis"
-    alt = label or _relay_role_label(role_name)
-    return (
-        f'<span class="marvis-relay-avatar marvis-relay-avatar-{escape(role_name)}" '
-        f'aria-label="{escape(alt)}"></span>'
     )
 
 
@@ -8456,56 +8372,6 @@ def _relay_role_config_html(
             """
         )
     return "\n".join(rows)
-
-
-def _relay_task_card_html(summary: Any, token_suffix: str) -> str:
-    presentation = _relay_summary_presentation(summary)
-    status = _relay_summary_presentation_state(summary)
-    status_label = _relay_task_status_label(status)
-    freshness = presentation.get("freshness") if isinstance(presentation.get("freshness"), dict) else {}
-    activity = _relay_activity_label(freshness.get("updated_at") or getattr(summary, "last_activity_at", ""))
-    workspace = str(summary.workspace or "")
-    project_name = Path(workspace).name or workspace or "wlcodex"
-    actor = presentation.get("current_actor") if isinstance(presentation.get("current_actor"), dict) else {}
-    actor_label = str(actor.get("label") or "系统协调")
-    handoff = str(getattr(summary, "latest_handoff_summary", "") or "").strip()
-    blocking_reason = str(presentation.get("blocking_reason") or "").strip()
-    next_action = str(presentation.get("next_action") or "等待系统更新。")
-    evidence_html = (
-        f'<div class="relay-summary">最新交接：{escape(handoff)}</div>'
-        if handoff
-        else ""
-    )
-    blocking_html = (
-        f'<div class="relay-summary relay-card-blocked">阻塞原因：{escape(blocking_reason)}</div>'
-        if blocking_reason
-        else ""
-    )
-    status_class = "relay-status-badge"
-    if status:
-        status_class += f" is-{_relay_status_class_name(status)}"
-    return f"""
-      <article class="relay-task-card marvis-relay-task-card" data-status="{escape(status)}">
-        <div class="relay-card-identity">
-          <div class="relay-card-avatar-row">
-            {_marvis_relay_avatar_html("marvis", label="Marvis")}
-          </div>
-          <div class="relay-card-side">
-            <span class="{escape(status_class)}">{escape(status_label)}</span>
-            <span class="relay-card-project-pill">{escape(project_name)}</span>
-            <span class="relay-card-activity">{escape(activity)}</span>
-          </div>
-        </div>
-        <div class="relay-title">{escape(summary.title)}</div>
-        <div class="relay-card-side"><strong>当前责任：</strong>{escape(actor_label)}</div>
-        {evidence_html}
-        {blocking_html}
-        <div class="relay-summary"><strong>下一步：</strong>{escape(next_action)}</div>
-        <div class="marvis-relay-task-card-footer">
-          <a class="relay-open relay-card-open" href="/native/workflows/relay/tasks/{int(summary.task_id)}{token_suffix}">打开任务</a>
-        </div>
-      </article>
-    """
 
 
 def _relay_routing_route_label(route: str) -> str:

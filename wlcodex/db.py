@@ -884,6 +884,11 @@ class Ledger:
         # discoverable before a hot row is removed and preserve sequence
         # continuity after the hot table has been pruned.
         self._conn.executescript(RETENTION_SCHEMA_SQL)
+        self._add_column_if_missing(
+            "provider_raw_frame_archives",
+            "purge_pending_at",
+            "purge_pending_at TEXT NOT NULL DEFAULT ''",
+        )
         # The maintenance singleton is deliberately separate from ordinary
         # settings: it is a durable operator gate that freezes submissions
         # before the raw-frame archive / SQLite swap window begins.

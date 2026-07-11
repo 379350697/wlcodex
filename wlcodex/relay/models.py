@@ -391,7 +391,11 @@ def build_relay_presentation(
     recovery_required = confirmation_source in {
         "provider_native_resolving",
         "provider_native_superseding",
-    }
+    } or any(
+        str(job.error_message or "").find("派发结果无法验证：") >= 0
+        or str(job.error_message or "").find("任务只完成了部分中断：") >= 0
+        for job in role_jobs
+    )
     approval_wait = waiting_reason in {
         "plan_approval",
         "provider_approval",
@@ -436,6 +440,7 @@ def build_relay_presentation(
         waiting_reason=waiting_reason,
         board=board,
         recovery_required=recovery_required,
+        recovery_source=confirmation_source,
     )
     next_action = _presentation_next_action(
         state=state,
@@ -444,6 +449,7 @@ def build_relay_presentation(
         actor=actor,
         blocking_reason=blocking_reason,
         recovery_required=recovery_required,
+        recovery_source=confirmation_source,
     )
     return RelayPresentation(
         state=state,
@@ -501,10 +507,26 @@ def _presentation_blocking_reason(
     waiting_reason: str,
     board: RelayBoard,
     recovery_required: bool = False,
+    recovery_source: str = "",
 ) -> str:
     if recovery_required:
-        return "原生审批操作尚未获得可验证回执；为避免重复授权，任务需要恢复。"
+        for job in role_jobs:
+            if job.error_message:
+                return str(job.error_message)
+        if recovery_source in {
+            "provider_native_resolving",
+            "provider_native_superseding",
+        }:
+            return "原生审批操作尚未获得可验证回执；为避免重复授权，任务需要恢复。"
+        return "原生操作尚未获得可验证回执；为避免重复执行，任务需要恢复。"
     if state in {"blocked", "failed"}:
+        # A task-level guardrail can deliberately leave the affected role's
+        # raw attempt as ``streaming`` while the task is blocked.  Its error is
+        # still the authoritative reason; filtering by the projected role
+        # status here would hide a partial external-control failure.
+        for job in role_jobs:
+            if job.error_message:
+                return str(job.error_message)
         for job in role_jobs:
             if str(job.status or "") in {"blocked", "failed"} and job.error_message:
                 return str(job.error_message)
@@ -524,9 +546,15 @@ def _presentation_next_action(
     actor: dict[str, str],
     blocking_reason: str,
     recovery_required: bool = False,
+    recovery_source: str = "",
 ) -> str:
     if recovery_required:
-        return "等待系统恢复审批回执；如持续无回执，请查看证据并恢复任务。"
+        if recovery_source in {
+            "provider_native_resolving",
+            "provider_native_superseding",
+        }:
+            return "等待系统恢复审批回执；未确认前不要再次授权或取消。"
+        return "查看 Provider 侧证据并确认回执；未确认前不要重派或再次中断。"
     if state == "waiting_approval":
         return "审阅当前方案或审批请求后确认。"
     if state == "waiting_user":
