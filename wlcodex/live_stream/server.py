@@ -29,7 +29,6 @@ from wlcodex.council import (
     CouncilReviewPacket,
     CouncilReviewRequest,
     CouncilReviewResult,
-    CouncilReviewService,
     CouncilSeat,
     CouncilSeatAssignment,
     CouncilSynthesis,
@@ -43,6 +42,7 @@ from wlcodex.live_stream.collapse import (
     LiveTurnSummaryConfig,
     summarize_turn_with_sidecar,
 )
+from wlcodex.live_stream.council_routes import handle_council_route
 from wlcodex.live_stream.hub import WorkerLiveStreamHub
 from wlcodex.live_stream.models import WorkerStreamEvent
 from wlcodex.live_stream.native_pages import (
@@ -2722,87 +2722,20 @@ class WorkerLiveStreamServer:
         headers: dict[str, str],
         query: dict[str, list[str]],
     ) -> None:
-        if not self._is_authorized(
+        await handle_council_route(
+            self,
+            reader,
             writer,
+            method,
+            path,
             headers,
             query,
-            require_token=(
-                self._native_registry is not None or self._native_controller is not None
-            ),
-        ):
-            await self._send_json(writer, 401, {"error": "unauthorized"})
-            return
-
-        if path == "/api/council/config/default":
-            if method != "GET":
-                await self._send_json(writer, 405, {"error": "method not allowed"})
-                return
-            await self._send_json(
-                writer,
-                200,
-                await self._default_council_config_payload(),
-            )
-            return
-
-        if path == "/api/council/projects":
-            if method != "GET":
-                await self._send_json(writer, 405, {"error": "method not allowed"})
-                return
-            await self._send_json(
-                writer,
-                200,
-                _council_projects_payload(workspaces=self._workspace_catalog),
-            )
-            return
-
-        if path == "/api/council/runs":
-            if method != "POST":
-                await self._send_json(writer, 405, {"error": "method not allowed"})
-                return
-            body = await self._read_request_json(writer, reader, headers)
-            if body is None:
-                return
-            try:
-                packet = _council_packet_from_body(body)
-                config = await self._council_config_from_body(body)
-                if bool(body.get("async")):
-                    await self._send_json(
-                        writer,
-                        200,
-                        self._start_async_council_run(
-                            packet=packet,
-                            config=config,
-                            cwd=str(body.get("cwd") or ""),
-                        ),
-                    )
-                    return
-                reviewer = NativeProviderCouncilReviewer(
-                    provider_resolver=_ServerNativeProviderResolver(self),
-                    default_cwd=str(body.get("cwd") or ""),
-                )
-                board = await CouncilReviewService(reviewer=reviewer).review_packet(
-                    packet=packet,
-                    config=config,
-                )
-            except ValueError as exc:
-                await self._send_json(writer, 400, {"error": str(exc)})
-                return
-            await self._send_json(writer, 200, board.to_json_dict())
-            return
-
-        run_id = _council_run_id_from_path(path)
-        if run_id:
-            if method != "GET":
-                await self._send_json(writer, 405, {"error": "method not allowed"})
-                return
-            run = self._council_runs.get(run_id)
-            if run is None:
-                await self._send_json(writer, 404, {"error": "council run not found"})
-                return
-            await self._send_json(writer, 200, _council_run_public_payload(run))
-            return
-
-        await self._send_json(writer, 404, {"error": "not found"})
+            run_id_from_path=_council_run_id_from_path,
+            projects_payload=_council_projects_payload,
+            packet_from_body=_council_packet_from_body,
+            public_run_payload=_council_run_public_payload,
+            provider_resolver=_ServerNativeProviderResolver,
+        )
 
     def _start_async_council_run(
         self,
