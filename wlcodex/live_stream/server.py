@@ -91,6 +91,10 @@ from wlcodex.live_stream.relay_composer import (
 from wlcodex.live_stream.relay_chat_page import render_relay_chat_home_page
 from wlcodex.live_stream.relay_collection_routes import handle_relay_collection_route
 from wlcodex.live_stream.relay_event_route import handle_relay_task_events_route
+from wlcodex.live_stream.relay_task_routes import (
+    RelayTaskRouteDependencies,
+    handle_relay_task_route,
+)
 from wlcodex.live_stream.relay_ui_routes import (
     RelayUiRouteDependencies,
     handle_relay_ui_route,
@@ -2144,364 +2148,37 @@ class WorkerLiveStreamServer:
             ):
                 return
 
-            task_id, suffix = _relay_task_api_parts(normalized_path)
-            if task_id is None:
-                await self._send_json(writer, 404, {"error": "not found"})
-                return
-
-            if suffix == "":
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                detail = await self._relay_task_detail(task_id)
-                await self._send_json(
-                    writer,
-                    200,
-                    _relay_task_detail_json_payload(detail, self._relay_service),
-                )
-                return
-            if await handle_relay_task_events_route(
-                suffix=suffix,
-                task_id=task_id,
+            await handle_relay_task_route(
+                deps=RelayTaskRouteDependencies(
+                    send_json=self._send_json,
+                    read_request_json=self._read_request_json,
+                    task_api_parts=_relay_task_api_parts,
+                    task_detail=self._relay_task_detail,
+                    task_detail_json=_relay_task_detail_json_payload,
+                    task_events=handle_relay_task_events_route,
+                    safe_int=_safe_int,
+                    safe_images=_safe_image_attachments,
+                    safe_files=_safe_relay_file_attachments,
+                    optional_nonempty_string=_optional_nonempty_string,
+                    first_blocked_role=_relay_first_blocked_role,
+                    schedule_dispatch=self._schedule_relay_dispatch,
+                    schedule_reconcile=self._schedule_relay_task_reconcile,
+                    reject_if_maintenance_frozen=self._reject_if_maintenance_frozen,
+                    begin_mutation=begin_mutation,
+                    finish_mutation=finish_mutation,
+                    abandon_mutation=abandon_mutation,
+                    maintenance_error_type=MaintenanceWindowError,
+                ),
+                normalized_path=normalized_path,
                 method=method,
                 query=query,
-                headers=headers,
+                reader=reader,
                 writer=writer,
+                headers=headers,
                 service=self._relay_service,
                 hub=self._hub,
-                safe_int=_safe_int,
-                send_json=self._send_json,
                 send_sse=_send_relay_sse,
-            ):
-                return
-            if suffix == "/inputs":
-                if method != "POST":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                body = await self._read_request_json(writer, reader, headers)
-                if body is None:
-                    return
-                mutation = await begin_mutation("relay.input.queue", task_id, body)
-                if mutation is None:
-                    return
-                try:
-                    result = await self._relay_service.queue_or_followup_user_input(
-                        task_id,
-                        str(body.get("text") or body.get("prompt") or ""),
-                        images=_safe_image_attachments(body.get("images")),
-                        files=_safe_relay_file_attachments(body.get("files")),
-                    )
-                except (KeyError, MaintenanceWindowError, ValueError) as exc:
-                    abandon_mutation(mutation)
-                    await self._send_json(
-                        writer,
-                        423 if isinstance(exc, MaintenanceWindowError) else 400,
-                        {"error": str(exc)},
-                    )
-                    return
-                await finish_mutation(mutation, 200, result)
-                return
-            if suffix.startswith("/inputs/"):
-                parts = [part for part in suffix.strip("/").split("/") if part]
-                if len(parts) != 3 or parts[0] != "inputs" or not parts[1].isdigit():
-                    await self._send_json(writer, 404, {"error": "not found"})
-                    return
-                pending_id = int(parts[1])
-                action = parts[2]
-                if method != "POST":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                mutation = await begin_mutation(
-                    f"relay.input.{action}",
-                    task_id,
-                    {"pending_id": pending_id, "action": action},
-                )
-                if mutation is None:
-                    return
-                if action == "steer":
-                    try:
-                        payload = await self._relay_service.steer_active_attempt_payload(
-                            task_id,
-                            pending_id,
-                        )
-                    except (KeyError, MaintenanceWindowError, ValueError, RuntimeError) as exc:
-                        abandon_mutation(mutation)
-                        await self._send_json(
-                            writer,
-                            423 if isinstance(exc, MaintenanceWindowError) else 400,
-                            {"error": str(exc)},
-                        )
-                        return
-                    await finish_mutation(mutation, 200, {"pending_input": payload})
-                    return
-                if action == "cancel":
-                    try:
-                        pending = self._relay_service.cancel_pending_input(task_id, pending_id)
-                    except (KeyError, ValueError) as exc:
-                        abandon_mutation(mutation)
-                        await self._send_json(writer, 400, {"error": str(exc)})
-                        return
-                    await finish_mutation(
-                        mutation,
-                        200,
-                        {"pending_input": pending.to_dict()},
-                    )
-                    return
-                abandon_mutation(mutation)
-                await self._send_json(writer, 404, {"error": "not found"})
-                return
-            if suffix.startswith("/rounds/"):
-                parts = [part for part in suffix.strip("/").split("/") if part]
-                if len(parts) != 3 or parts[0] != "rounds" or not parts[1].isdigit() or parts[2] != "control":
-                    await self._send_json(writer, 404, {"error": "not found"})
-                    return
-                if method != "POST":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                body = await self._read_request_json(writer, reader, headers)
-                if body is None:
-                    return
-                if str(body.get("decision") or "").strip() != "cancel_plan":
-                    if await self._reject_if_maintenance_frozen(writer):
-                        return
-                mutation = await begin_mutation(
-                    "relay.round.control",
-                    task_id,
-                    {"round_id": int(parts[1]), "control": body},
-                )
-                if mutation is None:
-                    return
-                try:
-                    result = await self._relay_service.apply_round_control(
-                        task_id,
-                        int(parts[1]),
-                        decision=str(body.get("decision") or ""),
-                        artifact_id=_safe_int(str(body.get("artifact_id") or "0"), default=0),
-                        comment=str(body.get("comment") or ""),
-                        selected_option_id=str(body.get("selected_option_id") or ""),
-                        selected_option_label=str(body.get("selected_option_label") or ""),
-                        selected_option_instruction=str(
-                            body.get("selected_option_instruction") or ""
-                        ),
-                        dispatch_next=False,
-                    )
-                except (KeyError, MaintenanceWindowError, ValueError) as exc:
-                    abandon_mutation(mutation)
-                    await self._send_json(
-                        writer,
-                        423 if isinstance(exc, MaintenanceWindowError) else 400,
-                        {"error": str(exc)},
-                    )
-                    return
-                next_role = str(result.get("next_role") or result.get("role") or "").strip()
-                if next_role:
-                    self._schedule_relay_dispatch(task_id, next_role)
-                await finish_mutation(mutation, 200, {"control": result})
-                return
-            if suffix == "/sessions":
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                detail = await self._relay_task_detail(task_id)
-                await self._send_json(
-                    writer,
-                    200,
-                    {"sessions": [link.to_dict() for link in detail.session_links]},
-                )
-                return
-            if suffix == "/message":
-                if method != "POST":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                body = await self._read_request_json(writer, reader, headers)
-                if body is None:
-                    return
-                mutation = await begin_mutation("relay.message.add", task_id, body)
-                if mutation is None:
-                    return
-                try:
-                    await self._relay_service.add_user_message(
-                        task_id,
-                        str(body.get("text") or body.get("prompt") or ""),
-                        images=_safe_image_attachments(body.get("images")),
-                        files=_safe_relay_file_attachments(body.get("files")),
-                    )
-                except (KeyError, MaintenanceWindowError, ValueError) as exc:
-                    abandon_mutation(mutation)
-                    await self._send_json(
-                        writer,
-                        423 if isinstance(exc, MaintenanceWindowError) else 400,
-                        {"error": str(exc)},
-                    )
-                    return
-                detail = await self._relay_task_detail(task_id)
-                await finish_mutation(
-                    mutation,
-                    200,
-                    _relay_task_detail_json_payload(detail, self._relay_service),
-                )
-                return
-            if suffix == "/resume":
-                if method != "POST":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                body = await self._read_request_json(writer, reader, headers)
-                if body is None:
-                    return
-                mutation = await begin_mutation("relay.role.resume", task_id, body)
-                if mutation is None:
-                    return
-                role = _optional_nonempty_string(body.get("role"))
-                if not role:
-                    detail = self._relay_service.get_task_readonly(task_id)
-                    role = _relay_first_blocked_role(detail.role_jobs)
-                if not role:
-                    abandon_mutation(mutation)
-                    await self._send_json(
-                        writer,
-                        400,
-                        {"error": "relay task has no blocked role to resume"},
-                    )
-                    return
-                try:
-                    await self._relay_service.resume_role(
-                        task_id,
-                        role,
-                        force=bool(body.get("force")),
-                        override_indeterminate_provider_state=bool(
-                            body.get("override_indeterminate_provider_state")
-                        ),
-                    )
-                except (KeyError, MaintenanceWindowError, ValueError) as exc:
-                    abandon_mutation(mutation)
-                    await self._send_json(
-                        writer,
-                        423 if isinstance(exc, MaintenanceWindowError) else 400,
-                        {"error": str(exc)},
-                    )
-                    return
-                detail = await self._relay_task_detail(task_id)
-                await finish_mutation(
-                    mutation,
-                    200,
-                    _relay_task_detail_json_payload(detail, self._relay_service),
-                )
-                return
-            if suffix == "/archive":
-                if method != "POST":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                body = await self._read_request_json(writer, reader, headers)
-                if body is None:
-                    return
-                mutation = await begin_mutation("relay.task.archive", task_id, body)
-                if mutation is None:
-                    return
-                try:
-                    detail = self._relay_service.get_task_readonly(task_id)
-                except KeyError:
-                    abandon_mutation(mutation)
-                    await self._send_json(writer, 404, {"error": "relay task not found"})
-                    return
-                state = str(getattr(detail.presentation, "state", "") or "")
-                freshness = getattr(detail.presentation, "freshness", {})
-                recovery_required = bool(
-                    freshness.get("recovery_required")
-                    if isinstance(freshness, dict)
-                    else False
-                )
-                if recovery_required:
-                    abandon_mutation(mutation)
-                    await self._send_json(
-                        writer,
-                        409,
-                        {
-                            "error": (
-                                "native approval recovery is pending; wait for the lifecycle worker "
-                                "before archiving"
-                            ),
-                            "state": state,
-                        },
-                    )
-                    return
-                if state in {"running", "waiting_user", "waiting_approval"}:
-                    abandon_mutation(mutation)
-                    await self._send_json(
-                        writer,
-                        409,
-                        {
-                            "error": "active Relay tasks must be interrupted or completed before archiving",
-                            "state": state,
-                        },
-                    )
-                    return
-                mutation_store, _claim = mutation
-                mutation_store.archive_task(
-                    task_id,
-                    reason=str(body.get("reason") or "").strip(),
-                )
-                await finish_mutation(
-                    mutation,
-                    200,
-                    {"task_id": task_id, "archived": True, "state": state},
-                )
-                return
-            if suffix == "/refresh":
-                if method != "POST":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                body = await self._read_request_json(writer, reader, headers)
-                if body is None:
-                    return
-                mutation = await begin_mutation("relay.task.refresh", task_id, body)
-                if mutation is None:
-                    return
-                # Verify the target without a lifecycle write, then let the
-                # background reconciliation worker own the provider read.
-                try:
-                    self._relay_service.get_task_readonly(task_id)
-                except KeyError:
-                    abandon_mutation(mutation)
-                    await self._send_json(writer, 404, {"error": "relay task not found"})
-                    return
-                scheduled = self._schedule_relay_task_reconcile(task_id)
-                await finish_mutation(
-                    mutation,
-                    202,
-                    {"task_id": task_id, "scheduled": scheduled},
-                )
-                return
-            if suffix == "/interrupt":
-                if method != "POST":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                body = await self._read_request_json(writer, reader, headers)
-                if body is None:
-                    return
-                mutation = await begin_mutation("relay.task.interrupt", task_id, body)
-                if mutation is None:
-                    return
-                try:
-                    await self._relay_service.interrupt(
-                        task_id,
-                        role=_optional_nonempty_string(body.get("role")),
-                    )
-                except (KeyError, ValueError, RuntimeError) as exc:
-                    abandon_mutation(mutation)
-                    await self._send_json(
-                        writer,
-                        503 if isinstance(exc, RuntimeError) else 400,
-                        {"error": str(exc), "retryable": isinstance(exc, RuntimeError)},
-                    )
-                    return
-                detail = await self._relay_task_detail(task_id)
-                await finish_mutation(
-                    mutation,
-                    200,
-                    _relay_task_detail_json_payload(detail, self._relay_service),
-                )
-                return
-            await self._send_json(writer, 404, {"error": "not found"})
+            )
         except KeyError:
             await self._send_json(writer, 404, {"error": "relay task not found"})
 
