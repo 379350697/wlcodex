@@ -1902,32 +1902,12 @@ def render_relay_task_detail_page(
       relayMutationStatus.textContent = text;
       relayMutationStatus.classList.toggle("is-error", isError);
     }}
-    function relayIdempotencyKey() {{
-      return window.crypto?.randomUUID?.() || `${{Date.now()}}-${{Math.random()}}`;
-    }}
+    const relayMutationClient = window.WLCodexSurfaceRuntime.createMutationClient({{
+      prefix: "relay",
+      keyAttribute: "relayIdempotencyKey",
+    }});
     async function relayMutation(url, body, button) {{
-      const idempotencyKey = button?.dataset.relayIdempotencyKey || relayIdempotencyKey();
-      if (button) button.dataset.relayIdempotencyKey = idempotencyKey;
-      if (button) {{
-        button.disabled = true;
-        button.setAttribute("aria-busy", "true");
-      }}
-      try {{
-        const response = await fetch(url, {{
-          method: "POST",
-          headers: {{ "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }},
-          body: JSON.stringify(body || {{}}),
-        }});
-        const payload = await response.json().catch(() => ({{}}));
-        if (!response.ok) throw new Error(payload.error || `请求失败 (${{response.status}})`);
-        if (button) delete button.dataset.relayIdempotencyKey;
-        return payload;
-      }} finally {{
-        if (button) {{
-          button.disabled = false;
-          button.removeAttribute("aria-busy");
-        }}
-      }}
+      return relayMutationClient.request(url, body, button);
     }}
     function marvisEscapeText(value) {{
       return String(value || "")
@@ -1996,19 +1976,13 @@ def render_relay_task_detail_page(
       const cancelId = target.getAttribute("data-pending-cancel");
       const pendingId = steerId || cancelId;
       if (!pendingId) return;
-      target.setAttribute("disabled", "disabled");
       const action = steerId ? "steer" : "cancel";
-      const idempotencyKey = target.dataset.relayIdempotencyKey || relayIdempotencyKey();
-      target.dataset.relayIdempotencyKey = idempotencyKey;
       try {{
-        const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/inputs/${{encodeURIComponent(pendingId)}}/${{action}}${{TOKEN_SUFFIX}}`, {{
-          method: "POST",
-          headers: {{ "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }},
-          body: JSON.stringify({{}}),
-        }});
-        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
-        const payload = await response.json();
-        delete target.dataset.relayIdempotencyKey;
+        const payload = await relayMutation(
+          `/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/inputs/${{encodeURIComponent(pendingId)}}/${{action}}${{TOKEN_SUFFIX}}`,
+          {{}},
+          target,
+        );
         const item = payload.pending_input || payload;
         if (action === "cancel") {{
           removePendingInput(pendingId);
@@ -2017,7 +1991,6 @@ def render_relay_task_detail_page(
           appendMarvisConversationGuidance(item);
         }}
       }} catch (_error) {{
-        target.removeAttribute("disabled");
         const current = pendingInputs.get(String(pendingId)) || {{ id: pendingId, status: "pending" }};
         upsertPendingInput({{ ...current, error_message: "引导失败，仍已排队" }});
       }}
@@ -2182,7 +2155,6 @@ def render_relay_task_detail_page(
       }}
       const activePlanControl = target.closest("[data-marvis-plan-control]");
       if (!(activePlanControl instanceof HTMLElement)) return;
-      target.setAttribute("disabled", "disabled");
       const roundId = activePlanControl.getAttribute("data-round-id") || CURRENT_ROUND_ID;
       const artifactId = activePlanControl.getAttribute("data-artifact-id") || "0";
       const selected = activePlanControl.querySelector("[data-confirmation-option-id][aria-pressed='true']") || activePlanControl.querySelector("[data-confirmation-option-id]");
@@ -2192,8 +2164,6 @@ def render_relay_task_detail_page(
         controlPayload.selected_option_label = selected.getAttribute("data-confirmation-option-label") || "";
         controlPayload.selected_option_instruction = selected.getAttribute("data-confirmation-option-instruction") || "";
       }}
-      const idempotencyKey = target.dataset.relayIdempotencyKey || relayIdempotencyKey();
-      target.dataset.relayIdempotencyKey = idempotencyKey;
       const shouldLeaveWaiting = decision === "approve_plan" || decision === "continue" || decision === "cancel_plan";
       if (shouldLeaveWaiting) {{
         hidePlanControlSurface();
@@ -2201,13 +2171,11 @@ def render_relay_task_detail_page(
         waitingControlInput = "";
       }}
       try {{
-        const response = await fetch(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/rounds/${{encodeURIComponent(roundId)}}/control${{TOKEN_SUFFIX}}`, {{
-          method: "POST",
-          headers: {{ "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }},
-          body: JSON.stringify(controlPayload),
-        }});
-        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
-        delete target.dataset.relayIdempotencyKey;
+        await relayMutation(
+          `/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/rounds/${{encodeURIComponent(roundId)}}/control${{TOKEN_SUFFIX}}`,
+          controlPayload,
+          target,
+        );
         if (decision === "approve_plan" || decision === "continue") {{
           updateTaskStatus("running");
           waitingControlInput = "";
@@ -2216,7 +2184,6 @@ def render_relay_task_detail_page(
           waitingControlInput = "";
         }}
       }} catch (_error) {{
-        target.removeAttribute("disabled");
         if (shouldLeaveWaiting) {{
           activePlanControl.hidden = false;
           planControl = activePlanControl;
@@ -2225,10 +2192,6 @@ def render_relay_task_detail_page(
       }}
     }});
     let relayEventsAfter = Number(new URLSearchParams(String(EVENTS_SUFFIX || "").replace(/^\\?/, "")).get("after") || "0") || 0;
-    let relayEventsSource = null;
-    let relayEventsReconnectTimer = null;
-    let relayEventsReconnectDelay = 500;
-    const relayEventBindings = [];
     function updateRelayEventsCursor(event) {{
       const value = Number(event?.lastEventId || "0") || 0;
       if (value > relayEventsAfter) relayEventsAfter = value;
@@ -2239,44 +2202,15 @@ def render_relay_task_detail_page(
       const value = params.toString();
       return value ? `?${{value}}` : "";
     }}
+    const relayEventsConnection = window.WLCodexSurfaceRuntime.createSseConnection({{
+      url: () => `/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{relayEventsSuffix()}}`,
+    }});
     function addRelayEventListener(name, handler) {{
-      relayEventBindings.push([name, handler]);
-      if (relayEventsSource) relayEventsSource.addEventListener(name, handler);
+      relayEventsConnection.addEventListener(name, handler);
     }}
-    function scheduleRelayEventsReconnect() {{
-      if (document.visibilityState === "hidden") return;
-      if (relayEventsReconnectTimer) return;
-      if (relayEventsSource) {{
-        relayEventsSource.close();
-        relayEventsSource = null;
-      }}
-      relayEventsReconnectTimer = window.setTimeout(() => {{
-        relayEventsReconnectTimer = null;
-        connectRelayEventSource();
-        relayEventsReconnectDelay = Math.min(relayEventsReconnectDelay * 2, 5000);
-      }}, relayEventsReconnectDelay);
-    }}
-    function closeRelayEventSource() {{
-      if (relayEventsReconnectTimer) {{
-        clearTimeout(relayEventsReconnectTimer);
-        relayEventsReconnectTimer = null;
-      }}
-      if (relayEventsSource) {{
-        relayEventsSource.close();
-        relayEventsSource = null;
-      }}
-    }}
+    function closeRelayEventSource() {{ relayEventsConnection.close(); }}
     function connectRelayEventSource() {{
-      if (document.visibilityState === "hidden") return;
-      closeRelayEventSource();
-      relayEventsSource = new EventSource(`/api/relay/tasks/${{encodeURIComponent(TASK_ID)}}/events${{relayEventsSuffix()}}`);
-      relayEventBindings.forEach(([name, handler]) => relayEventsSource.addEventListener(name, handler));
-      relayEventsSource.onopen = () => {{
-        relayEventsReconnectDelay = 500;
-      }};
-      relayEventsSource.onerror = () => {{
-        scheduleRelayEventsReconnect();
-      }};
+      relayEventsConnection.connect();
     }}
     document.addEventListener("visibilitychange", () => {{
       if (document.visibilityState === "visible") connectRelayEventSource();

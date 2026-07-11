@@ -94,6 +94,42 @@ test("Relay input, attachment, and send never interrupt; only its dedicated cont
   expect(interruptRequests).toBe(1);
 });
 
+test("Relay retry preserves one idempotency key while restoring the send control", async ({ page }) => {
+  const keys = [];
+  let attempts = 0;
+  await page.route("**/api/relay/tasks/4/inputs**", async (route) => {
+    attempts += 1;
+    keys.push(route.request().headers()["idempotency-key"] || "");
+    if (attempts === 1) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "temporary failure" }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(relayTaskPath(4));
+  const composer = page.locator("[data-marvis-followup-composer]");
+  const input = composer.locator("textarea[name=text]");
+  const send = composer.locator("[data-marvis-submit]");
+  await input.fill("retry with one identity");
+  await send.click();
+  await expect(composer.locator("[data-relay-mutation-status]")).toContainText("temporary failure");
+  await expect(send).toBeEnabled();
+
+  const retry = page.waitForRequest(
+    (request) => request.method() === "POST" && request.url().includes("/api/relay/tasks/4/inputs")
+  );
+  await send.click();
+  await retry;
+  expect(attempts).toBe(2);
+  expect(keys[0]).toBeTruthy();
+  expect(keys[1]).toBe(keys[0]);
+});
+
 test("Native send never doubles as interrupt, while the dedicated interrupt is reachable", async ({ page }) => {
   let interruptRequests = 0;
   page.on("request", (request) => {

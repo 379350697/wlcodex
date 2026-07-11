@@ -706,9 +706,37 @@ __ICONS_JS__
     let nativeItemCursor = 0;
     let nativeUpdateCursor = 0;
     let previousEventCount = 0;
-    let source = null;
-    let streamReconnectTimer = null;
-    let streamReconnectDelay = 500;
+    const nativeStreamConnection = window.WLCodexSurfaceRuntime.createSseConnection({
+      url: () => streamPathWithCursor(currentStreamCursor()),
+      onOpen: () => {
+        stopNativeTranscriptFallback();
+        setConnectionState("connected");
+      },
+      onError: () => {
+        setConnectionState("reconnecting");
+        pollEvents().catch(() => {});
+      },
+      onReconnectScheduled: () => {
+        startNativeTranscriptFallback();
+      },
+      onMessage: (message) => renderNativeStreamPayload(JSON.parse(message.data)),
+    });
+    const nativeStreamEventKinds = [
+      "message_added", "message_updated", "message_completed", "run_state", "sync_state",
+      "lifecycle", "activity", "user_message", "text_delta", "reasoning_delta",
+      "command_started", "command_output", "command_completed", "command_failed",
+      "file_changed", "diff_updated", "approval_requested", "approval_resolved",
+      "completed", "failed", "event",
+    ];
+    let nativeStreamListenersBound = false;
+    function bindNativeStreamListeners() {
+      if (nativeStreamListenersBound) return;
+      nativeStreamListenersBound = true;
+      nativeStreamEventKinds.forEach(kind => nativeStreamConnection.addEventListener(
+        kind,
+        message => renderNativeStreamPayload(JSON.parse(message.data)),
+      ));
+    }
     let pollInFlight = false;
     let nativeTranscriptSyncTimer = null;
     const NATIVE_TRANSCRIPT_FALLBACK_INTERVAL_MS = 30000;
@@ -3292,7 +3320,7 @@ __ICONS_JS__
     function startNativeTranscriptFallback() {
       // EventSource is the normal delivery path.  Polling exists only as a
       // low-frequency, visible-page recovery path while it reconnects.
-      if (document.visibilityState === "hidden" || source || nativeTranscriptSyncTimer) return;
+      if (document.visibilityState === "hidden" || nativeStreamConnection.source || nativeTranscriptSyncTimer) return;
       nativeTranscriptSyncTimer = window.setInterval(
         pollEvents,
         NATIVE_TRANSCRIPT_FALLBACK_INTERVAL_MS,
@@ -3301,7 +3329,7 @@ __ICONS_JS__
     function resumeNativeLiveConnection() {
       if (document.visibilityState === "hidden") return;
       pollEvents();
-      if (!source) openStream(currentStreamCursor());
+      if (!nativeStreamConnection.source) openStream(currentStreamCursor());
     }
     function startNativeTranscriptSyncLoop() {
       if (nativeThreadId && !invalidNativeThreadId) {
@@ -3657,74 +3685,16 @@ __ICONS_JS__
       }
     }
     function closeLiveEventSource() {
-      if (streamReconnectTimer) {
-        clearTimeout(streamReconnectTimer);
-        streamReconnectTimer = null;
-      }
-      if (source) {
-        source.close();
-        source = null;
-      }
-    }
-    function scheduleStreamReconnect() {
-      if (document.visibilityState === "hidden") return;
-      if (source) {
-        source.close();
-        source = null;
-      }
-      startNativeTranscriptFallback();
-      if (streamReconnectTimer) return;
-      streamReconnectTimer = window.setTimeout(() => {
-        streamReconnectTimer = null;
-        openStream(currentStreamCursor());
-        streamReconnectDelay = Math.min(streamReconnectDelay * 2, 5000);
-      }, streamReconnectDelay);
+      nativeStreamConnection.close();
     }
     function currentStreamCursor() {
       return nativeThreadId ? nativeUpdateCursor : latestEventId;
     }
     function openStream(afterId) {
       if (document.visibilityState === "hidden") return;
-      closeLiveEventSource();
-      source = new EventSource(streamPathWithCursor(afterId));
-      source.onopen = () => {
-        streamReconnectDelay = 500;
-        stopNativeTranscriptFallback();
-        setConnectionState("connected");
-      };
-      source.onerror = () => {
-        setConnectionState("reconnecting");
-        pollEvents();
-        startNativeTranscriptFallback();
-        scheduleStreamReconnect();
-      };
-      source.onmessage = (message) => renderNativeStreamPayload(JSON.parse(message.data));
-      [
-        "message_added",
-        "message_updated",
-        "message_completed",
-        "run_state",
-        "sync_state",
-        "lifecycle",
-        "activity",
-        "user_message",
-        "text_delta",
-        "message_completed",
-        "reasoning_delta",
-        "command_started",
-        "command_output",
-        "command_completed",
-        "command_failed",
-        "file_changed",
-        "diff_updated",
-        "approval_requested",
-        "approval_resolved",
-        "completed",
-        "failed",
-        "event"
-      ].forEach(kind => {
-        source.addEventListener(kind, message => renderNativeStreamPayload(JSON.parse(message.data)));
-      });
+      nativeStreamConnection.close();
+      bindNativeStreamListeners();
+      nativeStreamConnection.connect();
     }
     function renderNativeStreamPayload(payload) {
       if (nativeThreadId && payload && typeof payload === "object") {

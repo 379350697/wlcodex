@@ -109,39 +109,38 @@ def _marvis_relay_attachment_script() -> str:
       const fileInput = sheet.querySelector("[data-marvis-file-input]");
       const strip = composer.querySelector("[data-marvis-attachment-strip]");
       const state = { images: [], files: [] };
-      let previouslyFocused = null;
-      const focusableSelector = "a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
-      function setBackgroundInert(isOpen) {
+      const attachmentDialog = window.WLCodexSurfaceRuntime.createDialog(sheet, {
+        appRoot: null,
+        closeDelay: 180,
+        inertTargets: () => {
+          const targets = [];
         const phone = sheet.closest(".marvis-relay-phone");
-        if (!phone) return;
-        Array.from(phone.children).forEach((child) => {
+          if (!phone) return targets;
+          Array.from(phone.children).forEach((child) => {
           if (child === sheet || child === backdrop) return;
-          child.inert = isOpen;
-          child.setAttribute("aria-hidden", isOpen ? "true" : "false");
+            targets.push(child);
         });
-      }
+          return targets;
+        },
+        onOpen: () => {
+          backdrop.hidden = false;
+          requestAnimationFrame(() => {
+            sheet.classList.add("open");
+            backdrop.classList.add("visible");
+          });
+        },
+        onBeforeClose: () => {
+          sheet.classList.remove("open");
+          backdrop.classList.remove("visible");
+        },
+        onClosed: () => { backdrop.hidden = true; },
+      });
       const textFilePattern = /\.(txt|md|markdown|json|jsonl|log|csv|tsv|yaml|yml|toml|ini|py|js|ts|tsx|jsx|css|html|xml|sh|zsh|sql)$/i;
-      function openSheet() {
-        previouslyFocused = document.activeElement;
-        setBackgroundInert(true);
-        sheet.hidden = false;
-        backdrop.hidden = false;
-        requestAnimationFrame(() => {
-          sheet.classList.add("open");
-          backdrop.classList.add("visible");
-          closeButton?.focus();
-        });
+      function openSheet(trigger) {
+        attachmentDialog.open(trigger);
       }
       function closeSheet() {
-        if (sheet.hidden) return;
-        sheet.classList.remove("open");
-        backdrop.classList.remove("visible");
-        setBackgroundInert(false);
-        window.setTimeout(() => {
-          sheet.hidden = true;
-          backdrop.hidden = true;
-          if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
-        }, 180);
+        attachmentDialog.close();
       }
       function readRelayImageAttachment(file) {
         return new Promise((resolve, reject) => {
@@ -239,28 +238,9 @@ def _marvis_relay_attachment_script() -> str:
           if (!strip.children.length) strip.hidden = true;
         }, 3500);
       }
-      openButton?.addEventListener("click", openSheet);
+      openButton?.addEventListener("click", (event) => openSheet(event.currentTarget));
       closeButton?.addEventListener("click", closeSheet);
       backdrop?.addEventListener("click", closeSheet);
-      sheet.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          closeSheet();
-          return;
-        }
-        if (event.key !== "Tab") return;
-        const controls = Array.from(sheet.querySelectorAll(focusableSelector));
-        if (!controls.length) return;
-        const first = controls[0];
-        const last = controls[controls.length - 1];
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first.focus();
-        }
-      });
       sheet.querySelector("[data-marvis-pick-image]")?.addEventListener("click", () => imageInput?.click());
       sheet.querySelector("[data-marvis-pick-file]")?.addEventListener("click", () => fileInput?.click());
       imageInput?.addEventListener("change", async () => {
@@ -341,6 +321,5 @@ def _marvis_relay_attachment_script() -> str:
     }
     setupMarvisRelayAttachments();
     """
-
 
 

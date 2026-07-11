@@ -7174,10 +7174,9 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "function streamPathWithCursor(afterId)" in response
     assert 'return nativeMessagesStreamPath(afterId);' in response
     assert 'if (PROVIDER) params.set("native_provider", PROVIDER);' in response
-    assert "let streamReconnectTimer = null;" in response
+    assert "createSseConnection" in response
     assert "function closeLiveEventSource()" in response
-    assert "function scheduleStreamReconnect()" in response
-    assert "scheduleStreamReconnect();" in response
+    assert "nativeStreamConnection.scheduleReconnect" not in response
     assert 'window.addEventListener("pagehide", () => {' in response
     assert "stopNativeTranscriptFallback();" in response
     assert "closeLiveEventSource();" in response
@@ -7189,7 +7188,7 @@ async def test_worker_live_page_loads_native_timeline_and_folds_history(
     assert "以前的消息" in response
     assert "previous_event_count" in response
     assert "new EventSource(streamPath)" not in response
-    assert "new EventSource(streamPathWithCursor" in response
+    assert "nativeStreamConnection.connect();" in response
 
 
 def test_worker_live_page_native_soft_timeout_does_not_block_followup_poll() -> None:

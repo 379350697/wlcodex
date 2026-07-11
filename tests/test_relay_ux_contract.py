@@ -147,9 +147,20 @@ def test_relay_mutation_surfaces_keep_idempotency_keys_and_interrupt_isolated() 
         ),
         detail_page,
     ]
-    for page in pages:
+    for page in pages[:-1]:
         assert _post_count(page) > 0
         assert _post_count(page) == _idempotency_header_count(page)
+    # The detail page deliberately delegates mutation mechanics to the shared
+    # surface runtime, so it cannot silently drift from Native retries.
+    runtime = Path("wlcodex/live_stream/static/surface_runtime.js").read_text(
+        encoding="utf-8"
+    )
+    assert "surface_runtime.js" in detail_page
+    assert 'surface_runtime.js?v=20260710-semantic-closure"></script>' in detail_page
+    assert 'surface_runtime.js?v=20260710-semantic-closure" defer' not in detail_page
+    assert "createMutationClient" in detail_page
+    assert "Idempotency-Key" in runtime
+    assert "button.dataset[keyAttribute]" in runtime
 
     submit_start = detail_page.index('followupComposer?.addEventListener("submit"')
     interrupt_start = detail_page.index("followupInterruptButton?.addEventListener")
@@ -168,16 +179,20 @@ def test_relay_mutation_surfaces_keep_idempotency_keys_and_interrupt_isolated() 
 def test_relay_attachment_dialog_has_standard_keyboard_focus_and_inert_contract() -> None:
     sheet = _marvis_relay_attachment_sheet_html()
     script = _marvis_relay_attachment_script()
+    runtime = Path("wlcodex/live_stream/static/surface_runtime.js").read_text(
+        encoding="utf-8"
+    )
 
     assert 'role="dialog"' in sheet
     assert 'aria-modal="true"' in sheet
-    assert "let previouslyFocused = null;" in script
-    assert "child.inert = isOpen;" in script
-    assert 'event.key === "Escape"' in script
-    assert 'event.key !== "Tab"' in script
-    assert "closeButton?.focus();" in script
-    assert "previouslyFocused instanceof HTMLElement" in script
-    assert "previouslyFocused.focus();" in script
+    assert "createDialog(sheet" in script
+    assert "inertTargets" in script
+    assert "closeDelay: 180" in script
+    assert 'if (event.key === "Escape")' in runtime
+    assert "setBackgroundInert" in runtime
+    assert 'event.key !== "Tab"' in runtime
+    assert "const first = focusable()[0];" in runtime
+    assert "restoreFocus && typeof restoreFocus.focus" in runtime
 
 
 def test_relay_work_log_and_confirmation_pages_preserve_modal_a11y_contract() -> None:
@@ -337,11 +352,14 @@ def test_sse_connection_owns_live_updates_and_hidden_pages_suspend_polling() -> 
     native_home = _native_codex_page("codex")
     native_page = _live_page(42, native_provider="codex")
 
-    # Relay closes its EventSource while hidden and reconnects from the event
-    # cursor.  There is no second-level status poll in the rendered task page.
-    assert 'document.visibilityState === "hidden"' in detail_page
+    runtime = Path("wlcodex/live_stream/static/surface_runtime.js").read_text(
+        encoding="utf-8"
+    )
+    # Relay uses the shared EventSource lifecycle, which suspends while hidden
+    # and reconnects from the rendered cursor.  There is no fast status poll.
+    assert "createSseConnection" in detail_page
+    assert 'document.visibilityState === "hidden"' in runtime
     assert "closeRelayEventSource();" in detail_page
-    assert "scheduleRelayEventsReconnect" in detail_page
     assert "relayEventsAfter" in detail_page
     assert not re.search(r"setInterval\([^)]*,\s*(?:1000|2000)\)", detail_page)
 
@@ -352,7 +370,8 @@ def test_sse_connection_owns_live_updates_and_hidden_pages_suspend_polling() -> 
     assert "startNativeTranscriptFallback();" in native_page
     assert "document.visibilityState === \"hidden\"" in native_page
     assert "closeLiveEventSource();" in native_page
-    assert "source.onopen = () => {" in native_page
+    assert "createSseConnection" in native_page
+    assert "onOpen: () => {" in native_page
     assert not re.search(r"setInterval\(pollEvents,\s*1000\)", native_page)
     assert "WLCodexSurfaceRuntime.createConditionalScroller" in native_page
     assert "const timelineScroller" in native_page

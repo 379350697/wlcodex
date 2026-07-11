@@ -1222,7 +1222,7 @@ async def test_relay_task_detail_clears_waiting_confirmation_when_control_advanc
         1,
     )[1].split("} catch", 1)[0]
     assert click_segment.index("hidePlanControlSurface();") < click_segment.index(
-        "const response = await fetch"
+        "await relayMutation"
     )
 
     assert 'addRelayEventListener("round.control"' in response
@@ -2959,7 +2959,7 @@ async def test_relay_task_detail_renders_conversation_default_and_board_switch(
     assert "events${relayEventsSuffix()}" in response
     assert "function connectRelayEventSource()" in response
     assert "function closeRelayEventSource()" in response
-    assert "function scheduleRelayEventsReconnect()" in response
+    assert "createSseConnection" in response
     assert 'window.addEventListener("pagehide", closeRelayEventSource);' in response
     assert "updateRelayEventsCursor(event);" in response
     assert "appendConversationDelta(" not in response
