@@ -277,6 +277,44 @@ def render_message(
     return f'<article class="marvis-relay-agent-step" data-native-role="{escape(role)}" data-native-kind="{escape(kind)}" data-native-key="{escape(key)}"{final_attr}{stream_attr}{ids_attr}>{render_avatar(persona, label=display_name)}<div class="marvis-relay-agent-content"><div class="marvis-relay-agent-head"><strong>{escape(display_name)}</strong> {action_html}</div><div class="marvis-relay-agent-bubble" data-native-message-body>{escape(body)}</div></div></article>'
 
 
+def render_relay_attachment_list(
+    row: dict[str, Any],
+    *,
+    max_images: int,
+    max_files: int,
+) -> str:
+    """Render sanitized user attachments for one Relay conversation row."""
+
+    image_items: list[str] = []
+    file_items: list[str] = []
+    for raw in list(row.get("images") or [])[:max_images]:
+        if not isinstance(raw, dict):
+            continue
+        src = str(raw.get("url") or raw.get("data_url") or "")
+        if not src.startswith(("data:image/", "http://", "https://")):
+            continue
+        image_items.append(
+            '<img class="marvis-relay-message-image" '
+            f'src="{escape(src, quote=True)}" alt="" loading="lazy">'
+        )
+    for raw in list(row.get("files") or [])[:max_files]:
+        if not isinstance(raw, dict):
+            continue
+        filename = str(raw.get("filename") or "文件")
+        file_items.append(
+            '<span class="marvis-relay-attachment-chip marvis-relay-attachment-chip-file">'
+            '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span>'
+            f"<span>{escape(filename)}</span>"
+            "</span>"
+        )
+    parts: list[str] = []
+    if image_items:
+        parts.append('<div class="marvis-relay-message-images">' + "".join(image_items) + "</div>")
+    if file_items:
+        parts.append('<div class="marvis-relay-attachment-list">' + "".join(file_items) + "</div>")
+    return "".join(parts)
+
+
 def render_native_empty_conversation() -> str:
     return """<article class="relay-message" data-native-role="system" data-native-kind="status" data-native-empty><div class="relay-message-head"><strong>系统</strong></div><div class="relay-message-body" data-native-message-body>等待原生会话输出。</div></article>"""
 

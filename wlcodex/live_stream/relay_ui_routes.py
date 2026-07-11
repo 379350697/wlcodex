@@ -34,6 +34,7 @@ class RelayUiRouteDependencies:
     task_detail_view: Callable[[str], str]
     task_detail_page: Callable[..., str]
     task_detail: Callable[[int], Awaitable[Any]]
+    task_detail_read_model: Callable[[int], Awaitable[Any]] | None = None
 
 
 async def handle_relay_ui_route(
@@ -199,11 +200,15 @@ async def handle_relay_ui_route(
         await deps.send_json(writer, 503, {"error": "relay service unavailable"})
         return
     try:
-        detail = await deps.task_detail(task_id)
+        read_model = (
+            await deps.task_detail_read_model(task_id)
+            if deps.task_detail_read_model is not None
+            else None
+        )
+        detail = read_model.detail if read_model is not None else await deps.task_detail(task_id)
     except KeyError:
         await deps.send_json(writer, 404, {"error": "relay task not found"})
         return
-    events = relay_service.events_for_task(task_id)
     detail_view = deps.task_detail_view(
         str((query.get("view") or ["conversation"])[0] or "conversation")
     )
@@ -214,8 +219,12 @@ async def handle_relay_ui_route(
             detail,
             access_token=token,
             view=detail_view,
-            events=events,
+            events=read_model.events if read_model is not None else relay_service.events_for_task(task_id),
             hub=hub,
-            token_stats=relay_service.task_token_stats(task_id),
+            token_stats=(
+                read_model.token_stats
+                if read_model is not None
+                else relay_service.task_token_stats(task_id)
+            ),
         ),
     )

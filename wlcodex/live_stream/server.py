@@ -23,7 +23,6 @@ from wlcodex.claude_permissions import (
     CLAUDE_PERMISSION_MODE_ORDER,
     normalize_claude_permission_mode,
 )
-from wlcodex.codex_native.controller import build_native_session_presentation
 from wlcodex.council import (
     CouncilConfig,
     CouncilReviewPacket,
@@ -57,6 +56,10 @@ from wlcodex.live_stream.native_pages import (
     render_native_workflows_page,
 )
 from wlcodex.live_stream.native_agent_routes import handle_native_agent_route
+from wlcodex.live_stream.native_ui_routes import (
+    NativeUiRouteDependencies,
+    handle_native_ui_route,
+)
 from wlcodex.live_stream.native_templates.registry import render_native_template
 from wlcodex.live_stream.native_templates.auth_pages import (
     render_native_login_ticket_page,
@@ -74,6 +77,18 @@ from wlcodex.live_stream.native_message_projection import (
     native_timeline_display_event as _native_timeline_display_event,
     native_timeline_display_summary as _native_timeline_display_summary,
 )
+from wlcodex.live_stream.native_session_projection import (
+    build_native_session_payload as _build_native_session_payload,
+    build_native_sessions_payload as _build_native_sessions_payload,
+)
+from wlcodex.live_stream.relay_detail_read_model import (
+    build_relay_task_detail_read_model,
+)
+from wlcodex.live_stream.relay_conversation_projection import (
+    RelayConversationProjectionDependencies,
+    project_relay_conversation_rows,
+)
+from wlcodex.live_stream.relay_work_log_projection import render_relay_work_log_body
 from wlcodex.live_stream.presentation import (
     activity_label as _relay_activity_label,
     presentation_state_filter as _relay_presentation_state_filter,
@@ -101,11 +116,9 @@ from wlcodex.live_stream.relay_composer import (
     _marvis_relay_workspace_dock,
 )
 from wlcodex.live_stream.relay_chat_page import render_relay_chat_home_page
-from wlcodex.live_stream.relay_collection_routes import handle_relay_collection_route
-from wlcodex.live_stream.relay_event_route import handle_relay_task_events_route
-from wlcodex.live_stream.relay_task_routes import (
-    RelayTaskRouteDependencies,
-    handle_relay_task_route,
+from wlcodex.live_stream.relay_api_route import (
+    RelayApiRouteDependencies,
+    handle_relay_api_route,
 )
 from wlcodex.live_stream.relay_task_detail_template import (
     render_relay_task_detail_page,
@@ -121,6 +134,7 @@ from wlcodex.live_stream.relay_detail_components import (
     render_followup_composer as _render_followup_composer,
     render_handoff as _render_handoff,
     render_message as _render_relay_message,
+    render_relay_attachment_list as _render_relay_attachment_list,
     render_native_empty_conversation as _render_native_empty_conversation,
     render_native_message as _render_native_message,
     render_plan_control as _render_plan_control,
@@ -198,7 +212,6 @@ from wlcodex.relay.marvis_interaction import (
 from wlcodex.relay.mutations import (
     MutationStore,
     RelayMutationClaim,
-    RelayMutationStore,
 )
 from wlcodex.relay.models import RELAY_ROLE_IDS
 from wlcodex.relay.work_log_projection import (
@@ -766,99 +779,13 @@ class WorkerLiveStreamServer:
                 )
                 return
 
-            if parsed.path in ("", "/") and (
-                self._native_controller is not None or self._native_registry is not None
+            if await self._handle_native_ui_route(
+                writer,
+                method,
+                parsed.path,
+                headers,
+                query,
             ):
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                native_landing_path = (
-                    "/native" if self._native_registry is not None else "/native/codex"
-                )
-                if not self._access_token or (
-                    self._allow_unauthenticated_loopback and _is_loopback_peer(writer)
-                ):
-                    await self._send_redirect(writer, native_landing_path)
-                    return
-                await self._send_html(
-                    writer,
-                    200,
-                    _native_token_entry_page(native_landing_path),
-                )
-                return
-
-            if parsed.path == "/native":
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                await self._send_native_provider_index(writer, headers, query)
-                return
-
-            login_provider = _native_login_provider_from_path(parsed.path)
-            if login_provider:
-                if self._native_provider(login_provider) is None:
-                    await self._send_json(
-                        writer,
-                        404,
-                        {"error": "unknown native provider"},
-                    )
-                    return
-                safe_login_provider = quote(login_provider, safe="")
-                if not self._access_token:
-                    await self._send_redirect(writer, f"/native/{safe_login_provider}")
-                    return
-                if method == "GET":
-                    ticket = query.get("ticket", [""])[0]
-                    if not self._has_login_ticket(ticket):
-                        await self._send_html(writer, 401, _native_token_entry_page())
-                        return
-                    await self._send_html(
-                        writer,
-                        200,
-                        _native_login_ticket_page(ticket, login_provider),
-                    )
-                    return
-                if method != "POST":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                if not self._consume_login_ticket(query.get("ticket", [""])[0]):
-                    await self._send_html(writer, 401, _native_token_entry_page())
-                    return
-                await self._send_redirect(
-                    writer,
-                    f"/native/{safe_login_provider}",
-                    headers={"Set-Cookie": _login_cookie_header(self._access_token or "")},
-                )
-                return
-
-            if parsed.path == "/native/codex":
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                if not self._is_authorized(
-                    writer,
-                    headers,
-                    query,
-                    require_token=self._native_controller is not None,
-                ):
-                    await self._send_html(writer, 401, _native_token_entry_page())
-                    return
-                await self._send_native_page(writer, "codex", headers, query)
-                return
-
-            if parsed.path == "/native/codex-v2":
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                if not self._is_authorized(
-                    writer,
-                    headers,
-                    query,
-                    require_token=self._native_controller is not None,
-                ):
-                    await self._send_html(writer, 401, _native_token_entry_page("/native/codex-v2"))
-                    return
-                await self._send_native_timeline_v2_page(writer, "codex", headers, query)
                 return
 
             if parsed.path in (
@@ -880,14 +807,6 @@ class WorkerLiveStreamServer:
                 )
                 return
 
-            native_provider = _native_page_provider_from_path(parsed.path)
-            if native_provider:
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                await self._send_native_page(writer, native_provider, headers, query)
-                return
-
             if parsed.path.startswith("/api/native/workflows/"):
                 await self._handle_workflow_route(
                     reader,
@@ -907,85 +826,6 @@ class WorkerLiveStreamServer:
                     parsed.path,
                     headers,
                     query,
-                )
-                return
-
-            native_messages_route = _native_messages_route_from_path(parsed.path)
-            if native_messages_route is not None:
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                if not self._is_authorized(writer, headers, query):
-                    await self._send_json(writer, 401, {"error": "unauthorized"})
-                    return
-                provider, native_thread_id, stream = native_messages_route
-                if stream:
-                    after_update = _safe_int(
-                        query.get(
-                            "after_update",
-                            query.get("after", [headers.get("last-event-id", "0")]),
-                        )[0],
-                        default=0,
-                    )
-                    await self._send_native_messages_sse(
-                        writer,
-                        provider,
-                        native_thread_id,
-                        after_update,
-                    )
-                    return
-                after = _safe_int(query.get("after", ["0"])[0], default=0)
-                after_update = _safe_int(
-                    query.get("after_update", ["0"])[0],
-                    default=0,
-                )
-                before_value = query.get("before", [""])[0]
-                before = _safe_int(before_value, default=0) if str(before_value).strip() else None
-                limit = _safe_int(query.get("limit", ["100"])[0], default=100)
-                await self._send_native_messages_json(
-                    writer,
-                    provider,
-                    native_thread_id,
-                    after=after,
-                    after_update=after_update,
-                    before=before,
-                    limit=limit,
-                )
-                return
-
-            native_timeline_route = _native_timeline_route_from_path(parsed.path)
-            if native_timeline_route is not None:
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                if not self._is_authorized(writer, headers, query):
-                    await self._send_json(writer, 401, {"error": "unauthorized"})
-                    return
-                provider, native_thread_id, stream = native_timeline_route
-                if stream:
-                    after = _safe_int(
-                        query.get("after", [headers.get("last-event-id", "0")])[0],
-                        default=0,
-                    )
-                    await self._send_native_timeline_sse(
-                        writer,
-                        provider,
-                        native_thread_id,
-                        after,
-                    )
-                    return
-                after = _safe_int(query.get("after", ["0"])[0], default=0)
-                before_value = query.get("before", [""])[0]
-                before = _safe_int(before_value, default=0) if str(before_value).strip() else None
-                limit = _safe_int(query.get("limit", ["100"])[0], default=100)
-                await self._send_native_timeline_json(
-                    writer,
-                    provider,
-                    native_thread_id,
-                    after=after,
-                    before=before,
-                    limit=limit,
-                    item_snapshot=True,
                 )
                 return
 
@@ -1581,64 +1421,20 @@ class WorkerLiveStreamServer:
         native_thread_id: str,
     ) -> dict[str, Any]:
         key = ("native_session", provider_name, native_thread_id)
-        native_sync_error = self._native_background_errors.get(key, "")
-        cached = await self._read_cached_native_session(target, native_thread_id)
-        if cached is not None:
-            payload = dict(cached)
-            payload.setdefault("native_provider", provider_name)
-            # A detail GET is an observation, not a synchronization command.
-            # In particular, never let page refreshes project a Codex session
-            # into SQLite/timeline as a side effect.  Explicit /sync and the
-            # background watcher remain the write owners.
-            payload["native_sync_pending"] = bool(
-                (task := self._native_background_tasks.get(key)) is not None and not task.done()
-            )
-            if native_sync_error:
-                payload["native_sync_error"] = native_sync_error
-            payload["presentation"] = build_native_session_presentation(
-                payload,
-                sync_error=native_sync_error,
-            )
-            return payload
-        try:
-            read_only_session = getattr(target, "peek_session", None)
-            if read_only_session is None:
-                # ``read_session`` is intentionally allowed to project/import
-                # provider history for command and background-sync flows.  A
-                # GET must never fall back to it: third-party providers that
-                # have not opted into the read-only contract get a transparent
-                # stale snapshot instead of an accidental database mutation.
-                raise RuntimeError("native provider does not expose a read-only session snapshot")
-            result = await asyncio.wait_for(
-                read_only_session(native_thread_id),
-                timeout=self._native_sessions_timeout_seconds,
-            )
-            payload = _json_object(result)
-            payload.setdefault("native_provider", provider_name)
-            payload.setdefault("native_session_source", "daemon")
-            payload["native_sync_pending"] = False
-            payload["presentation"] = build_native_session_presentation(payload)
-            return payload
-        except KeyError:
-            raise
-        except (asyncio.TimeoutError, JsonRpcTimeout) as exc:
-            native_sync_error = str(exc) or "native session sync timed out"
-        except Exception as exc:
-            native_sync_error = str(exc) or "native session sync failed"
-        payload = {
-            "native_thread_id": native_thread_id,
-            "native_provider": provider_name,
-            "native_session_source": "stub",
-            "native_sync_error": native_sync_error,
-            "native_sync_pending": False,
-            "native_sync_recovery": "请使用同步操作重试；缓存恢复后会显示最后成功更新时间。",
-            "thread": {"id": native_thread_id, "threadId": native_thread_id},
-        }
-        payload["presentation"] = build_native_session_presentation(
-            payload,
-            sync_error=native_sync_error,
+        sync_error = self._native_background_errors.get(key, "")
+        pending = bool(
+            (task := self._native_background_tasks.get(key)) is not None and not task.done()
         )
-        return payload
+        return await _build_native_session_payload(
+            provider_name,
+            target,
+            native_thread_id,
+            read_cached=self._read_cached_native_session,
+            sync_error=sync_error,
+            sync_pending=pending,
+            timeout_seconds=self._native_sessions_timeout_seconds,
+            json_object=_json_object,
+        )
 
     async def _native_sessions_payload(
         self,
@@ -1677,24 +1473,14 @@ class WorkerLiveStreamServer:
                 native_sync_error = str(exc) or "native sessions sync timed out"
                 sessions = await self._list_cached_native_sessions(target)
                 native_session_source = "cache"
-        session_payloads: list[dict[str, Any]] = []
-        for session in sessions:
-            item = _json_object(session)
-            item.setdefault("native_provider", provider_name)
-            item.setdefault("native_session_source", native_session_source)
-            item["presentation"] = build_native_session_presentation(
-                item,
-                sync_error=native_sync_error,
-            )
-            session_payloads.append(item)
-        payload: dict[str, Any] = {
-            "sessions": session_payloads,
-            "native_refresh_pending": native_refresh_pending,
-            "native_session_source": native_session_source,
-        }
-        if native_sync_error:
-            payload["native_sync_error"] = native_sync_error
-        return payload
+        return _build_native_sessions_payload(
+            sessions,
+            provider_name=provider_name,
+            source=native_session_source,
+            sync_error=native_sync_error,
+            refresh_pending=native_refresh_pending,
+            json_object=_json_object,
+        )
 
     async def _index_native_jsonl_sessions(self, provider_name: str) -> int:
         if provider_name != "codex" or self._native_transcript_mirror is None:
@@ -2013,6 +1799,11 @@ class WorkerLiveStreamServer:
             raise KeyError(f"unknown relay task id: {task_id}")
         return self._relay_service.get_task_readonly(task_id)
 
+    async def _relay_task_detail_read_model(self, task_id: int) -> Any:
+        """Build the page snapshot through the read-model boundary only."""
+
+        return await build_relay_task_detail_read_model(self._relay_service, task_id)
+
     async def _handle_relay_ui_route(
         self,
         writer: asyncio.StreamWriter,
@@ -2042,6 +1833,7 @@ class WorkerLiveStreamServer:
                 task_detail_view=_relay_task_detail_view,
                 task_detail_page=_relay_task_detail_page,
                 task_detail=self._relay_task_detail,
+                task_detail_read_model=self._relay_task_detail_read_model,
             ),
             writer=writer,
             method=method,
@@ -2064,90 +1856,12 @@ class WorkerLiveStreamServer:
         headers: dict[str, str],
         query: dict[str, list[str]],
     ) -> None:
-        if self._relay_service is None:
-            await self._send_json(writer, 503, {"error": "relay service unavailable"})
-            return
-        if not self._is_authorized(
-            writer,
-            headers,
-            query,
-            require_token=self._relay_service is not None,
-        ):
-            await self._send_json(writer, 401, {"error": "unauthorized"})
-            return
-        normalized_path = _normalize_relay_api_path(path)
-
-        async def begin_mutation(
-            operation: str,
-            task_id: int | None,
-            payload: dict[str, Any],
-        ) -> tuple[RelayMutationStore, RelayMutationClaim | None] | None:
-            """Acquire a durable mutation key or answer a replay immediately."""
-
-            mutation_store = RelayMutationStore.from_relay_service(self._relay_service)
-            try:
-                claim = mutation_store.claim(
-                    key=headers.get("idempotency-key", ""),
-                    operation=operation,
-                    task_id=task_id,
-                    payload=payload,
-                )
-            except ValueError as exc:
-                await self._send_json(writer, 400, {"error": str(exc)})
-                return None
-            if claim is None:
-                return mutation_store, None
-            if claim.is_replay:
-                await self._send_json(
-                    writer,
-                    int(claim.response_status or 200),
-                    dict(claim.response_payload or {}),
-                )
-                return None
-            if not claim.should_execute:
-                await self._send_json(
-                    writer,
-                    409,
-                    {
-                        "error": claim.error or "mutation is already in progress",
-                        "task_id": claim.task_id,
-                        "retryable": claim.status == "in_progress",
-                    },
-                )
-                return None
-            return mutation_store, claim
-
-        async def finish_mutation(
-            mutation: tuple[RelayMutationStore, RelayMutationClaim | None],
-            status: int,
-            payload: dict[str, Any],
-        ) -> None:
-            mutation_store, claim = mutation
-            if claim is not None:
-                mutation_store.complete(claim.key, status=status, payload=payload)
-            await self._send_json(writer, status, payload)
-
-        def abandon_mutation(
-            mutation: tuple[RelayMutationStore, RelayMutationClaim | None],
-        ) -> None:
-            mutation_store, claim = mutation
-            if claim is not None:
-                mutation_store.abandon(claim.key)
-
-        try:
-            if await handle_relay_collection_route(
-                normalized_path=normalized_path,
-                method=method,
-                query=query,
-                reader=reader,
-                writer=writer,
-                headers=headers,
-                service=self._relay_service,
+        await handle_relay_api_route(
+            deps=RelayApiRouteDependencies(
+                is_authorized=self._is_authorized,
                 send_json=self._send_json,
                 read_request_json=self._read_request_json,
-                begin_mutation=begin_mutation,
-                finish_mutation=finish_mutation,
-                abandon_mutation=abandon_mutation,
+                normalize_path=_normalize_relay_api_path,
                 presentation_state_filter=_relay_presentation_state_filter,
                 page_number=_relay_page_number,
                 safe_int=_safe_int,
@@ -2156,43 +1870,24 @@ class WorkerLiveStreamServer:
                 safe_files=_safe_relay_file_attachments,
                 acceptance_criteria=_relay_acceptance_criteria_from_body,
                 task_detail=self._relay_task_detail,
+                task_api_parts=_relay_task_api_parts,
+                task_detail_json=_relay_task_detail_json_payload,
+                first_blocked_role=_relay_first_blocked_role,
+                schedule_dispatch=self._schedule_relay_dispatch,
+                schedule_reconcile=self._schedule_relay_task_reconcile,
+                reject_if_maintenance_frozen=self._reject_if_maintenance_frozen,
                 maintenance_error_type=MaintenanceWindowError,
-            ):
-                return
-
-            await handle_relay_task_route(
-                deps=RelayTaskRouteDependencies(
-                    send_json=self._send_json,
-                    read_request_json=self._read_request_json,
-                    task_api_parts=_relay_task_api_parts,
-                    task_detail=self._relay_task_detail,
-                    task_detail_json=_relay_task_detail_json_payload,
-                    task_events=handle_relay_task_events_route,
-                    safe_int=_safe_int,
-                    safe_images=_safe_image_attachments,
-                    safe_files=_safe_relay_file_attachments,
-                    optional_nonempty_string=_optional_nonempty_string,
-                    first_blocked_role=_relay_first_blocked_role,
-                    schedule_dispatch=self._schedule_relay_dispatch,
-                    schedule_reconcile=self._schedule_relay_task_reconcile,
-                    reject_if_maintenance_frozen=self._reject_if_maintenance_frozen,
-                    begin_mutation=begin_mutation,
-                    finish_mutation=finish_mutation,
-                    abandon_mutation=abandon_mutation,
-                    maintenance_error_type=MaintenanceWindowError,
-                ),
-                normalized_path=normalized_path,
-                method=method,
-                query=query,
-                reader=reader,
-                writer=writer,
-                headers=headers,
-                service=self._relay_service,
-                hub=self._hub,
-                send_sse=_send_relay_sse,
-            )
-        except KeyError:
-            await self._send_json(writer, 404, {"error": "relay task not found"})
+            ),
+            reader=reader,
+            writer=writer,
+            method=method,
+            path=path,
+            headers=headers,
+            query=query,
+            service=self._relay_service,
+            hub=self._hub,
+            send_sse=_send_relay_sse,
+        )
 
     async def _handle_native_agent_route(
         self,
@@ -2573,6 +2268,51 @@ class WorkerLiveStreamServer:
             path,
             headers,
             query,
+        )
+
+    async def _handle_native_ui_route(
+        self,
+        writer: asyncio.StreamWriter,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        query: dict[str, list[str]],
+    ) -> bool:
+        return await handle_native_ui_route(
+            deps=NativeUiRouteDependencies(
+                is_authorized=self._is_authorized,
+                send_json=self._send_json,
+                send_html=self._send_html,
+                send_redirect=self._send_redirect,
+                token_entry_page=_native_token_entry_page,
+                login_ticket_page=_native_login_ticket_page,
+                native_provider=self._native_provider,
+                send_provider_index=self._send_native_provider_index,
+                send_native_page=self._send_native_page,
+                send_timeline_page=self._send_native_timeline_v2_page,
+                send_messages_json=self._send_native_messages_json,
+                send_messages_sse=self._send_native_messages_sse,
+                send_timeline_json=self._send_native_timeline_json,
+                send_timeline_sse=self._send_native_timeline_sse,
+                has_login_ticket=self._has_login_ticket,
+                consume_login_ticket=self._consume_login_ticket,
+                login_cookie_header=_login_cookie_header,
+                login_provider_from_path=_native_login_provider_from_path,
+                page_provider_from_path=_native_page_provider_from_path,
+                messages_route_from_path=_native_messages_route_from_path,
+                timeline_route_from_path=_native_timeline_route_from_path,
+                safe_int=_safe_int,
+            ),
+            writer=writer,
+            method=method,
+            path=path,
+            headers=headers,
+            query=query,
+            native_registry=self._native_registry,
+            native_controller=self._native_controller,
+            access_token=self._access_token or "",
+            allow_unauthenticated_loopback=self._allow_unauthenticated_loopback,
+            is_loopback_peer=_is_loopback_peer,
         )
 
     def _native_provider(self, provider_name: str) -> Any | None:
@@ -4813,17 +4553,14 @@ def _marvis_relay_work_log_body_html(
     hub: WorkerLiveStreamHub | None,
     canonical_payloads: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    segments = _marvis_relay_work_log_segments(
+    return render_relay_work_log_body(
         detail,
         hub=hub,
         canonical_payloads=canonical_payloads,
+        build_segments=_marvis_relay_work_log_segments,
+        render_segment=_marvis_relay_work_log_segment_html,
+        render_empty=_render_empty_work_log,
     )
-    rows: list[str] = []
-    for index, segment in enumerate(segments):
-        rows.append(_marvis_relay_work_log_segment_html(segment, index=index))
-    if not rows:
-        return _render_empty_work_log()
-    return "\n".join(rows)
 
 
 def _marvis_relay_work_log_segments(
@@ -5688,162 +5425,14 @@ def _relay_projected_conversation_rows(
     canonical_payload_sequence: list[dict[str, Any]] | None = None,
     artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> list[dict[str, str]]:
-    canonical_payloads = canonical_payloads or {}
-    events = _relay_worker_events_for_roles(role_jobs, hub=hub)
-    job_by_role = {str(getattr(job, "role", "") or ""): job for job in role_jobs}
-    user_followup_texts = {
-        _relay_user_message_dedupe_text(str(artifact.get("text") or ""))
-        for artifact in (artifacts or [])
-        if str(artifact.get("artifact_type") or "") == "user_followup"
-        and _relay_user_message_dedupe_text(str(artifact.get("text") or ""))
-    }
-    completed_keys = {
-        _relay_native_message_key(role, worker_event, bucket="assistant")
-        for _occurred_at, _event_id, role, _display_name, worker_event in events
-        if worker_event.kind == "message_completed"
-        and _relay_native_event_text(worker_event).strip()
-    }
-    rows: list[dict[str, str]] = []
-    row_by_key: dict[str, dict[str, str]] = {}
-    for _occurred_at, _event_id, role, display_name, worker_event in events:
-        kind = str(worker_event.kind or "event")
-        text = _relay_native_event_text(worker_event)
-        if kind in {"text_delta", "message_completed"} and (
-            _relay_text_is_structured_artifact_placeholder(text)
-            or text_contains_relay_protocol_payload(text)
-            or _relay_parse_role_envelope_payload(text) is not None
-        ):
-            continue
-        if kind == "text_delta":
-            key = _relay_native_message_key(role, worker_event, bucket="assistant")
-            if key in completed_keys:
-                continue
-            if key not in row_by_key:
-                row = {
-                    "role": role,
-                    "kind": kind,
-                    "speaker": display_name,
-                    "meta": str(worker_event.source or ""),
-                    "body": "",
-                    "key": key,
-                    "round_id": "",
-                    "preview_event_ids": str(worker_event.id),
-                }
-                rows.append(row)
-                row_by_key[key] = row
-            event_ids = set(filter(None, row_by_key[key].get("preview_event_ids", "").split(",")))
-            event_ids.add(str(worker_event.id))
-            row_by_key[key]["preview_event_ids"] = ",".join(sorted(event_ids, key=int))
-            row_by_key[key]["body"] += text
-            continue
-        row = _relay_native_event_row(role, display_name, worker_event)
-        if row is not None:
-            rows.append(row)
-
-    projected_rows: list[dict[str, str]] = []
-    seen_keys: set[str] = set()
-    seen_user_bodies: set[str] = set()
-    for row in rows:
-        projected = _relay_project_native_conversation_row(
-            row,
-            job=job_by_role.get(str(row.get("role") or "")),
-        )
-        if projected is None and str(row.get("kind") or "") == "message_completed":
-            role = str(row.get("role") or "")
-            body = _relay_sanitize_protocol_leak_text(role, str(row.get("body") or ""))
-            if (
-                body
-                and not _relay_text_is_structured_artifact_placeholder(body)
-                and not text_contains_relay_protocol_payload(body)
-                and _relay_parse_role_envelope_payload(body) is None
-                and not _relay_conversation_row_is_task_status_noise(
-                    {"kind": "message_completed", "body": body}
-                )
-            ):
-                projected = {**row, "body": body}
-        if projected is None:
-            continue
-        if _relay_conversation_row_is_task_status_noise(projected):
-            continue
-        if str(projected.get("kind") or "") == "user_message":
-            body = str(projected.get("body") or "").strip()
-            dedupe_body = _relay_user_message_dedupe_text(body)
-            if not dedupe_body or dedupe_body in user_followup_texts:
-                continue
-            if dedupe_body in seen_user_bodies:
-                continue
-            seen_user_bodies.add(dedupe_body)
-        key = str(projected.get("key") or "")
-        if key and key in seen_keys:
-            continue
-        if key:
-            seen_keys.add(key)
-        projected_rows.append(projected)
-
-    if artifacts is not None:
-        for index, artifact in enumerate(artifacts):
-            artifact_row = _relay_conversation_row_from_artifact(
-                artifact,
-                index=index,
-                job_by_role=job_by_role,
-                user_followup_texts=user_followup_texts,
-            )
-            if artifact_row is None:
-                continue
-            if str(artifact_row.get("kind") or "") == "user_message":
-                body = str(artifact_row.get("body") or "").strip()
-                dedupe_body = _relay_user_message_dedupe_text(body)
-                if not dedupe_body or dedupe_body in seen_user_bodies:
-                    continue
-                seen_user_bodies.add(dedupe_body)
-            key = str(artifact_row.get("key") or "")
-            if key and key in seen_keys:
-                continue
-            if key:
-                seen_keys.add(key)
-            projected_rows.append(artifact_row)
-        pending_row = _relay_pending_followup_waiting_row(artifacts, job_by_role)
-        if pending_row is not None:
-            key = str(pending_row.get("key") or "")
-            if not key or key not in seen_keys:
-                if key:
-                    seen_keys.add(key)
-                projected_rows.append(pending_row)
-    _relay_prune_direct_final_summary_rows(projected_rows)
-    _relay_normalize_conversation_lifecycle_rows(projected_rows)
-    has_pending_followup_waiting = any(
-        str(row.get("kind") or "") == "waiting"
-        and str(row.get("key") or "").startswith("followup-waiting:")
-        for row in projected_rows
+    return project_relay_conversation_rows(
+        role_jobs,
+        hub=hub,
+        canonical_payloads=canonical_payloads,
+        canonical_payload_sequence=canonical_payload_sequence,
+        artifacts=artifacts,
+        deps=_RELAY_CONVERSATION_PROJECTION_DEPENDENCIES,
     )
-    blocked_role = _relay_first_blocked_role(role_jobs)
-    current_round_id = _relay_current_round_id_from_artifacts(artifacts)
-    has_current_round_blocked_role_result = any(
-        str(row.get("role") or "") == blocked_role
-        and str(row.get("kind") or "") in {"role_envelope", "followup_response", "role_process"}
-        and (
-            str(row.get("kind") or "") == "followup_response"
-            or str(row.get("artifact_type") or "") == "final_summary"
-        )
-        and str(row.get("round_id") or current_round_id) == current_round_id
-        for row in projected_rows
-    )
-    if (
-        blocked_role
-        and not has_pending_followup_waiting
-        and not has_current_round_blocked_role_result
-    ):
-        projected_rows.append(
-            {
-                "role": blocked_role,
-                "kind": "status",
-                "speaker": "系统",
-                "meta": "",
-                "body": f"接力暂停在{_relay_role_label(blocked_role)}，详情见工作日志。",
-                "key": f"relay-paused:{blocked_role}",
-            }
-        )
-    return projected_rows
 
 
 def _relay_prune_direct_final_summary_rows(rows: list[dict[str, Any]]) -> None:
@@ -6414,38 +6003,11 @@ def _marvis_relay_message_html(row: dict[str, str]) -> str:
 
 
 def _marvis_relay_attachment_list_html(row: dict[str, Any]) -> str:
-    image_items: list[str] = []
-    file_items: list[str] = []
-    for raw in list(row.get("images") or [])[:_MAX_NATIVE_IMAGE_ATTACHMENTS]:
-        if not isinstance(raw, dict):
-            continue
-        src = str(raw.get("url") or raw.get("data_url") or "")
-        if not (
-            src.startswith("data:image/") or src.startswith("http://") or src.startswith("https://")
-        ):
-            continue
-        image_items.append(
-            '<img class="marvis-relay-message-image" '
-            f'src="{escape(src, quote=True)}" alt="" loading="lazy">'
-        )
-    for raw in list(row.get("files") or [])[:_MAX_RELAY_TEXT_ATTACHMENTS]:
-        if not isinstance(raw, dict):
-            continue
-        filename = str(raw.get("filename") or "文件")
-        file_items.append(
-            '<span class="marvis-relay-attachment-chip marvis-relay-attachment-chip-file">'
-            '<span class="marvis-relay-attachment-icon" aria-hidden="true"></span>'
-            f"<span>{escape(filename)}</span>"
-            "</span>"
-        )
-    parts: list[str] = []
-    if image_items:
-        parts.append('<div class="marvis-relay-message-images">' + "".join(image_items) + "</div>")
-    if file_items:
-        parts.append('<div class="marvis-relay-attachment-list">' + "".join(file_items) + "</div>")
-    if not parts:
-        return ""
-    return "".join(parts)
+    return _render_relay_attachment_list(
+        row,
+        max_images=_MAX_NATIVE_IMAGE_ATTACHMENTS,
+        max_files=_MAX_RELAY_TEXT_ATTACHMENTS,
+    )
 
 
 def _relay_native_empty_conversation_html() -> str:
@@ -6823,6 +6385,28 @@ def _relay_native_message_key(
         or worker_event.id
     )
     return f"{bucket}:{role}:{stable}"
+
+
+_RELAY_CONVERSATION_PROJECTION_DEPENDENCIES = RelayConversationProjectionDependencies(
+    worker_events_for_roles=_relay_worker_events_for_roles,
+    user_message_dedupe_text=_relay_user_message_dedupe_text,
+    native_message_key=_relay_native_message_key,
+    native_event_text=_relay_native_event_text,
+    text_is_structured_artifact_placeholder=_relay_text_is_structured_artifact_placeholder,
+    text_contains_relay_protocol_payload=text_contains_relay_protocol_payload,
+    parse_role_envelope_payload=_relay_parse_role_envelope_payload,
+    native_event_row=_relay_native_event_row,
+    project_native_conversation_row=_relay_project_native_conversation_row,
+    sanitize_protocol_leak_text=_relay_sanitize_protocol_leak_text,
+    conversation_row_is_task_status_noise=_relay_conversation_row_is_task_status_noise,
+    conversation_row_from_artifact=_relay_conversation_row_from_artifact,
+    pending_followup_waiting_row=_relay_pending_followup_waiting_row,
+    prune_direct_final_summary_rows=_relay_prune_direct_final_summary_rows,
+    normalize_conversation_lifecycle_rows=_relay_normalize_conversation_lifecycle_rows,
+    first_blocked_role=_relay_first_blocked_role,
+    current_round_id_from_artifacts=_relay_current_round_id_from_artifacts,
+    role_label=_relay_role_label,
+)
 
 
 def _council_review_page() -> str:
