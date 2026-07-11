@@ -90,6 +90,7 @@ from wlcodex.live_stream.relay_composer import (
 )
 from wlcodex.live_stream.relay_chat_page import render_relay_chat_home_page
 from wlcodex.live_stream.relay_collection_routes import handle_relay_collection_route
+from wlcodex.live_stream.relay_event_route import handle_relay_task_events_route
 from wlcodex.live_stream.relay_conversation_view import render_conversation_rows
 from wlcodex.live_stream.relay_config_page import render_relay_config_page
 from wlcodex.live_stream.relay_list_views import (
@@ -2317,29 +2318,19 @@ class WorkerLiveStreamServer:
                     _relay_task_detail_json_payload(detail, self._relay_service),
                 )
                 return
-            if suffix == "/events":
-                if method != "GET":
-                    await self._send_json(writer, 405, {"error": "method not allowed"})
-                    return
-                after = _safe_int(query.get("after", ["0"])[0], default=0)
-                live = "text/event-stream" in headers.get("accept", "").lower()
-                relay_event_queue = self._relay_service.subscribe_events(task_id) if live else None
-                try:
-                    events = self._relay_service.events_for_task(task_id, after=after)
-                    detail = self._relay_service.get_task_readonly(task_id)
-                except Exception:
-                    if relay_event_queue is not None:
-                        self._relay_service.unsubscribe_events(task_id, relay_event_queue)
-                    raise
-                await _send_relay_sse(
-                    writer,
-                    events,
-                    detail=detail,
-                    hub=self._hub,
-                    relay_service=self._relay_service,
-                    relay_event_queue=relay_event_queue,
-                    live=live,
-                )
+            if await handle_relay_task_events_route(
+                suffix=suffix,
+                task_id=task_id,
+                method=method,
+                query=query,
+                headers=headers,
+                writer=writer,
+                service=self._relay_service,
+                hub=self._hub,
+                safe_int=_safe_int,
+                send_json=self._send_json,
+                send_sse=_send_relay_sse,
+            ):
                 return
             if suffix == "/inputs":
                 if method != "POST":
